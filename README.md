@@ -33,8 +33,7 @@ node tools/dev/check-repo.js
 Android:
 
 ```bash
-cd apps/android
-./gradlew assembleDebug --no-daemon
+node tools/dev/check-android-build.js
 ```
 
 Desktop:

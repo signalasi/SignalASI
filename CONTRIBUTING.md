@@ -15,5 +15,5 @@ Run these checks before opening a pull request:
 
 ```bash
 node tools/dev/check-repo.js
-cd apps/android && ./gradlew assembleDebug --no-daemon
+node tools/dev/check-android-build.js
 ```
