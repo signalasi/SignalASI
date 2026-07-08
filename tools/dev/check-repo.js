@@ -256,6 +256,8 @@ function checkWindowsPackageWorkflow() {
   const requiredText = [
     "Windows Package",
     "runs-on: windows-latest",
+    "pull_request:",
+    "push:",
     "npm --prefix apps/desktop ci",
     "npm run package:desktop:win",
     "npm run smoke:desktop:packaged",

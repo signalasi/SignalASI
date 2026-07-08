@@ -23,7 +23,7 @@ Product scope is defined in `docs/product/PRODUCT_REQUIREMENTS.md`.
 | Windows package build | `npm run package:desktop:win` | The Windows Desktop package is assembled with the backend, docs, sidecar runtime hooks, dependency installer, and packaged scripts. |
 | Packaged Desktop smoke | `npm run smoke:desktop:packaged` | The packaged Windows Desktop app uses the current source backend layout, includes required runtime files, exposes diagnostics, and captures packaged UI evidence. |
 
-The `Windows Package` GitHub Actions workflow runs the Windows package build and packaged smoke gates for Desktop packaging changes and can also be started manually.
+The `Windows Package` GitHub Actions workflow runs the Windows package build and packaged smoke gates for every push and pull request, and can also be started manually.
 
 Run `npm run audit:release` to print the release gate checklist and the latest public GitHub Actions status. Run `npm run audit:release:strict` after the local gates and GitHub Actions should be green; strict mode fails if the working tree is dirty or the required workflows are not successful for the current commit.
 

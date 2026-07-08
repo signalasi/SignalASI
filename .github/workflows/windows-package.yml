@@ -3,19 +3,7 @@ name: Windows Package
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - ".github/workflows/windows-package.yml"
-      - "apps/desktop/**"
-      - "apps/android/gradlew"
-      - "apps/android/gradlew.bat"
-      - "package.json"
   push:
-    paths:
-      - ".github/workflows/windows-package.yml"
-      - "apps/desktop/**"
-      - "apps/android/gradlew"
-      - "apps/android/gradlew.bat"
-      - "package.json"
 
 jobs:
   package-win:
