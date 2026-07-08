@@ -10,6 +10,7 @@ const apkPath = path.join(androidDir, "app", "build", "outputs", "apk", "debug",
 const outDir = path.join(root, "ui-smoke");
 const windowDump = path.join(outDir, "android-agent-page.xml");
 const securityDump = path.join(outDir, "android-security-page.xml");
+const settingsDump = path.join(outDir, "android-settings-page.xml");
 const packageName = "com.signalasi.chat";
 const activityName = `${packageName}/.MainActivity`;
 const securityTitleTexts = ["Security Center", "\u5b89\u5168\u4e2d\u5fc3"];
@@ -85,6 +86,12 @@ function requireAnyText(value, texts, label, dumpPath) {
   }
 }
 
+function dumpWindowTo(fileName, remoteName) {
+  adb(["shell", "uiautomator", "dump", `/sdcard/${remoteName}`]);
+  adb(["pull", `/sdcard/${remoteName}`, fileName]);
+  return fs.readFileSync(fileName, "utf8");
+}
+
 function readTrustStore() {
   try {
     return adb(["shell", "run-as", packageName, "cat", "shared_prefs/signalasi_signal_trust.xml"]);
@@ -98,6 +105,40 @@ function readHistoryStore() {
     return adb(["shell", "run-as", packageName, "cat", "shared_prefs/signalasi_chat_history.xml"]);
   } catch {
     return "";
+  }
+}
+
+async function openDebugPageAndVerify(extraName, titleTexts, requiredGroups) {
+  adb([
+    "shell",
+    "am",
+    "start",
+    "-n",
+    activityName,
+    "--ez",
+    extraName,
+    "true"
+  ]);
+  let pageXml = "";
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    await sleep(1000);
+    pageXml = dumpWindowTo(settingsDump, "signalasi-settings.xml");
+    if (hasAnyText(pageXml, titleTexts)) break;
+  }
+  requireAnyText(pageXml, titleTexts, titleTexts[0], settingsDump);
+
+  for (let reset = 0; reset < 3; reset += 1) {
+    adb(["shell", "input", "swipe", "520", "520", "520", "1900", "350"]);
+    await sleep(500);
+  }
+  let combinedXml = dumpWindowTo(settingsDump, "signalasi-settings.xml");
+  for (let scroll = 0; scroll < 3; scroll += 1) {
+    adb(["shell", "input", "swipe", "520", "1900", "520", "520", "450"]);
+    await sleep(700);
+    combinedXml += dumpWindowTo(settingsDump, "signalasi-settings.xml");
+  }
+  for (const texts of requiredGroups) {
+    requireAnyText(combinedXml, texts, texts[0], settingsDump);
   }
 }
 
@@ -244,6 +285,76 @@ async function main() {
     requireAnyText(scrolledSecurityXml, texts, texts[0], securityDump);
   }
 
+  log("opening Settings feature pages");
+  await openDebugPageAndVerify(
+    "signalasi_debug_open_voice_settings",
+    ["Voice Wake &amp; ASR/TTS", "\u8bed\u97f3\u5524\u9192\u4e0e ASR/TTS"],
+    [
+      ["Low-power Voice Listening", "\u4f4e\u529f\u8017\u8bed\u97f3\u76d1\u542c"],
+      ["Wake Engine", "\u5524\u9192\u5f15\u64ce"],
+      ["ASR Provider", "ASR \u63d0\u4f9b\u65b9"],
+      ["TTS Provider", "TTS \u63d0\u4f9b\u65b9"]
+    ]
+  );
+  await openDebugPageAndVerify(
+    "signalasi_debug_open_backup_export",
+    ["Back Up Chat History", "\u5907\u4efd\u804a\u5929\u8bb0\u5f55"],
+    [
+      ["Encrypted Backup", "\u52a0\u5bc6\u5907\u4efd"],
+      ["Backup Password", "\u5907\u4efd\u5bc6\u7801"],
+      ["Back up chat history", "\u5907\u4efd\u804a\u5929\u8bb0\u5f55"]
+    ]
+  );
+  await openDebugPageAndVerify(
+    "signalasi_debug_open_backup_import",
+    ["Import Encrypted Backup", "\u5bfc\u5165\u52a0\u5bc6\u5907\u4efd"],
+    [
+      ["Enter the password used during export.", "\u8f93\u5165\u5bfc\u51fa\u65f6\u8bbe\u7f6e\u7684\u5bc6\u7801\u3002"],
+      ["Password", "\u5bc6\u7801"],
+      ["Import", "\u5bfc\u5165"]
+    ]
+  );
+  await openDebugPageAndVerify(
+    "signalasi_debug_open_destroy_data",
+    ["Clear All Data", "\u6e05\u9664\u6240\u6709\u6570\u636e"],
+    [
+      ["Dangerous Operation", "\u5371\u9669\u64cd\u4f5c"],
+      ["Regenerate Identity", "\u91cd\u65b0\u751f\u6210\u8eab\u4efd"],
+      ["Contacts", "\u8054\u7cfb\u4eba"],
+      ["Chat History", "\u804a\u5929\u8bb0\u5f55"]
+    ]
+  );
+  await openDebugPageAndVerify(
+    "signalasi_debug_open_protocol_quality",
+    ["Protocol &amp; Quality", "\u534f\u8bae\u4e0e\u8d28\u91cf"],
+    [
+      ["Delivery Acknowledgement", "\u9001\u8fbe\u786e\u8ba4"],
+      ["Offline Queue", "\u79bb\u7ebf\u961f\u5217"],
+      ["Identity Key", "\u8eab\u4efd\u5bc6\u94a5"],
+      ["Session Rotation", "\u4f1a\u8bdd\u8f6e\u6362"]
+    ]
+  );
+  await openDebugPageAndVerify(
+    "signalasi_debug_open_signal_link_protocol",
+    ["Signal Link Protocol"],
+    [
+      ["Version v1.0.3", "\u7248\u672c v1.0.3"],
+      ["Identity Layer", "\u8eab\u4efd\u5c42"],
+      ["Session Layer", "\u4f1a\u8bdd\u5c42"],
+      ["Signal Protocol"]
+    ]
+  );
+  await openDebugPageAndVerify(
+    "signalasi_debug_open_advanced_options",
+    ["Advanced Options", "\u9ad8\u7ea7\u9009\u9879"],
+    [
+      ["Diagnostics", "\u8bca\u65ad"],
+      ["Protocol Logs", "\u534f\u8bae\u65e5\u5fd7"],
+      ["Agent Permission Audit", "Agent \u6743\u9650\u5ba1\u8ba1"],
+      ["Experiments", "\u5b9e\u9a8c"]
+    ]
+  );
+
   log("revoking debug pairing and verifying cleanup");
   adb(["shell", "am", "start", "-n", activityName, "--ez", "signalasi_debug_revoke", "true"]);
   await sleep(2000);
@@ -261,7 +372,7 @@ async function main() {
     fail("Debug pairing cleanup failed; trust or dynamic contact remains");
   }
 
-  log(`OK: dynamic Agent UI and Security Center verified. Dumps: ${windowDump}, ${securityDump}`);
+  log(`OK: dynamic Agent UI, Security Center, and Settings feature pages verified. Dumps: ${windowDump}, ${securityDump}, ${settingsDump}`);
 }
 
 main().catch((error) => {
