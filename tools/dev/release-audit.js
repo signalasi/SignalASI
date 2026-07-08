@@ -33,6 +33,10 @@ const deviceGates = [
   "npm run smoke:android:reset"
 ];
 
+const deviceGateBundle = [
+  "npm run test:release:device"
+];
+
 const networkGates = [
   "npm run smoke:desktop:mqtt-persistence"
 ];
@@ -136,6 +140,9 @@ async function main() {
 
   section("Device Gates");
   list(deviceGates);
+
+  section("Device Gate Bundle");
+  list(deviceGateBundle);
 
   section("Network Gate");
   list(networkGates);

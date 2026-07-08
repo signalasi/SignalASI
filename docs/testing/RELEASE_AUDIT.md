@@ -20,6 +20,12 @@ Run the local non-device gate bundle before strict audit:
 npm run test:release:local
 ```
 
+Run the Android device gate bundle before publishing a mobile build:
+
+```bash
+npm run test:release:device
+```
+
 The audit prints:
 
 - current Git branch and commit
@@ -27,6 +33,7 @@ The audit prints:
 - required local gates
 - local non-device gate bundle
 - Android device gates
+- Android device gate bundle
 - Android destructive reset gate
 - network-dependent MQTT persistence gate
 - manual release checks

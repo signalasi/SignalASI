@@ -178,7 +178,8 @@ function checkReadme() {
     "npm run smoke:desktop:packaged",
     "npm run audit:release",
     "npm run audit:release:strict",
-    "npm run test:release:local"
+    "npm run test:release:local",
+    "npm run test:release:device"
   ];
 
   for (const text of requiredText) {
@@ -289,6 +290,7 @@ function checkReleaseAudit() {
     "Manual Release Checks",
     "npm run audit:release:strict",
     "npm run test:release:local",
+    "npm run test:release:device",
     "smoke:desktop:mqtt-persistence",
     "smoke:android:ui",
     "smoke:android:friends",

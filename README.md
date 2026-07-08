@@ -66,6 +66,7 @@ Local release gates:
 
 ```bash
 npm run test:release:local
+npm run test:release:device
 ```
 
 Windows desktop package:
