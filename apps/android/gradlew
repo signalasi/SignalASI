@@ -3,7 +3,7 @@
 LOCAL_GRADLE="$HOME/.gradle/wrapper/dists/gradle-8.14.3-all/10utluxaxniiv4wxiphsi49nj/gradle-8.14.3/bin/gradle"
 
 if [ -x "$LOCAL_GRADLE" ]; then
-  JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" exec "$LOCAL_GRADLE" "$@"
+  exec "$LOCAL_GRADLE" "$@"
 fi
 
 DIRNAME=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
