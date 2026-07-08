@@ -23,7 +23,8 @@ const requiredLocalGates = [
 const deviceGates = [
   "npm run smoke:android:ui",
   "npm run smoke:android:friends",
-  "npm run smoke:android:background"
+  "npm run smoke:android:background",
+  "npm run smoke:android:reset"
 ];
 
 const networkGates = [
@@ -35,7 +36,7 @@ const manualChecks = [
   "Send text messages from Android to Hermes and Codex and confirm full replies arrive on the phone.",
   "Send a voice message to Hermes and confirm Desktop STT is used when configured.",
   "Exercise the Voice page wake loop and confirm replies are preserved in the voice response panel.",
-  "Clear Android app data and confirm a new identity fingerprint, empty contacts, and a new welcome notification are created.",
+  "Clear Android app data and confirm a new identity fingerprint, empty contacts, and a new welcome notification are created. Automated evidence: npm run smoke:android:reset.",
   "Verify exported APK, Desktop EXE, local databases, logs, screenshots, pairing state, tokens, and node_modules are not staged for Git."
 ];
 

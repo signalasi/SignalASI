@@ -14,6 +14,7 @@ The audit prints:
 - clean or dirty working tree state
 - required local gates
 - Android device gates
+- Android destructive reset gate
 - network-dependent MQTT persistence gate
 - manual release checks
 - latest public GitHub Actions status for Repository Guard and Windows Package

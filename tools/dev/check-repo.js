@@ -220,7 +220,8 @@ function checkReleaseAudit() {
     "smoke:desktop:mqtt-persistence",
     "smoke:android:ui",
     "smoke:android:friends",
-    "smoke:android:background"
+    "smoke:android:background",
+    "smoke:android:reset"
   ];
 
   for (const text of requiredText) {
