@@ -17,7 +17,7 @@ SignalASI is a private superintelligence interface for trusted communication bet
 | Area | Requirement | Verification |
 | --- | --- | --- |
 | Main navigation | Android opens to the Voice page and supports the Messages, Contacts, Discover, and Settings tabs. | `npm run smoke:android:ui` |
-| Messages | Messages show contacts, unread state, timestamps, delivery evidence, and persisted conversation history. | `npm run smoke:android:background` |
+| Messages | Messages show contacts, unread state, timestamps, delivery evidence, full Agent replies, and persisted conversation history. | `npm run smoke:android:background`, `npm run smoke:android:agent-replies` |
 | Contacts | Contacts can represent agents, models, and devices with type labels and editable display names. | `npm run smoke:android:ui` |
 | New friends | Newly scanned peers appear in New Friends until approved, and deleted contacts require re-adding before communication. | `npm run smoke:android:friends` |
 | Pairing | QR scan accepts `/signalasi/verify` payloads, stores peer fingerprints, and creates trusted contacts only after confirmation. | `npm run smoke:android:ui`, `npm run smoke:desktop:pairing` |
@@ -27,6 +27,7 @@ SignalASI is a private superintelligence interface for trusted communication bet
 | Backup and import | Settings exposes backup export, backup import, and destructive data reset entry points. | `npm run smoke:android:ui` |
 | Destructive reset | Clear All Data rotates local identity, clears contacts and trust state, and recreates the welcome system notification. | `npm run smoke:android:reset` |
 | Background delivery | MQTT identity, QoS 1 behavior, background history, and local notification history survive app restart. | `npm run smoke:android:background` |
+| Agent reply preservation | Hermes and Codex replies stay complete after contact switching and UI refresh, with delivery trace evidence persisted. | `npm run smoke:android:agent-replies` |
 | Voice reply preservation | Long Agent replies stay visible on the Voice page response panel and persist into Hermes chat history with delivery trace evidence. | `npm run smoke:android:voice-reply` |
 
 ## Desktop Requirements

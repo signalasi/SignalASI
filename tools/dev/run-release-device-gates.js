@@ -11,6 +11,7 @@ const gates = [
   "smoke:android:ui",
   "smoke:android:friends",
   "smoke:android:background",
+  "smoke:android:agent-replies",
   "smoke:android:voice-reply",
   "smoke:android:reset"
 ];

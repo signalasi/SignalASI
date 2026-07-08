@@ -13,6 +13,7 @@ Product scope is defined in `docs/product/PRODUCT_REQUIREMENTS.md`.
 | Android UI smoke | `npm run smoke:android:ui` | Main navigation, contacts, cloud model entry, security center, settings entry points, voice settings, backup, protocol quality, and destructive-data screens can be opened on a real device or emulator. |
 | Android friend flow | `npm run smoke:android:friends` | New-friend approval, deleted-contact blocking, re-add flow, contact detail routing, and contact deletion evidence work on Android. |
 | Android background delivery | `npm run smoke:android:background` | Offline or background message persistence, notification history, unread handling, stable MQTT client identity, and QoS 1 delivery evidence are present. |
+| Android agent replies | `npm run smoke:android:agent-replies` | Hermes and Codex chat replies preserve full text and delivery trace evidence after contact switching and UI refresh. |
 | Android voice reply panel | `npm run smoke:android:voice-reply` | Long Agent replies remain visible on the Voice page response panel and are persisted in the Hermes chat history with delivery trace evidence. |
 | Android destructive reset | `npm run smoke:android:reset` | Clear All Data rotates the local identity, clears contacts and trust state, recreates the welcome system notification, and restores test device state afterward. |
 | Desktop connector smoke | `npm run smoke:desktop` | Desktop backend starts, pairing endpoints respond, connector diagnostics are structured, default agents are discoverable, and basic agent/mobile APIs respond. |
@@ -36,10 +37,10 @@ Run `npm run audit:release` to print the release gate checklist and the latest p
 
 | Product area | Primary evidence |
 | --- | --- |
-| Mobile chat and contacts | `npm run smoke:android:ui`, `npm run smoke:android:friends`, `npm run smoke:android:background`, `npm run smoke:android:voice-reply`, `npm run smoke:android:reset` |
+| Mobile chat and contacts | `npm run smoke:android:ui`, `npm run smoke:android:friends`, `npm run smoke:android:background`, `npm run smoke:android:agent-replies`, `npm run smoke:android:voice-reply`, `npm run smoke:android:reset` |
 | QR pairing and fingerprint trust | `npm run smoke:desktop:pairing`, `npm run smoke:android:ui`, `npm run smoke:desktop:e2e` |
 | SignalASI Link encrypted messaging | `npm run check`, `npm run smoke:desktop:pairing`, `npm run smoke:desktop:e2e` |
-| Hermes, Codex, Claude Code, Local LLM, Custom Agent, and MCP contacts | `npm run smoke:desktop`, `npm run smoke:desktop:e2e` |
+| Hermes, Codex, Claude Code, Local LLM, Custom Agent, and MCP contacts | `npm run smoke:desktop`, `npm run smoke:desktop:e2e`, `npm run smoke:android:agent-replies` |
 | Direct mobile cloud model contacts | `npm run smoke:android:ui`, `npm run check` |
 | Voice wake, voice recording, ASR, TTS settings, and reply preservation | `npm run smoke:android:ui`, `npm run smoke:android:voice-reply`, `npm run check` |
 | Background notification and delayed message handling | `npm run smoke:android:background`, `npm run smoke:desktop:mqtt-persistence` |
