@@ -331,7 +331,8 @@ async function main() {
       ["Delivery Acknowledgement", "\u9001\u8fbe\u786e\u8ba4"],
       ["Offline Queue", "\u79bb\u7ebf\u961f\u5217"],
       ["Identity Key", "\u8eab\u4efd\u5bc6\u94a5"],
-      ["Session Rotation", "\u4f1a\u8bdd\u8f6e\u6362"]
+      ["Session Rotation", "\u4f1a\u8bdd\u8f6e\u6362"],
+      ["Enabled", "\u542f\u7528"]
     ]
   );
   await openDebugPageAndVerify(
