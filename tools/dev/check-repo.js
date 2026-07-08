@@ -8,6 +8,7 @@ const path = require("node:path");
 const root = path.resolve(__dirname, "..", "..");
 const testingMatrix = path.join(root, "docs", "testing", "README.md");
 const productRequirements = path.join(root, "docs", "product", "PRODUCT_REQUIREMENTS.md");
+const readme = path.join(root, "README.md");
 const trustModel = path.join(root, "docs", "security", "TRUST_MODEL.md");
 const windowsPackageWorkflow = path.join(root, ".github", "workflows", "windows-package.yml");
 const releaseAuditDoc = path.join(root, "docs", "testing", "RELEASE_AUDIT.md");
@@ -117,6 +118,35 @@ function checkProductRequirements() {
   for (const text of requiredText) {
     if (!content.includes(text)) {
       throw new Error(`Product requirements missing: ${text}`);
+    }
+  }
+}
+
+function checkReadme() {
+  if (!fs.existsSync(readme)) {
+    throw new Error("Missing README.md");
+  }
+
+  const content = fs.readFileSync(readme, "utf8");
+  const requiredText = [
+    "SignalASI",
+    "Repository Layout",
+    "npm run check",
+    "npm run check:android",
+    "npm run smoke:android:ui",
+    "npm run smoke:android:friends",
+    "npm run smoke:android:background",
+    "npm run smoke:android:reset",
+    "npm run smoke:desktop",
+    "npm run smoke:desktop:e2e",
+    "npm run package:desktop:win",
+    "npm run smoke:desktop:packaged",
+    "npm run audit:release"
+  ];
+
+  for (const text of requiredText) {
+    if (!content.includes(text)) {
+      throw new Error(`README missing: ${text}`);
     }
   }
 }
@@ -239,6 +269,10 @@ const checks = [
   {
     name: "product requirements",
     run: checkProductRequirements
+  },
+  {
+    name: "README",
+    run: checkReadme
   },
   {
     name: "trust model",
