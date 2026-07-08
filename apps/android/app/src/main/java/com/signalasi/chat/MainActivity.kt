@@ -3721,7 +3721,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         })
         featureContent.addView(featureRow(getString(R.string.voice_openwakeword_model), config.wakeModel, R.drawable.ic_protocol_link, getString(R.string.common_select)).apply {
             setOnClickListener {
-                showChoiceDialog(getString(R.string.voice_openwakeword_model), listOf("hello_world.onnx", "signalasi.onnx"), config.wakeModel) {
+                showChoiceDialog(getString(R.string.voice_openwakeword_model), VoiceAssistantSettings.SUPPORTED_WAKE_MODELS, config.wakeModel) {
                     VoiceAssistantSettings.setWakeModel(this@MainActivity, it)
                     showVoiceAssistantSettingsPage()
                 }

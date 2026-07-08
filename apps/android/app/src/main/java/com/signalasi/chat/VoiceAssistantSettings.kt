@@ -38,6 +38,8 @@ object VoiceAssistantSettings {
     const val WAKE_PROVIDER_ANDROID_ASR = "android_asr"
     const val ASR_PROVIDER_ANDROID = "android_asr"
     const val ASR_PROVIDER_PC_STT = "pc_stt"
+    const val DEFAULT_WAKE_MODEL = "hello_world.onnx"
+    val SUPPORTED_WAKE_MODELS = listOf(DEFAULT_WAKE_MODEL)
 
     fun get(context: Context): VoiceAssistantConfig {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -52,8 +54,9 @@ object VoiceAssistantSettings {
                 .filter { it.isNotBlank() },
             wakeProvider = prefs.getString(KEY_WAKE_PROVIDER, WAKE_PROVIDER_OPEN_WAKE_WORD).orEmpty()
                 .ifBlank { WAKE_PROVIDER_OPEN_WAKE_WORD },
-            wakeModel = prefs.getString(KEY_WAKE_MODEL, "hello_world.onnx").orEmpty()
-                .ifBlank { "hello_world.onnx" },
+            wakeModel = prefs.getString(KEY_WAKE_MODEL, DEFAULT_WAKE_MODEL).orEmpty()
+                .takeIf { it in SUPPORTED_WAKE_MODELS }
+                ?: DEFAULT_WAKE_MODEL,
             wakeThreshold = prefs.getFloat(KEY_WAKE_THRESHOLD, 0.5f).coerceIn(0.01f, 0.99f),
             asrProvider = prefs.getString(KEY_ASR_PROVIDER, ASR_PROVIDER_PC_STT).orEmpty()
                 .ifBlank { ASR_PROVIDER_PC_STT },
@@ -82,7 +85,8 @@ object VoiceAssistantSettings {
     }
 
     fun setWakeModel(context: Context, value: String) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_WAKE_MODEL, value).apply()
+        val model = value.takeIf { it in SUPPORTED_WAKE_MODELS } ?: DEFAULT_WAKE_MODEL
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_WAKE_MODEL, model).apply()
     }
 
     fun setWakeThreshold(context: Context, value: Float) {

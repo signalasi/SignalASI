@@ -505,11 +505,17 @@ for (const requiredVoicePipelineText of [
   "sendVoiceRecordingThroughPipeline",
   "ASR_PROVIDER_PC_STT",
   "voice_asr_provider",
-  "PC faster-whisper"
+  "PC faster-whisper",
+  "SUPPORTED_WAKE_MODELS",
+  "DEFAULT_WAKE_MODEL"
 ]) {
   if (![androidMainActivity, androidVoiceSettings, androidStringsZh, androidStringsEn].some((content) => content.includes(requiredVoicePipelineText))) {
     throw new Error(`Android voice pipeline missing: ${requiredVoicePipelineText}`);
   }
+}
+
+if ([androidMainActivity, androidVoiceSettings].some((content) => content.includes("signalasi.onnx"))) {
+  throw new Error("Android voice wake settings must not expose unbundled wake model signalasi.onnx");
 }
 
 for (const requiredCloudModelText of [
