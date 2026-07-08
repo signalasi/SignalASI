@@ -198,6 +198,7 @@ writeJson(path.join(appDir, "package.json"), {
     "smoke:android-ui": "node scripts/smoke-android-ui.js",
     "smoke:android-friends": "node scripts/smoke-android-friends.js",
     "smoke:android-contact-rename": "node scripts/smoke-android-contact-rename.js",
+    "smoke:android-cloud-models": "node scripts/smoke-android-cloud-models.js",
     "smoke:android-background": "node scripts/smoke-android-background-message.js",
     "smoke:android-agent-replies": "node scripts/smoke-android-agent-replies.js",
     "smoke:android-backup": "node scripts/smoke-android-backup-roundtrip.js",

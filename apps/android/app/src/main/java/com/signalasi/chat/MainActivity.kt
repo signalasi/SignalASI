@@ -1643,6 +1643,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             intent?.getStringExtra("signalasi_debug_rename_name")?.trim().orEmpty()
         }
         val backupRoundtripToken = intent?.getStringExtra("signalasi_debug_backup_roundtrip")?.trim().orEmpty()
+        val cloudModelsRoundtripToken = intent?.getStringExtra("signalasi_debug_cloud_models_roundtrip")?.trim().orEmpty()
         val scanPayload = intent?.getStringExtra("signalasi_debug_scan_payload")?.trim().orEmpty()
         val scanPayloadB64 = intent?.getStringExtra("signalasi_debug_scan_payload_b64")?.trim().orEmpty()
         if (approveFriendId.isNotBlank()) {
@@ -1687,6 +1688,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (backupRoundtripToken.isNotBlank()) {
             intent?.removeExtra("signalasi_debug_backup_roundtrip")
             runDebugBackupRoundtrip(backupRoundtripToken)
+            return
+        }
+        if (cloudModelsRoundtripToken.isNotBlank()) {
+            intent?.removeExtra("signalasi_debug_cloud_models_roundtrip")
+            runDebugCloudModelsRoundtrip(cloudModelsRoundtripToken)
             return
         }
         if (destroyAllData) {
@@ -1983,6 +1989,70 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }.getOrElse { error ->
             prefs.edit()
                 .putString("backup_roundtrip_result", JSONObject()
+                    .put("ok", false)
+                    .put("token", token)
+                    .put("error", error.message ?: error.javaClass.simpleName)
+                    .toString())
+                .commit()
+        }
+    }
+
+    private fun runDebugCloudModelsRoundtrip(token: String) {
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
+        val prefs = getSharedPreferences("signalasi_debug", MODE_PRIVATE)
+        runCatching {
+            val deepseekContact = debugSeedCloudProvider("DeepSeek")
+                ?: throw IllegalStateException("DeepSeek provider was not seeded")
+            val openAiContact = debugSeedCloudProvider("OpenAI")
+                ?: throw IllegalStateException("OpenAI provider was not seeded")
+            val deepseekSecondModel = modelsForProvider("DeepSeek").getOrNull(1)
+                ?: throw IllegalStateException("DeepSeek second model is missing")
+            val switched = AppStore.setSelectedCloudModel(this, deepseekContact.id, deepseekSecondModel.modelId)
+            val deepseekRaw = AppStore.contactById(this, deepseekContact.id)
+                ?: throw IllegalStateException("DeepSeek contact is missing")
+            val openAiRaw = AppStore.contactById(this, openAiContact.id)
+                ?: throw IllegalStateException("OpenAI contact is missing")
+            val contacts = AppStore.contacts(this)
+            var cloudProviderContacts = 0
+            var desktopCloudPresent = false
+            for (i in 0 until contacts.length()) {
+                val contact = contacts.optJSONObject(i) ?: continue
+                if (contact.optString("delivery_mode") == "cloud_api") cloudProviderContacts += 1
+                if (contact.optString("agent_id") == "cloud-model" || contact.optString("agent_kind") == "cloud-model") {
+                    desktopCloudPresent = true
+                }
+            }
+            val deepseekModels = deepseekRaw.optJSONArray("cloud_models") ?: JSONArray()
+            val openAiModels = openAiRaw.optJSONArray("cloud_models") ?: JSONArray()
+            val ok = switched &&
+                deepseekRaw.optString("name") == "DeepSeek" &&
+                openAiRaw.optString("name") == "OpenAI" &&
+                deepseekModels.length() >= 2 &&
+                openAiModels.length() >= 2 &&
+                deepseekRaw.optString("selected_cloud_model") == deepseekSecondModel.modelId &&
+                deepseekRaw.optString("cloud_model") == deepseekSecondModel.modelId &&
+                !desktopCloudPresent
+            prefs.edit()
+                .putString("cloud_models_roundtrip_result", JSONObject()
+                    .put("ok", ok)
+                    .put("token", token)
+                    .put("deepseek_contact_id", deepseekContact.id)
+                    .put("openai_contact_id", openAiContact.id)
+                    .put("deepseek_name", deepseekRaw.optString("name"))
+                    .put("openai_name", openAiRaw.optString("name"))
+                    .put("deepseek_model_count", deepseekModels.length())
+                    .put("openai_model_count", openAiModels.length())
+                    .put("selected_model", deepseekRaw.optString("selected_cloud_model"))
+                    .put("cloud_provider_contacts", cloudProviderContacts)
+                    .put("desktop_cloud_present", desktopCloudPresent)
+                    .toString())
+                .commit()
+            refreshContactList()
+            refreshDirectoryContacts()
+            showChatPage(Contact(deepseekContact.id, deepseekRaw.optString("name", "DeepSeek"), ""))
+        }.getOrElse { error ->
+            prefs.edit()
+                .putString("cloud_models_roundtrip_result", JSONObject()
                     .put("ok", false)
                     .put("token", token)
                     .put("error", error.message ?: error.javaClass.simpleName)
