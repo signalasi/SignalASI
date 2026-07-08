@@ -1,4 +1,5 @@
 ﻿const { execFileSync } = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -11,19 +12,19 @@ const windowDump = path.join(outDir, "android-agent-page.xml");
 const securityDump = path.join(outDir, "android-security-page.xml");
 const packageName = "com.signalasi.chat";
 const activityName = `${packageName}/.MainActivity`;
-const securityTitle = "Security Center";
-const securityRequiredTexts = [
-  securityTitle,
-  "Privacy &amp; Security",
-  "Phone Fingerprint",
-  "SignalASI ID",
-  "Paired Devices"
+const securityTitleTexts = ["Security Center", "\u5b89\u5168\u4e2d\u5fc3"];
+const securityRequiredTextGroups = [
+  securityTitleTexts,
+  ["Privacy &amp; Security", "\u9690\u79c1\u4e0e\u5b89\u5168"],
+  ["Phone Fingerprint", "\u624b\u673a\u6307\u7eb9"],
+  ["SignalASI ID"],
+  ["Paired Devices", "\u5df2\u914d\u5bf9\u8bbe\u5907"]
 ];
-const securityScrolledRequiredTexts = [
-  "Agent Permissions",
-  "Message Protection",
-  "Dual Fingerprint Confirmation",
-  "Revoke All PC Pairings"
+const securityScrolledRequiredTextGroups = [
+  ["Agent Permissions", "Agent \u6743\u9650"],
+  ["Message Protection", "\u6d88\u606f\u4fdd\u62a4"],
+  ["Dual Fingerprint Confirmation", "\u53cc\u7aef\u6307\u7eb9\u786e\u8ba4"],
+  ["Revoke All PC Pairings", "\u64a4\u9500\u6240\u6709 PC \u914d\u5bf9"]
 ];
 
 function log(message) {
@@ -49,6 +50,39 @@ function sleep(ms) {
 
 function readAppStore() {
   return adb(["shell", "run-as", packageName, "cat", "shared_prefs/signalasi_app_store.xml"]);
+}
+
+function slimPairingPayload() {
+  const identityKey = crypto.randomBytes(32);
+  const fingerprint = crypto.createHash("sha256").update(identityKey).digest("hex");
+  return {
+    type: "signalasi_verify",
+    version: 1,
+    device: "pc",
+    desktop_id: `desktop_${fingerprint.slice(0, 16)}`,
+    desktop_name: "SMOKE-PC",
+    device_id: 1,
+    identity_key: identityKey.toString("base64"),
+    identity_key_sha256: fingerprint,
+    created_at: Math.floor(Date.now() / 1000),
+    pairing_token: crypto.randomBytes(24).toString("base64url")
+  };
+}
+
+function hasAnyText(value, texts) {
+  return texts.some((text) => value.includes(text));
+}
+
+function requireStoreText(store, text, stage) {
+  if (!store.includes(text)) {
+    fail(`${stage}: app store did not include ${text}`);
+  }
+}
+
+function requireAnyText(value, texts, label, dumpPath) {
+  if (!hasAnyText(value, texts)) {
+    fail(`Window dump missing ${label}. Dump saved at ${dumpPath}`);
+  }
 }
 
 function readTrustStore() {
@@ -78,6 +112,36 @@ async function main() {
   adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"]);
   adb(["shell", "input", "keyevent", "KEYCODE_BACK"]);
   adb(["shell", "am", "force-stop", packageName]);
+
+  log("scanning slim Desktop QR and verifying default connector contacts");
+  const pairingPayload = slimPairingPayload();
+  const qrB64 = Buffer.from(JSON.stringify(pairingPayload), "utf8").toString("base64");
+  adb([
+    "shell",
+    "am",
+    "start",
+    "-n",
+    activityName,
+    "--es",
+    "signalasi_debug_scan_payload_b64",
+    qrB64,
+    "--ez",
+    "signalasi_debug_auto_confirm_scan",
+    "true"
+  ]);
+  await sleep(3000);
+  const slimQrStore = readAppStore();
+  for (const text of [
+    "Hermes Agent",
+    "Codex Agent",
+    "Claude Code",
+    "Local LLM",
+    "Custom Agent",
+    "SMOKE-PC",
+    "pc_connector"
+  ]) {
+    requireStoreText(slimQrStore, text, "slim QR scan");
+  }
 
   log("opening AI Agent page with debug connector status");
   adb([
@@ -109,7 +173,7 @@ async function main() {
       fail(`Window dump missing ${text}. Dump saved at ${windowDump}`);
     }
   }
-  if (!xml.includes("Add Cloud Model")) {
+  if (!hasAnyText(xml, ["Add Cloud Model", "\u6dfb\u52a0\u4e91\u7aef\u6a21\u578b"])) {
     fail(`Window dump missing mobile direct cloud model entry. Dump saved at ${windowDump}`);
   }
   if (xml.includes("Desktop Cloud Model")) {
@@ -163,27 +227,33 @@ async function main() {
     adb(["shell", "uiautomator", "dump", "/sdcard/signalasi-security.xml"]);
     adb(["pull", "/sdcard/signalasi-security.xml", securityDump]);
     securityXml = fs.readFileSync(securityDump, "utf8");
-    if (securityXml.includes(securityTitle)) break;
+    if (hasAnyText(securityXml, securityTitleTexts)) break;
   }
-  for (const text of securityRequiredTexts) {
-    if (!securityXml.includes(text)) {
-      fail(`Security Center dump missing ${text}. Dump saved at ${securityDump}`);
-    }
+  for (const texts of securityRequiredTextGroups) {
+    requireAnyText(securityXml, texts, texts[0], securityDump);
   }
-  adb(["shell", "input", "swipe", "520", "1900", "520", "520", "450"]);
-  await sleep(800);
-  adb(["shell", "uiautomator", "dump", "/sdcard/signalasi-security.xml"]);
-  adb(["pull", "/sdcard/signalasi-security.xml", securityDump]);
-  securityXml = fs.readFileSync(securityDump, "utf8");
-  for (const text of securityScrolledRequiredTexts) {
-    if (!securityXml.includes(text)) {
-      fail(`Security Center scrolled dump missing ${text}. Dump saved at ${securityDump}`);
-    }
+  let scrolledSecurityXml = securityXml;
+  for (let scroll = 0; scroll < 3; scroll += 1) {
+    adb(["shell", "input", "swipe", "520", "1900", "520", "520", "450"]);
+    await sleep(800);
+    adb(["shell", "uiautomator", "dump", "/sdcard/signalasi-security.xml"]);
+    adb(["pull", "/sdcard/signalasi-security.xml", securityDump]);
+    scrolledSecurityXml += fs.readFileSync(securityDump, "utf8");
+  }
+  for (const texts of securityScrolledRequiredTextGroups) {
+    requireAnyText(scrolledSecurityXml, texts, texts[0], securityDump);
   }
 
   log("revoking debug pairing and verifying cleanup");
   adb(["shell", "am", "start", "-n", activityName, "--ez", "signalasi_debug_revoke", "true"]);
   await sleep(2000);
+  const slimRevoke = Buffer.from(JSON.stringify({
+    type: "pairing_revoked",
+    desktop_id: pairingPayload.desktop_id,
+    content: "smoke slim QR revoked"
+  }), "utf8").toString("base64");
+  adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_incoming_b64", slimRevoke]);
+  await sleep(1200);
   const trustStore = readTrustStore();
   const cleanStore = readAppStore();
   const activeResearchAgent = /research-agent[\s\S]{0,1600}&quot;deleted&quot;:false/.test(cleanStore);

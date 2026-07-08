@@ -103,8 +103,20 @@ async function main() {
     if (!html.includes('data-pairing-route="/signalasi/verify"')) {
       throw new Error("Pairing QR page did not expose /signalasi/verify route");
     }
+    if (!/data-agent-count="[1-9][0-9]*"/.test(html)) {
+      throw new Error("Pairing QR page did not expose connector agent count");
+    }
     if (html.includes("hermes_signal_verify") || html.includes("/signal/verify")) {
       throw new Error("Pairing QR page leaked an old Hermes pairing protocol name");
+    }
+    const payload = await fetchJson("/api/pairing/payload");
+    if (!Array.isArray(payload.connector_agents) || payload.connector_agents.length < 2) {
+      throw new Error(`Pairing payload did not include connector agents: ${JSON.stringify(payload)}`);
+    }
+    for (const requiredAgentId of ["hermes", "codex"]) {
+      if (!payload.connector_agents.some((agent) => agent.agent_id === requiredAgentId || String(agent.id || "").endsWith(`:${requiredAgentId}`))) {
+        throw new Error(`Pairing payload missing connector agent ${requiredAgentId}: ${JSON.stringify(payload.connector_agents)}`);
+      }
     }
     const waiting = await fetchJson("/api/pairing/status");
     if (!waiting.token || waiting.token.active !== true || waiting.state === "not_paired") {

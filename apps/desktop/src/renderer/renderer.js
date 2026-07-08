@@ -876,18 +876,17 @@ if (languageSelect) {
 
 async function initialize() {
   await refreshBackend();
-  for (const task of [
+  const tasks = [
+    refreshDiagnostics,
     refreshAgents,
     refreshConfig,
-    refreshDiagnostics,
     refreshExecutionLog,
     refreshRuntimeDiagnostics
-  ]) {
-    try {
-      await task();
-    } catch (error) {
-      testResult.textContent = error.message || String(error);
-    }
+  ];
+  const results = await Promise.allSettled(tasks.map((task) => task()));
+  const firstError = results.find((result) => result.status === "rejected");
+  if (firstError) {
+    testResult.textContent = firstError.reason?.message || String(firstError.reason);
   }
 }
 

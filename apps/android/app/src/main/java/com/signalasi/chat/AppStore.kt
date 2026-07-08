@@ -534,19 +534,32 @@ object AppStore {
             updateConnectorAgentStatuses(context, agents)
             return
         }
-        val hermes = connectorAgentContact(
-            id = "$desktopId:hermes",
-            name = "Hermes",
-            kind = "local-cli",
-            fingerprint = fingerprint,
-            createdAt = now,
-            desktopId = desktopId,
-            desktopName = desktopName,
-            agentId = "hermes",
-            topic = DEFAULT_HERMES_SEND_TOPIC
-        )
-        upsertContact(contacts, hermes)
-        writeArray(context, KEY_CONTACTS, contacts)
+        val fallbackAgents = JSONArray()
+        listOf(
+            Triple("hermes", "Hermes Agent", "local-cli"),
+            Triple("codex", "Codex Agent", "local-cli"),
+            Triple("claude", "Claude Code", "local-cli"),
+            Triple("local-llm", "Local LLM", "local-model"),
+            Triple("custom-agent", "Custom Agent", "custom-cli")
+        ).forEach { (agentId, name, kind) ->
+            fallbackAgents.put(
+                JSONObject()
+                    .put("id", "$desktopId:$agentId")
+                    .put("agent_id", agentId)
+                    .put("name", name)
+                    .put("display_name", "$name · $desktopName")
+                    .put("kind", kind)
+                    .put("desktop_id", desktopId)
+                    .put("desktop_name", desktopName)
+                    .put("desktop_fingerprint", fingerprint)
+                    .put("status", "unknown")
+                    .put("detail", "Waiting for SignalASI Desktop status")
+                    .put("setup", "")
+                    .put("mqtt_topic", DEFAULT_HERMES_SEND_TOPIC)
+                    .put("updated_at", now)
+            )
+        }
+        updateConnectorAgentStatuses(context, fallbackAgents)
     }
 
     fun updateConnectorAgentStatuses(context: Context, agents: JSONArray): Boolean {

@@ -51,6 +51,17 @@ manager = ConnectionManager()
 # ── App ──
 from pathlib import Path
 
+def signalasi_pairing_payload(include_agents: bool = False) -> dict:
+    from pairing_state import new_pairing_token
+    from signalasi_client import get_signal_verification_payload
+
+    payload = get_signal_verification_payload()
+    payload["pairing_token"] = new_pairing_token()
+    if include_agents:
+        from mqtt_bridge import mobile_connector_agents
+        payload["connector_agents"] = mobile_connector_agents()
+    return payload
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -113,12 +124,7 @@ def api_pairing_status():
 
 @app.get("/api/pairing/payload")
 def api_pairing_payload():
-    from pairing_state import new_pairing_token
-    from signalasi_client import get_signal_verification_payload
-
-    payload = get_signal_verification_payload()
-    payload["pairing_token"] = new_pairing_token()
-    return payload
+    return signalasi_pairing_payload(include_agents=True)
 
 @app.post("/api/pairing/clear")
 def api_pairing_clear():
@@ -278,11 +284,10 @@ def serve_index():
 @app.get("/signalasi/verify")
 def signalasi_verify_qr():
     import qrcode
-    from signalasi_client import get_signal_verification_payload
-    from pairing_state import new_pairing_token
+    from mqtt_bridge import mobile_connector_agents
 
-    payload = get_signal_verification_payload()
-    payload["pairing_token"] = new_pairing_token()
+    payload = signalasi_pairing_payload()
+    agent_count = len(mobile_connector_agents())
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L, border=2, box_size=10)
     qr.add_data(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
     qr.make(fit=True)
@@ -313,7 +318,7 @@ def signalasi_verify_qr():
     <section>
       <h1>SignalASI Secure Pairing</h1>
       <p>Scan this QR code in the SignalASI mobile app to pair this desktop connector.</p>
-      <img alt="SignalASI pairing QR" data-pairing-type="{pairing_type}" data-pairing-route="/signalasi/verify" src="data:image/png;base64,{encoded}">
+      <img alt="SignalASI pairing QR" data-pairing-type="{pairing_type}" data-pairing-route="/signalasi/verify" data-agent-count="{agent_count}" src="data:image/png;base64,{encoded}">
       <p>PC identity hash</p>
       <code>{short_hash}</code>
     </section>

@@ -7,6 +7,7 @@ npm-debug.log*
 dist/
 out/
 release/
+apps/desktop/ui-smoke/
 *.exe
 *.msi
 *.dmg

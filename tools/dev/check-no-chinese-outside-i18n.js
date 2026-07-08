@@ -14,6 +14,7 @@ const ignoredDirs = new Set([
   "node_modules",
   "out",
   "release",
+  "ui-smoke",
   "__pycache__",
   "venv",
   ".venv"
