@@ -33,6 +33,11 @@ function backendHasCapabilities(diagnostics) {
   return requiredBackendCapabilities.every((item) => capabilities.has(item));
 }
 
+function backendIsCurrentSource(diagnostics) {
+  const actual = diagnostics?.backend_dir;
+  return typeof actual === "string" && path.resolve(actual).toLowerCase() === path.resolve(backendDir).toLowerCase();
+}
+
 function stopBackendPort() {
   if (process.platform !== "win32") return;
   execFileSync(
@@ -132,10 +137,10 @@ async function waitForBackend() {
 async function startBackendIfNeeded() {
   try {
     const diagnostics = await fetchJson("/api/agents/diagnostics");
-    if (backendHasCapabilities(diagnostics)) {
+    if (backendHasCapabilities(diagnostics) && backendIsCurrentSource(diagnostics)) {
       return undefined;
     }
-    log("stale backend detected on :8765; restarting current source backend");
+    log("stale backend detected or foreign backend on :8765; restarting current source backend");
     stopBackendPort();
     await new Promise((resolve) => setTimeout(resolve, 1000));
   } catch {

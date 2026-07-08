@@ -273,6 +273,7 @@ def connector_diagnostics() -> dict:
     return {
         "protocol": "SignalASI Link Protocol",
         "connector": "SignalASI Desktop",
+        "backend_dir": str(Path(__file__).resolve().parent),
         "pairing_route": "/signalasi/verify",
         "mobile_delivery": "verified_pc_signal_tunnel",
         "capabilities": [
