@@ -25,6 +25,8 @@ Product scope is defined in `docs/product/PRODUCT_REQUIREMENTS.md`.
 
 The `Windows Package` GitHub Actions workflow runs the Windows package build and packaged smoke gates for every push and pull request, and can also be started manually.
 
+Run `npm run test:release:local` to execute the non-device local release gates sequentially. Android device gates stay separate because they require a connected phone or emulator.
+
 Run `npm run audit:release` to print the release gate checklist and the latest public GitHub Actions status. Run `npm run audit:release:strict` after the local gates and GitHub Actions should be green; strict mode fails if the working tree is dirty or the required workflows are not successful for the current commit.
 
 ## Product Coverage

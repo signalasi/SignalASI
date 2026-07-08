@@ -14,11 +14,18 @@ Run the strict audit after local gates and GitHub Actions are expected to be gre
 npm run audit:release:strict
 ```
 
+Run the local non-device gate bundle before strict audit:
+
+```bash
+npm run test:release:local
+```
+
 The audit prints:
 
 - current Git branch and commit
 - clean or dirty working tree state
 - required local gates
+- local non-device gate bundle
 - Android device gates
 - Android destructive reset gate
 - network-dependent MQTT persistence gate

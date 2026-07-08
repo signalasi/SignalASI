@@ -20,6 +20,7 @@
     "package:desktop:win": "npm --prefix apps/desktop run package:win:python",
     "smoke:desktop:packaged": "npm --prefix apps/desktop run smoke:packaged",
     "audit:release": "node tools/dev/release-audit.js",
-    "audit:release:strict": "node tools/dev/release-audit.js --strict"
+    "audit:release:strict": "node tools/dev/release-audit.js --strict",
+    "test:release:local": "node tools/dev/run-release-local-gates.js"
   }
 }

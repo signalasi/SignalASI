@@ -177,7 +177,8 @@ function checkReadme() {
     "npm run package:desktop:win",
     "npm run smoke:desktop:packaged",
     "npm run audit:release",
-    "npm run audit:release:strict"
+    "npm run audit:release:strict",
+    "npm run test:release:local"
   ];
 
   for (const text of requiredText) {
@@ -287,6 +288,7 @@ function checkReleaseAudit() {
     "Windows Package",
     "Manual Release Checks",
     "npm run audit:release:strict",
+    "npm run test:release:local",
     "smoke:desktop:mqtt-persistence",
     "smoke:android:ui",
     "smoke:android:friends",

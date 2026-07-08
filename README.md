@@ -62,6 +62,12 @@ Full test coverage is documented in `docs/testing/README.md`.
 
 Product requirements are documented in `docs/product/PRODUCT_REQUIREMENTS.md`.
 
+Local release gates:
+
+```bash
+npm run test:release:local
+```
+
 Windows desktop package:
 
 ```bash

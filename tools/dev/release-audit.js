@@ -22,6 +22,10 @@ const requiredLocalGates = [
   "npm run smoke:desktop:packaged"
 ];
 
+const localGateBundle = [
+  "npm run test:release:local"
+];
+
 const deviceGates = [
   "npm run smoke:android:ui",
   "npm run smoke:android:friends",
@@ -126,6 +130,9 @@ async function main() {
 
   section("Required Local Gates");
   list(requiredLocalGates);
+
+  section("Local Gate Bundle");
+  list(localGateBundle);
 
   section("Device Gates");
   list(deviceGates);
