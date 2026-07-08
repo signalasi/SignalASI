@@ -57,6 +57,8 @@ npm run smoke:desktop:e2e
 
 Run smoke commands sequentially; they share the local backend port and test lock.
 
+Full test coverage is documented in `docs/testing/README.md`.
+
 Windows desktop package:
 
 ```bash

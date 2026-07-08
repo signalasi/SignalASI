@@ -25,3 +25,5 @@ npm run smoke:desktop:packaged
 ```
 
 Smoke commands that touch the Desktop backend, MQTT broker, packaged app, or Android device must run sequentially because they share the same local backend port and test lock.
+
+Use `docs/testing/README.md` as the release test matrix before publishing a build.
