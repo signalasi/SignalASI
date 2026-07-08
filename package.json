@@ -16,6 +16,7 @@
     "smoke:android:reset": "npm --prefix apps/desktop run smoke:android-reset",
     "smoke:android:backup": "npm --prefix apps/desktop run smoke:android-backup",
     "smoke:android:voice-reply": "npm --prefix apps/desktop run smoke:android-voice-reply",
+    "smoke:android:voice-settings": "npm --prefix apps/desktop run smoke:android-voice-settings",
     "smoke:desktop": "npm --prefix apps/desktop run smoke",
     "smoke:desktop:pairing": "npm --prefix apps/desktop run smoke:pairing",
     "smoke:desktop:agent-push": "npm --prefix apps/desktop run smoke:agent-push",

@@ -77,4 +77,5 @@ Local identity and runtime files are device-local state:
 - `npm run smoke:android:agent-replies`
 - `npm run smoke:android:backup`
 - `npm run smoke:android:voice-reply`
+- `npm run smoke:android:voice-settings`
 - `npm run smoke:android:reset`

@@ -1644,6 +1644,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         val backupRoundtripToken = intent?.getStringExtra("signalasi_debug_backup_roundtrip")?.trim().orEmpty()
         val cloudModelsRoundtripToken = intent?.getStringExtra("signalasi_debug_cloud_models_roundtrip")?.trim().orEmpty()
+        val voiceSettingsRoundtripToken = intent?.getStringExtra("signalasi_debug_voice_settings_roundtrip")?.trim().orEmpty()
         val scanPayload = intent?.getStringExtra("signalasi_debug_scan_payload")?.trim().orEmpty()
         val scanPayloadB64 = intent?.getStringExtra("signalasi_debug_scan_payload_b64")?.trim().orEmpty()
         if (approveFriendId.isNotBlank()) {
@@ -1693,6 +1694,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (cloudModelsRoundtripToken.isNotBlank()) {
             intent?.removeExtra("signalasi_debug_cloud_models_roundtrip")
             runDebugCloudModelsRoundtrip(cloudModelsRoundtripToken)
+            return
+        }
+        if (voiceSettingsRoundtripToken.isNotBlank()) {
+            intent?.removeExtra("signalasi_debug_voice_settings_roundtrip")
+            runDebugVoiceSettingsRoundtrip(voiceSettingsRoundtripToken)
             return
         }
         if (destroyAllData) {
@@ -2053,6 +2059,78 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }.getOrElse { error ->
             prefs.edit()
                 .putString("cloud_models_roundtrip_result", JSONObject()
+                    .put("ok", false)
+                    .put("token", token)
+                    .put("error", error.message ?: error.javaClass.simpleName)
+                    .toString())
+                .commit()
+        }
+    }
+
+    private fun runDebugVoiceSettingsRoundtrip(token: String) {
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
+        val prefs = getSharedPreferences("signalasi_debug", MODE_PRIVATE)
+        runCatching {
+            val desktopId = "desktop_voice_settings_smoke"
+            val pairing = JSONObject()
+                .put("desktop_id", desktopId)
+                .put("desktop_name", "VOICE-PC")
+                .put("identity_key_sha256", "VOICE_SETTINGS_SMOKE_FINGERPRINT_0000000000000000000000000000")
+            AppStore.markDesktopVerified(this, pairing)
+            val codexId = "$desktopId:codex"
+            val welcome = "VOICE_SETTINGS_WELCOME_$token"
+            VoiceAssistantSettings.setEnabled(this, true)
+            VoiceAssistantSettings.setWakeProvider(this, VoiceAssistantSettings.WAKE_PROVIDER_ANDROID_ASR)
+            VoiceAssistantSettings.setWakeWords(this, "SignalASI,voice smoke,$token")
+            VoiceAssistantSettings.setWakeModel(this, VoiceAssistantSettings.DEFAULT_WAKE_MODEL)
+            VoiceAssistantSettings.setWakeThreshold(this, 0.73f)
+            VoiceAssistantSettings.setAsrProvider(this, VoiceAssistantSettings.ASR_PROVIDER_ANDROID)
+            VoiceAssistantSettings.setAsrLanguage(this, "en-US")
+            VoiceAssistantSettings.setTtsProvider(this, VoiceAssistantSettings.PROVIDER_ANDROID)
+            VoiceAssistantSettings.setMicrosoftVoice(this, "zh-CN-XiaoxiaoNeural")
+            VoiceAssistantSettings.setWelcomeText(this, welcome)
+            VoiceAssistantSettings.setSpeakReplies(this, false)
+            VoiceAssistantSettings.setTargetContact(this, codexId)
+            val config = VoiceAssistantSettings.get(this)
+            val resolvedTarget = resolveVoiceAssistantTargetContactId(config.targetContactId)
+            val ok = config.enabled &&
+                config.wakeProvider == VoiceAssistantSettings.WAKE_PROVIDER_ANDROID_ASR &&
+                config.wakeWords.contains("voice smoke") &&
+                config.wakeModel == VoiceAssistantSettings.DEFAULT_WAKE_MODEL &&
+                kotlin.math.abs(config.wakeThreshold - 0.73f) < 0.001f &&
+                config.asrProvider == VoiceAssistantSettings.ASR_PROVIDER_ANDROID &&
+                config.asrLanguage == "en-US" &&
+                config.ttsProvider == VoiceAssistantSettings.PROVIDER_ANDROID &&
+                config.microsoftVoice == "zh-CN-XiaoxiaoNeural" &&
+                config.welcomeText == welcome &&
+                !config.speakReplies &&
+                config.targetContactId == codexId &&
+                resolvedTarget == codexId
+            prefs.edit()
+                .putString("voice_settings_roundtrip_result", JSONObject()
+                    .put("ok", ok)
+                    .put("token", token)
+                    .put("enabled", config.enabled)
+                    .put("wake_provider", config.wakeProvider)
+                    .put("wake_words", JSONArray(config.wakeWords))
+                    .put("wake_model", config.wakeModel)
+                    .put("wake_threshold", config.wakeThreshold.toDouble())
+                    .put("asr_provider", config.asrProvider)
+                    .put("asr_language", config.asrLanguage)
+                    .put("tts_provider", config.ttsProvider)
+                    .put("microsoft_voice", config.microsoftVoice)
+                    .put("welcome_text", config.welcomeText)
+                    .put("speak_replies", config.speakReplies)
+                    .put("target_contact_id", config.targetContactId)
+                    .put("resolved_target_contact_id", resolvedTarget)
+                    .toString())
+                .commit()
+            refreshContactList()
+            refreshDirectoryContacts()
+            showVoiceAssistantSettingsPage()
+        }.getOrElse { error ->
+            prefs.edit()
+                .putString("voice_settings_roundtrip_result", JSONObject()
                     .put("ok", false)
                     .put("token", token)
                     .put("error", error.message ?: error.javaClass.simpleName)

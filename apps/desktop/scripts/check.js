@@ -26,6 +26,7 @@ const required = [
   "scripts/smoke-android-agent-replies.js",
   "scripts/smoke-android-backup-roundtrip.js",
   "scripts/smoke-android-voice-reply.js",
+  "scripts/smoke-android-voice-settings.js",
   "scripts/smoke-android-reset.js",
   "scripts/smoke-mqtt-persistence.js",
   "scripts/smoke-agent-push.js",
@@ -77,6 +78,7 @@ const smokeAndroidBackground = fs.readFileSync(path.join(root, "scripts/smoke-an
 const smokeAndroidAgentReplies = fs.readFileSync(path.join(root, "scripts/smoke-android-agent-replies.js"), "utf8");
 const smokeAndroidBackup = fs.readFileSync(path.join(root, "scripts/smoke-android-backup-roundtrip.js"), "utf8");
 const smokeAndroidVoiceReply = fs.readFileSync(path.join(root, "scripts/smoke-android-voice-reply.js"), "utf8");
+const smokeAndroidVoiceSettings = fs.readFileSync(path.join(root, "scripts/smoke-android-voice-settings.js"), "utf8");
 const smokeAndroidReset = fs.readFileSync(path.join(root, "scripts/smoke-android-reset.js"), "utf8");
 const smokeMqttPersistence = fs.readFileSync(path.join(root, "scripts/smoke-mqtt-persistence.js"), "utf8");
 const smokeAgentPush = fs.readFileSync(path.join(root, "scripts/smoke-agent-push.js"), "utf8");
@@ -344,6 +346,7 @@ for (const requiredText of [
   "smoke:android-agent-replies",
   "smoke:android-backup",
   "smoke:android-voice-reply",
+  "smoke:android-voice-settings",
   "smoke:android-reset",
   "smoke:mqtt-persistence",
   "smoke:agent-push",
@@ -450,6 +453,10 @@ for (const requiredText of [
   "smoke:android-reset",
   "smoke:android-voice-reply",
   "VOICE_REPLY_TAIL",
+  "signalasi_debug_voice_settings_roundtrip",
+  "voice_settings_roundtrip_result",
+  "zh-CN-XiaoxiaoNeural",
+  "smoke:android-voice-settings",
   "Destructive reset did not rotate the local Signal identity store",
   "SIGNALASI_WHISPER_MODEL",
   "SIGNALASI_WHISPER_DEVICE",

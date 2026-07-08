@@ -80,6 +80,7 @@ function checkTestingMatrix() {
     "npm run smoke:android:agent-replies",
     "npm run smoke:android:backup",
     "npm run smoke:android:voice-reply",
+    "npm run smoke:android:voice-settings",
     "npm run smoke:android:reset",
     "npm run smoke:desktop",
     "npm run smoke:desktop:pairing",
@@ -183,6 +184,7 @@ function checkReadme() {
     "npm run smoke:android:agent-replies",
     "npm run smoke:android:backup",
     "npm run smoke:android:voice-reply",
+    "npm run smoke:android:voice-settings",
     "npm run smoke:android:reset",
     "npm run smoke:desktop",
     "npm run smoke:desktop:e2e",
@@ -225,6 +227,7 @@ function checkTrustModel() {
     "npm run smoke:android:cloud-models",
     "npm run smoke:android:backup",
     "npm run smoke:android:voice-reply",
+    "npm run smoke:android:voice-settings",
     "X-SignalASI-Token"
   ];
 
@@ -318,6 +321,7 @@ function checkReleaseAudit() {
     "smoke:android:agent-replies",
     "smoke:android:backup",
     "smoke:android:voice-reply",
+    "smoke:android:voice-settings",
     "smoke:android:reset"
   ];
 

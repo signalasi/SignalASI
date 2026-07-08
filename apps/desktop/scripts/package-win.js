@@ -203,6 +203,7 @@ writeJson(path.join(appDir, "package.json"), {
     "smoke:android-agent-replies": "node scripts/smoke-android-agent-replies.js",
     "smoke:android-backup": "node scripts/smoke-android-backup-roundtrip.js",
     "smoke:android-voice-reply": "node scripts/smoke-android-voice-reply.js",
+    "smoke:android-voice-settings": "node scripts/smoke-android-voice-settings.js",
     "smoke:mqtt-persistence": "node scripts/smoke-mqtt-persistence.js",
     "smoke:agent-push": "node scripts/smoke-agent-push.js",
     "smoke:voice-stt": "node scripts/smoke-voice-stt.js",
