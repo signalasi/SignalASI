@@ -26,6 +26,8 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
+      - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+      - run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "platform-tools"'
       - run: npm run check:android
 
   desktop-source-smoke:
@@ -38,7 +40,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
       - run: python -m pip install -r apps/desktop/core/signalasi-link/backend/requirements.txt
+      - run: apps/android/gradlew -p apps/desktop/core/signalasi-link/backend/signal_sidecar installDist --no-daemon
       - run: npm run smoke:desktop
       - run: npm run smoke:desktop:pairing
       - run: npm run smoke:desktop:agent-push

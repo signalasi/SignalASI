@@ -15,7 +15,8 @@ SIDECAR_PORT = int(os.environ.get("SIGNALASI_LINK_PORT", os.environ.get("HERMES_
 SIDECAR_BASE = f"http://127.0.0.1:{SIDECAR_PORT}"
 ROOT = Path(__file__).resolve().parent
 SIDECAR_DIR = ROOT / "signal_sidecar"
-SIDECAR_SCRIPT = SIDECAR_DIR / "build" / "install" / "signalasi-link-sidecar" / "bin" / "signalasi-link-sidecar.bat"
+SIDECAR_BIN_DIR = SIDECAR_DIR / "build" / "install" / "signalasi-link-sidecar" / "bin"
+SIDECAR_SCRIPT = SIDECAR_BIN_DIR / ("signalasi-link-sidecar.bat" if os.name == "nt" else "signalasi-link-sidecar")
 
 _process: subprocess.Popen | None = None
 
@@ -30,13 +31,14 @@ def start_signal_sidecar() -> None:
 
     out = open(SIDECAR_DIR / "sidecar.out.log", "ab", buffering=0)
     err = open(SIDECAR_DIR / "sidecar.err.log", "ab", buffering=0)
-    _process = subprocess.Popen(
-        [str(SIDECAR_SCRIPT)],
-        cwd=str(SIDECAR_DIR),
-        stdout=out,
-        stderr=err,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    popen_kwargs = {
+        "cwd": str(SIDECAR_DIR),
+        "stdout": out,
+        "stderr": err,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    _process = subprocess.Popen([str(SIDECAR_SCRIPT)], **popen_kwargs)
     deadline = time.time() + 15
     while time.time() < deadline:
         if _is_healthy():
