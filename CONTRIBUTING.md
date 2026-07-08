@@ -8,6 +8,7 @@ Thank you for contributing to SignalASI.
 - Put user-visible localized strings in the proper i18n resource files.
 - Do not commit secrets, local device state, generated packages, logs, databases, or temporary screenshots.
 - Keep protocol changes documented under `docs/protocol`.
+- `npm run check` rejects tracked generated artifacts such as APKs, installers, smoke screenshots, UI dumps, local databases, logs, and pairing state.
 
 ## Checks
 
