@@ -162,7 +162,9 @@ function createFakeClaude(tmpDir) {
     script,
     [
       "import sys",
-      "prompt = sys.stdin.read().strip() if not sys.argv[1:] or sys.argv[-1] == '-' else ' '.join(sys.argv[1:])",
+      "if sys.argv[1:] != ['-']:",
+      "    raise SystemExit('CLAUDE_ARGV_LEAK:' + repr(sys.argv[1:]))",
+      "prompt = sys.stdin.read().strip()",
       "print('CLAUDE_SMOKE_OK:' + (prompt[:32] or 'empty'))"
     ].join("\n"),
     "utf8"
@@ -177,7 +179,9 @@ function createFakeCustomAgent(tmpDir) {
     script,
     [
       "import sys",
-      "prompt = sys.stdin.read().strip() if not sys.argv[1:] or sys.argv[-1] == '-' else ' '.join(sys.argv[1:])",
+      "if sys.argv[1:] != ['-']:",
+      "    raise SystemExit('CUSTOM_AGENT_ARGV_LEAK:' + repr(sys.argv[1:]))",
+      "prompt = sys.stdin.read().strip()",
       "print('CUSTOM_AGENT_OK:' + (prompt[:32] or 'empty'))"
     ].join("\n"),
     "utf8"
