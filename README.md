@@ -56,6 +56,7 @@ Desktop smoke gates from the repository root:
 
 ```bash
 npm run smoke:desktop
+npm run smoke:desktop:voice-stt
 npm run smoke:desktop:e2e
 ```
 

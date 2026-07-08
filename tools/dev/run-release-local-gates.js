@@ -14,6 +14,7 @@ const gates = [
   "smoke:desktop:pairing",
   "smoke:desktop:agent-push",
   "smoke:desktop:mqtt-persistence",
+  "smoke:desktop:voice-stt",
   "smoke:desktop:ui",
   "smoke:desktop:e2e",
   "package:desktop:win",

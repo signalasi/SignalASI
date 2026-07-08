@@ -20,6 +20,7 @@ Product scope is defined in `docs/product/PRODUCT_REQUIREMENTS.md`.
 | Desktop connector smoke | `npm run smoke:desktop` | Desktop backend starts, pairing endpoints respond, connector diagnostics are structured, default agents are discoverable, and basic agent/mobile APIs respond. |
 | Desktop pairing smoke | `npm run smoke:desktop:pairing` | QR pairing, phone claim handling, pairing status, pairing revocation, and unpaired access guards are enforced. |
 | Desktop agent push smoke | `npm run smoke:desktop:agent-push` | Long-running agents and scripts can call the local push API with token validation and publish messages to the paired phone path. |
+| Desktop voice STT smoke | `npm run smoke:desktop:voice-stt` | Inline phone voice payloads are saved, routed through the Desktop STT bridge, and cleaned before Agent reply handling. |
 | Desktop MQTT persistence smoke | `npm run smoke:desktop:mqtt-persistence` | Desktop and Android MQTT topics use persistent client identity and QoS settings required for delayed delivery. |
 | Desktop UI smoke | `npm run smoke:desktop:ui` | Electron renderer loads, connector panels are visible, Desktop UI screenshots can be captured, and localized UI wiring does not regress. |
 | Desktop end-to-end smoke | `npm run smoke:desktop:e2e` | Hermes, Codex, Claude Code, Local LLM, Custom Agent, MCP wrapper, status matrix, execution log, and setup helpers work together through the source backend. |
@@ -43,7 +44,7 @@ Run `npm run audit:release` to print the release gate checklist and the latest p
 | SignalASI Link encrypted messaging | `npm run check`, `npm run smoke:desktop:pairing`, `npm run smoke:desktop:e2e` |
 | Hermes, Codex, Claude Code, Local LLM, Custom Agent, and MCP contacts | `npm run smoke:desktop`, `npm run smoke:desktop:e2e`, `npm run smoke:android:agent-replies` |
 | Direct mobile cloud model contacts | `npm run smoke:android:ui`, `npm run check` |
-| Voice wake, voice recording, ASR, TTS settings, and reply preservation | `npm run smoke:android:ui`, `npm run smoke:android:voice-reply`, `npm run check` |
+| Voice wake, voice recording, ASR, TTS settings, and reply preservation | `npm run smoke:android:ui`, `npm run smoke:android:voice-reply`, `npm run smoke:desktop:voice-stt`, `npm run check` |
 | Backup export and import | `npm run smoke:android:ui`, `npm run smoke:android:backup` |
 | Background notification and delayed message handling | `npm run smoke:android:background`, `npm run smoke:desktop:mqtt-persistence` |
 | Desktop packaged Windows release | `npm run package:desktop:win`, `npm run smoke:desktop:packaged` |

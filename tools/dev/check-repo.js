@@ -82,9 +82,11 @@ function checkTestingMatrix() {
     "npm run smoke:desktop",
     "npm run smoke:desktop:pairing",
     "npm run smoke:desktop:agent-push",
+    "npm run smoke:desktop:voice-stt",
     "npm run smoke:desktop:mqtt-persistence",
     "npm run smoke:desktop:ui",
     "npm run smoke:desktop:e2e",
+    "npm run smoke:desktop:voice-stt",
     "npm run package:desktop:win",
     "npm run smoke:desktop:packaged"
   ];
@@ -301,6 +303,7 @@ function checkReleaseAudit() {
     "npm run test:release:local",
     "npm run test:release:device",
     "smoke:desktop:mqtt-persistence",
+    "smoke:desktop:voice-stt",
     "smoke:android:ui",
     "smoke:android:friends",
     "smoke:android:background",

@@ -53,15 +53,21 @@ async function runUiSmoke() {
     for (let attempt = 0; attempt < 60; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 500));
       state = await mainWindow.webContents.executeJavaScript(`
-        (() => ({
-          title: document.querySelector(".topbar h2")?.textContent || "",
-          setupTitle: document.querySelector(".setup-guide h3")?.textContent || "",
-          setupItems: document.querySelectorAll("#setupChecklist .setup-item").length,
-          matrixTitle: document.querySelector(".status-matrix h3")?.textContent || "",
-          rows: document.querySelectorAll("#connectorMatrixRows .matrix-row").length,
-          summary: document.querySelector("#statusSummary")?.textContent || "",
-          backend: document.querySelector("#backendBadge")?.textContent || ""
-        }))()
+        (() => {
+          const state = {
+            title: document.querySelector(".topbar h2")?.textContent || "",
+            setupTitle: document.querySelector(".setup-guide h3")?.textContent || "",
+            setupItems: document.querySelectorAll("#setupChecklist .setup-item").length,
+            matrixTitle: document.querySelector(".status-matrix h3")?.textContent || "",
+            rows: document.querySelectorAll("#connectorMatrixRows .matrix-row").length,
+            summary: document.querySelector("#statusSummary")?.textContent || "",
+            backend: document.querySelector("#backendBadge")?.textContent || ""
+          };
+          if ((state.setupItems < 6 || state.rows < 5) && ${attempt % 6 === 0 ? "true" : "false"}) {
+            document.querySelector("#refreshDiagnostics")?.click();
+          }
+          return state;
+        })()
       `);
       if (state.setupTitle.trim() && state.setupItems >= 6 && state.matrixTitle.trim() && state.rows >= 5) break;
     }

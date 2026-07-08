@@ -68,6 +68,7 @@ Local identity and runtime files are device-local state:
 - `npm run check`
 - `npm run smoke:desktop:pairing`
 - `npm run smoke:desktop:e2e`
+- `npm run smoke:desktop:voice-stt`
 - `npm run smoke:android:ui`
 - `npm run smoke:android:friends`
 - `npm run smoke:android:background`

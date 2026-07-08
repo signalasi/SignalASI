@@ -27,6 +27,7 @@ const required = [
   "scripts/smoke-android-reset.js",
   "scripts/smoke-mqtt-persistence.js",
   "scripts/smoke-agent-push.js",
+  "scripts/smoke-voice-stt.js",
   "scripts/smoke-e2e.js",
   "scripts/smoke-packaged.js",
   "scripts/smoke-lock.js",
@@ -75,6 +76,7 @@ const smokeAndroidVoiceReply = fs.readFileSync(path.join(root, "scripts/smoke-an
 const smokeAndroidReset = fs.readFileSync(path.join(root, "scripts/smoke-android-reset.js"), "utf8");
 const smokeMqttPersistence = fs.readFileSync(path.join(root, "scripts/smoke-mqtt-persistence.js"), "utf8");
 const smokeAgentPush = fs.readFileSync(path.join(root, "scripts/smoke-agent-push.js"), "utf8");
+const smokeVoiceStt = fs.readFileSync(path.join(root, "scripts/smoke-voice-stt.js"), "utf8");
 const smokeE2e = fs.readFileSync(path.join(root, "scripts/smoke-e2e.js"), "utf8");
 const smokePackaged = fs.readFileSync(path.join(root, "scripts/smoke-packaged.js"), "utf8");
 const smokeLock = fs.readFileSync(path.join(root, "scripts/smoke-lock.js"), "utf8");
@@ -339,6 +341,7 @@ for (const requiredText of [
   "smoke:android-reset",
   "smoke:mqtt-persistence",
   "smoke:agent-push",
+  "smoke:voice-stt",
   "smoke:e2e",
   "smoke:packaged",
   "status:connectors",
@@ -437,6 +440,8 @@ for (const requiredText of [
   "SIGNALASI_WHISPER_MODEL",
   "SIGNALASI_WHISPER_DEVICE",
   "SIGNALASI_WHISPER_COMPUTE_TYPE",
+  "VOICE_STT_SMOKE",
+  "clean_audio_reply",
   "signalasi_debug_open_protocol_quality",
   "signalasi_debug_open_signal_link_protocol",
   "signalasi_debug_open_advanced_options",
@@ -451,7 +456,7 @@ for (const requiredText of [
   "scripts/smoke.js",
   "SignalASI Link Protocol"
 ]) {
-  if (![main, preload, html, renderer, packageJson, packager, androidAdb, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidBackground, smokeAndroidAgentReplies, smokeAndroidBackup, smokeAndroidVoiceReply, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendGateway, backendAgentConfig, backendPushAuth, backendSignalasiNotify, backendStt, androidMainActivity, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
+  if (![main, preload, html, renderer, packageJson, packager, androidAdb, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidBackground, smokeAndroidAgentReplies, smokeAndroidBackup, smokeAndroidVoiceReply, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeVoiceStt, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendGateway, backendAgentConfig, backendPushAuth, backendSignalasiNotify, backendStt, androidMainActivity, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
     throw new Error(`Missing desktop connector capability: ${requiredText}`);
   }
 }

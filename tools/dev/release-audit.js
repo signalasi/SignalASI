@@ -16,6 +16,7 @@ const requiredLocalGates = [
   "npm run smoke:desktop",
   "npm run smoke:desktop:pairing",
   "npm run smoke:desktop:agent-push",
+  "npm run smoke:desktop:voice-stt",
   "npm run smoke:desktop:ui",
   "npm run smoke:desktop:e2e",
   "npm run package:desktop:win",
