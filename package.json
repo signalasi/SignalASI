@@ -10,6 +10,7 @@
     "smoke:android:ui": "npm --prefix apps/desktop run smoke:android-ui",
     "smoke:android:friends": "npm --prefix apps/desktop run smoke:android-friends",
     "smoke:android:background": "npm --prefix apps/desktop run smoke:android-background",
+    "smoke:android:reset": "npm --prefix apps/desktop run smoke:android-reset",
     "smoke:desktop": "npm --prefix apps/desktop run smoke",
     "smoke:desktop:pairing": "npm --prefix apps/desktop run smoke:pairing",
     "smoke:desktop:agent-push": "npm --prefix apps/desktop run smoke:agent-push",

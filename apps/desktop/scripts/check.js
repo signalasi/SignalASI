@@ -20,6 +20,7 @@ const required = [
   "scripts/smoke-android-ui.js",
   "scripts/smoke-android-friends.js",
   "scripts/smoke-android-background-message.js",
+  "scripts/smoke-android-reset.js",
   "scripts/smoke-mqtt-persistence.js",
   "scripts/smoke-agent-push.js",
   "scripts/smoke-e2e.js",
@@ -50,6 +51,7 @@ const smokeUi = fs.readFileSync(path.join(root, "scripts/smoke-ui.js"), "utf8");
 const smokeAndroidUi = fs.readFileSync(path.join(root, "scripts/smoke-android-ui.js"), "utf8");
 const smokeAndroidFriends = fs.readFileSync(path.join(root, "scripts/smoke-android-friends.js"), "utf8");
 const smokeAndroidBackground = fs.readFileSync(path.join(root, "scripts/smoke-android-background-message.js"), "utf8");
+const smokeAndroidReset = fs.readFileSync(path.join(root, "scripts/smoke-android-reset.js"), "utf8");
 const smokeMqttPersistence = fs.readFileSync(path.join(root, "scripts/smoke-mqtt-persistence.js"), "utf8");
 const smokeAgentPush = fs.readFileSync(path.join(root, "scripts/smoke-agent-push.js"), "utf8");
 const smokeE2e = fs.readFileSync(path.join(root, "scripts/smoke-e2e.js"), "utf8");
@@ -393,6 +395,9 @@ for (const requiredText of [
   "signalasi_debug_open_backup_export",
   "signalasi_debug_open_backup_import",
   "signalasi_debug_open_destroy_data",
+  "signalasi_debug_destroy_all_data",
+  "smoke:android-reset",
+  "Destructive reset did not rotate the local Signal identity store",
   "signalasi_debug_open_protocol_quality",
   "signalasi_debug_open_signal_link_protocol",
   "signalasi_debug_open_advanced_options",
@@ -407,7 +412,7 @@ for (const requiredText of [
   "scripts/smoke.js",
   "SignalASI Link Protocol"
 ]) {
-  if (![main, preload, html, renderer, packageJson, packager, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidBackground, smokeMqttPersistence, smokeAgentPush, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendGateway, backendAgentConfig, backendPushAuth, backendSignalasiNotify, androidMainActivity, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
+  if (![main, preload, html, renderer, packageJson, packager, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidBackground, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendGateway, backendAgentConfig, backendPushAuth, backendSignalasiNotify, androidMainActivity, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
     throw new Error(`Missing desktop connector capability: ${requiredText}`);
   }
 }

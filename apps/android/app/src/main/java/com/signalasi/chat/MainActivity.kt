@@ -1615,6 +1615,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val openBackupExport = intent?.getBooleanExtra("signalasi_debug_open_backup_export", false) == true
         val openBackupImport = intent?.getBooleanExtra("signalasi_debug_open_backup_import", false) == true
         val openDestroyData = intent?.getBooleanExtra("signalasi_debug_open_destroy_data", false) == true
+        val destroyAllData = intent?.getBooleanExtra("signalasi_debug_destroy_all_data", false) == true
         val openProtocolQuality = intent?.getBooleanExtra("signalasi_debug_open_protocol_quality", false) == true
         val openSignalLinkProtocol = intent?.getBooleanExtra("signalasi_debug_open_signal_link_protocol", false) == true
         val openAdvancedOptions = intent?.getBooleanExtra("signalasi_debug_open_advanced_options", false) == true
@@ -1659,6 +1660,20 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (scanPayload.isNotBlank()) {
             intent?.removeExtra("signalasi_debug_scan_payload")
             handleSecurityScan(scanPayload, intent?.getBooleanExtra("signalasi_debug_auto_confirm_scan", false) == true)
+            return
+        }
+        if (destroyAllData) {
+            intent?.removeExtra("signalasi_debug_destroy_all_data")
+            AppStore.destroyAllPrivateData(this)
+            messages.clear()
+            summaries.clear()
+            directoryContacts.clear()
+            currentMessages.clear()
+            nextMessageId = 1L
+            loadChatHistory()
+            refreshContactList()
+            refreshDirectoryContacts()
+            showMainTab(PAGE_MESSAGES)
             return
         }
         if (pairing) {
@@ -1776,6 +1791,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         intent?.removeExtra("signalasi_debug_open_backup_export")
         intent?.removeExtra("signalasi_debug_open_backup_import")
         intent?.removeExtra("signalasi_debug_open_destroy_data")
+        intent?.removeExtra("signalasi_debug_destroy_all_data")
         intent?.removeExtra("signalasi_debug_open_protocol_quality")
         intent?.removeExtra("signalasi_debug_open_signal_link_protocol")
         intent?.removeExtra("signalasi_debug_open_advanced_options")
