@@ -41,3 +41,5 @@ jobs:
       - run: python -m pip install -r apps/desktop/core/signalasi-link/backend/requirements.txt
       - run: npm run smoke:desktop
       - run: npm run smoke:desktop:pairing
+      - run: npm run smoke:desktop:agent-push
+      - run: npm run smoke:desktop:e2e
