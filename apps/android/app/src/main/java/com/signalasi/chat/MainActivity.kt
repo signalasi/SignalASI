@@ -3944,7 +3944,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             row.addView(TextView(this).apply {
                 text = label
                 gravity = Gravity.CENTER
-                setTextColor(getColorCompat(if (index == 0) R.color.signalai_green else R.color.text_secondary))
+                setTextColor(getColorCompat(if (index == 0) R.color.signalasi_green else R.color.text_secondary))
                 textSize = 14f
                 if (index == 0) setTypeface(typeface, android.graphics.Typeface.BOLD)
             }, LinearLayout.LayoutParams(0, dp(38), 1f))
@@ -4098,7 +4098,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     textSize = 12.5f
                 })
             }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            addView(statusPill(getString(R.string.status_online), getColorCompat(R.color.signalai_green)))
+            addView(statusPill(getString(R.string.status_online), getColorCompat(R.color.signalasi_green)))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(86)
@@ -4120,7 +4120,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     textSize = 15.5f
                     setTypeface(typeface, android.graphics.Typeface.BOLD)
                 }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                addView(statusPill(getString(R.string.status_running), getColorCompat(R.color.signalai_green)))
+                addView(statusPill(getString(R.string.status_running), getColorCompat(R.color.signalasi_green)))
             })
             addView(localModelMetric("Qwen 7B (4bit)", getString(R.string.local_model_memory_usage), "3.2GB / 6GB", 53))
             addView(localModelMetric(getString(R.string.local_model_inference_speed), "", "", 72))
@@ -4162,7 +4162,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             addView(ProgressBar(this@MainActivity, null, android.R.attr.progressBarStyleHorizontal).apply {
                 max = 100
                 this.progress = progress
-                progressTintList = android.content.res.ColorStateList.valueOf(getColorCompat(R.color.signalai_green))
+                progressTintList = android.content.res.ColorStateList.valueOf(getColorCompat(R.color.signalasi_green))
                 progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#E5E7EB"))
             }, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -4244,7 +4244,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = dp(13).toFloat()
-                setColor(if (checked) getColorCompat(R.color.signalai_green) else Color.parseColor("#D1D5DB"))
+                setColor(if (checked) getColorCompat(R.color.signalasi_green) else Color.parseColor("#D1D5DB"))
             }
             addView(View(this@MainActivity).apply {
                 background = GradientDrawable().apply {
@@ -4281,7 +4281,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             addView(ProgressBar(this@MainActivity, null, android.R.attr.progressBarStyleHorizontal).apply {
                 max = 100
                 progress = 19
-                progressTintList = android.content.res.ColorStateList.valueOf(getColorCompat(R.color.signalai_green))
+                progressTintList = android.content.res.ColorStateList.valueOf(getColorCompat(R.color.signalasi_green))
                 progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#E5E7EB"))
             }, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -4366,7 +4366,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             addView(TextView(this@MainActivity).apply {
                 text = action
-                setTextColor(getColorCompat(R.color.signalai_green))
+                setTextColor(getColorCompat(R.color.signalasi_green))
                 textSize = 13f
                 gravity = Gravity.CENTER
                 maxLines = 1
@@ -4413,7 +4413,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             addView(TextView(this@MainActivity).apply {
                 text = action
-                setTextColor(getColorCompat(if (isSelected) R.color.text_secondary else R.color.signalai_green))
+                setTextColor(getColorCompat(if (isSelected) R.color.text_secondary else R.color.signalasi_green))
                 textSize = 12f
                 gravity = Gravity.CENTER
                 maxLines = 1
@@ -4571,7 +4571,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             text = getString(R.string.backup_include_messages)
             setTextColor(getColorCompat(R.color.text_primary))
             textSize = 15f
-            buttonTintList = android.content.res.ColorStateList.valueOf(getColorCompat(R.color.signalai_green))
+            buttonTintList = android.content.res.ColorStateList.valueOf(getColorCompat(R.color.signalasi_green))
             isChecked = true
         }
         featureContent.addView(includeMessagesCb, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)).apply {

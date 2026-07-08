@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="hermes_dark">#0B1110</color>
-    <color name="signalai_green">#14C66A</color>
-    <color name="signalai_blue">#5B6CFF</color>
-    <color name="signalai_glass">#F7FAF9</color>
+    <color name="signalasi_green">#14C66A</color>
+    <color name="signalasi_blue">#5B6CFF</color>
+    <color name="signalasi_glass">#F7FAF9</color>
     <color name="page_bg">#F6F7F8</color>
     <color name="bar_bg">#FFFFFF</color>
     <color name="surface_bg">#FFFFFF</color>

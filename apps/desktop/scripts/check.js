@@ -37,6 +37,19 @@ for (const file of required) {
   }
 }
 
+function listFilesRecursive(dir) {
+  const result = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      result.push(...listFilesRecursive(full));
+    } else {
+      result.push(full);
+    }
+  }
+  return result;
+}
+
 const main = fs.readFileSync(path.join(root, "src/main.js"), "utf8");
 const preload = fs.readFileSync(path.join(root, "src/preload.js"), "utf8");
 const html = fs.readFileSync(path.join(root, "src/renderer/index.html"), "utf8");
@@ -88,6 +101,7 @@ const androidVoiceSettings = fs.readFileSync(path.join(workspaceRoot, "android",
 const androidCloudModelClient = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "CloudModelClient.kt"), "utf8");
 const androidStringsZh = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "res", "values-zh-rCN", "strings.xml"), "utf8");
 const androidStringsEn = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "res", "values", "strings.xml"), "utf8");
+const androidSourceRoot = path.join(workspaceRoot, "android", "app", "src", "main");
 
 if (!main.includes("/signalasi/verify")) {
   throw new Error("Electron desktop must use /signalasi/verify");
@@ -488,6 +502,19 @@ if (androidMqtt.includes("hermeschat-android")) {
 
 if ([androidMainActivity, androidAppStore, androidStringsZh, androidStringsEn].some((content) => content.includes("hermes_backup"))) {
   throw new Error("New Android backup artifacts must use SignalASI naming, not hermes_backup");
+}
+
+for (const file of listFilesRecursive(androidSourceRoot)) {
+  const relative = path.relative(workspaceRoot, file).replace(/\\/g, "/");
+  const oldBrandToken = "signal" + "ai";
+  if (relative.toLowerCase().includes(oldBrandToken)) {
+    throw new Error(`Android resource path must use SignalASI naming: ${relative}`);
+  }
+  if (!/\.(kt|xml|gradle|properties|txt)$/i.test(file)) continue;
+  const content = fs.readFileSync(file, "utf8");
+  if (content.toLowerCase().includes(oldBrandToken)) {
+    throw new Error(`Android source must use SignalASI naming: ${relative}`);
+  }
 }
 
 for (const requiredAndroidSignalasiText of [
