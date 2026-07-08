@@ -1628,6 +1628,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val openLocalModel = intent?.getBooleanExtra("signalasi_debug_open_local_model", false) == true
         val openCloudProviders = intent?.getBooleanExtra("signalasi_debug_open_cloud_providers", false) == true
         val openCloudProvider = intent?.getStringExtra("signalasi_debug_open_cloud_provider")?.trim().orEmpty()
+        val seedCloudProvider = intent?.getStringExtra("signalasi_debug_seed_cloud_provider")?.trim().orEmpty()
+        val openCloudSwitchProvider = intent?.getStringExtra("signalasi_debug_open_cloud_switch_provider")?.trim().orEmpty()
         val approveFriendId = intent?.getStringExtra("signalasi_debug_approve_friend")?.trim().orEmpty()
         val deleteContactId = intent?.getStringExtra("signalasi_debug_delete_contact")?.trim().orEmpty()
         val scanPayload = intent?.getStringExtra("signalasi_debug_scan_payload")?.trim().orEmpty()
@@ -1689,6 +1691,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             intent?.removeExtra("signalasi_debug_open_local_model")
             intent?.removeExtra("signalasi_debug_open_cloud_providers")
             intent?.removeExtra("signalasi_debug_open_cloud_provider")
+            intent?.removeExtra("signalasi_debug_seed_cloud_provider")
+            intent?.removeExtra("signalasi_debug_open_cloud_switch_provider")
+            val seededCloudContact = if (seedCloudProvider.isNotBlank() || openCloudSwitchProvider.isNotBlank()) {
+                debugSeedCloudProvider(seedCloudProvider.ifBlank { openCloudSwitchProvider })
+            } else {
+                null
+            }
             if (openContactId.isNotBlank()) {
                 reloadChatHistoryIfChanged(force = true)
                 showChatPage(contactById(openContactId))
@@ -1719,6 +1728,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             if (openCloudProvider.isNotBlank()) {
                 showCloudModelPage(openCloudProvider)
+            }
+            if (openCloudSwitchProvider.isNotBlank() && seededCloudContact != null) {
+                showCloudModelSwitchPage(seededCloudContact)
+            } else if (seedCloudProvider.isNotBlank() && seededCloudContact != null) {
+                showChatPage(seededCloudContact)
             }
             if (openAgents) {
                 showAgentFeaturePage()
@@ -1775,6 +1789,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         intent?.removeExtra("signalasi_debug_open_local_model")
         intent?.removeExtra("signalasi_debug_open_cloud_providers")
         intent?.removeExtra("signalasi_debug_open_cloud_provider")
+        intent?.removeExtra("signalasi_debug_seed_cloud_provider")
+        intent?.removeExtra("signalasi_debug_open_cloud_switch_provider")
         intent?.removeExtra("signalasi_debug_incoming")
         intent?.removeExtra("signalasi_debug_incoming_b64")
         Log.i("SignalASIDebug", "Processing debug incoming payload")
@@ -2626,6 +2642,29 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
             })
         }
+    }
+
+    private fun debugSeedCloudProvider(provider: String): Contact? {
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) return null
+        val normalizedProvider = provider.trim().ifBlank { "DeepSeek" }
+        val presets = modelsForProvider(normalizedProvider).ifEmpty { modelsForProvider("DeepSeek") }
+        if (presets.isEmpty()) return null
+        var raw: JSONObject? = null
+        presets.take(2).forEach { preset ->
+            raw = AppStore.addCloudModelContact(
+                this,
+                preset.name,
+                preset.provider,
+                preset.modelId,
+                preset.endpoint,
+                "sk-signalasi-smoke-key",
+                preset.apiStyle
+            )
+        }
+        val contact = raw ?: return null
+        refreshContactList()
+        refreshDirectoryContacts()
+        return Contact(contact.getString("id"), contact.optString("name", normalizedProvider), "")
     }
 
     private fun showCloudModelConfigPage(preset: CloudModelPreset) {

@@ -9,6 +9,7 @@ const androidDir = path.join(workspaceRoot, "android");
 const apkPath = path.join(androidDir, "app", "build", "outputs", "apk", "debug", "app-debug.apk");
 const outDir = path.join(root, "ui-smoke");
 const windowDump = path.join(outDir, "android-agent-page.xml");
+const cloudDump = path.join(outDir, "android-cloud-model-page.xml");
 const securityDump = path.join(outDir, "android-security-page.xml");
 const settingsDump = path.join(outDir, "android-settings-page.xml");
 const packageName = "com.signalasi.chat";
@@ -109,36 +110,41 @@ function readHistoryStore() {
 }
 
 async function openDebugPageAndVerify(extraName, titleTexts, requiredGroups) {
-  adb([
+  await openDebugExtrasAndVerify([{ type: "bool", name: extraName, value: "true" }], titleTexts, requiredGroups, settingsDump);
+}
+
+async function openDebugExtrasAndVerify(extras, titleTexts, requiredGroups, dumpFile) {
+  const args = [
     "shell",
     "am",
     "start",
     "-n",
-    activityName,
-    "--ez",
-    extraName,
-    "true"
-  ]);
+    activityName
+  ];
+  for (const extra of extras) {
+    args.push(extra.type === "bool" ? "--ez" : "--es", extra.name, String(extra.value));
+  }
+  adb(args);
   let pageXml = "";
   for (let attempt = 0; attempt < 12; attempt += 1) {
     await sleep(1000);
-    pageXml = dumpWindowTo(settingsDump, "signalasi-settings.xml");
+    pageXml = dumpWindowTo(dumpFile, "signalasi-debug-page.xml");
     if (hasAnyText(pageXml, titleTexts)) break;
   }
-  requireAnyText(pageXml, titleTexts, titleTexts[0], settingsDump);
+  requireAnyText(pageXml, titleTexts, titleTexts[0], dumpFile);
 
   for (let reset = 0; reset < 3; reset += 1) {
     adb(["shell", "input", "swipe", "520", "520", "520", "1900", "350"]);
     await sleep(500);
   }
-  let combinedXml = dumpWindowTo(settingsDump, "signalasi-settings.xml");
+  let combinedXml = dumpWindowTo(dumpFile, "signalasi-debug-page.xml");
   for (let scroll = 0; scroll < 3; scroll += 1) {
     adb(["shell", "input", "swipe", "520", "1900", "520", "520", "450"]);
     await sleep(700);
-    combinedXml += dumpWindowTo(settingsDump, "signalasi-settings.xml");
+    combinedXml += dumpWindowTo(dumpFile, "signalasi-debug-page.xml");
   }
   for (const texts of requiredGroups) {
-    requireAnyText(combinedXml, texts, texts[0], settingsDump);
+    requireAnyText(combinedXml, texts, texts[0], dumpFile);
   }
 }
 
@@ -250,6 +256,53 @@ async function main() {
   if (!pairedTrustStore.includes("DEBUG_PC_FINGERPRINT_FOR_UI_TEST")) {
     fail("Trust store did not include debug PC fingerprint after debug pairing");
   }
+
+  log("opening mobile cloud model provider, model, chat, and switch pages");
+  await openDebugExtrasAndVerify(
+    [{ type: "bool", name: "signalasi_debug_open_cloud_providers", value: "true" }],
+    ["Cloud Models", "\u4e91\u7aef\u5927\u6a21\u578b", "\u4e91\u7aef\u6a21\u578b"],
+    [
+      ["Select Provider", "\u9009\u62e9 Provider", "\u9009\u62e9\u63d0\u4f9b\u65b9"],
+      ["OpenAI"],
+      ["Anthropic"],
+      ["Google Gemini"],
+      ["DeepSeek"],
+      ["Qwen"],
+      ["OpenRouter"]
+    ],
+    cloudDump
+  );
+  await openDebugExtrasAndVerify(
+    [{ type: "string", name: "signalasi_debug_open_cloud_provider", value: "DeepSeek" }],
+    ["DeepSeek"],
+    [
+      ["Select Model", "\u9009\u62e9\u6a21\u578b"],
+      ["DeepSeek V4 Pro"],
+      ["DeepSeek V4 Flash"],
+      ["Custom Model ID", "\u81ea\u5b9a\u4e49\u6a21\u578b ID"]
+    ],
+    cloudDump
+  );
+  await openDebugExtrasAndVerify(
+    [{ type: "string", name: "signalasi_debug_seed_cloud_provider", value: "DeepSeek" }],
+    ["DeepSeek"],
+    [
+      ["Model", "\u6a21\u578b"],
+      ["DeepSeek V4 Pro"]
+    ],
+    cloudDump
+  );
+  await openDebugExtrasAndVerify(
+    [{ type: "string", name: "signalasi_debug_open_cloud_switch_provider", value: "DeepSeek" }],
+    ["Switch Model", "\u5207\u6362\u6a21\u578b"],
+    [
+      ["DeepSeek V4 Pro"],
+      ["DeepSeek V4 Flash"],
+      ["Current", "\u5f53\u524d"],
+      ["Select", "\u9009\u62e9"]
+    ],
+    cloudDump
+  );
 
   log("opening Security Center and verifying trust controls");
   adb([
@@ -373,7 +426,7 @@ async function main() {
     fail("Debug pairing cleanup failed; trust or dynamic contact remains");
   }
 
-  log(`OK: dynamic Agent UI, Security Center, and Settings feature pages verified. Dumps: ${windowDump}, ${securityDump}, ${settingsDump}`);
+  log(`OK: dynamic Agent UI, mobile cloud models, Security Center, and Settings feature pages verified. Dumps: ${windowDump}, ${cloudDump}, ${securityDump}, ${settingsDump}`);
 }
 
 main().catch((error) => {
