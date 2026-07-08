@@ -7,6 +7,8 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..", "..");
 const repo = "signalasi/SignalASI";
+const strict = process.argv.includes("--strict");
+const requiredWorkflows = ["Repository Guard", "Windows Package"];
 
 const requiredLocalGates = [
   "npm run check",
@@ -106,7 +108,9 @@ async function latestWorkflowRuns() {
 }
 
 async function main() {
+  const failures = [];
   const head = runGit(["rev-parse", "--short", "HEAD"]);
+  const fullHead = runGit(["rev-parse", "HEAD"]);
   const branch = runGit(["branch", "--show-current"]);
   const status = runGit(["status", "--short"]);
 
@@ -115,6 +119,10 @@ async function main() {
   console.log(`Branch: ${branch || "unknown"}`);
   console.log(`HEAD: ${head || "unknown"}`);
   console.log(`Working tree: ${status ? "dirty" : "clean"}`);
+  console.log(`Strict mode: ${strict ? "enabled" : "disabled"}`);
+  if (strict && status) {
+    failures.push("Working tree must be clean.");
+  }
 
   section("Required Local Gates");
   list(requiredLocalGates);
@@ -137,14 +145,35 @@ async function main() {
       for (const run of runs) {
         console.log(`- ${run.name}: ${run.status}/${run.conclusion || "pending"} (${run.head_sha.slice(0, 7)}) ${run.html_url}`);
       }
+      if (strict) {
+        for (const workflowName of requiredWorkflows) {
+          const run = runs.find((item) => item.name === workflowName);
+          if (!run) {
+            failures.push(`${workflowName} has no visible run.`);
+          } else if (run.head_sha !== fullHead) {
+            failures.push(`${workflowName} latest run is for ${run.head_sha.slice(0, 7)}, not current HEAD ${head}.`);
+          } else if (run.status !== "completed" || run.conclusion !== "success") {
+            failures.push(`${workflowName} must be completed/success for current HEAD; got ${run.status}/${run.conclusion || "pending"}.`);
+          }
+        }
+      }
     }
   } catch (error) {
     console.log(`- Unable to read GitHub Actions: ${error.message}`);
+    if (strict) {
+      failures.push(`Unable to read GitHub Actions: ${error.message}`);
+    }
   }
 
   if (status) {
     section("Uncommitted Changes");
     console.log(status);
+  }
+
+  if (strict && failures.length > 0) {
+    section("Strict Audit Failures");
+    list(failures);
+    process.exit(1);
   }
 }
 

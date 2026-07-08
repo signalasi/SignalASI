@@ -19,6 +19,7 @@
     "smoke:desktop:e2e": "npm --prefix apps/desktop run smoke:e2e",
     "package:desktop:win": "npm --prefix apps/desktop run package:win:python",
     "smoke:desktop:packaged": "npm --prefix apps/desktop run smoke:packaged",
-    "audit:release": "node tools/dev/release-audit.js"
+    "audit:release": "node tools/dev/release-audit.js",
+    "audit:release:strict": "node tools/dev/release-audit.js --strict"
   }
 }
