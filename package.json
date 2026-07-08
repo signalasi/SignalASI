@@ -9,6 +9,7 @@
     "check:android": "node tools/dev/check-android-build.js",
     "smoke:android:ui": "npm --prefix apps/desktop run smoke:android-ui",
     "smoke:android:friends": "npm --prefix apps/desktop run smoke:android-friends",
+    "smoke:android:contact-rename": "npm --prefix apps/desktop run smoke:android-contact-rename",
     "smoke:android:background": "npm --prefix apps/desktop run smoke:android-background",
     "smoke:android:agent-replies": "npm --prefix apps/desktop run smoke:android-agent-replies",
     "smoke:android:reset": "npm --prefix apps/desktop run smoke:android-reset",

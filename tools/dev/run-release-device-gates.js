@@ -10,6 +10,7 @@ const npmCommand = isWindows ? (process.env.ComSpec || "cmd.exe") : "npm";
 const gates = [
   "smoke:android:ui",
   "smoke:android:friends",
+  "smoke:android:contact-rename",
   "smoke:android:background",
   "smoke:android:agent-replies",
   "smoke:android:voice-reply",

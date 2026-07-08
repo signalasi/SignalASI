@@ -1633,6 +1633,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val openCloudSwitchProvider = intent?.getStringExtra("signalasi_debug_open_cloud_switch_provider")?.trim().orEmpty()
         val approveFriendId = intent?.getStringExtra("signalasi_debug_approve_friend")?.trim().orEmpty()
         val deleteContactId = intent?.getStringExtra("signalasi_debug_delete_contact")?.trim().orEmpty()
+        val renameContactId = intent?.getStringExtra("signalasi_debug_rename_contact")?.trim().orEmpty()
+        val renameContactNameB64 = intent?.getStringExtra("signalasi_debug_rename_name_b64")?.trim().orEmpty()
+        val renameContactName = if (renameContactNameB64.isNotBlank()) {
+            runCatching {
+                String(Base64.decode(renameContactNameB64, Base64.NO_WRAP), Charsets.UTF_8).trim()
+            }.getOrDefault("")
+        } else {
+            intent?.getStringExtra("signalasi_debug_rename_name")?.trim().orEmpty()
+        }
         val backupRoundtripToken = intent?.getStringExtra("signalasi_debug_backup_roundtrip")?.trim().orEmpty()
         val scanPayload = intent?.getStringExtra("signalasi_debug_scan_payload")?.trim().orEmpty()
         val scanPayloadB64 = intent?.getStringExtra("signalasi_debug_scan_payload_b64")?.trim().orEmpty()
@@ -1648,6 +1657,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             AppStore.deleteContact(this, deleteContactId, deleteMessages = false)
             refreshContactList()
             refreshDirectoryContacts()
+            return
+        }
+        if (renameContactId.isNotBlank() && renameContactName.isNotBlank()) {
+            intent?.removeExtra("signalasi_debug_rename_contact")
+            intent?.removeExtra("signalasi_debug_rename_name")
+            intent?.removeExtra("signalasi_debug_rename_name_b64")
+            AppStore.renameContact(this, renameContactId, renameContactName)
+            refreshContactList()
+            refreshDirectoryContacts()
+            if (openContactDetailId.isNotBlank()) {
+                showContactDetail(contactById(openContactDetailId))
+            }
             return
         }
         if (scanPayloadB64.isNotBlank()) {
@@ -1714,6 +1735,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             intent?.removeExtra("signalasi_debug_open_cloud_provider")
             intent?.removeExtra("signalasi_debug_seed_cloud_provider")
             intent?.removeExtra("signalasi_debug_open_cloud_switch_provider")
+            intent?.removeExtra("signalasi_debug_rename_contact")
+            intent?.removeExtra("signalasi_debug_rename_name")
+            intent?.removeExtra("signalasi_debug_rename_name_b64")
             val seededCloudContact = if (seedCloudProvider.isNotBlank() || openCloudSwitchProvider.isNotBlank()) {
                 debugSeedCloudProvider(seedCloudProvider.ifBlank { openCloudSwitchProvider })
             } else {
@@ -1813,6 +1837,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         intent?.removeExtra("signalasi_debug_open_cloud_provider")
         intent?.removeExtra("signalasi_debug_seed_cloud_provider")
         intent?.removeExtra("signalasi_debug_open_cloud_switch_provider")
+        intent?.removeExtra("signalasi_debug_rename_contact")
+        intent?.removeExtra("signalasi_debug_rename_name")
+        intent?.removeExtra("signalasi_debug_rename_name_b64")
         intent?.removeExtra("signalasi_debug_incoming")
         intent?.removeExtra("signalasi_debug_incoming_b64")
         Log.i("SignalASIDebug", "Processing debug incoming payload")

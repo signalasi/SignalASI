@@ -18,7 +18,7 @@ SignalASI is a private superintelligence interface for trusted communication bet
 | --- | --- | --- |
 | Main navigation | Android opens to the Voice page and supports the Messages, Contacts, Discover, and Settings tabs. | `npm run smoke:android:ui` |
 | Messages | Messages show contacts, unread state, timestamps, delivery evidence, full Agent replies, and persisted conversation history. | `npm run smoke:android:background`, `npm run smoke:android:agent-replies` |
-| Contacts | Contacts can represent agents, models, and devices with type labels and editable display names. | `npm run smoke:android:ui` |
+| Contacts | Contacts can represent agents, models, and devices with type labels and editable display names. | `npm run smoke:android:ui`, `npm run smoke:android:contact-rename` |
 | New friends | Newly scanned peers appear in New Friends until approved, and deleted contacts require re-adding before communication. | `npm run smoke:android:friends` |
 | Pairing | QR scan accepts `/signalasi/verify` payloads, stores peer fingerprints, and creates trusted contacts only after confirmation. | `npm run smoke:android:ui`, `npm run smoke:desktop:pairing` |
 | Security center | The app displays phone and desktop fingerprints, paired devices, protocol quality, and revocation controls. | `npm run smoke:android:ui` |

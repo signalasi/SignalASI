@@ -20,6 +20,7 @@ const required = [
   "scripts/smoke-ui.js",
   "scripts/smoke-android-ui.js",
   "scripts/smoke-android-friends.js",
+  "scripts/smoke-android-contact-rename.js",
   "scripts/smoke-android-background-message.js",
   "scripts/smoke-android-agent-replies.js",
   "scripts/smoke-android-backup-roundtrip.js",
@@ -69,6 +70,7 @@ const smokePairing = fs.readFileSync(path.join(root, "scripts/smoke-pairing.js")
 const smokeUi = fs.readFileSync(path.join(root, "scripts/smoke-ui.js"), "utf8");
 const smokeAndroidUi = fs.readFileSync(path.join(root, "scripts/smoke-android-ui.js"), "utf8");
 const smokeAndroidFriends = fs.readFileSync(path.join(root, "scripts/smoke-android-friends.js"), "utf8");
+const smokeAndroidContactRename = fs.readFileSync(path.join(root, "scripts/smoke-android-contact-rename.js"), "utf8");
 const smokeAndroidBackground = fs.readFileSync(path.join(root, "scripts/smoke-android-background-message.js"), "utf8");
 const smokeAndroidAgentReplies = fs.readFileSync(path.join(root, "scripts/smoke-android-agent-replies.js"), "utf8");
 const smokeAndroidBackup = fs.readFileSync(path.join(root, "scripts/smoke-android-backup-roundtrip.js"), "utf8");
@@ -334,6 +336,7 @@ for (const requiredText of [
   "smoke:ui",
   "smoke:android-ui",
   "smoke:android-friends",
+  "smoke:android-contact-rename",
   "smoke:android-background",
   "smoke:android-agent-replies",
   "smoke:android-backup",
@@ -422,6 +425,10 @@ for (const requiredText of [
   "previously_deleted",
   "readd_required",
   "re-added contact did not store readded_at evidence",
+  "signalasi_debug_rename_contact",
+  "signalasi_debug_rename_name_b64",
+  "user_renamed",
+  "smoke:android-contact-rename",
   "signalasi_debug_open_voice_settings",
   "signalasi_debug_open_backup_export",
   "signalasi_debug_open_backup_import",
