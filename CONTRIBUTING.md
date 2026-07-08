@@ -18,4 +18,5 @@ npm run check
 npm run check:android
 npm run smoke:desktop
 npm run smoke:desktop:e2e
+npm run smoke:desktop:packaged
 ```

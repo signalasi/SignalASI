@@ -55,7 +55,6 @@ npm run smoke:desktop:e2e
 Windows desktop package:
 
 ```bash
-cd apps/desktop
-npm run package:win:python
-npm run smoke:packaged
+npm run package:desktop:win
+npm run smoke:desktop:packaged
 ```
