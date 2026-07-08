@@ -71,6 +71,15 @@ function slimPairingPayload() {
   };
 }
 
+function mismatchedPairingPayload() {
+  return {
+    ...slimPairingPayload(),
+    desktop_id: "desktop_bad_fingerprint",
+    desktop_name: "BAD-PC",
+    identity_key_sha256: "f".repeat(64)
+  };
+}
+
 function hasAnyText(value, texts) {
   return texts.some((text) => value.includes(text));
 }
@@ -158,6 +167,30 @@ async function main() {
   adb(["install", "-r", apkPath], { stdio: "inherit" });
   adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"]);
   adb(["shell", "input", "keyevent", "KEYCODE_BACK"]);
+  adb(["shell", "am", "force-stop", packageName]);
+
+  log("scanning mismatched Desktop QR and verifying rejection");
+  const invalidPayload = mismatchedPairingPayload();
+  const invalidQrB64 = Buffer.from(JSON.stringify(invalidPayload), "utf8").toString("base64");
+  adb([
+    "shell",
+    "am",
+    "start",
+    "-n",
+    activityName,
+    "--es",
+    "signalasi_debug_scan_payload_b64",
+    invalidQrB64,
+    "--ez",
+    "signalasi_debug_auto_confirm_scan",
+    "true"
+  ]);
+  await sleep(1800);
+  const invalidTrustStore = readTrustStore();
+  const invalidAppStore = readAppStore();
+  if (invalidTrustStore.includes(invalidPayload.identity_key_sha256) || invalidAppStore.includes("BAD-PC")) {
+    fail("Mismatched Desktop QR was accepted into trust or contact state");
+  }
   adb(["shell", "am", "force-stop", packageName]);
 
   log("scanning slim Desktop QR and verifying default connector contacts");
