@@ -515,6 +515,11 @@ for (const file of listFilesRecursive(androidSourceRoot)) {
   if (content.toLowerCase().includes(oldBrandToken)) {
     throw new Error(`Android source must use SignalASI naming: ${relative}`);
   }
+  for (const oldAndroidInternalName of ["hermes_dark", "DEFAULT_HERMES_SEND_TOPIC"]) {
+    if (content.includes(oldAndroidInternalName)) {
+      throw new Error(`Android internal resource/constant must use SignalASI naming: ${relative}`);
+    }
+  }
 }
 
 for (const requiredAndroidSignalasiText of [

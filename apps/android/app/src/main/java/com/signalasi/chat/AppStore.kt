@@ -25,7 +25,7 @@ object AppStore {
     private const val KEY_CONTACTS = "contacts"
     private const val KEY_FRIEND_REQUESTS = "friend_requests"
     private const val KEY_PROFILE = "profile"
-    private const val DEFAULT_HERMES_SEND_TOPIC = "signalasichat/android/send"
+    private const val DEFAULT_DESKTOP_SEND_TOPIC = "signalasichat/android/send"
     private const val DEFAULT_LOCAL_INBOX_TOPIC = "signalasichat/android/recv"
     private const val BACKUP_VERSION = 1
     private const val PBKDF2_ITERATIONS = 180_000
@@ -64,7 +64,7 @@ object AppStore {
             current.put("name", "Me")
             changed = true
         }
-        if (current.optString("mqtt_topic").isBlank() || current.optString("mqtt_topic") == DEFAULT_HERMES_SEND_TOPIC) {
+        if (current.optString("mqtt_topic").isBlank() || current.optString("mqtt_topic") == DEFAULT_DESKTOP_SEND_TOPIC) {
             current.put("mqtt_topic", DEFAULT_LOCAL_INBOX_TOPIC)
             changed = true
         }
@@ -432,7 +432,7 @@ object AppStore {
 
     fun outgoingTopicForContact(context: Context, hermesId: String): String? {
         if (hermesId == "hermes") {
-            return if (canCommunicateWith(context, hermesId)) DEFAULT_HERMES_SEND_TOPIC else null
+            return if (canCommunicateWith(context, hermesId)) DEFAULT_DESKTOP_SEND_TOPIC else null
         }
         if (hermesId.startsWith("group:")) return null
         val contact = contactById(context, hermesId) ?: return null
@@ -555,7 +555,7 @@ object AppStore {
                     .put("status", "unknown")
                     .put("detail", "Waiting for SignalASI Desktop status")
                     .put("setup", "")
-                    .put("mqtt_topic", DEFAULT_HERMES_SEND_TOPIC)
+                    .put("mqtt_topic", DEFAULT_DESKTOP_SEND_TOPIC)
                     .put("updated_at", now)
             )
         }
@@ -610,7 +610,7 @@ object AppStore {
                     desktopId,
                     desktopName,
                     agentId,
-                    agent.optString("mqtt_topic").ifBlank { DEFAULT_HERMES_SEND_TOPIC }
+                    agent.optString("mqtt_topic").ifBlank { DEFAULT_DESKTOP_SEND_TOPIC }
                 )
                 applyConnectorAgentStatus(created, agent, id, now, desktopId, desktopName, fingerprint, agentId)
                 contacts.put(created)
@@ -642,7 +642,7 @@ object AppStore {
         contact.put("desktop_name", desktopName)
         contact.put("agent_id", agentId)
         putSignalasiId(contact, id)
-        contact.put("mqtt_topic", agent.optString("mqtt_topic").ifBlank { DEFAULT_HERMES_SEND_TOPIC })
+        contact.put("mqtt_topic", agent.optString("mqtt_topic").ifBlank { DEFAULT_DESKTOP_SEND_TOPIC })
         contact.put("identity_fingerprint", fingerprint)
         contact.put("desktop_fingerprint", fingerprint)
         contact.put("agent_kind", agent.optString("kind", contact.optString("agent_kind", "custom-cli")))
@@ -1106,7 +1106,7 @@ object AppStore {
         desktopId: String = "desktop_${fingerprint.take(16)}",
         desktopName: String = "Computer",
         agentId: String = id,
-        topic: String = DEFAULT_HERMES_SEND_TOPIC
+        topic: String = DEFAULT_DESKTOP_SEND_TOPIC
     ): JSONObject =
         run {
             val displayName = if (desktopId.isNotBlank()) "$name · $desktopName" else name

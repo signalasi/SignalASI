@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="hermes_dark">#05070A</color>
+    <color name="signalasi_dark">#05070A</color>
     <color name="page_bg">#15171B</color>
     <color name="bar_bg">#202329</color>
     <color name="surface_bg">#252930</color>
