@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="hermes_dark">#0B1110</color>
+    <color name="signalai_green">#14C66A</color>
+    <color name="signalai_blue">#5B6CFF</color>
+    <color name="signalai_glass">#F7FAF9</color>
+    <color name="page_bg">#F6F7F8</color>
+    <color name="bar_bg">#FFFFFF</color>
+    <color name="surface_bg">#FFFFFF</color>
+    <color name="search_bg">#E5E5EA</color>
+    <color name="text_primary">#111111</color>
+    <color name="text_secondary">#8E8E93</color>
+    <color name="accent_green">#14C66A</color>
+    <color name="sent_bubble">#95EC69</color>
+    <color name="button_soft">#E9EAEC</color>
+    <color name="input_stroke">#C7C7CC</color>
+    <color name="unread_red">#FF3B30</color>
+    <color name="sidebar_text">#8E8E93</color>
+    <color name="white">#FFFFFF</color>
+    <color name="wechat_green">#14C66A</color>
+    <color name="separator">#E5E5EA</color>
+    <color name="incoming_bubble">#FFFFFF</color>
+    <color name="icon_gray">#8E8E93</color>
+</resources>

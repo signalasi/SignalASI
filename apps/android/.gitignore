@@ -1,0 +1,7 @@
+.gradle/
+.gradle-local-maven/
+.gradle-local-maven2/
+.gradle-dist/
+build/
+app/build/
+local.properties

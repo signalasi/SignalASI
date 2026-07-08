@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SignalASI Desktop</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="mark" src="./signalasi-mark.png" alt="SignalASI">
+        <div>
+          <h1>SignalASI</h1>
+          <p>Desktop Connector</p>
+        </div>
+      </div>
+      <nav>
+        <button class="nav active" data-target="overview">Overview</button>
+        <button class="nav" data-target="pairing">Pairing</button>
+        <button class="nav" data-target="agents">Agents</button>
+        <button class="nav" data-target="models">Models</button>
+      </nav>
+    </aside>
+
+    <section class="content">
+      <header class="topbar">
+        <div>
+          <h2>Local Agent Connector</h2>
+          <p>Hermes, Codex, Claude Code, local models, and custom agents do not need native SignalASI support. This desktop connector wraps them as secure mobile contacts.</p>
+        </div>
+        <div class="topbar-actions">
+          <label class="language-switch">
+            <span>Language</span>
+            <select id="languageSelect" aria-label="Language">
+              <option value="zh-CN">Chinese (Simplified)</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+          <div id="backendBadge" class="badge pending">Checking</div>
+        </div>
+      </header>
+
+      <section id="overview" class="section active-section">
+        <div class="steps">
+          <article class="step-card">
+            <span>1</span>
+            <strong>Start the connector</strong>
+            <p>The connector starts the local backend, MQTT bridge, and SignalASI Link identity.</p>
+            <button class="inline-action" data-nav="pairing">Open pairing</button>
+          </article>
+          <article class="step-card">
+            <span>2</span>
+            <strong>Scan the QR code</strong>
+            <p>Scan once from the mobile app. Hermes is added, and connector-managed agents appear as contacts.</p>
+            <button class="inline-action" id="copyPairingLink">Copy pairing link</button>
+          </article>
+          <article class="step-card">
+            <span>3</span>
+            <strong>Configure agents</strong>
+            <p>CLI agents use commands. Local models use Ollama, LM Studio, vLLM, or OpenAI-compatible local APIs.</p>
+            <button class="inline-action" data-nav="agents">Open agent setup</button>
+          </article>
+          <article class="step-card">
+            <span>4</span>
+            <strong>Run self-test</strong>
+            <p>Check setup status, optional agent calls, and encrypted mobile delivery in one place.</p>
+            <button class="inline-action" id="jumpSelfTest">Run below</button>
+          </article>
+        </div>
+
+        <section class="panel setup-guide">
+          <div class="panel-head">
+            <div>
+              <h3>First-run setup</h3>
+              <p>Follow these steps to pair the phone and turn each local agent or model into a SignalASI contact.</p>
+            </div>
+            <button id="refreshSetupGuide">Refresh guide</button>
+          </div>
+          <div class="setup-progress">
+            <div>
+              <strong id="setupProgressText">Checking setup</strong>
+              <span id="setupProgressDetail">Waiting for connector diagnostics</span>
+            </div>
+            <div class="setup-track"><span id="setupProgressBar"></span></div>
+          </div>
+          <div id="pairingState" class="pairing-state">Checking phone pairing state</div>
+          <div id="setupChecklist" class="setup-checklist"></div>
+          <div class="hint">
+            Hermes, Codex, Claude Code, local models, and custom agents do not need their own SignalASI plugin. The desktop connector is the trusted bridge: it pairs once with the phone, then calls each local tool through CLI or local API. Cloud models are added directly on the phone.
+          </div>
+        </section>
+
+        <section class="panel contact-map">
+          <div class="panel-head">
+            <div>
+              <h3>Phone contact map</h3>
+              <p>The phone pairs with this desktop identity once. Desktop then exposes each tool as a normal SignalASI contact.</p>
+            </div>
+            <button id="copyContactMap">Copy map</button>
+          </div>
+          <div class="map-grid">
+            <div><strong>Hermes</strong><span>contact: hermes</span><p>Default assistant contact. Uses Hermes CLI or bridge.</p></div>
+            <div><strong>Codex</strong><span>contact: codex</span><p>Wrapped through <code>codex exec --skip-git-repo-check -</code>.</p></div>
+            <div><strong>Claude Code</strong><span>contact: claude</span><p>Wrapped through <code>claude -p</code>; no native SignalASI plugin required.</p></div>
+            <div><strong>Local LLM</strong><span>contact: local-llm</span><p>Ollama, LM Studio, vLLM, or OpenAI-compatible localhost.</p></div>
+            <div><strong>Custom Agent</strong><span>contact: custom-agent</span><p>Any CLI or MCP wrapper command using <code>{prompt}</code> or stdin.</p></div>
+          </div>
+        </section>
+
+        <section class="panel status-matrix">
+          <div class="panel-head">
+            <div>
+              <h3>Connector status matrix</h3>
+              <p>Live readiness for every phone contact, with the exact next action needed before it is product-ready.</p>
+            </div>
+            <button id="syncStatusToPhone">Sync phone status</button>
+            <button id="refreshStatusMatrix">Refresh status</button>
+          </div>
+          <div id="statusSummary" class="status-summary">Waiting for connector diagnostics</div>
+          <div class="matrix-table" role="table" aria-label="SignalASI connector status matrix">
+            <div class="matrix-row matrix-head" role="row">
+              <span role="columnheader">Contact</span>
+              <span role="columnheader">Current</span>
+              <span role="columnheader">Proof</span>
+              <span role="columnheader">Next step</span>
+            </div>
+            <div id="connectorMatrixRows"></div>
+          </div>
+        </section>
+
+        <section class="panel architecture">
+          <div class="panel-head">
+            <div>
+              <h3>Connector diagnostics</h3>
+              <p>Inspect pairing, desktop service state, and agent/model availability.</p>
+            </div>
+            <button id="refreshDiagnostics">Refresh</button>
+          </div>
+          <div class="flow">
+            <span>Mobile SignalASI</span>
+            <strong>SignalASI Link Protocol</strong>
+            <span>Desktop Connector</span>
+            <strong>CLI / API</strong>
+            <span>Agent / Model</span>
+          </div>
+          <pre id="diagnosticsResult" class="test-result compact">Waiting for diagnostics</pre>
+        </section>
+
+        <section class="panel architecture">
+          <div class="panel-head">
+            <div>
+              <h3>Runtime requirements</h3>
+              <p>Check whether the desktop package can start the local Python backend and Signal sidecar.</p>
+            </div>
+            <button id="refreshRuntime">Check runtime</button>
+          </div>
+          <pre id="runtimeResult" class="test-result compact">Waiting for runtime check</pre>
+        </section>
+      </section>
+
+      <section id="pairing" class="section">
+        <article class="panel pairing">
+          <div class="panel-head">
+            <div>
+              <h3>Mobile pairing</h3>
+              <p>Scan this QR code in SignalASI mobile. One verified desktop identity exposes Hermes, Codex, Claude, Local LLM, and Custom Agent contacts. Cloud models are added directly in the mobile app.</p>
+            </div>
+            <button id="refreshPairing">Refresh</button>
+          </div>
+          <iframe id="pairingFrame" title="SignalASI pairing QR"></iframe>
+          <div id="pairingStatusDetail" class="pairing-state">Checking phone pairing state</div>
+          <div class="pairing-actions">
+            <button id="copyPairingLinkSecondary">Copy pairing link</button>
+            <button data-nav="agents">Configure agents</button>
+            <button id="pairingSelfTest">Run self-test</button>
+            <button id="forgetPhone">Forget phone</button>
+          </div>
+          <div class="hint">
+            The only pairing route is <code>/signalasi/verify</code>. Pairing a new phone revokes the previous phone first. Existing agents do not need SignalASI settings because Desktop owns the SignalASI identity and calls them through CLI/API.
+          </div>
+        </article>
+      </section>
+
+      <section id="agents" class="section">
+        <article class="panel agents">
+          <div class="panel-head">
+            <div>
+              <h3>Connectable agents</h3>
+              <p>The connector calls each agent locally, then routes replies back through the verified SignalASI Link tunnel.</p>
+            </div>
+            <button id="detectAgents">Detect again</button>
+          </div>
+          <div id="agentList" class="agent-list"></div>
+        </article>
+
+        <article class="panel audit">
+          <div class="panel-head">
+            <div>
+              <h3>Agent permissions and execution log</h3>
+              <p>Every local Agent call is recorded without storing the full prompt text.</p>
+            </div>
+            <button id="refreshExecutionLog">Refresh log</button>
+          </div>
+          <div class="permission-grid">
+            <div><strong>local_process</strong><span>Hermes, Codex, Claude Code, Custom Agent</span></div>
+            <div><strong>local_http</strong><span>Ollama, LM Studio, vLLM, local OpenAI-compatible APIs</span></div>
+            <div><strong>cloud_http</strong><span>Cloud APIs are configured directly on the mobile app</span></div>
+          </div>
+          <div id="executionLog" class="audit-log">Waiting for execution log</div>
+        </article>
+
+        <article class="panel connector">
+          <div class="panel-head">
+            <div>
+              <h3>CLI agent settings</h3>
+              <p>Prompt text is sent through stdin by default. Use <code>{prompt}</code> only when a tool requires arguments.</p>
+            </div>
+            <button id="saveConfig">Save settings</button>
+          </div>
+          <div class="form-grid three">
+            <label>
+              <span>Hermes command</span>
+              <input id="cmdHermes" spellcheck="false">
+            </label>
+            <label>
+              <span>Codex command</span>
+              <input id="cmdCodex" spellcheck="false">
+            </label>
+            <label>
+              <span>Claude Code command</span>
+              <input id="cmdClaude" spellcheck="false">
+            </label>
+            <label>
+              <span>Custom Agent name</span>
+              <input id="customAgentName" maxlength="48" placeholder="Custom Agent" spellcheck="false">
+            </label>
+            <label>
+              <span>Custom Agent command</span>
+              <input id="cmdCustomAgent" placeholder="python custom_agent_stdio.py -" spellcheck="false">
+            </label>
+          </div>
+          <div class="custom-agent-editor">
+            <div class="subhead">
+              <div>
+                <strong>Additional custom agents</strong>
+                <p>Add one row per CLI, MCP wrapper, automation, or local tool. Each row becomes a phone contact after pairing.</p>
+              </div>
+              <button id="addCustomAgent" type="button">Add agent</button>
+            </div>
+            <div class="custom-agent-head">
+              <span>Contact ID</span>
+              <span>Display name</span>
+              <span>Command</span>
+              <span></span>
+            </div>
+            <div id="customAgentsList" class="custom-agent-list"></div>
+          </div>
+          <div class="action-row">
+            <button id="copyDefaultCommands">Copy default commands</button>
+            <button id="openClaudeDocs">Open Claude Code docs</button>
+            <button id="useCustomStdinTemplate">Use stdin template</button>
+            <button id="useCustomMcpTemplate">Use MCP wrapper template</button>
+            <button id="testClaudeConfig">Test Claude Code</button>
+            <button id="testCustomAgentConfig">Test Custom Agent</button>
+          </div>
+          <div class="hint">
+            Claude Code and other tools do not need native SignalASI support. For MCP, use <code>mcp_agent_wrapper.py</code> as the command and expose it as Custom Agent.
+          </div>
+        </article>
+      </section>
+
+      <section id="models" class="section">
+        <article class="panel connector">
+          <div class="panel-head">
+            <div>
+              <h3>Model settings</h3>
+              <p>Local models can use Ollama, LM Studio, vLLM, or another OpenAI-compatible local endpoint. Cloud models are configured directly in the mobile app.</p>
+            </div>
+            <button id="saveModelConfig">Save model settings</button>
+          </div>
+
+          <div class="form-grid">
+            <label>
+              <span>Local contact name</span>
+              <input id="localModelName" maxlength="48" placeholder="Local LLM" spellcheck="false">
+            </label>
+            <label>
+              <span>Local provider</span>
+              <select id="localProvider">
+                <option value="auto">Auto</option>
+                <option value="ollama">Ollama generate</option>
+                <option value="openai">OpenAI-compatible</option>
+              </select>
+            </label>
+            <label>
+              <span>Local URL</span>
+              <input id="localUrl" placeholder="http://127.0.0.1:11434/api/generate" spellcheck="false">
+            </label>
+            <label>
+              <span>Local model</span>
+              <input id="localModel" placeholder="qwen2.5:7b" spellcheck="false">
+            </label>
+            <label>
+              <span>Local API key</span>
+              <input id="localKey" type="password" spellcheck="false">
+            </label>
+          </div>
+          <div class="model-actions">
+            <div>
+              <strong>Local model shortcuts</strong>
+              <div class="action-row">
+                <button id="useOllamaPreset">Use Ollama defaults</button>
+                <button id="useLmStudioPreset">Use LM Studio preset</button>
+                <button id="testLocalModel">Save and test Local LLM</button>
+              </div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel test-panel">
+        <div class="panel-head">
+          <div>
+            <h3>Closed-loop tests</h3>
+            <p>Test one agent, send an encrypted mobile diagnostic, or run the connector self-test for every contact.</p>
+          </div>
+        </div>
+        <div class="test-row">
+          <select id="testAgent">
+            <option value="hermes">Hermes Agent</option>
+            <option value="codex">Codex Agent</option>
+            <option value="claude">Claude Code</option>
+            <option value="local-llm">Local LLM</option>
+            <option value="custom-agent">Custom Agent</option>
+          </select>
+          <input id="testPrompt" value="hello" spellcheck="false">
+          <button id="runTest">Test agent</button>
+          <button id="sendMobileTest">Send to phone</button>
+          <button id="syncStatusToPhoneSecondary">Sync status</button>
+          <button id="runSelfTest">Self-test all</button>
+        </div>
+        <label class="inline-check">
+          <input id="includeAgentCalls" type="checkbox">
+          <span>Also call ready agents during self-test</span>
+        </label>
+        <pre id="testResult" class="test-result">Waiting for test</pre>
+      </section>
+    </section>
+  </main>
+  <script src="./renderer.js"></script>
+</body>
+</html>

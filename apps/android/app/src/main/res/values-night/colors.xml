@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="hermes_dark">#05070A</color>
+    <color name="page_bg">#15171B</color>
+    <color name="bar_bg">#202329</color>
+    <color name="surface_bg">#252930</color>
+    <color name="search_bg">#2B3038</color>
+    <color name="text_primary">#F2F4F7</color>
+    <color name="text_secondary">#A5ABB6</color>
+    <color name="accent_green">#19D36B</color>
+    <color name="sent_bubble">#2E8B57</color>
+    <color name="button_soft">#363B44</color>
+    <color name="input_stroke">#363B44</color>
+    <color name="unread_red">#FF5A5F</color>
+    <color name="sidebar_text">#CED3DC</color>
+    <color name="white">#252930</color>
+    <color name="wechat_green">#19D36B</color>
+    <color name="separator">#343841</color>
+    <color name="incoming_bubble">#252930</color>
+    <color name="icon_gray">#CED3DC</color>
+</resources>

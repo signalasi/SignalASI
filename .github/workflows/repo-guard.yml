@@ -1,0 +1,16 @@
+name: Repository Guard
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  no-chinese-outside-i18n:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node tools/dev/check-no-chinese-outside-i18n.js
+

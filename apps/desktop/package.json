@@ -1,0 +1,28 @@
+{
+  "name": "signalasi-desktop",
+  "version": "0.1.0",
+  "description": "SignalASI Desktop Connector for pairing local agents with the mobile app.",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "node .electron-runtime/node_modules/electron/cli.js .",
+    "check": "node scripts/check.js",
+    "status:connectors": "node scripts/connector-status.js",
+    "smoke": "node scripts/smoke.js",
+    "smoke:pairing": "node scripts/smoke-pairing.js",
+    "smoke:ui": "node scripts/smoke-ui.js",
+    "smoke:android-ui": "node scripts/smoke-android-ui.js",
+    "smoke:android-friends": "node scripts/smoke-android-friends.js",
+    "smoke:android-background": "node scripts/smoke-android-background-message.js",
+    "smoke:mqtt-persistence": "node scripts/smoke-mqtt-persistence.js",
+    "smoke:agent-push": "node scripts/smoke-agent-push.js",
+    "smoke:e2e": "node scripts/smoke-e2e.js",
+    "smoke:packaged": "node scripts/smoke-packaged.js",
+    "package:win": "node scripts/package-win.js",
+    "package:win:python": "node scripts/package-win.js --bundle-python"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "rcedit": "^5.0.1"
+  }
+}
