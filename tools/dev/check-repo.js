@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const root = path.resolve(__dirname, "..", "..");
+const rootPackageJson = path.join(root, "package.json");
 const testingMatrix = path.join(root, "docs", "testing", "README.md");
 const productRequirements = path.join(root, "docs", "product", "PRODUCT_REQUIREMENTS.md");
 const readme = path.join(root, "README.md");
@@ -89,6 +90,40 @@ function checkTestingMatrix() {
     if (!content.includes(text)) {
       throw new Error(`Testing matrix missing: ${text}`);
     }
+  }
+}
+
+function documentedNpmRunCommands(file) {
+  const content = fs.readFileSync(file, "utf8");
+  return [...content.matchAll(/npm run ([a-zA-Z0-9:._-]+)/g)]
+    .map((match) => match[1].replace(/[.]+$/g, ""))
+    .filter((scriptName, index, all) => all.indexOf(scriptName) === index)
+    .sort();
+}
+
+function checkDocumentedRootScripts() {
+  if (!fs.existsSync(rootPackageJson)) {
+    throw new Error("Missing package.json");
+  }
+
+  const scripts = JSON.parse(fs.readFileSync(rootPackageJson, "utf8")).scripts || {};
+  const docs = [
+    testingMatrix,
+    productRequirements,
+    trustModel,
+    releaseAuditDoc,
+    releaseAuditScript
+  ];
+  const missing = [];
+  for (const file of docs) {
+    for (const scriptName of documentedNpmRunCommands(file)) {
+      if (!scripts[scriptName]) {
+        missing.push(`${path.relative(root, file).replace(/\\/g, "/")}: npm run ${scriptName}`);
+      }
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(`Documented npm scripts are missing from root package.json:\n${missing.join("\n")}`);
   }
 }
 
@@ -266,6 +301,10 @@ const checks = [
   {
     name: "testing matrix",
     run: checkTestingMatrix
+  },
+  {
+    name: "documented npm scripts",
+    run: checkDocumentedRootScripts
   },
   {
     name: "product requirements",
