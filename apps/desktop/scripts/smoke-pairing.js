@@ -45,6 +45,14 @@ async function fetchText(pathname) {
   return response.text();
 }
 
+async function expectRejected(pathname) {
+  const response = await fetch(`${backendOrigin}${pathname}`);
+  if (response.ok) {
+    throw new Error(`${pathname} must reject legacy pairing routes, returned HTTP ${response.status}`);
+  }
+  return response.status;
+}
+
 async function waitForBackend() {
   let lastError;
   for (let attempt = 0; attempt < 24; attempt += 1) {
@@ -108,6 +116,13 @@ async function main() {
     }
     if (html.includes("hermes_signal_verify") || html.includes("/signal/verify")) {
       throw new Error("Pairing QR page leaked an old Hermes pairing protocol name");
+    }
+    log("checking legacy pairing routes are rejected");
+    for (const legacyRoute of ["/signal/verify", "/signalagi/verify"]) {
+      const status = await expectRejected(legacyRoute);
+      if (status !== 404) {
+        throw new Error(`${legacyRoute} must return HTTP 404, returned HTTP ${status}`);
+      }
     }
     const payload = await fetchJson("/api/pairing/payload");
     if (!Array.isArray(payload.connector_agents) || payload.connector_agents.length < 2) {
