@@ -49,6 +49,8 @@ SignalASI is a private superintelligence interface for trusted communication bet
 | Pairing replacement | A newly paired app invalidates the previous paired app through revocation/pairing-state updates. | `npm run smoke:desktop:pairing` |
 | Unpaired guard | Desktop refuses phone delivery APIs when no trusted phone is paired. | `npm run smoke:desktop:pairing` |
 
+Security boundaries are documented in `docs/security/TRUST_MODEL.md`.
+
 ## Release Requirements
 
 - `npm run check` must pass.

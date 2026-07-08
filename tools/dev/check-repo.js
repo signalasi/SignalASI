@@ -8,6 +8,7 @@ const path = require("node:path");
 const root = path.resolve(__dirname, "..", "..");
 const testingMatrix = path.join(root, "docs", "testing", "README.md");
 const productRequirements = path.join(root, "docs", "product", "PRODUCT_REQUIREMENTS.md");
+const trustModel = path.join(root, "docs", "security", "TRUST_MODEL.md");
 
 function listTrackedFiles() {
   const result = spawnSync("git", ["ls-files", "-z"], {
@@ -115,6 +116,34 @@ function checkProductRequirements() {
   }
 }
 
+function checkTrustModel() {
+  if (!fs.existsSync(trustModel)) {
+    throw new Error("Missing docs/security/TRUST_MODEL.md");
+  }
+
+  const content = fs.readFileSync(trustModel, "utf8");
+  const requiredText = [
+    "Trust Model",
+    "Trust Zones",
+    "Identity And Pairing",
+    "Message Protection",
+    "Broker Boundary",
+    "Local Data Boundary",
+    "Agent Permission Boundary",
+    "Current Security Limits",
+    "Required Evidence",
+    "/signalasi/verify",
+    "signalasi_verify",
+    "X-SignalASI-Token"
+  ];
+
+  for (const text of requiredText) {
+    if (!content.includes(text)) {
+      throw new Error(`Trust model missing: ${text}`);
+    }
+  }
+}
+
 const checks = [
   {
     name: "testing matrix",
@@ -123,6 +152,10 @@ const checks = [
   {
     name: "product requirements",
     run: checkProductRequirements
+  },
+  {
+    name: "trust model",
+    run: checkTrustModel
   },
   {
     name: "tracked artifact policy",
