@@ -44,10 +44,10 @@ const networkGates = [
 ];
 
 const manualChecks = [
-  "Pair a fresh Android install with a fresh Desktop install using /signalasi/verify.",
-  "Send text messages from Android to Hermes and Codex and confirm full replies arrive on the phone.",
-  "Send a voice message to Hermes and confirm Desktop STT is used when configured.",
-  "Exercise the Voice page wake loop and confirm replies are preserved in the voice response panel.",
+  "Pair a fresh Android install with a fresh Desktop install using /signalasi/verify. Automated evidence: npm run smoke:desktop:pairing and npm run smoke:android:ui.",
+  "Send text messages from Android to Hermes and Codex and confirm live Agent replies arrive on the phone. Automated display evidence: npm run smoke:android:agent-replies.",
+  "Send a voice message to Hermes and confirm Desktop STT is used when configured. Automated reply-panel evidence: npm run smoke:android:voice-reply.",
+  "Exercise the Voice page wake loop on a real microphone and confirm replies are preserved in the voice response panel. Automated preservation evidence: npm run smoke:android:voice-reply.",
   "Clear Android app data and confirm a new identity fingerprint, empty contacts, and a new welcome notification are created. Automated evidence: npm run smoke:android:reset.",
   "Verify exported APK, Desktop EXE, local databases, logs, screenshots, pairing state, tokens, and node_modules are not staged for Git."
 ];
