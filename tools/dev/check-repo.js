@@ -169,6 +169,7 @@ function checkTrustModel() {
     "Required Evidence",
     "/signalasi/verify",
     "signalasi_verify",
+    "npm run smoke:android:reset",
     "X-SignalASI-Token"
   ];
 
