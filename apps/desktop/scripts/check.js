@@ -70,6 +70,7 @@ const backendMcpWrapper = fs.readFileSync(path.join(backendDir, "mcp_agent_wrapp
 const backendPushAuth = fs.readFileSync(path.join(backendDir, "push_auth.py"), "utf8");
 const backendSignalasiNotify = fs.readFileSync(path.join(backendDir, "signalasi_notify.py"), "utf8");
 const backendApiResponse = fs.readFileSync(path.join(backendDir, "api_response.py"), "utf8");
+const backendStt = fs.readFileSync(path.join(backendDir, "stt_bridge.py"), "utf8");
 const sidecarDir = path.join(backendDir, "signal_sidecar");
 const sidecarSourceDir = path.join(sidecarDir, "src", "main", "java");
 const sidecarMainSource = fs.readFileSync(path.join(sidecarSourceDir, "com", "signalasi", "link", "SignalSidecar.java"), "utf8");
@@ -399,6 +400,9 @@ for (const requiredText of [
   "signalasi_debug_destroy_all_data",
   "smoke:android-reset",
   "Destructive reset did not rotate the local Signal identity store",
+  "SIGNALASI_WHISPER_MODEL",
+  "SIGNALASI_WHISPER_DEVICE",
+  "SIGNALASI_WHISPER_COMPUTE_TYPE",
   "signalasi_debug_open_protocol_quality",
   "signalasi_debug_open_signal_link_protocol",
   "signalasi_debug_open_advanced_options",
@@ -413,7 +417,7 @@ for (const requiredText of [
   "scripts/smoke.js",
   "SignalASI Link Protocol"
 ]) {
-  if (![main, preload, html, renderer, packageJson, packager, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidBackground, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendGateway, backendAgentConfig, backendPushAuth, backendSignalasiNotify, androidMainActivity, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
+  if (![main, preload, html, renderer, packageJson, packager, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidBackground, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendGateway, backendAgentConfig, backendPushAuth, backendSignalasiNotify, backendStt, androidMainActivity, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
     throw new Error(`Missing desktop connector capability: ${requiredText}`);
   }
 }
@@ -457,6 +461,10 @@ for (const [label, content] of [
 
 if (androidMainActivity.includes("Hermes ID")) {
   throw new Error("Android UI must display SignalASI ID, not Hermes ID");
+}
+
+if (androidMqtt.includes("hermeschat-android")) {
+  throw new Error("Android MQTT client id must use SignalASI naming");
 }
 
 if ([androidMainActivity, androidAppStore, androidStringsZh, androidStringsEn].some((content) => content.includes("hermes_backup"))) {

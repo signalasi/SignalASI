@@ -12,9 +12,13 @@ except ImportError:
     WhisperModel = None
 
 
-MODEL_NAME = os.environ.get("HERMESCHAT_WHISPER_MODEL", "medium")
-DEVICE = os.environ.get("HERMESCHAT_WHISPER_DEVICE", "cpu")
-COMPUTE_TYPE = os.environ.get("HERMESCHAT_WHISPER_COMPUTE_TYPE", "int8")
+def _env(name: str, legacy_name: str, default: str) -> str:
+    return os.environ.get(name) or os.environ.get(legacy_name, default)
+
+
+MODEL_NAME = _env("SIGNALASI_WHISPER_MODEL", "HERMESCHAT_WHISPER_MODEL", "medium")
+DEVICE = _env("SIGNALASI_WHISPER_DEVICE", "HERMESCHAT_WHISPER_DEVICE", "cpu")
+COMPUTE_TYPE = _env("SIGNALASI_WHISPER_COMPUTE_TYPE", "HERMESCHAT_WHISPER_COMPUTE_TYPE", "int8")
 
 _model: Any | None = None
 _lock = threading.Lock()

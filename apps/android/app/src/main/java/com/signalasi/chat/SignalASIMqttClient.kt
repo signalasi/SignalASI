@@ -438,7 +438,7 @@ object SignalASIMqttClient {
 
     private fun stableClientId(): String {
         val identity = runCatching { SignalASICrypto.localIdentitySha256().take(16) }.getOrDefault("unknown")
-        return "hermeschat-android-$identity"
+        return "signalasi-android-$identity"
     }
 
     private fun setConnected(value: Boolean) {
