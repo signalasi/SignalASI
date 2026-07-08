@@ -75,4 +75,5 @@ Release audit:
 
 ```bash
 npm run audit:release
+npm run audit:release:strict
 ```

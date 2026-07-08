@@ -176,7 +176,8 @@ function checkReadme() {
     "npm run smoke:desktop:e2e",
     "npm run package:desktop:win",
     "npm run smoke:desktop:packaged",
-    "npm run audit:release"
+    "npm run audit:release",
+    "npm run audit:release:strict"
   ];
 
   for (const text of requiredText) {
@@ -283,6 +284,7 @@ function checkReleaseAudit() {
     "Repository Guard",
     "Windows Package",
     "Manual Release Checks",
+    "npm run audit:release:strict",
     "smoke:desktop:mqtt-persistence",
     "smoke:android:ui",
     "smoke:android:friends",
