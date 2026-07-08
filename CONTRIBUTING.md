@@ -23,3 +23,5 @@ npm run smoke:desktop
 npm run smoke:desktop:e2e
 npm run smoke:desktop:packaged
 ```
+
+Smoke commands that touch the Desktop backend, MQTT broker, packaged app, or Android device must run sequentially because they share the same local backend port and test lock.
