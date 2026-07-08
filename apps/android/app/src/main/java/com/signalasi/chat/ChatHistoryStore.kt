@@ -144,14 +144,9 @@ object ChatHistoryStore {
             else -> {
                 val content = json?.optString("content", payload)?.takeIf { it.isNotBlank() } ?: payload
                 val sender = json?.optString("sender", CONTACT_HERMES) ?: CONTACT_HERMES
-                val groupId = json?.optString("group_id", "")?.takeIf { it.isNotBlank() }
                 val contactId = when {
                     sender == "system" -> CONTACT_SYSTEM
-                    groupId != null -> groupId
                     else -> json?.optString("contact_id", CONTACT_HERMES)?.takeIf { it.isNotBlank() } ?: CONTACT_HERMES
-                }
-                if (groupId != null) {
-                    AppStore.ensureIncomingGroup(context, groupId, json.optString("group_name", "Group"), sender)
                 }
                 StoredIncomingMessage(contactId, contactName(context, contactId), content)
             }

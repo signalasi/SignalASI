@@ -2084,12 +2084,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         val content = json?.optString("content", payload)?.takeIf { it.isNotBlank() } ?: payload
         val sender = json?.optString("sender", "hermes") ?: "hermes"
-        val groupId = json?.optString("group_id", "")?.takeIf { it.isNotBlank() }
-        val contactId = groupId ?: json?.optString("contact_id", CONTACT_HERMES.id)?.takeIf { it.isNotBlank() } ?: CONTACT_HERMES.id
-        if (groupId != null) {
-            AppStore.ensureIncomingGroup(this, groupId, json.optString("group_name", "Group"), sender)
-            refreshDirectoryContacts()
-        }
+        val contactId = json?.optString("contact_id", CONTACT_HERMES.id)?.takeIf { it.isNotBlank() } ?: CONTACT_HERMES.id
         val contact = contactById(if (sender == "system") CONTACT_SYSTEM.id else contactId)
         return ChatMessage(newMessageId(), content, sender == "self", contact, deliveryTrace = incomingTrace)
     }

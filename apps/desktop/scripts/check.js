@@ -441,6 +441,24 @@ if (backendCustomAgent.includes("Received: {prompt}")) {
   throw new Error("Custom Agent template must not echo the full user prompt");
 }
 
+if (androidMainActivity.includes("publishGroupTextMessage(") || androidMainActivity.includes("AppStore.createGroup(") || androidMainActivity.includes("createGroupWithMembers(")) {
+  throw new Error("Group chat is deferred and must not be callable from Android UI");
+}
+
+if (androidMainActivity.includes("AppStore.ensureIncomingGroup(") || androidChatHistoryStore.includes("AppStore.ensureIncomingGroup(")) {
+  throw new Error("Group chat is deferred; incoming messages must not auto-create group contacts");
+}
+
+for (const requiredDeferredGroupText of [
+  "badge_unavailable",
+  "group_feature_status_subtitle",
+  "Group chat implementation is not enabled in this version"
+]) {
+  if (![androidMainActivity, androidStringsEn].some((content) => content.includes(requiredDeferredGroupText))) {
+    throw new Error(`Deferred group UI marker missing: ${requiredDeferredGroupText}`);
+  }
+}
+
 for (const promptPrivacyText of [
   "Prompt text is sent through stdin by default",
   "Request received. Custom Agent is connected."
