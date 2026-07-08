@@ -1,8 +1,8 @@
 # SignalASI
 
-SignalASI is a private AI communication system for people, agents, models, and devices.
+SignalASI is a private superintelligence interface that turns phones, computers, agents, models, and devices into a trusted AI mesh.
 
-The project combines a mobile-first chat experience, Signal-style trusted pairing, encrypted agent messaging, voice interaction, and a desktop connector that exposes local tools as contacts.
+The project combines a mobile-first command surface, Signal-style trusted pairing, encrypted agent messaging, voice interaction, and a desktop connector that makes local tools, cloud models, and autonomous agents reachable as secure contacts.
 
 ## Repository Layout
 
