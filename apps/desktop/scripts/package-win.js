@@ -22,6 +22,9 @@ const bundledPythonDir = path.join(resourcesDir, "python", "venv");
 const runtimePythonDir = path.join(root, ".runtime-python", "venv");
 const bundlePython = process.argv.includes("--bundle-python") || process.env.SIGNALASI_BUNDLE_PYTHON === "1";
 const releaseLock = acquireSignalasiLock(bundlePython ? "package:win:python" : "package:win");
+const sidecarDir = path.join(backendSrc, "signal_sidecar");
+const sidecarRuntimeName = "signalasi-link-sidecar";
+const sidecarRuntimeDir = path.join(sidecarDir, "build", "install", sidecarRuntimeName);
 
 process.on("exit", releaseLock);
 
@@ -100,6 +103,27 @@ function findPythonExecutable() {
   return candidates.find((candidate) => candidate === "python" || fs.existsSync(candidate));
 }
 
+function findGradleCommand() {
+  const wrapper = path.join(workspaceRoot, "android", process.platform === "win32" ? "gradlew.bat" : "gradlew");
+  if (fs.existsSync(wrapper)) return wrapper;
+  return process.platform === "win32" ? "gradle.bat" : "gradle";
+}
+
+function runGradle(args, options = {}) {
+  const gradle = findGradleCommand();
+  if (process.platform === "win32") {
+    run(process.env.ComSpec || "cmd.exe", ["/d", "/c", "call", gradle, ...args], options);
+    return;
+  }
+  run(gradle, args, options);
+}
+
+function ensureSignalSidecarRuntime() {
+  if (fs.existsSync(sidecarRuntimeDir)) return;
+  console.log("Building SignalASI Link sidecar runtime...");
+  runGradle(["-p", sidecarDir, "installDist", "--no-daemon"], { cwd: workspaceRoot });
+}
+
 function pythonCanImportBackendDeps(pythonExe) {
   try {
     execFileSync(
@@ -139,8 +163,8 @@ function ensureRuntimePythonVenv() {
 
 requirePath(electronDist, "Electron runtime");
 requirePath(backendSrc, "SignalASI backend");
-const sidecarRuntimeName = "signalasi-link-sidecar";
-requirePath(path.join(backendSrc, "signal_sidecar", "build", "install", sidecarRuntimeName), "SignalASI Link sidecar runtime");
+ensureSignalSidecarRuntime();
+requirePath(sidecarRuntimeDir, "SignalASI Link sidecar runtime");
 
 removeIfExists(packageDir);
 fs.mkdirSync(packageDir, { recursive: true });
@@ -186,7 +210,7 @@ for (const file of backendFiles) {
   copyRecursive(path.join(backendSrc, file), path.join(packagedBackendDir, file));
 }
 copyRecursive(
-  path.join(backendSrc, "signal_sidecar", "build", "install", sidecarRuntimeName),
+  sidecarRuntimeDir,
   path.join(packagedBackendDir, "signal_sidecar", "build", "install", sidecarRuntimeName)
 );
 

@@ -1,4 +1,4 @@
-﻿const fs = require("node:fs");
+const fs = require("node:fs");
 const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
@@ -335,6 +335,9 @@ for (const requiredText of [
   "Run these scripts sequentially",
   "packageDir",
   "--bundle-python",
+  "ensureSignalSidecarRuntime",
+  "runGradle",
+  "installDist",
   "copyRecursive(path.join(root, \"docs\")",
   "Packaged connector status doc",
   "Packaged UI smoke screenshot",

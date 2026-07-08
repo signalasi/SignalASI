@@ -22,6 +22,8 @@ Product scope is defined in `docs/product/PRODUCT_REQUIREMENTS.md`.
 | Windows package build | `npm run package:desktop:win` | The Windows Desktop package is assembled with the backend, docs, sidecar runtime hooks, dependency installer, and packaged scripts. |
 | Packaged Desktop smoke | `npm run smoke:desktop:packaged` | The packaged Windows Desktop app uses the current source backend layout, includes required runtime files, exposes diagnostics, and captures packaged UI evidence. |
 
+The `Windows Package` GitHub Actions workflow runs the Windows package build and packaged smoke gates for Desktop packaging changes and can also be started manually.
+
 ## Product Coverage
 
 | Product area | Primary evidence |

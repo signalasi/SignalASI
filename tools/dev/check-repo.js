@@ -9,6 +9,7 @@ const root = path.resolve(__dirname, "..", "..");
 const testingMatrix = path.join(root, "docs", "testing", "README.md");
 const productRequirements = path.join(root, "docs", "product", "PRODUCT_REQUIREMENTS.md");
 const trustModel = path.join(root, "docs", "security", "TRUST_MODEL.md");
+const windowsPackageWorkflow = path.join(root, ".github", "workflows", "windows-package.yml");
 
 function listTrackedFiles() {
   const result = spawnSync("git", ["ls-files", "-z"], {
@@ -175,6 +176,28 @@ function checkProtocolSpec() {
   }
 }
 
+function checkWindowsPackageWorkflow() {
+  if (!fs.existsSync(windowsPackageWorkflow)) {
+    throw new Error("Missing .github/workflows/windows-package.yml");
+  }
+
+  const content = fs.readFileSync(windowsPackageWorkflow, "utf8");
+  const requiredText = [
+    "Windows Package",
+    "runs-on: windows-latest",
+    "npm --prefix apps/desktop ci",
+    "npm run package:desktop:win",
+    "npm run smoke:desktop:packaged",
+    "gradle/actions/setup-gradle"
+  ];
+
+  for (const text of requiredText) {
+    if (!content.includes(text)) {
+      throw new Error(`Windows package workflow missing: ${text}`);
+    }
+  }
+}
+
 const checks = [
   {
     name: "testing matrix",
@@ -191,6 +214,10 @@ const checks = [
   {
     name: "protocol spec",
     run: checkProtocolSpec
+  },
+  {
+    name: "windows package workflow",
+    run: checkWindowsPackageWorkflow
   },
   {
     name: "tracked artifact policy",

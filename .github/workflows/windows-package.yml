@@ -1,0 +1,38 @@
+name: Windows Package
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-package.yml"
+      - "apps/desktop/**"
+      - "apps/android/gradlew"
+      - "apps/android/gradlew.bat"
+      - "package.json"
+  push:
+    paths:
+      - ".github/workflows/windows-package.yml"
+      - "apps/desktop/**"
+      - "apps/android/gradlew"
+      - "apps/android/gradlew.bat"
+      - "package.json"
+
+jobs:
+  package-win:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: gradle/actions/setup-gradle@v4
+      - run: npm --prefix apps/desktop ci
+      - run: npm run package:desktop:win
+      - run: npm run smoke:desktop:packaged
