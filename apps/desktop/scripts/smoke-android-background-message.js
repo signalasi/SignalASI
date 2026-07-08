@@ -1,6 +1,6 @@
-﻿const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const { createAdb } = require("./android-adb");
 
 const root = path.resolve(__dirname, "..");
 const workspaceRoot = path.resolve(root, "..");
@@ -24,15 +24,7 @@ function fail(message) {
   throw new Error(message);
 }
 
-function adb(args, options = {}) {
-  return execFileSync("adb", args, {
-    cwd: options.cwd || root,
-    encoding: options.encoding || "utf8",
-    windowsHide: true,
-    input: options.input,
-    stdio: options.stdio || ["pipe", "pipe", "pipe"]
-  });
-}
+const adb = createAdb(root, log);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

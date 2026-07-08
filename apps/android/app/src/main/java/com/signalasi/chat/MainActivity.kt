@@ -1633,6 +1633,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val openCloudSwitchProvider = intent?.getStringExtra("signalasi_debug_open_cloud_switch_provider")?.trim().orEmpty()
         val approveFriendId = intent?.getStringExtra("signalasi_debug_approve_friend")?.trim().orEmpty()
         val deleteContactId = intent?.getStringExtra("signalasi_debug_delete_contact")?.trim().orEmpty()
+        val backupRoundtripToken = intent?.getStringExtra("signalasi_debug_backup_roundtrip")?.trim().orEmpty()
         val scanPayload = intent?.getStringExtra("signalasi_debug_scan_payload")?.trim().orEmpty()
         val scanPayloadB64 = intent?.getStringExtra("signalasi_debug_scan_payload_b64")?.trim().orEmpty()
         if (approveFriendId.isNotBlank()) {
@@ -1660,6 +1661,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (scanPayload.isNotBlank()) {
             intent?.removeExtra("signalasi_debug_scan_payload")
             handleSecurityScan(scanPayload, intent?.getBooleanExtra("signalasi_debug_auto_confirm_scan", false) == true)
+            return
+        }
+        if (backupRoundtripToken.isNotBlank()) {
+            intent?.removeExtra("signalasi_debug_backup_roundtrip")
+            runDebugBackupRoundtrip(backupRoundtripToken)
             return
         }
         if (destroyAllData) {
@@ -1873,6 +1879,89 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             showAdvancedOptionsFeaturePage()
         }
         Toast.makeText(this, getString(R.string.debug_incoming_processed), Toast.LENGTH_SHORT).show()
+    }
+
+    private fun runDebugBackupRoundtrip(token: String) {
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
+        val prefs = getSharedPreferences("signalasi_debug", MODE_PRIVATE)
+        val password = "SignalASIBackupSmoke2026"
+        val contactToken = "backup-smoke-${token.lowercase(Locale.US).replace(Regex("[^a-z0-9_-]+"), "-")}"
+        val messageToken = "BACKUP_ROUNDTRIP_MESSAGE_$token"
+        runCatching {
+            val contact = AppStore.addCloudModelContact(
+                this,
+                displayName = "Backup Smoke Model",
+                provider = "Backup Smoke",
+                modelId = contactToken,
+                endpoint = "http://127.0.0.1:9/v1/chat/completions",
+                apiKey = "backup-smoke-key",
+                apiStyle = "openai"
+            )
+            val contactId = contact.optString("id")
+            val message = JSONObject()
+                .put("id", System.currentTimeMillis())
+                .put("content", messageToken)
+                .put("isMine", false)
+                .put("contactId", contactId)
+                .put("isSystem", false)
+                .put("timestamp", System.currentTimeMillis())
+                .put("deliveryStatus", "")
+                .put("deliveryTrace", JSONArray().put(JSONObject()
+                    .put("stage", "backup_roundtrip_seed")
+                    .put("at", System.currentTimeMillis())
+                    .put("detail", "debug")))
+            val historyRoot = JSONObject()
+            historyRoot.put(contactId, JSONArray().put(message))
+            getSharedPreferences(HISTORY_PREFS, MODE_PRIVATE).edit()
+                .putString(HISTORY_KEY, historyRoot.toString())
+                .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis())
+                .commit()
+
+            val backup = AppStore.exportBackup(
+                this,
+                password = password,
+                includeContacts = true,
+                includeMessages = true
+            )
+            val backupText = backup.readText(Charsets.UTF_8)
+            getSharedPreferences("signalasi_app_store", MODE_PRIVATE).edit()
+                .putString("contacts", JSONArray().toString())
+                .putString("friend_requests", JSONArray().toString())
+                .commit()
+            getSharedPreferences(HISTORY_PREFS, MODE_PRIVATE).edit()
+                .putString(HISTORY_KEY, JSONObject().toString())
+                .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis())
+                .commit()
+
+            AppStore.importBackup(this, backup, password, includeMessages = true)
+            val restoredContacts = AppStore.contacts(this).toString()
+            val restoredHistory = getSharedPreferences(HISTORY_PREFS, MODE_PRIVATE).getString(HISTORY_KEY, "{}").orEmpty()
+            val contactRestored = restoredContacts.contains(contactToken) && restoredContacts.contains("Backup Smoke")
+            val messageRestored = restoredHistory.contains(messageToken)
+            backup.delete()
+            val ok = backupText.contains("\"type\":\"signalasi_backup\"") && contactRestored && messageRestored
+            prefs.edit()
+                .putString("backup_roundtrip_result", JSONObject()
+                    .put("ok", ok)
+                    .put("token", token)
+                    .put("contact_id", contactId)
+                    .put("contact_restored", contactRestored)
+                    .put("message_restored", messageRestored)
+                    .put("encrypted_backup", backupText.contains("\"cipher\":\"aes-256-gcm\""))
+                    .toString())
+                .commit()
+            loadChatHistory()
+            refreshContactList()
+            refreshDirectoryContacts()
+        }.getOrElse { error ->
+            prefs.edit()
+                .putString("backup_roundtrip_result", JSONObject()
+                    .put("ok", false)
+                    .put("token", token)
+                    .put("error", error.message ?: error.javaClass.simpleName)
+                    .toString())
+                .commit()
+        }
     }
 
     private fun scheduleDebugOutgoing(contactId: String, content: String, attempt: Int) {

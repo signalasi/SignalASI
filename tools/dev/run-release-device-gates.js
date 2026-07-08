@@ -13,6 +13,7 @@ const gates = [
   "smoke:android:background",
   "smoke:android:agent-replies",
   "smoke:android:voice-reply",
+  "smoke:android:backup",
   "smoke:android:reset"
 ];
 
