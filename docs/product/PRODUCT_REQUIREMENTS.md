@@ -23,10 +23,11 @@ SignalASI is a private superintelligence interface for trusted communication bet
 | Pairing | QR scan accepts `/signalasi/verify` payloads, stores peer fingerprints, and creates trusted contacts only after confirmation. | `npm run smoke:android:ui`, `npm run smoke:desktop:pairing` |
 | Security center | The app displays phone and desktop fingerprints, paired devices, protocol quality, and revocation controls. | `npm run smoke:android:ui` |
 | Cloud models | The app can add multiple providers as direct mobile model contacts; provider contact lists show provider names, while the chat header switches the selected model. | `npm run smoke:android:ui` |
-| Voice page | Local wake mode, ASR provider selection, PC STT routing, TTS settings, and reply preservation are available from the app. | `npm run smoke:android:ui` |
+| Voice page | Local wake mode, ASR provider selection, PC STT routing, TTS settings, and reply preservation are available from the app. | `npm run smoke:android:ui`, `npm run smoke:android:voice-reply` |
 | Backup and import | Settings exposes backup export, backup import, and destructive data reset entry points. | `npm run smoke:android:ui` |
 | Destructive reset | Clear All Data rotates local identity, clears contacts and trust state, and recreates the welcome system notification. | `npm run smoke:android:reset` |
 | Background delivery | MQTT identity, QoS 1 behavior, background history, and local notification history survive app restart. | `npm run smoke:android:background` |
+| Voice reply preservation | Long Agent replies stay visible on the Voice page response panel and persist into Hermes chat history with delivery trace evidence. | `npm run smoke:android:voice-reply` |
 
 ## Desktop Requirements
 

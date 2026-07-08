@@ -75,6 +75,7 @@ function checkTestingMatrix() {
     "npm run smoke:android:ui",
     "npm run smoke:android:friends",
     "npm run smoke:android:background",
+    "npm run smoke:android:voice-reply",
     "npm run smoke:android:reset",
     "npm run smoke:desktop",
     "npm run smoke:desktop:pairing",
@@ -171,6 +172,7 @@ function checkReadme() {
     "npm run smoke:android:ui",
     "npm run smoke:android:friends",
     "npm run smoke:android:background",
+    "npm run smoke:android:voice-reply",
     "npm run smoke:android:reset",
     "npm run smoke:desktop",
     "npm run smoke:desktop:e2e",
@@ -208,6 +210,7 @@ function checkTrustModel() {
     "/signalasi/verify",
     "signalasi_verify",
     "npm run smoke:android:reset",
+    "npm run smoke:android:voice-reply",
     "X-SignalASI-Token"
   ];
 
@@ -295,6 +298,7 @@ function checkReleaseAudit() {
     "smoke:android:ui",
     "smoke:android:friends",
     "smoke:android:background",
+    "smoke:android:voice-reply",
     "smoke:android:reset"
   ];
 
