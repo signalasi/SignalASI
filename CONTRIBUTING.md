@@ -14,6 +14,6 @@ Thank you for contributing to SignalASI.
 Run these checks before opening a pull request:
 
 ```bash
-node tools/dev/check-repo.js
-node tools/dev/check-android-build.js
+npm run check
+npm run check:android
 ```

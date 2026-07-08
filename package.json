@@ -1,0 +1,11 @@
+{
+  "name": "signalasi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Private superintelligence interface for trusted AI mesh communication.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "check": "node tools/dev/check-repo.js",
+    "check:android": "node tools/dev/check-android-build.js"
+  }
+}

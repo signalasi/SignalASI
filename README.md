@@ -27,13 +27,13 @@ tests             Cross-platform fixtures and end-to-end tests
 Repository checks:
 
 ```bash
-node tools/dev/check-repo.js
+npm run check
 ```
 
 Android:
 
 ```bash
-node tools/dev/check-android-build.js
+npm run check:android
 ```
 
 Desktop:
