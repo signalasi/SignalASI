@@ -309,6 +309,7 @@ for (const requiredText of [
   "smoke:android-ui",
   "smoke:android-friends",
   "smoke:android-background",
+  "smoke:android-reset",
   "smoke:mqtt-persistence",
   "smoke:agent-push",
   "smoke:e2e",
