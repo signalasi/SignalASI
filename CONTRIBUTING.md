@@ -16,4 +16,6 @@ Run these checks before opening a pull request:
 ```bash
 npm run check
 npm run check:android
+npm run smoke:desktop
+npm run smoke:desktop:e2e
 ```

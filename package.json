@@ -6,6 +6,12 @@
   "license": "Apache-2.0",
   "scripts": {
     "check": "node tools/dev/check-repo.js",
-    "check:android": "node tools/dev/check-android-build.js"
+    "check:android": "node tools/dev/check-android-build.js",
+    "smoke:desktop": "npm --prefix apps/desktop run smoke",
+    "smoke:desktop:pairing": "npm --prefix apps/desktop run smoke:pairing",
+    "smoke:desktop:agent-push": "npm --prefix apps/desktop run smoke:agent-push",
+    "smoke:desktop:mqtt-persistence": "npm --prefix apps/desktop run smoke:mqtt-persistence",
+    "smoke:desktop:ui": "npm --prefix apps/desktop run smoke:ui",
+    "smoke:desktop:e2e": "npm --prefix apps/desktop run smoke:e2e"
   }
 }

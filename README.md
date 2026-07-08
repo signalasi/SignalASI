@@ -45,6 +45,13 @@ npm run check
 npm run smoke
 ```
 
+Desktop smoke gates from the repository root:
+
+```bash
+npm run smoke:desktop
+npm run smoke:desktop:e2e
+```
+
 Windows desktop package:
 
 ```bash
