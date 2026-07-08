@@ -85,6 +85,7 @@ const androidAppStore = fs.readFileSync(path.join(workspaceRoot, "android", "app
 const androidCrypto = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "SignalASICrypto.kt"), "utf8");
 const androidMqtt = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "SignalASIMqttClient.kt"), "utf8");
 const androidVoiceSettings = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "VoiceAssistantSettings.kt"), "utf8");
+const androidCloudModelClient = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "CloudModelClient.kt"), "utf8");
 const androidStringsZh = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "res", "values-zh-rCN", "strings.xml"), "utf8");
 const androidStringsEn = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "res", "values", "strings.xml"), "utf8");
 
@@ -490,6 +491,26 @@ for (const requiredVoicePipelineText of [
 ]) {
   if (![androidMainActivity, androidVoiceSettings, androidStringsZh, androidStringsEn].some((content) => content.includes(requiredVoicePipelineText))) {
     throw new Error(`Android voice pipeline missing: ${requiredVoicePipelineText}`);
+  }
+}
+
+for (const requiredCloudModelText of [
+  "sendOpenAiCompatible",
+  "sendAnthropic",
+  "sendGemini",
+  "\"Authorization\" to \"Bearer",
+  "\"x-api-key\"",
+  "\"anthropic-version\"",
+  "anthropic-dangerous-direct-browser-access",
+  "URLEncoder.encode(contact.getString(\"cloud_api_key\")",
+  "\"system_instruction\"",
+  "\"contents\"",
+  "\"generationConfig\"",
+  "\"HTTP-Referer\"",
+  "\"X-Title\""
+]) {
+  if (!androidCloudModelClient.includes(requiredCloudModelText)) {
+    throw new Error(`Android direct cloud model client missing: ${requiredCloudModelText}`);
   }
 }
 
