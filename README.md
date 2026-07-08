@@ -24,6 +24,12 @@ tests             Cross-platform fixtures and end-to-end tests
 
 ## Development
 
+Repository checks:
+
+```bash
+node tools/dev/check-repo.js
+```
+
 Android:
 
 ```bash
