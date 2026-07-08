@@ -7,6 +7,7 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..", "..");
 const testingMatrix = path.join(root, "docs", "testing", "README.md");
+const productRequirements = path.join(root, "docs", "product", "PRODUCT_REQUIREMENTS.md");
 
 function listTrackedFiles() {
   const result = spawnSync("git", ["ls-files", "-z"], {
@@ -85,10 +86,43 @@ function checkTestingMatrix() {
   }
 }
 
+function checkProductRequirements() {
+  if (!fs.existsSync(productRequirements)) {
+    throw new Error("Missing docs/product/PRODUCT_REQUIREMENTS.md");
+  }
+
+  const content = fs.readFileSync(productRequirements, "utf8");
+  const requiredText = [
+    "Product Requirements",
+    "Product Principles",
+    "Android Requirements",
+    "Desktop Requirements",
+    "Protocol And Security Requirements",
+    "Release Requirements",
+    "Deferred Scope",
+    "Voice page",
+    "Cloud models",
+    "Agent contacts",
+    "Pairing replacement",
+    "npm run smoke:desktop:pairing",
+    "docs/testing/README.md"
+  ];
+
+  for (const text of requiredText) {
+    if (!content.includes(text)) {
+      throw new Error(`Product requirements missing: ${text}`);
+    }
+  }
+}
+
 const checks = [
   {
     name: "testing matrix",
     run: checkTestingMatrix
+  },
+  {
+    name: "product requirements",
+    run: checkProductRequirements
   },
   {
     name: "tracked artifact policy",

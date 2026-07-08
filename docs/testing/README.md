@@ -2,6 +2,8 @@
 
 This matrix maps the current product scope to the checks that prove each area is still working. Run smoke commands sequentially because Android device tests, Desktop backend tests, packaged Desktop tests, and MQTT delivery tests share local ports, device state, broker topics, and a repository test lock.
 
+Product scope is defined in `docs/product/PRODUCT_REQUIREMENTS.md`.
+
 ## Required Gates
 
 | Gate | Command | Proves |

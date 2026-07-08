@@ -59,6 +59,8 @@ Run smoke commands sequentially; they share the local backend port and test lock
 
 Full test coverage is documented in `docs/testing/README.md`.
 
+Product requirements are documented in `docs/product/PRODUCT_REQUIREMENTS.md`.
+
 Windows desktop package:
 
 ```bash
