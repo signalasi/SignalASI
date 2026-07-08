@@ -144,6 +144,37 @@ function checkTrustModel() {
   }
 }
 
+function checkProtocolSpec() {
+  const spec = path.join(root, "docs", "protocol", "SignalASI-Link-Protocol.md");
+  if (!fs.existsSync(spec)) {
+    throw new Error("Missing docs/protocol/SignalASI-Link-Protocol.md");
+  }
+
+  const content = fs.readFileSync(spec, "utf8");
+  const requiredText = [
+    "Version: v1.0.3",
+    "Transport",
+    "Pairing QR Payload",
+    "Pairing Claim",
+    "Signal Envelope",
+    "Delivery Trace",
+    "Agent Contact Metadata",
+    "Compatibility Rules",
+    "signalasichat/android/send",
+    "signalasichat/android/recv",
+    "signalasichat/android/pc",
+    "signalasi_pairing_claim",
+    "delivery_ack",
+    "connector_agents"
+  ];
+
+  for (const text of requiredText) {
+    if (!content.includes(text)) {
+      throw new Error(`Protocol spec missing: ${text}`);
+    }
+  }
+}
+
 const checks = [
   {
     name: "testing matrix",
@@ -156,6 +187,10 @@ const checks = [
   {
     name: "trust model",
     run: checkTrustModel
+  },
+  {
+    name: "protocol spec",
+    run: checkProtocolSpec
   },
   {
     name: "tracked artifact policy",
