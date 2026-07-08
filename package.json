@@ -7,6 +7,7 @@
   "scripts": {
     "check": "node tools/dev/check-repo.js",
     "check:android": "node tools/dev/check-android-build.js",
+    "smoke:android:ui": "npm --prefix apps/desktop run smoke:android-ui",
     "smoke:desktop": "npm --prefix apps/desktop run smoke",
     "smoke:desktop:pairing": "npm --prefix apps/desktop run smoke:pairing",
     "smoke:desktop:agent-push": "npm --prefix apps/desktop run smoke:agent-push",

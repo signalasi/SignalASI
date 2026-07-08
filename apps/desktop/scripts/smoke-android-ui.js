@@ -11,19 +11,19 @@ const windowDump = path.join(outDir, "android-agent-page.xml");
 const securityDump = path.join(outDir, "android-security-page.xml");
 const packageName = "com.signalasi.chat";
 const activityName = `${packageName}/.MainActivity`;
-const securityTitle = "\u5b89\u5168\u4e2d\u5fc3";
+const securityTitle = "Security Center";
 const securityRequiredTexts = [
   securityTitle,
-  "\u9690\u79c1\u4e0e\u5b89\u5168",
-  "\u624b\u673a\u6307\u7eb9",
+  "Privacy &amp; Security",
+  "Phone Fingerprint",
   "SignalASI ID",
-  "\u5df2\u914d\u5bf9\u8bbe\u5907"
+  "Paired Devices"
 ];
 const securityScrolledRequiredTexts = [
-  "Agent \u6743\u9650",
-  "\u6d88\u606f\u4fdd\u62a4",
-  "\u53cc\u7aef\u6307\u7eb9\u786e\u8ba4",
-  "\u64a4\u9500\u6240\u6709 PC \u914d\u5bf9"
+  "Agent Permissions",
+  "Message Protection",
+  "Dual Fingerprint Confirmation",
+  "Revoke All PC Pairings"
 ];
 
 function log(message) {
@@ -109,11 +109,17 @@ async function main() {
       fail(`Window dump missing ${text}. Dump saved at ${windowDump}`);
     }
   }
-  if (xml.includes("Cloud Model")) {
+  if (!xml.includes("Add Cloud Model")) {
+    fail(`Window dump missing mobile direct cloud model entry. Dump saved at ${windowDump}`);
+  }
+  if (xml.includes("Desktop Cloud Model")) {
     fail(`Window dump still exposes Desktop Cloud Model. Dump saved at ${windowDump}`);
   }
 
   const pairedStore = readAppStore();
+  if (pairedStore.includes("&quot;agent_id&quot;:&quot;cloud-model&quot;") || pairedStore.includes(":cloud-model")) {
+    fail("App store still exposes Desktop Cloud Model as a connector contact");
+  }
   for (const text of ["research-agent", "Research Agent", "pc_connector"]) {
     if (!pairedStore.includes(text)) {
       fail(`App store did not include ${text} after debug status sync`);

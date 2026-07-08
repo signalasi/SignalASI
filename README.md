@@ -34,6 +34,7 @@ Android:
 
 ```bash
 npm run check:android
+npm run smoke:android:ui
 ```
 
 Desktop:
