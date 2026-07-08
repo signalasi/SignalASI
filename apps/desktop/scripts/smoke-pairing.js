@@ -124,6 +124,36 @@ async function main() {
         throw new Error(`${legacyRoute} must return HTTP 404, returned HTTP ${status}`);
       }
     }
+    log("checking legacy pairing payload types are ignored");
+    const legacyPayloadCheck = execFileSync(findPython(), [
+      "-c",
+      [
+        "import json, os",
+        "from pairing_state import clear_pairing_state, pairing_status",
+        "import mqtt_bridge",
+        "os.environ.pop('SIGNALASI_ALLOW_UNPAIRED_MQTT', None)",
+        "clear_pairing_state()",
+        "class FakeInfo:",
+        "    mid = 0",
+        "    rc = 0",
+        "class FakeClient:",
+        "    def __init__(self):",
+        "        self.publishes = []",
+        "    def publish(self, *args, **kwargs):",
+        "        self.publishes.append([args, kwargs])",
+        "        return FakeInfo()",
+        "class FakeMsg:",
+        "    topic = mqtt_bridge.TOPIC_SEND",
+        "    payload = json.dumps({'type':'hermes_pairing_claim','pairing_token':'legacy-token','identity_fingerprint':'LEGACY_FP','signal_bundle':{'scheme':'signal','identityKey':'legacy'}}).encode('utf-8')",
+        "fake = FakeClient()",
+        "mqtt_bridge.on_message(fake, None, FakeMsg())",
+        "print(json.dumps({'paired': pairing_status()['paired'], 'publishes': len(fake.publishes)}))"
+      ].join("\n")
+    ], { cwd: backendDir, windowsHide: true, encoding: "utf8" }).trim();
+    const legacyPayload = JSON.parse(legacyPayloadCheck);
+    if (legacyPayload.paired || legacyPayload.publishes !== 0) {
+      throw new Error(`Legacy Hermes pairing claim was not rejected: ${legacyPayloadCheck}`);
+    }
     const payload = await fetchJson("/api/pairing/payload");
     if (!Array.isArray(payload.connector_agents) || payload.connector_agents.length < 2) {
       throw new Error(`Pairing payload did not include connector agents: ${JSON.stringify(payload)}`);
