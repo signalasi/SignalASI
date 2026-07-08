@@ -69,3 +69,9 @@ npm run smoke:desktop:packaged
 ```
 
 The Windows package workflow runs the same package and packaged-smoke gates on Desktop packaging changes.
+
+Release audit:
+
+```bash
+npm run audit:release
+```

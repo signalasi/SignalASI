@@ -10,6 +10,8 @@ const testingMatrix = path.join(root, "docs", "testing", "README.md");
 const productRequirements = path.join(root, "docs", "product", "PRODUCT_REQUIREMENTS.md");
 const trustModel = path.join(root, "docs", "security", "TRUST_MODEL.md");
 const windowsPackageWorkflow = path.join(root, ".github", "workflows", "windows-package.yml");
+const releaseAuditDoc = path.join(root, "docs", "testing", "RELEASE_AUDIT.md");
+const releaseAuditScript = path.join(root, "tools", "dev", "release-audit.js");
 
 function listTrackedFiles() {
   const result = spawnSync("git", ["ls-files", "-z"], {
@@ -198,6 +200,34 @@ function checkWindowsPackageWorkflow() {
   }
 }
 
+function checkReleaseAudit() {
+  if (!fs.existsSync(releaseAuditDoc)) {
+    throw new Error("Missing docs/testing/RELEASE_AUDIT.md");
+  }
+  if (!fs.existsSync(releaseAuditScript)) {
+    throw new Error("Missing tools/dev/release-audit.js");
+  }
+
+  const doc = fs.readFileSync(releaseAuditDoc, "utf8");
+  const script = fs.readFileSync(releaseAuditScript, "utf8");
+  const requiredText = [
+    "npm run audit:release",
+    "Repository Guard",
+    "Windows Package",
+    "Manual Release Checks",
+    "smoke:desktop:mqtt-persistence",
+    "smoke:android:ui",
+    "smoke:android:friends",
+    "smoke:android:background"
+  ];
+
+  for (const text of requiredText) {
+    if (!doc.includes(text) && !script.includes(text)) {
+      throw new Error(`Release audit missing: ${text}`);
+    }
+  }
+}
+
 const checks = [
   {
     name: "testing matrix",
@@ -218,6 +248,10 @@ const checks = [
   {
     name: "windows package workflow",
     run: checkWindowsPackageWorkflow
+  },
+  {
+    name: "release audit",
+    run: checkReleaseAudit
   },
   {
     name: "tracked artifact policy",

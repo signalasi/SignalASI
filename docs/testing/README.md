@@ -24,6 +24,8 @@ Product scope is defined in `docs/product/PRODUCT_REQUIREMENTS.md`.
 
 The `Windows Package` GitHub Actions workflow runs the Windows package build and packaged smoke gates for Desktop packaging changes and can also be started manually.
 
+Run `npm run audit:release` to print the release gate checklist and the latest public GitHub Actions status.
+
 ## Product Coverage
 
 | Product area | Primary evidence |
