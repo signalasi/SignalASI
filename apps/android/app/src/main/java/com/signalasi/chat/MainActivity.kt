@@ -792,7 +792,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             if (state.phase == AgentPhase.PAUSED) {
                 renderAgentState(mobileNativeAgent.resumeCurrentTask())
             } else if (state.pendingAction != null) {
-                renderAgentState(mobileNativeAgent.pauseCurrentTask())
+                renderAgentState(mobileNativeAgent.cancelCurrentTask())
             } else if (agentVoiceListening) {
                 stopAgentVoiceInput()
             } else {
@@ -1573,6 +1573,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             state.phase == AgentPhase.PAUSED -> getString(R.string.agent_status_paused)
             state.phase == AgentPhase.COMPLETED -> getString(R.string.agent_status_completed)
             state.phase == AgentPhase.FAILED -> getString(R.string.agent_status_failed)
+            state.phase == AgentPhase.CANCELLED -> getString(R.string.agent_status_cancelled)
             isPlanning -> getString(R.string.agent_status_planning)
             else -> getString(R.string.agent_status_observing)
         }
@@ -1582,6 +1583,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 ?.ifBlank { getString(R.string.agent_status_blocked_subtitle) }
                 ?: getString(R.string.agent_status_blocked_subtitle)
             state.phase == AgentPhase.PAUSED -> getString(R.string.agent_status_paused_subtitle)
+            state.phase == AgentPhase.CANCELLED -> getString(R.string.agent_status_cancelled_subtitle)
             pendingAction != null -> getString(R.string.agent_status_confirm_subtitle, pendingAction.description)
             state.lastActionResult != null -> getString(R.string.agent_status_result_subtitle, state.lastActionResult.message)
             isPlanning -> getString(R.string.agent_status_goal_subtitle)
@@ -1665,7 +1667,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         )
         agentVoiceButton.text = when {
             state.phase == AgentPhase.PAUSED -> getString(R.string.agent_resume_button)
-            pendingAction != null -> getString(R.string.agent_pause_button)
+            pendingAction != null -> getString(R.string.common_cancel)
             else -> getString(R.string.agent_voice_button)
         }
         agentSubmitButton.text = when {
@@ -2102,6 +2104,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             task.blocked -> getColorCompat(R.color.unread_red)
             task.phase == AgentPhase.COMPLETED -> getColorCompat(R.color.wechat_green)
             task.phase == AgentPhase.FAILED -> getColorCompat(R.color.unread_red)
+            task.phase == AgentPhase.CANCELLED -> getColorCompat(R.color.text_secondary)
             task.phase == AgentPhase.PAUSED -> getColorCompat(R.color.text_secondary)
             else -> getColorCompat(R.color.signalasi_green)
         }
@@ -2709,6 +2712,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         task.blocked -> getString(R.string.agent_recent_status_blocked)
         task.phase == AgentPhase.COMPLETED -> getString(R.string.agent_recent_status_done)
         task.phase == AgentPhase.FAILED -> getString(R.string.agent_recent_status_failed)
+        task.phase == AgentPhase.CANCELLED -> getString(R.string.agent_recent_status_cancelled)
         task.phase == AgentPhase.PAUSED -> getString(R.string.agent_recent_status_paused)
         task.phase == AgentPhase.EXECUTING ||
             task.phase == AgentPhase.VERIFYING ||

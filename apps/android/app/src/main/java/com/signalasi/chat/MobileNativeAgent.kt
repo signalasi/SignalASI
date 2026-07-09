@@ -289,12 +289,17 @@ class MobileNativeAgent(
     }
 
     fun cancelCurrentTask(): AgentUiState {
+        phase = AgentPhase.CANCELLED
+        lastActionResult = AgentActionResult(
+            actionId = "agent-cancelled",
+            success = true,
+            message = "Task cancelled"
+        )
         saveTaskRecord(result = "Cancelled")
-        phase = AgentPhase.OBSERVING
         currentGoal = ""
         currentPlan = null
-        lastActionResult = null
         recordAudit(AgentAuditEvent.TASK_CANCELLED, "cancelled")
+        persistSession()
         return snapshot()
     }
 
@@ -303,7 +308,8 @@ class MobileNativeAgent(
             phase == AgentPhase.OBSERVING ||
             phase == AgentPhase.BLOCKED ||
             phase == AgentPhase.COMPLETED ||
-            phase == AgentPhase.FAILED
+            phase == AgentPhase.FAILED ||
+            phase == AgentPhase.CANCELLED
         ) {
             return snapshot()
         }
@@ -3075,6 +3081,7 @@ enum class AgentPhase {
     EXECUTING,
     VERIFYING,
     PAUSED,
+    CANCELLED,
     BLOCKED,
     COMPLETED,
     FAILED

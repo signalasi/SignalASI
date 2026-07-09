@@ -233,6 +233,8 @@
     <string name="agent_status_blocked_subtitle">Safety policy stopped this task</string>
     <string name="agent_status_completed">Action completed</string>
     <string name="agent_status_failed">Action failed</string>
+    <string name="agent_status_cancelled">Task cancelled</string>
+    <string name="agent_status_cancelled_subtitle">The current Agent plan was cancelled</string>
     <string name="agent_status_default_subtitle">SignalASI - ask before action - high-risk guard on</string>
     <string name="agent_status_goal_subtitle">Goal received - building a safe local plan</string>
     <string name="agent_status_confirm_subtitle">%1$s</string>
@@ -256,6 +258,7 @@
     <string name="agent_recent_status_blocked">Blocked</string>
     <string name="agent_recent_status_done">Done</string>
     <string name="agent_recent_status_failed">Failed</string>
+    <string name="agent_recent_status_cancelled">Cancelled</string>
     <string name="agent_recent_status_running">Running</string>
     <string name="agent_recent_status_paused">Paused</string>
     <string name="agent_section_audit_trail">Audit Trail</string>
