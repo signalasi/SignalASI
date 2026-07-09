@@ -15,7 +15,7 @@ Product scope is defined in `docs/product/PRODUCT_REQUIREMENTS.md`.
 | Android contact rename | `npm run smoke:android:contact-rename` | Agent contact display names can be renamed, persist with user-renamed evidence, and render on the contact detail page. |
 | Android contact type tags | `npm run smoke:android:contact-tags` | Agent, Model, and Device contacts render their type labels in the Android Contacts page. |
 | Android language | `npm run smoke:android:language` | Android defaults to English, can switch to Simplified Chinese, and can switch back to English from Settings. |
-| Android cloud models | `npm run smoke:android:cloud-models` | Direct mobile cloud provider contacts keep provider-only names, preserve multiple model configs, and persist selected chat-header models. |
+| Android cloud models | `npm run smoke:android:cloud-models` | Direct mobile cloud provider contacts keep provider-only names, preserve multiple model configs, persist selected chat-header models, call an OpenAI-compatible API directly from Android, and show the model reply in chat. |
 | Android background delivery | `npm run smoke:android:background` | Offline or background message persistence, notification history, unread badge, list timestamp, bubble timestamp, stable MQTT client identity, and QoS 1 delivery evidence are present. |
 | Android agent replies | `npm run smoke:android:agent-replies` | Hermes and Codex chat replies preserve full text and delivery trace evidence after contact switching and UI refresh. |
 | Android voice reply panel | `npm run smoke:android:voice-reply` | Long Agent replies remain visible on the Voice page response panel and are persisted in the Hermes chat history with delivery trace evidence. |

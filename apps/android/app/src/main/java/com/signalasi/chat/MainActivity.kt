@@ -2175,6 +2175,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         val delayMs = if (attempt == 0) 300L else 1000L
         handler.postDelayed({
+            val contact = contactById(contactId)
+            val raw = AppStore.contactById(this, contact.id)
+            if (raw?.optString("delivery_mode") == "cloud_api") {
+                sendOutgoingText(contact, content)
+                Toast.makeText(this, getString(R.string.debug_message_sent_to, contact.name), Toast.LENGTH_SHORT).show()
+                return@postDelayed
+            }
             if (!SignalASIMqttClient.isConnected() || !SignalASIMqttClient.isSecureReady()) {
                 if (attempt < 12) {
                     scheduleDebugOutgoing(contactId, content, attempt + 1)
@@ -2183,7 +2190,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
                 return@postDelayed
             }
-            val contact = contactById(contactId)
             sendOutgoingText(contact, content)
             Toast.makeText(this, getString(R.string.debug_message_sent_to, contact.name), Toast.LENGTH_SHORT).show()
         }, delayMs)

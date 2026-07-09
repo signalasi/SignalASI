@@ -451,6 +451,9 @@ for (const requiredText of [
   "smoke:android-language",
   "signalasi_debug_cloud_models_roundtrip",
   "cloud_models_roundtrip_result",
+  "CLOUD_API_REPLY_",
+  "direct_mobile_cloud_api",
+  "adb([\"reverse\"",
   "deepseek-v4-flash",
   "smoke:android-cloud-models",
   "signalasi_debug_open_voice_settings",
@@ -501,7 +504,7 @@ for (const requiredText of [
   "scripts/smoke.js",
   "SignalASI Link Protocol"
 ]) {
-if (![main, preload, html, renderer, packageJson, packager, androidAdb, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidContactTags, smokeAndroidLanguage, smokeAndroidBackground, smokeAndroidAgentReplies, smokeAndroidBackup, smokeAndroidVoiceReply, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeVoiceStt, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendGateway, backendAgentConfig, backendPushAuth, backendSignalasiNotify, backendStt, androidMainActivity, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
+if (![main, preload, html, renderer, packageJson, packager, androidAdb, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidContactTags, smokeAndroidLanguage, smokeAndroidCloudModels, smokeAndroidBackground, smokeAndroidAgentReplies, smokeAndroidBackup, smokeAndroidVoiceReply, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeVoiceStt, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendGateway, backendAgentConfig, backendPushAuth, backendSignalasiNotify, backendStt, androidMainActivity, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
     throw new Error(`Missing desktop connector capability: ${requiredText}`);
   }
 }

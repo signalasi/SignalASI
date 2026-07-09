@@ -77,19 +77,24 @@ function tapText(xml, text, label, dumpPath) {
 }
 
 async function openLanguagePage(dumpPath, remoteName) {
-  adb(["shell", "am", "force-stop", packageName]);
-  adb([
-    "shell",
-    "am",
-    "start",
-    "-n",
-    activityName,
-    "--ez",
-    "signalasi_debug_open_language_settings",
-    "true"
-  ]);
-  await sleep(3500);
-  return dumpWindowTo(dumpPath, remoteName);
+  let xml = "";
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    adb(["shell", "am", "force-stop", packageName]);
+    adb([
+      "shell",
+      "am",
+      "start",
+      "-n",
+      activityName,
+      "--ez",
+      "signalasi_debug_open_language_settings",
+      "true"
+    ]);
+    await sleep(3500 + attempt * 500);
+    xml = dumpWindowTo(dumpPath, remoteName);
+    if (xml.includes("Language") || xml.includes("\u8bed\u8a00")) return xml;
+  }
+  return xml;
 }
 
 function requireEnglish(xml, dumpPath) {
