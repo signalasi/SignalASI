@@ -32,6 +32,15 @@ object AgentSystemToolPlanner {
                 description = "Open accessibility settings",
                 intentAction = Settings.ACTION_ACCESSIBILITY_SETTINGS
             )
+            lower.contains("open notification listener settings") ||
+                lower.contains("open notification access settings") ||
+                lower.contains("notification listener permission") ||
+                lower.contains("notification access permission") -> intentAction(
+                    id = "open-notification-listener-settings",
+                    target = "Notification Access",
+                    description = "Open notification listener access settings",
+                    intentAction = "android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"
+                )
             lower.contains("open notification settings") || lower == "notification settings" -> intentAction(
                 id = "open-notification-settings",
                 target = "Notification Settings",
@@ -415,7 +424,12 @@ object AgentSystemToolPlanner {
             kind = AgentActionKind.OPEN_APP,
             risk = AgentRisk.LOW,
             capabilities = listOf(AgentCapability.SYSTEM_SETTINGS, AgentCapability.APP_NAVIGATION),
-            examples = listOf("open settings", "open wifi settings", "open battery settings", "open display settings")
+            examples = listOf(
+                "open settings",
+                "open wifi settings",
+                "open notification listener settings",
+                "open battery settings"
+            )
         ),
         AgentSystemTool(
             id = "navigation",

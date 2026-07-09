@@ -758,6 +758,14 @@ class RuleBasedAgentPlanner : AgentPlanner {
                 status = AgentActionStatus.PENDING_CONFIRMATION,
                 description = "Read current screen structure"
             )
+            lower.contains("read notifications") || lower.contains("scan notifications") -> AgentAction(
+                id = "read-notifications",
+                kind = AgentActionKind.READ_SCREEN,
+                target = "Notification Context",
+                risk = AgentRisk.LOW,
+                status = AgentActionStatus.PENDING_CONFIRMATION,
+                description = "Read current notification context"
+            )
             (lower.startsWith("type ") || lower.startsWith("input ")) && lower.contains(" into ") ->
                 namedTextInputAction(request)
             lower.startsWith("type ") -> AgentAction(
@@ -1302,11 +1310,7 @@ interface AgentActionExecutor {
 
 class AndroidAgentActionExecutor(private val context: Context) : AgentActionExecutor {
     override fun execute(action: AgentAction, screen: ScreenContext): AgentActionResult = when (action.kind) {
-        AgentActionKind.READ_SCREEN -> AgentActionResult(
-            actionId = action.id,
-            success = true,
-            message = "Read ${screen.visibleTextCount} text items and ${screen.clickableNodeCount} actions"
-        )
+        AgentActionKind.READ_SCREEN -> readScreenContext(action, screen)
         AgentActionKind.SAVE_SCREEN_KNOWLEDGE -> saveScreenKnowledge(action, screen)
         AgentActionKind.DRAFT_PLAN -> AgentActionResult(
             actionId = action.id,
@@ -1457,6 +1461,32 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             )
         )
         return AgentActionResult(action.id, true, "Saved screen snapshot to Agent knowledge")
+    }
+
+    private fun readScreenContext(action: AgentAction, screen: ScreenContext): AgentActionResult {
+        if (action.id == "read-notifications") {
+            if (!screen.notifications.hasAccess) {
+                return AgentActionResult(action.id, false, "Notification access is not enabled")
+            }
+            val packages = screen.notifications.items
+                .map { it.packageName }
+                .filter { it.isNotBlank() }
+                .distinct()
+                .take(4)
+                .joinToString(", ")
+                .ifBlank { "none" }
+            val sensitiveCount = screen.notifications.items.count { it.sensitiveFlags.isNotEmpty() }
+            return AgentActionResult(
+                actionId = action.id,
+                success = true,
+                message = "Read ${screen.notifications.items.size} notifications from $packages; sensitive=$sensitiveCount"
+            )
+        }
+        return AgentActionResult(
+            actionId = action.id,
+            success = true,
+            message = "Read ${screen.visibleTextCount} text items and ${screen.clickableNodeCount} actions"
+        )
     }
 
     private fun openApp(action: AgentAction): AgentActionResult {

@@ -22,6 +22,7 @@ data class AgentRuntimeContext(
         append("; screen=").append(screen.foregroundApp)
         append("; texts=").append(screen.visibleTextCount)
         append("; actions=").append(screen.clickableNodeCount)
+        append("; notifications=").append(screen.notifications.items.size)
         append("; tools=").append(systemTools.size)
         append("; targets=").append(callableTargets.size)
         append("; memories=").append(memories.size)
