@@ -142,6 +142,9 @@ class MobileNativeAgent(
         callableInventoryCommand(currentGoal)?.let { filter ->
             return showCallableInventoryCommand(filter)
         }
+        callableSearchCommandValue(currentGoal)?.let { query ->
+            return searchCallableInventoryCommand(query)
+        }
         if (recentTasksCommand(currentGoal)) {
             return showRecentTasksCommand()
         }
@@ -413,6 +416,25 @@ class MobileNativeAgent(
         }
     }
 
+    private fun callableSearchCommandValue(goal: String): String? {
+        val prefixes = listOf(
+            "search tools ",
+            "find tools ",
+            "search tool ",
+            "find tool ",
+            "search capabilities ",
+            "find capabilities ",
+            "search capability ",
+            "find capability ",
+            "search agents ",
+            "find agents ",
+            "search models ",
+            "find models "
+        )
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
     private fun recentTasksCommand(goal: String): Boolean {
         val normalized = goal.trim().lowercase(Locale.US)
         return normalized == "recent tasks" ||
@@ -679,6 +701,50 @@ class MobileNativeAgent(
         return snapshot()
     }
 
+    private fun searchCallableInventoryCommand(query: String): AgentUiState {
+        val targets = connectorRegistry.availableTargets()
+        val tools = AgentSystemToolPlanner.availableTools()
+        val result = callableInventorySearchSummary(query, targets, tools)
+        val action = AgentAction(
+            id = "search-callable-inventory",
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Tool Router",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.COMPLETED,
+            description = "Search Agent callable inventory",
+            parameters = mapOf("query" to query),
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Tool Router",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "agent-tool-router",
+                kind = AgentRouteKind.LOCAL_SYSTEM,
+                targetId = "agent-tool-router",
+                targetTitle = "Agent Tool Router",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.TASK_EXECUTION)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        return snapshot()
+    }
+
     private fun callableInventorySummary(
         filter: CallableInventoryFilter,
         targets: List<AgentCallableTarget>,
@@ -709,6 +775,50 @@ class MobileNativeAgent(
             .joinToString(" | ")
             .ifBlank { "No callable inventory for ${filter.name.lowercase(Locale.US)}" }
     }
+
+    private fun callableInventorySearchSummary(
+        query: String,
+        targets: List<AgentCallableTarget>,
+        tools: List<AgentSystemTool>
+    ): String {
+        val cleanQuery = query.trim().lowercase(Locale.US)
+        if (cleanQuery.isBlank()) return "No callable inventory query"
+        val targetMatches = targets
+            .filter { target -> callableTargetSearchText(target).contains(cleanQuery) }
+            .take(6)
+            .joinToString(" | ") { target ->
+                "${target.title}:${target.kind.name.lowercase(Locale.US)}:${target.status.name.lowercase(Locale.US)}"
+            }
+        val toolMatches = tools
+            .filter { tool -> systemToolSearchText(tool).contains(cleanQuery) }
+            .take(8)
+            .joinToString(" | ") { tool ->
+                "${tool.title}:${tool.kind.name.lowercase(Locale.US)}:${tool.risk.name.lowercase(Locale.US)}"
+            }
+        return listOf(targetMatches, toolMatches)
+            .filter { it.isNotBlank() }
+            .joinToString(" | ")
+            .ifBlank { "No callable inventory hits for \"$query\"" }
+    }
+
+    private fun callableTargetSearchText(target: AgentCallableTarget): String =
+        listOf(
+            target.id,
+            target.title,
+            target.kind.name,
+            target.status.name,
+            target.capabilities.joinToString(" ") { it.name }
+        ).joinToString(" ").lowercase(Locale.US)
+
+    private fun systemToolSearchText(tool: AgentSystemTool): String =
+        listOf(
+            tool.id,
+            tool.title,
+            tool.kind.name,
+            tool.risk.name,
+            tool.capabilities.joinToString(" ") { it.name },
+            tool.examples.joinToString(" ")
+        ).joinToString(" ").lowercase(Locale.US)
 
     private fun setMemoryCaptureCommand(enabled: Boolean): AgentUiState {
         safetySettingsStore.save(safetySettingsStore.load().copy(memoryCapture = enabled))
