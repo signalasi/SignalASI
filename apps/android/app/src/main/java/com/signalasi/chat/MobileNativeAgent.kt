@@ -1978,6 +1978,19 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 message = "Battery ${status.batteryPercent}% / charging=${status.charging} / powerSave=${status.powerSaveMode} / network=${status.network} / storage=${status.freeStorageMb}MB free"
             )
         }
+        if (action.id == "read-clipboard") {
+            val clipboard = screen.clipboard
+            val message = when {
+                !clipboard.hasText -> "Clipboard is empty"
+                clipboard.sensitiveFlags.isNotEmpty() -> "Clipboard has ${clipboard.textLength} chars and sensitive flags=${clipboard.sensitiveFlags.joinToString(",")}"
+                else -> "Clipboard has ${clipboard.textLength} chars: ${clipboard.preview.ifBlank { clipboard.textHash }}"
+            }
+            return AgentActionResult(
+                actionId = action.id,
+                success = true,
+                message = message
+            )
+        }
         return AgentActionResult(
             actionId = action.id,
             success = true,

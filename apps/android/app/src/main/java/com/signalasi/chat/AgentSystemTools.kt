@@ -122,6 +122,14 @@ object AgentSystemToolPlanner {
                 status = AgentActionStatus.PENDING_CONFIRMATION,
                 description = "Copy current screen text"
             )
+            lower.contains("read clipboard") || lower.contains("clipboard status") -> AgentAction(
+                id = "read-clipboard",
+                kind = AgentActionKind.READ_SCREEN,
+                target = "Clipboard",
+                risk = AgentRisk.LOW,
+                status = AgentActionStatus.PENDING_CONFIRMATION,
+                description = "Read clipboard context"
+            )
             lower.contains("clear text") || lower.contains("delete text") -> textEditAction(
                 id = "clear-focused-text",
                 kind = AgentActionKind.DELETE_TEXT,
@@ -578,7 +586,7 @@ object AgentSystemToolPlanner {
             kind = AgentActionKind.COPY_SCREEN_TEXT,
             risk = AgentRisk.LOW,
             capabilities = listOf(AgentCapability.SCREEN_READING, AgentCapability.CLIPBOARD),
-            examples = listOf("copy screen text", "copy current screen", "paste clipboard", "clear text")
+            examples = listOf("copy screen text", "read clipboard", "paste clipboard", "clear text")
         ),
         AgentSystemTool(
             id = "share-text",
