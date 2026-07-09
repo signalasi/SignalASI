@@ -11,6 +11,7 @@
     "smoke:android:friends": "npm --prefix apps/desktop run smoke:android-friends",
     "smoke:android:contact-rename": "npm --prefix apps/desktop run smoke:android-contact-rename",
     "smoke:android:contact-tags": "npm --prefix apps/desktop run smoke:android-contact-tags",
+    "smoke:android:language": "npm --prefix apps/desktop run smoke:android-language",
     "smoke:android:cloud-models": "npm --prefix apps/desktop run smoke:android-cloud-models",
     "smoke:android:background": "npm --prefix apps/desktop run smoke:android-background",
     "smoke:android:agent-replies": "npm --prefix apps/desktop run smoke:android-agent-replies",

@@ -256,6 +256,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppLanguage.applyToResources(this)
         configureSystemBars()
         setContentView(R.layout.activity_main)
         AppStore.ensureInitialized(this)
@@ -1611,6 +1612,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val openAgents = intent?.getBooleanExtra("signalasi_debug_open_agents", false) == true
         val openSecurity = intent?.getBooleanExtra("signalasi_debug_open_security", false) == true
         val openVoiceSettings = intent?.getBooleanExtra("signalasi_debug_open_voice_settings", false) == true
+        val openLanguageSettings = intent?.getBooleanExtra("signalasi_debug_open_language_settings", false) == true
         val openOnDeviceAgent = intent?.getBooleanExtra("signalasi_debug_open_on_device_agent", false) == true
         val openBackupExport = intent?.getBooleanExtra("signalasi_debug_open_backup_export", false) == true
         val openBackupImport = intent?.getBooleanExtra("signalasi_debug_open_backup_import", false) == true
@@ -1754,6 +1756,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             intent?.removeExtra("signalasi_debug_rename_name_b64")
             intent?.removeExtra("signalasi_debug_open_messages")
             intent?.removeExtra("signalasi_debug_open_contacts")
+            intent?.removeExtra("signalasi_debug_open_language_settings")
             val seededCloudContact = if (seedCloudProvider.isNotBlank() || openCloudSwitchProvider.isNotBlank()) {
                 debugSeedCloudProvider(seedCloudProvider.ifBlank { openCloudSwitchProvider })
             } else {
@@ -1812,6 +1815,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             if (openVoiceSettings) {
                 showVoiceAssistantSettingsPage()
             }
+            if (openLanguageSettings) {
+                showLanguageSettingsPage()
+            }
             if (openOnDeviceAgent) {
                 showOnDeviceAgentFeaturePage()
             }
@@ -1841,6 +1847,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         intent?.removeExtra("signalasi_debug_open_agents")
         intent?.removeExtra("signalasi_debug_open_security")
         intent?.removeExtra("signalasi_debug_open_voice_settings")
+        intent?.removeExtra("signalasi_debug_open_language_settings")
         intent?.removeExtra("signalasi_debug_open_on_device_agent")
         intent?.removeExtra("signalasi_debug_open_backup_export")
         intent?.removeExtra("signalasi_debug_open_backup_import")
@@ -1913,6 +1920,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         if (openVoiceSettings) {
             showVoiceAssistantSettingsPage()
+        }
+        if (openLanguageSettings) {
+            showLanguageSettingsPage()
         }
         if (openOnDeviceAgent) {
             showOnDeviceAgentFeaturePage()

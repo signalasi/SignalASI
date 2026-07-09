@@ -45,6 +45,7 @@ function isAllowedChineseFile(file) {
   const rel = normalize(path.relative(root, file));
   return (
     rel === "apps/android/app/src/main/res/values-zh-rCN/strings.xml" ||
+    rel === "apps/android/app/src/main/res/values-b+zh+Hans+CN/strings.xml" ||
     rel === "apps/desktop/src/renderer/locales/zh-CN.json" ||
     /apps\/ios\/.*\/zh-Hans\.lproj\/Localizable\.strings$/.test(rel)
   );

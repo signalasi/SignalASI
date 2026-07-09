@@ -12,6 +12,7 @@ const gates = [
   "smoke:android:friends",
   "smoke:android:contact-rename",
   "smoke:android:contact-tags",
+  "smoke:android:language",
   "smoke:android:cloud-models",
   "smoke:android:background",
   "smoke:android:agent-replies",

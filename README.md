@@ -38,6 +38,7 @@ npm run smoke:android:ui
 npm run smoke:android:friends
 npm run smoke:android:contact-rename
 npm run smoke:android:contact-tags
+npm run smoke:android:language
 npm run smoke:android:cloud-models
 npm run smoke:android:background
 npm run smoke:android:agent-replies

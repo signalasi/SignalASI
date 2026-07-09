@@ -19,7 +19,7 @@ object AppLanguage {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY, normalized)
-            .apply()
+            .commit()
     }
 
     fun wrap(context: Context): Context {
@@ -31,6 +31,18 @@ object AppLanguage {
             config.setLocales(android.os.LocaleList(locale))
         }
         return context.createConfigurationContext(config)
+    }
+
+    @Suppress("DEPRECATION")
+    fun applyToResources(context: Context) {
+        val locale = localeFor(current(context))
+        Locale.setDefault(locale)
+        val config = Configuration(context.resources.configuration)
+        config.setLocale(locale)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            config.setLocales(android.os.LocaleList(locale))
+        }
+        context.resources.updateConfiguration(config, context.resources.displayMetrics)
     }
 
     fun displayName(context: Context): String =
