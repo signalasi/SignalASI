@@ -245,6 +245,9 @@
     <string name="agent_recent_status_done">Done</string>
     <string name="agent_recent_status_failed">Failed</string>
     <string name="agent_recent_status_running">Running</string>
+    <string name="agent_section_audit_trail">Audit Trail</string>
+    <string name="agent_audit_empty">No Agent audit events yet</string>
+    <string name="agent_audit_meta">%1$s ago</string>
     <string name="agent_section_info">Info</string>
     <string name="agent_step_observe">Read current screen structure</string>
     <string name="agent_step_analyze">Analyze user goal</string>

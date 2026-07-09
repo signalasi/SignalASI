@@ -159,6 +159,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentKnowledgeText: TextView
     private lateinit var agentScreenSearchInput: EditText
     private lateinit var agentScreenDetailList: LinearLayout
+    private lateinit var agentAuditTrailList: LinearLayout
     private lateinit var agentRecentTaskList: LinearLayout
     private lateinit var agentGoalInput: EditText
     private lateinit var agentVoiceButton: TextView
@@ -330,6 +331,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentKnowledgeText = findViewById(R.id.agentKnowledgeText)
         agentScreenSearchInput = findViewById(R.id.agentScreenSearchInput)
         agentScreenDetailList = findViewById(R.id.agentScreenDetailList)
+        agentAuditTrailList = findViewById(R.id.agentAuditTrailList)
         agentRecentTaskList = findViewById(R.id.agentRecentTaskList)
         agentGoalInput = findViewById(R.id.agentGoalInput)
         agentVoiceButton = findViewById(R.id.agentVoiceButton)
@@ -1619,6 +1621,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             )
         }
         renderAgentRecentTasks(state)
+        renderAgentAuditTrail(state)
         latestAgentScreenContext = state.currentScreen
         renderAgentScreenDetails(state.currentScreen)
     }
@@ -1634,6 +1637,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
+    private fun renderAgentAuditTrail(state: AgentUiState) {
+        agentAuditTrailList.removeAllViews()
+        val events = state.auditTrail.takeLast(6).asReversed()
+        if (events.isEmpty()) {
+            agentAuditTrailList.addView(agentAuditEmptyRow())
+            return
+        }
+        events.forEachIndexed { index, entry ->
+            agentAuditTrailList.addView(agentAuditRow(entry, index))
+        }
+    }
+
     private fun agentRecentEmptyRow(): View {
         return TextView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
@@ -1646,6 +1661,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             setTextColor(getColorCompat(R.color.text_secondary))
             textSize = 14f
             text = getString(R.string.agent_recent_empty)
+        }
+    }
+
+    private fun agentAuditEmptyRow(): View {
+        return TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48)
+            )
+            setBackgroundResource(R.drawable.agent_step_background)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), 0, dp(14), 0)
+            setTextColor(getColorCompat(R.color.text_secondary))
+            textSize = 13f
+            text = getString(R.string.agent_audit_empty)
         }
     }
 
@@ -1716,6 +1746,68 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 setTypeface(null, android.graphics.Typeface.BOLD)
                 text = statusText
             })
+        }
+    }
+
+    private fun agentAuditRow(entry: AgentAuditEntry, index: Int): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundResource(R.drawable.agent_step_background)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                if (index > 0) topMargin = dp(8)
+            }
+
+            addView(TextView(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply {
+                    marginEnd = dp(12)
+                }
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(getColorCompat(R.color.wechat_green))
+                }
+            })
+
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+
+                addView(TextView(this@MainActivity).apply {
+                    setTextColor(getColorCompat(R.color.text_primary))
+                    textSize = 13f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    text = entry.event.name.lowercase(Locale.US).replace('_', ' ')
+                })
+
+                addView(TextView(this@MainActivity).apply {
+                    setTextColor(getColorCompat(R.color.text_secondary))
+                    textSize = 11f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    text = entry.detail.ifBlank { "-" }
+                })
+            })
+
+            addView(TextView(this@MainActivity).apply {
+                setTextColor(getColorCompat(R.color.text_secondary))
+                textSize = 11f
+                text = getString(R.string.agent_audit_meta, agentAuditAge(entry.timestampMillis))
+            })
+        }
+    }
+
+    private fun agentAuditAge(timestampMillis: Long): String {
+        val deltaSeconds = ((System.currentTimeMillis() - timestampMillis).coerceAtLeast(0L) / 1000L)
+        return when {
+            deltaSeconds < 60 -> "${deltaSeconds}s"
+            deltaSeconds < 3600 -> "${deltaSeconds / 60}m"
+            deltaSeconds < 86_400 -> "${deltaSeconds / 3600}h"
+            else -> "${deltaSeconds / 86_400}d"
         }
     }
 
