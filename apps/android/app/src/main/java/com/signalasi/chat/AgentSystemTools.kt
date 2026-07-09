@@ -463,7 +463,7 @@ object AgentSystemToolPlanner {
             kind = AgentActionKind.HOME,
             risk = AgentRisk.LOW,
             capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.DEVICE_CONTROL),
-            examples = listOf("go home", "show recents", "go back")
+            examples = listOf("go home", "show recents", "go back", "lock screen")
         ),
         AgentSystemTool(
             id = "open-url",

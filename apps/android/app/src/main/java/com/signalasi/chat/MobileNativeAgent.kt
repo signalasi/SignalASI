@@ -945,6 +945,16 @@ class RuleBasedAgentPlanner : AgentPlanner {
                 status = AgentActionStatus.PENDING_CONFIRMATION,
                 description = "Go back one screen"
             )
+            lower == "lock screen" ||
+                lower == "turn off screen" ||
+                lower.contains("lock the phone") -> AgentAction(
+                    id = "lock-screen",
+                    kind = AgentActionKind.LOCK_SCREEN,
+                    target = "Screen Lock",
+                    risk = AgentRisk.MEDIUM,
+                    status = AgentActionStatus.PENDING_CONFIRMATION,
+                    description = "Lock the phone screen"
+                )
             lower.contains("save screen") ||
                 lower.contains("remember screen") ||
                 lower.contains("capture screen to knowledge") -> AgentAction(
@@ -1379,7 +1389,8 @@ object AgentPlanFactory {
             AgentActionKind.SWIPE,
             AgentActionKind.BACK,
             AgentActionKind.HOME,
-            AgentActionKind.RECENTS -> permissions += AgentPermissionRequirement(
+            AgentActionKind.RECENTS,
+            AgentActionKind.LOCK_SCREEN -> permissions += AgentPermissionRequirement(
                 id = "accessibility_service",
                 title = "Screen Agent permission",
                 granted = request.screen.isAccessibilityEnabled
@@ -1460,6 +1471,7 @@ object AgentPlanFactory {
         AgentActionKind.TAP,
         AgentActionKind.LONG_PRESS,
         AgentActionKind.SWIPE -> "Observe the result and go back if the page changed unexpectedly."
+        AgentActionKind.LOCK_SCREEN -> "Wake and unlock the phone manually to continue."
         AgentActionKind.CALL_CONNECTOR,
         AgentActionKind.CONTROL_DEVICE -> "Keep the task in chat history and report delivery failure."
         else -> "Stop execution and ask the user before retrying."
@@ -1472,6 +1484,7 @@ object AgentPlanFactory {
         AgentActionKind.OPEN_APP -> "The requested Android screen opens."
         AgentActionKind.OPEN_URL -> "The requested URL opens in a browser or matching app."
         AgentActionKind.SET_ALARM -> "Android alarm setup is opened or handed off."
+        AgentActionKind.LOCK_SCREEN -> "The phone screen is locked through Accessibility."
         AgentActionKind.COPY_SCREEN_TEXT -> "Visible screen text is copied to the clipboard."
         AgentActionKind.SAVE_SCREEN_KNOWLEDGE -> "Current screen is saved into Agent knowledge."
         AgentActionKind.DELETE_TEXT -> "Text is cleared from the active input field."
@@ -1524,6 +1537,7 @@ object AgentPlanFactory {
         AgentActionKind.OPEN_URL,
         AgentActionKind.SET_ALARM -> "Android intent route selected because the task maps to a system app or system handoff."
         AgentActionKind.CREATE_NOTIFICATION -> "Local notification route selected because the task should alert the user on this phone."
+        AgentActionKind.LOCK_SCREEN -> "Mobile executor route selected for an owner-confirmed screen lock."
         AgentActionKind.DRAFT_PLAN -> "Local planning route selected because the task needs clarification or a safe plan first."
     }
 }
@@ -1555,6 +1569,7 @@ object AgentRouteResolver {
             AgentActionKind.BACK,
             AgentActionKind.HOME,
             AgentActionKind.RECENTS,
+            AgentActionKind.LOCK_SCREEN,
             AgentActionKind.OPEN_APP,
             AgentActionKind.OPEN_URL,
             AgentActionKind.SET_ALARM,
@@ -1767,6 +1782,9 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         }
         AgentActionKind.RECENTS -> serviceAction(action.id, "Recent apps opened") {
             SignalASIAccessibilityService.performGlobalRecents()
+        }
+        AgentActionKind.LOCK_SCREEN -> serviceAction(action.id, "Screen locked") {
+            SignalASIAccessibilityService.performGlobalLockScreen()
         }
         AgentActionKind.COPY_SCREEN_TEXT -> copyScreenText(action, screen)
         AgentActionKind.OPEN_URL -> openUrl(action)
@@ -3011,6 +3029,7 @@ private fun AgentActionKind.mayChangeScreen(): Boolean = when (this) {
     AgentActionKind.BACK,
     AgentActionKind.HOME,
     AgentActionKind.RECENTS,
+    AgentActionKind.LOCK_SCREEN,
     AgentActionKind.OPEN_APP,
     AgentActionKind.OPEN_URL,
     AgentActionKind.SET_ALARM -> true
@@ -3248,6 +3267,7 @@ enum class AgentActionKind {
     BACK,
     HOME,
     RECENTS,
+    LOCK_SCREEN,
     OPEN_APP,
     OPEN_URL,
     SET_ALARM,

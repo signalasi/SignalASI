@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Rect
 import android.os.Bundle
+import android.os.Build
 import android.graphics.Path
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -160,6 +161,10 @@ class SignalASIAccessibilityService : AccessibilityService() {
         fun performGlobalHome(): Boolean = activeService?.performGlobalAction(GLOBAL_ACTION_HOME) == true
 
         fun performGlobalRecents(): Boolean = activeService?.performGlobalAction(GLOBAL_ACTION_RECENTS) == true
+
+        fun performGlobalLockScreen(): Boolean =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                activeService?.performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN) == true
 
         fun performTap(bounds: String): Boolean = activeService?.tap(bounds) == true
 
