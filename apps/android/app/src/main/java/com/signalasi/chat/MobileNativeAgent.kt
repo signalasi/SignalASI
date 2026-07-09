@@ -139,6 +139,9 @@ class MobileNativeAgent(
         }
 
         currentScreen = perceptionProvider.capture()
+        callableInventoryCommand(currentGoal)?.let { filter ->
+            return showCallableInventoryCommand(filter)
+        }
         if (recentTasksCommand(currentGoal)) {
             return showRecentTasksCommand()
         }
@@ -384,6 +387,32 @@ class MobileNativeAgent(
         return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
     }
 
+    private fun callableInventoryCommand(goal: String): CallableInventoryFilter? {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return when (normalized) {
+            "list tools",
+            "show tools",
+            "available tools",
+            "list system tools",
+            "show system tools" -> CallableInventoryFilter.TOOLS
+            "list agents",
+            "show agents",
+            "available agents" -> CallableInventoryFilter.AGENTS
+            "list models",
+            "show models",
+            "available models" -> CallableInventoryFilter.MODELS
+            "list devices",
+            "show devices",
+            "available devices" -> CallableInventoryFilter.DEVICES
+            "list capabilities",
+            "show capabilities",
+            "list callable targets",
+            "show callable targets",
+            "what can you do" -> CallableInventoryFilter.ALL
+            else -> null
+        }
+    }
+
     private fun recentTasksCommand(goal: String): Boolean {
         val normalized = goal.trim().lowercase(Locale.US)
         return normalized == "recent tasks" ||
@@ -604,6 +633,81 @@ class MobileNativeAgent(
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
         return snapshot()
+    }
+
+    private fun showCallableInventoryCommand(filter: CallableInventoryFilter): AgentUiState {
+        val targets = connectorRegistry.availableTargets()
+        val tools = AgentSystemToolPlanner.availableTools()
+        val result = callableInventorySummary(filter, targets, tools)
+        val action = AgentAction(
+            id = "show-callable-inventory",
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Tool Router",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.COMPLETED,
+            description = "Show Agent callable inventory",
+            parameters = mapOf("filter" to filter.name),
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Tool Router",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "agent-tool-router",
+                kind = AgentRouteKind.LOCAL_SYSTEM,
+                targetId = "agent-tool-router",
+                targetTitle = "Agent Tool Router",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.TASK_EXECUTION)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        return snapshot()
+    }
+
+    private fun callableInventorySummary(
+        filter: CallableInventoryFilter,
+        targets: List<AgentCallableTarget>,
+        tools: List<AgentSystemTool>
+    ): String {
+        val targetLines = targets
+            .filter { target ->
+                when (filter) {
+                    CallableInventoryFilter.AGENTS -> target.kind == AgentConnectorKind.AGENT
+                    CallableInventoryFilter.MODELS -> target.kind == AgentConnectorKind.MODEL
+                    CallableInventoryFilter.DEVICES -> target.kind == AgentConnectorKind.DEVICE
+                    CallableInventoryFilter.TOOLS -> false
+                    CallableInventoryFilter.ALL -> true
+                }
+            }
+            .joinToString(" | ") { target ->
+                "${target.title}:${target.kind.name.lowercase(Locale.US)}:${target.status.name.lowercase(Locale.US)}"
+            }
+        val toolLines = if (filter == CallableInventoryFilter.TOOLS || filter == CallableInventoryFilter.ALL) {
+            tools.joinToString(" | ") { tool ->
+                "${tool.title}:${tool.kind.name.lowercase(Locale.US)}:${tool.risk.name.lowercase(Locale.US)}"
+            }
+        } else {
+            ""
+        }
+        return listOf(targetLines, toolLines)
+            .filter { it.isNotBlank() }
+            .joinToString(" | ")
+            .ifBlank { "No callable inventory for ${filter.name.lowercase(Locale.US)}" }
     }
 
     private fun setMemoryCaptureCommand(enabled: Boolean): AgentUiState {
@@ -3601,6 +3705,14 @@ enum class AgentConnectorKind {
     AGENT,
     DEVICE,
     KNOWLEDGE
+}
+
+private enum class CallableInventoryFilter {
+    ALL,
+    TOOLS,
+    AGENTS,
+    MODELS,
+    DEVICES
 }
 
 enum class AgentConnectorStatus {
