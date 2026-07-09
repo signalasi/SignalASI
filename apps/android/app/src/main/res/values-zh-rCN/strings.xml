@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">SignalASI</string>
+    <string name="tab_agent">Agent</string>
     <string name="tab_messages">消息</string>
     <string name="tab_contacts">通讯录</string>
     <string name="tab_discover">发现</string>
@@ -206,6 +207,30 @@
     <string name="security_device_agent_fingerprint_summary">%1$d 个 Agent / %2$s</string>
     <string name="security_revoked_all_pc">已撤销所有 PC 配对</string>
     <string name="status_unknown">未知</string>
+    <string name="agent_tab_title">Agent</string>
+    <string name="agent_tab_subtitle">手机本体超级智能体</string>
+    <string name="agent_status_observing">正在观察当前屏幕</string>
+    <string name="agent_status_planning">正在根据目标规划</string>
+    <string name="agent_status_default_subtitle">SignalASI · 执行前确认 · 高危保护开启</string>
+    <string name="agent_status_goal_subtitle">已收到目标 · 正在生成安全本机计划</string>
+    <string name="agent_badge_safe">安全</string>
+    <string name="agent_section_process">执行过程</string>
+    <string name="agent_section_info">信息</string>
+    <string name="agent_step_observe">读取当前屏幕结构</string>
+    <string name="agent_step_analyze">分析用户目标</string>
+    <string name="agent_step_plan">生成可执行计划</string>
+    <string name="agent_step_act">确认后执行动作</string>
+    <string name="agent_step_status_current">当前</string>
+    <string name="agent_step_status_done">完成</string>
+    <string name="agent_step_status_waiting">等待</string>
+    <string name="agent_step_status_safe">安全</string>
+    <string name="agent_current_app_value">当前 App：%1$s</string>
+    <string name="agent_callable_targets_value">可调用对象：%1$d</string>
+    <string name="agent_running_tasks_value">运行任务：%1$d</string>
+    <string name="agent_goal_hint">语音或文字输入目标</string>
+    <string name="agent_voice_button">话</string>
+    <string name="agent_empty_goal">请输入 SignalASI Agent 的目标</string>
+    <string name="agent_voice_not_ready">语音命令绑定将在下一步接入</string>
     <string name="pairing_confirm_title">确认配对</string>
     <string name="pairing_confirm_subtitle">请确认双端指纹一致后再保存信任关系</string>
     <string name="pairing_pending_confirm">待确认</string>

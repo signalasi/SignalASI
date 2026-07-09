@@ -98,6 +98,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val HISTORY_UPDATED_KEY = "updated_at"
         private const val MAX_SAVED_MESSAGES_PER_CONTACT = 500
         private const val PAGE_VOICE = "page_voice"
+        private const val PAGE_AGENT = "page_agent"
         private const val PAGE_MESSAGES = "page_messages"
         private const val PAGE_CONTACTS = "page_contacts"
         private const val PAGE_DISCOVER = "page_discover"
@@ -141,6 +142,25 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var wakePage: FrameLayout
     private lateinit var wakeAnimation: ImageView
     private lateinit var mainPage: LinearLayout
+    private lateinit var mainTopBar: LinearLayout
+    private lateinit var agentPage: LinearLayout
+    private lateinit var agentStatusTitle: TextView
+    private lateinit var agentStatusSubtitle: TextView
+    private lateinit var agentSafetyBadge: TextView
+    private lateinit var agentCurrentAppText: TextView
+    private lateinit var agentCallableTargetsText: TextView
+    private lateinit var agentRunningTasksText: TextView
+    private lateinit var agentGoalInput: EditText
+    private lateinit var agentVoiceButton: TextView
+    private lateinit var agentSubmitButton: TextView
+    private lateinit var agentStepObserveNumber: TextView
+    private lateinit var agentStepAnalyzeNumber: TextView
+    private lateinit var agentStepPlanNumber: TextView
+    private lateinit var agentStepActNumber: TextView
+    private lateinit var agentStepObserveStatus: TextView
+    private lateinit var agentStepAnalyzeStatus: TextView
+    private lateinit var agentStepPlanStatus: TextView
+    private lateinit var agentStepActStatus: TextView
     private lateinit var contactPage: LinearLayout
     private lateinit var directoryPage: LinearLayout
     private lateinit var discoverPage: LinearLayout
@@ -179,10 +199,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var meIdSubtitleText: TextView
     private lateinit var meIdText: TextView
     private lateinit var meAvatar: ImageView
+    private lateinit var tabAgent: TextView
     private lateinit var tabMessages: TextView
     private lateinit var tabContacts: TextView
     private lateinit var tabDiscover: TextView
     private lateinit var tabMe: TextView
+    private lateinit var featureTabAgent: TextView
     private lateinit var featureTabMessages: TextView
     private lateinit var featureTabContacts: TextView
     private lateinit var featureTabDiscover: TextView
@@ -195,10 +217,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val historyExecutor = Executors.newSingleThreadExecutor()
     private val cloudExecutor = Executors.newCachedThreadPool()
     private val historySaveSeq = AtomicInteger()
+    private lateinit var mobileNativeAgent: MobileNativeAgent
     private val messages = mutableMapOf<String, MutableList<ChatMessage>>()
     private val summaries = mutableMapOf<String, ContactSummary>()
     private var selectedContact: Contact? = null
-    private var activeMainTab = PAGE_VOICE
+    private var activeMainTab = PAGE_AGENT
     private var nextMessageId = 1L
     private var recorder: MediaRecorder? = null
     private var recordingFile: File? = null
@@ -260,6 +283,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         configureSystemBars()
         setContentView(R.layout.activity_main)
         AppStore.ensureInitialized(this)
+        mobileNativeAgent = MobileNativeAgent(this)
         microsoftTts = MicrosoftEdgeTts(applicationContext)
         androidTts = TextToSpeech(this) { status ->
             androidTtsReady = status == TextToSpeech.SUCCESS
@@ -281,6 +305,25 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         wakePage = findViewById(R.id.wakePage)
         wakeAnimation = findViewById(R.id.wakeAnimation)
         mainPage = findViewById(R.id.mainPage)
+        mainTopBar = findViewById(R.id.mainTopBar)
+        agentPage = findViewById(R.id.agentPage)
+        agentStatusTitle = findViewById(R.id.agentStatusTitle)
+        agentStatusSubtitle = findViewById(R.id.agentStatusSubtitle)
+        agentSafetyBadge = findViewById(R.id.agentSafetyBadge)
+        agentCurrentAppText = findViewById(R.id.agentCurrentAppText)
+        agentCallableTargetsText = findViewById(R.id.agentCallableTargetsText)
+        agentRunningTasksText = findViewById(R.id.agentRunningTasksText)
+        agentGoalInput = findViewById(R.id.agentGoalInput)
+        agentVoiceButton = findViewById(R.id.agentVoiceButton)
+        agentSubmitButton = findViewById(R.id.agentSubmitButton)
+        agentStepObserveNumber = findViewById(R.id.agentStepObserveNumber)
+        agentStepAnalyzeNumber = findViewById(R.id.agentStepAnalyzeNumber)
+        agentStepPlanNumber = findViewById(R.id.agentStepPlanNumber)
+        agentStepActNumber = findViewById(R.id.agentStepActNumber)
+        agentStepObserveStatus = findViewById(R.id.agentStepObserveStatus)
+        agentStepAnalyzeStatus = findViewById(R.id.agentStepAnalyzeStatus)
+        agentStepPlanStatus = findViewById(R.id.agentStepPlanStatus)
+        agentStepActStatus = findViewById(R.id.agentStepActStatus)
         contactPage = findViewById(R.id.contactPage)
         directoryPage = findViewById(R.id.directoryPage)
         discoverPage = findViewById(R.id.discoverPage)
@@ -314,10 +357,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         meIdSubtitleText = findViewById(R.id.meIdSubtitleText)
         meIdText = findViewById(R.id.meIdText)
         meAvatar = findViewById(R.id.meAvatar)
+        tabAgent = findViewById(R.id.tabAgent)
         tabMessages = findViewById(R.id.tabMessages)
         tabContacts = findViewById(R.id.tabContacts)
         tabDiscover = findViewById(R.id.tabDiscover)
         tabMe = findViewById(R.id.tabMe)
+        featureTabAgent = findViewById(R.id.featureTabAgent)
         featureTabMessages = findViewById(R.id.featureTabMessages)
         featureTabContacts = findViewById(R.id.featureTabContacts)
         featureTabDiscover = findViewById(R.id.featureTabDiscover)
@@ -330,13 +375,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
         loadChatHistory()
         configureMainTabs()
+        configureAgentPage()
         configureContacts()
         configureMessages()
         configureInput()
         configureWakePage()
         styleSettingsRows()
         startMessageService()
-        showMainTab(PAGE_VOICE)
+        showMainTab(PAGE_AGENT)
 
         SignalASIMqttClient.addListener(this)
         SignalASIMqttClient.connect(this)
@@ -562,11 +608,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun showContactPage() {
-        wakePage.visibility = View.GONE
-        mainPage.visibility = View.VISIBLE
-        chatPage.visibility = View.GONE
-        featurePage.visibility = View.GONE
-        activeMainTab = PAGE_MESSAGES
+        showMainTab(PAGE_MESSAGES)
     }
 
     // ===== Contacts =====
@@ -603,10 +645,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 showMainTab(PAGE_VOICE)
             }
         }
+        tabAgent.setOnClickListener { showMainTab(PAGE_AGENT) }
         tabMessages.setOnClickListener { showMainTab(PAGE_MESSAGES) }
         tabContacts.setOnClickListener { showMainTab(PAGE_CONTACTS) }
         tabDiscover.setOnClickListener { showMainTab(PAGE_DISCOVER) }
         tabMe.setOnClickListener { showMainTab(PAGE_SETTINGS) }
+        featureTabAgent.setOnClickListener { showMainTab(PAGE_AGENT) }
         featureTabMessages.setOnClickListener { showMainTab(PAGE_MESSAGES) }
         featureTabContacts.setOnClickListener { showMainTab(PAGE_CONTACTS) }
         featureTabDiscover.setOnClickListener { showMainTab(PAGE_DISCOVER) }
@@ -644,6 +688,29 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         findViewById<View>(R.id.destroyDataButton).setOnClickListener { confirmDestroyAllData() }
         backButton.setOnClickListener { showContactPage() }
         featureBackButton.setOnClickListener { hideFeaturePage() }
+    }
+
+    private fun configureAgentPage() {
+        renderAgentState(mobileNativeAgent.observeCurrentScreen())
+        agentSubmitButton.setOnClickListener { submitAgentGoal() }
+        agentGoalInput.setOnEditorActionListener { _, _, _ ->
+            submitAgentGoal()
+            true
+        }
+        agentVoiceButton.setOnClickListener {
+            Toast.makeText(this, getString(R.string.agent_voice_not_ready), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun submitAgentGoal() {
+        val goal = agentGoalInput.text?.toString()?.trim().orEmpty()
+        if (goal.isBlank()) {
+            Toast.makeText(this, getString(R.string.agent_empty_goal), Toast.LENGTH_SHORT).show()
+            return
+        }
+        renderAgentState(mobileNativeAgent.submitGoal(goal))
+        agentGoalInput.setText("")
+        hideKeyboard()
     }
 
     private fun configureWakePage() {
@@ -1309,6 +1376,56 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
+    private fun renderAgentState(state: AgentUiState) {
+        val isPlanning = state.phase != AgentPhase.OBSERVING
+        agentStatusTitle.text = if (isPlanning) {
+            getString(R.string.agent_status_planning)
+        } else {
+            getString(R.string.agent_status_observing)
+        }
+        agentStatusSubtitle.text = if (isPlanning) {
+            getString(R.string.agent_status_goal_subtitle)
+        } else {
+            getString(R.string.agent_status_default_subtitle)
+        }
+        agentSafetyBadge.text = getString(R.string.agent_badge_safe)
+        agentCurrentAppText.text = getString(R.string.agent_current_app_value, state.currentScreen.foregroundApp)
+        agentCallableTargetsText.text = getString(R.string.agent_callable_targets_value, state.callableTargets.size)
+        agentRunningTasksText.text = getString(R.string.agent_running_tasks_value, state.runningTaskCount)
+
+        val statusViews = mapOf(
+            AgentStepKind.OBSERVE_SCREEN to Pair(agentStepObserveNumber, agentStepObserveStatus),
+            AgentStepKind.ANALYZE_GOAL to Pair(agentStepAnalyzeNumber, agentStepAnalyzeStatus),
+            AgentStepKind.BUILD_PLAN to Pair(agentStepPlanNumber, agentStepPlanStatus),
+            AgentStepKind.CONFIRM_AND_ACT to Pair(agentStepActNumber, agentStepActStatus)
+        )
+        state.steps.forEach { step ->
+            val views = statusViews[step.kind] ?: return@forEach
+            val numberView = views.first
+            val statusView = views.second
+            val current = step.status == AgentStepStatus.CURRENT || step.status == AgentStepStatus.DONE
+            numberView.setBackgroundResource(
+                if (current) R.drawable.agent_step_number_background else R.drawable.agent_step_number_outline_background
+            )
+            numberView.setTextColor(
+                if (current) getColorCompat(R.color.white) else getColorCompat(R.color.wechat_green)
+            )
+            statusView.text = when (step.status) {
+                AgentStepStatus.CURRENT -> getString(R.string.agent_step_status_current)
+                AgentStepStatus.DONE -> getString(R.string.agent_step_status_done)
+                AgentStepStatus.WAITING -> getString(R.string.agent_step_status_waiting)
+                AgentStepStatus.SAFE -> getString(R.string.agent_step_status_safe)
+            }
+            statusView.setTextColor(
+                if (step.status == AgentStepStatus.CURRENT || step.status == AgentStepStatus.DONE) {
+                    getColorCompat(R.color.wechat_green)
+                } else {
+                    getColorCompat(R.color.text_secondary)
+                }
+            )
+        }
+    }
+
     private fun showMainTab(tab: String) {
         val inactive = getColorCompat(R.color.text_secondary)
         activeMainTab = tab
@@ -1321,14 +1438,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             stopVoiceAssistant()
         }
 
-        if (tab == PAGE_MESSAGES || tab == PAGE_CONTACTS || tab == PAGE_DISCOVER || tab == PAGE_SETTINGS) {
+        if (tab == PAGE_AGENT || tab == PAGE_MESSAGES || tab == PAGE_CONTACTS || tab == PAGE_DISCOVER || tab == PAGE_SETTINGS) {
             mainPage.visibility = View.VISIBLE
+            mainTopBar.visibility = if (tab == PAGE_AGENT) View.GONE else View.VISIBLE
             mainActionButton.visibility = if (tab == PAGE_CONTACTS) View.VISIBLE else View.INVISIBLE
             mainActionButton.text = when (tab) {
                 PAGE_CONTACTS -> "+"
                 else -> ""
             }
             mainTitle.text = when (tab) {
+                PAGE_AGENT -> getString(R.string.tab_agent)
                 PAGE_MESSAGES -> getString(R.string.title_messages)
                 PAGE_CONTACTS -> getString(R.string.tab_contacts)
                 PAGE_DISCOVER -> getString(R.string.tab_discover)
@@ -1338,19 +1457,22 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         } else {
             mainPage.visibility = View.GONE
         }
+        agentPage.visibility = if (tab == PAGE_AGENT) View.VISIBLE else View.GONE
         contactPage.visibility = if (tab == PAGE_MESSAGES) View.VISIBLE else View.GONE
         directoryPage.visibility = if (tab == PAGE_CONTACTS) View.VISIBLE else View.GONE
         discoverPage.visibility = if (tab == PAGE_DISCOVER) View.VISIBLE else View.GONE
         mePage.visibility = if (tab == PAGE_SETTINGS) View.VISIBLE else View.GONE
 
+        setTabSelected(tabAgent, tab == PAGE_AGENT, inactive)
         setTabSelected(tabMessages, tab == PAGE_MESSAGES, inactive)
         setTabSelected(tabContacts, tab == PAGE_CONTACTS, inactive)
         setTabSelected(tabDiscover, tab == PAGE_DISCOVER, inactive)
         setTabSelected(tabMe, tab == PAGE_SETTINGS, inactive)
         setFeatureTabsSelected(tab)
 
-        val activeIds = listOf(PAGE_MESSAGES, PAGE_CONTACTS, PAGE_DISCOVER, PAGE_SETTINGS)
+        val activeIds = listOf(PAGE_AGENT, PAGE_MESSAGES, PAGE_CONTACTS, PAGE_DISCOVER, PAGE_SETTINGS)
         if (tab in activeIds) {
+            if (tab == PAGE_AGENT) renderAgentState(mobileNativeAgent.snapshot())
             if (tab == PAGE_MESSAGES) refreshContactList()
             if (tab == PAGE_SETTINGS) refreshMePage()
             if (tab == PAGE_CONTACTS || tab == PAGE_DISCOVER) refreshDirectoryContacts()
@@ -1358,7 +1480,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun showAdjacentMainTab(direction: Int) {
-        val tabs = listOf(PAGE_MESSAGES, PAGE_CONTACTS, PAGE_DISCOVER, PAGE_SETTINGS)
+        val tabs = listOf(PAGE_AGENT, PAGE_MESSAGES, PAGE_CONTACTS, PAGE_DISCOVER, PAGE_SETTINGS)
         val currentIndex = tabs.indexOf(activeMainTab).let { if (it >= 0) it else 0 }
         val nextIndex = Math.floorMod(currentIndex + direction, tabs.size)
         showMainTab(tabs[nextIndex])
@@ -1367,6 +1489,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun setTabSelected(tabView: TextView, selected: Boolean, inactive: Int) {
         val color = if (selected) getColorCompat(R.color.wechat_green) else inactive
         val iconRes = when (tabView.id) {
+            R.id.tabAgent, R.id.featureTabAgent -> if (selected) R.drawable.ic_tab_agent_filled else R.drawable.ic_tab_agent
             R.id.tabMessages, R.id.featureTabMessages -> if (selected) R.drawable.ic_tab_chat_filled else R.drawable.ic_tab_chat
             R.id.tabContacts, R.id.featureTabContacts -> if (selected) R.drawable.ic_tab_contacts else R.drawable.ic_tab_contacts_outline
             R.id.tabDiscover, R.id.featureTabDiscover -> if (selected) R.drawable.ic_tab_discover_filled else R.drawable.ic_tab_discover
@@ -1386,6 +1509,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun setFeatureTabsSelected(tab: String = activeMainTab) {
         val inactive = getColorCompat(R.color.text_secondary)
+        setTabSelected(featureTabAgent, tab == PAGE_AGENT, inactive)
         setTabSelected(featureTabMessages, tab == PAGE_MESSAGES, inactive)
         setTabSelected(featureTabContacts, tab == PAGE_CONTACTS, inactive)
         setTabSelected(featureTabDiscover, tab == PAGE_DISCOVER, inactive)

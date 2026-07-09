@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">SignalASI</string>
+    <string name="tab_agent">Agent</string>
     <string name="tab_messages">Messages</string>
     <string name="tab_contacts">Contacts</string>
     <string name="tab_discover">Discover</string>
@@ -206,6 +207,30 @@
     <string name="security_device_agent_fingerprint_summary">%1$d Agents / %2$s</string>
     <string name="security_revoked_all_pc">All PC pairings revoked</string>
     <string name="status_unknown">Unknown</string>
+    <string name="agent_tab_title">Agent</string>
+    <string name="agent_tab_subtitle">Phone-native super agent</string>
+    <string name="agent_status_observing">Observing current screen</string>
+    <string name="agent_status_planning">Planning from your goal</string>
+    <string name="agent_status_default_subtitle">SignalASI · ask before action · high-risk guard on</string>
+    <string name="agent_status_goal_subtitle">Goal received · building a safe local plan</string>
+    <string name="agent_badge_safe">Safe</string>
+    <string name="agent_section_process">Process</string>
+    <string name="agent_section_info">Info</string>
+    <string name="agent_step_observe">Read current screen structure</string>
+    <string name="agent_step_analyze">Analyze user goal</string>
+    <string name="agent_step_plan">Build executable plan</string>
+    <string name="agent_step_act">Confirm before action</string>
+    <string name="agent_step_status_current">Current</string>
+    <string name="agent_step_status_done">Done</string>
+    <string name="agent_step_status_waiting">Waiting</string>
+    <string name="agent_step_status_safe">Safe</string>
+    <string name="agent_current_app_value">Current app: %1$s</string>
+    <string name="agent_callable_targets_value">Callable targets: %1$d</string>
+    <string name="agent_running_tasks_value">Running tasks: %1$d</string>
+    <string name="agent_goal_hint">Voice or text input goal</string>
+    <string name="agent_voice_button">Talk</string>
+    <string name="agent_empty_goal">Enter a goal for SignalASI Agent</string>
+    <string name="agent_voice_not_ready">Voice command binding is coming next</string>
     <string name="pairing_confirm_title">Confirm Pairing</string>
     <string name="pairing_confirm_subtitle">Confirm that both fingerprints match before saving the trust relationship</string>
     <string name="pairing_pending_confirm">Pending Confirmation</string>
