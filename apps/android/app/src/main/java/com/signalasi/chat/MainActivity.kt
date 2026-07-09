@@ -166,6 +166,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentActionQueueList: LinearLayout
     private lateinit var agentRequirementList: LinearLayout
     private lateinit var agentPlanContextList: LinearLayout
+    private lateinit var agentVerificationList: LinearLayout
     private lateinit var agentAuditTrailList: LinearLayout
     private lateinit var agentRecentTaskList: LinearLayout
     private lateinit var agentGoalInput: EditText
@@ -345,6 +346,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentActionQueueList = findViewById(R.id.agentActionQueueList)
         agentRequirementList = findViewById(R.id.agentRequirementList)
         agentPlanContextList = findViewById(R.id.agentPlanContextList)
+        agentVerificationList = findViewById(R.id.agentVerificationList)
         agentAuditTrailList = findViewById(R.id.agentAuditTrailList)
         agentRecentTaskList = findViewById(R.id.agentRecentTaskList)
         agentGoalInput = findViewById(R.id.agentGoalInput)
@@ -1649,6 +1651,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         renderAgentActionQueue(state)
         renderAgentRequirements(state)
         renderAgentPlanContext(state)
+        renderAgentVerification(state)
         renderAgentRecentTasks(state)
         renderAgentAuditTrail(state)
         latestAgentScreenContext = state.currentScreen
@@ -1714,6 +1717,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
+    private fun renderAgentVerification(state: AgentUiState) {
+        agentVerificationList.removeAllViews()
+        val results = state.plan?.verificationResults.orEmpty().takeLast(4).asReversed()
+        if (results.isEmpty()) {
+            agentVerificationList.addView(agentVerificationEmptyRow())
+            return
+        }
+        results.forEachIndexed { index, result ->
+            agentVerificationList.addView(agentVerificationRow(result, index))
+        }
+    }
+
     private fun renderAgentAuditTrail(state: AgentUiState) {
         agentAuditTrailList.removeAllViews()
         val events = state.auditTrail.takeLast(6).asReversed()
@@ -1723,6 +1738,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         events.forEachIndexed { index, entry ->
             agentAuditTrailList.addView(agentAuditRow(entry, index))
+        }
+    }
+
+    private fun agentVerificationEmptyRow(): View {
+        return TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48)
+            )
+            setBackgroundResource(R.drawable.agent_step_background)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), 0, dp(14), 0)
+            setTextColor(getColorCompat(R.color.text_secondary))
+            textSize = 13f
+            text = getString(R.string.agent_verification_empty)
         }
     }
 
@@ -1831,6 +1861,86 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 maxLines = 2
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 text = value
+            })
+        }
+    }
+
+    private fun agentVerificationRow(result: AgentVerificationResult, index: Int): View {
+        val statusColor = if (result.success) getColorCompat(R.color.wechat_green) else getColorCompat(R.color.unread_red)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundResource(R.drawable.agent_step_background)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                if (index > 0) topMargin = dp(8)
+            }
+
+            addView(TextView(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply {
+                    marginEnd = dp(12)
+                }
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(statusColor)
+                }
+            })
+
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+
+                addView(TextView(this@MainActivity).apply {
+                    setTextColor(getColorCompat(R.color.text_primary))
+                    textSize = 13f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    text = result.observedTitle.ifBlank { result.observedApp.ifBlank { "-" } }
+                })
+
+                addView(TextView(this@MainActivity).apply {
+                    setTextColor(getColorCompat(R.color.text_secondary))
+                    textSize = 11f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    text = getString(
+                        R.string.agent_verification_meta,
+                        result.observedApp.ifBlank { "-" },
+                        result.visibleTextCount,
+                        result.clickableNodeCount
+                    )
+                })
+
+                if (result.evidence.isNotBlank()) {
+                    addView(TextView(this@MainActivity).apply {
+                        setTextColor(getColorCompat(R.color.text_secondary))
+                        textSize = 11f
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                        text = result.evidence
+                    })
+                }
+            })
+
+            addView(TextView(this@MainActivity).apply {
+                setTextColor(statusColor)
+                textSize = 12f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                text = getString(
+                    if (result.success) R.string.agent_verification_success else R.string.agent_verification_failed
+                )
+            })
+
+            addView(TextView(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    marginStart = dp(8)
+                }
+                setTextColor(getColorCompat(R.color.text_secondary))
+                textSize = 11f
+                text = getString(R.string.agent_audit_meta, agentAuditAge(result.timestampMillis))
             })
         }
     }
