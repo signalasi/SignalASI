@@ -261,6 +261,10 @@
     <string name="agent_action_queue_empty">No active Agent plan</string>
     <string name="agent_action_queue_meta">%1$s / %2$s risk</string>
     <string name="agent_action_queue_result">%1$s</string>
+    <string name="agent_section_requirements">Requirements</string>
+    <string name="agent_requirements_empty">No active execution requirements</string>
+    <string name="agent_requirement_granted">Ready</string>
+    <string name="agent_requirement_missing">Needed</string>
     <string name="agent_current_app_value">Current app: %1$s</string>
     <string name="agent_callable_targets_value">Callable targets: %1$d</string>
     <string name="agent_running_tasks_value">Running tasks: %1$d</string>
