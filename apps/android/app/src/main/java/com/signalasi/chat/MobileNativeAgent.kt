@@ -73,7 +73,8 @@ class MobileNativeAgent(
                 currentPlan?.actions?.firstOrNull { it.status == AgentActionStatus.PENDING_CONFIRMATION }
             },
             auditTrail = auditTrail.toList(),
-            lastActionResult = lastActionResult
+            lastActionResult = lastActionResult,
+            recentTasks = taskStore.recent(limit = 3)
         )
     }
 
@@ -1602,7 +1603,8 @@ data class AgentUiState(
     val plan: AgentPlan? = null,
     val pendingAction: AgentAction? = null,
     val auditTrail: List<AgentAuditEntry> = emptyList(),
-    val lastActionResult: AgentActionResult? = null
+    val lastActionResult: AgentActionResult? = null,
+    val recentTasks: List<AgentTaskRecord> = emptyList()
 )
 
 data class AgentSessionSnapshot(

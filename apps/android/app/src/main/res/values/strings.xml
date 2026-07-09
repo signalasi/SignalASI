@@ -228,6 +228,13 @@
     <string name="agent_badge_safe">Safe</string>
     <string name="agent_badge_blocked">Blocked</string>
     <string name="agent_section_process">Process</string>
+    <string name="agent_section_recent_tasks">Recent Tasks</string>
+    <string name="agent_recent_empty">No recent Agent tasks yet</string>
+    <string name="agent_recent_meta">%1$s / %2$s / %3$s risk</string>
+    <string name="agent_recent_status_blocked">Blocked</string>
+    <string name="agent_recent_status_done">Done</string>
+    <string name="agent_recent_status_failed">Failed</string>
+    <string name="agent_recent_status_running">Running</string>
     <string name="agent_section_info">Info</string>
     <string name="agent_step_observe">Read current screen structure</string>
     <string name="agent_step_analyze">Analyze user goal</string>

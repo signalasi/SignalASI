@@ -152,6 +152,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentCurrentAppText: TextView
     private lateinit var agentCallableTargetsText: TextView
     private lateinit var agentRunningTasksText: TextView
+    private lateinit var agentRecentTaskList: LinearLayout
     private lateinit var agentGoalInput: EditText
     private lateinit var agentVoiceButton: TextView
     private lateinit var agentSubmitButton: TextView
@@ -316,6 +317,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentCurrentAppText = findViewById(R.id.agentCurrentAppText)
         agentCallableTargetsText = findViewById(R.id.agentCallableTargetsText)
         agentRunningTasksText = findViewById(R.id.agentRunningTasksText)
+        agentRecentTaskList = findViewById(R.id.agentRecentTaskList)
         agentGoalInput = findViewById(R.id.agentGoalInput)
         agentVoiceButton = findViewById(R.id.agentVoiceButton)
         agentSubmitButton = findViewById(R.id.agentSubmitButton)
@@ -1512,6 +1514,114 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
             )
         }
+        renderAgentRecentTasks(state)
+    }
+
+    private fun renderAgentRecentTasks(state: AgentUiState) {
+        agentRecentTaskList.removeAllViews()
+        if (state.recentTasks.isEmpty()) {
+            agentRecentTaskList.addView(agentRecentEmptyRow())
+            return
+        }
+        state.recentTasks.forEachIndexed { index, task ->
+            agentRecentTaskList.addView(agentRecentTaskRow(task, index))
+        }
+    }
+
+    private fun agentRecentEmptyRow(): View {
+        return TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(54)
+            )
+            setBackgroundResource(R.drawable.agent_step_background)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), 0, dp(14), 0)
+            setTextColor(getColorCompat(R.color.text_secondary))
+            textSize = 14f
+            text = getString(R.string.agent_recent_empty)
+        }
+    }
+
+    private fun agentRecentTaskRow(task: AgentTaskRecord, index: Int): View {
+        val statusText = agentTaskStatusText(task)
+        val statusColor = when {
+            task.blocked -> getColorCompat(R.color.unread_red)
+            task.phase == AgentPhase.COMPLETED -> getColorCompat(R.color.wechat_green)
+            task.phase == AgentPhase.FAILED -> getColorCompat(R.color.unread_red)
+            else -> getColorCompat(R.color.signalasi_green)
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundResource(R.drawable.agent_step_background)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                if (index > 0) topMargin = dp(8)
+            }
+
+            addView(TextView(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(28), dp(28)).apply {
+                    marginEnd = dp(10)
+                }
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(statusColor)
+                }
+                gravity = Gravity.CENTER
+                setTextColor(getColorCompat(R.color.white))
+                textSize = 12f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                text = "${index + 1}"
+            })
+
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+
+                addView(TextView(this@MainActivity).apply {
+                    setTextColor(getColorCompat(R.color.text_primary))
+                    textSize = 14f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    text = task.goal
+                })
+
+                addView(TextView(this@MainActivity).apply {
+                    setTextColor(getColorCompat(R.color.text_secondary))
+                    textSize = 12f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    text = getString(
+                        R.string.agent_recent_meta,
+                        task.routeKind.name.lowercase(Locale.US).replace('_', ' '),
+                        task.targetTitle.ifBlank { "-" },
+                        task.risk.name.lowercase(Locale.US)
+                    )
+                })
+            })
+
+            addView(TextView(this@MainActivity).apply {
+                setTextColor(statusColor)
+                textSize = 12f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                text = statusText
+            })
+        }
+    }
+
+    private fun agentTaskStatusText(task: AgentTaskRecord): String = when {
+        task.blocked -> getString(R.string.agent_recent_status_blocked)
+        task.phase == AgentPhase.COMPLETED -> getString(R.string.agent_recent_status_done)
+        task.phase == AgentPhase.FAILED -> getString(R.string.agent_recent_status_failed)
+        task.phase == AgentPhase.EXECUTING ||
+            task.phase == AgentPhase.VERIFYING ||
+            task.phase == AgentPhase.PLANNING ||
+            task.phase == AgentPhase.WAITING_CONFIRMATION -> getString(R.string.agent_recent_status_running)
+        else -> task.phase.name.lowercase(Locale.US)
     }
 
     private fun showMainTab(tab: String) {
