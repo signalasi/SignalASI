@@ -55,7 +55,10 @@ class MobileNativeAgent(
             highRiskGuard = context.highRiskGuard,
             callableTargets = targets,
             runtimeContext = context,
-            runningTaskCount = if (phase == AgentPhase.PLANNING || phase == AgentPhase.WAITING_CONFIRMATION || phase == AgentPhase.EXECUTING) 1 else 0,
+            runningTaskCount = if (phase == AgentPhase.PLANNING ||
+                phase == AgentPhase.WAITING_CONFIRMATION ||
+                phase == AgentPhase.EXECUTING ||
+                phase == AgentPhase.VERIFYING) 1 else 0,
             steps = currentPlan?.steps ?: defaultSteps(),
             lastEvent = if (currentGoal.isBlank()) AgentEvent.WAITING_FOR_GOAL else AgentEvent.GOAL_RECEIVED,
             sessionId = sessionId,
@@ -130,16 +133,45 @@ class MobileNativeAgent(
         phase = AgentPhase.EXECUTING
         currentPlan = plan.markAction(nextAction.id, AgentActionStatus.RUNNING)
         currentScreen = perceptionProvider.capture()
+        val executionScreen = currentScreen
         lastActionResult = actionExecutor.execute(nextAction, currentScreen)
+        phase = AgentPhase.VERIFYING
+        val verificationScreen = captureVerificationScreen(
+            action = nextAction,
+            beforeAction = executionScreen,
+            actionResult = lastActionResult
+        )
+        currentScreen = verificationScreen
         val finalStatus = if (lastActionResult?.success == true) {
             AgentActionStatus.COMPLETED
         } else {
             AgentActionStatus.FAILED
         }
         currentPlan = currentPlan?.markAction(nextAction.id, finalStatus, lastActionResult)
+            ?.addVerification(AgentVerificationResult.from(nextAction.id, lastActionResult, verificationScreen))
         phase = if (lastActionResult?.success == true) AgentPhase.COMPLETED else AgentPhase.FAILED
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${nextAction.kind}:${finalStatus}")
         return snapshot()
+    }
+
+    private fun captureVerificationScreen(
+        action: AgentAction,
+        beforeAction: ScreenContext,
+        actionResult: AgentActionResult?
+    ): ScreenContext {
+        var latest = perceptionProvider.capture()
+        if (actionResult?.success != true || !action.kind.mayChangeScreen()) {
+            return latest
+        }
+
+        repeat(8) {
+            if (latest.isDifferentFrom(beforeAction)) {
+                return latest
+            }
+            runCatching { Thread.sleep(250) }
+            latest = perceptionProvider.capture()
+        }
+        return latest
     }
 
     fun cancelCurrentTask(): AgentUiState {
@@ -994,6 +1026,9 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("planner_profile", plan.plannerProfile)
         .put("context_digest", plan.contextDigest)
         .put("validation", encodePlanValidation(plan.validation))
+        .put("verification_results", JSONArray().also { array ->
+            plan.verificationResults.forEach { array.put(encodeVerificationResult(it)) }
+        })
         .put("steps", JSONArray().also { array ->
             plan.steps.forEach { array.put(encodeStep(it)) }
         })
@@ -1017,6 +1052,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         plannerProfile = json.optString("planner_profile", "rule-based-local"),
         contextDigest = json.optString("context_digest"),
         validation = decodePlanValidation(json.optJSONObject("validation")),
+        verificationResults = decodeVerificationResults(json.optJSONArray("verification_results")),
         safetyReview = decodeSafetyReview(json.optJSONObject("safety_review"))
     )
 
@@ -1059,6 +1095,37 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
             valid = json.optBoolean("valid", true),
             issues = decodeStringList(json.optJSONArray("issues"))
         )
+    }
+
+    private fun encodeVerificationResult(result: AgentVerificationResult): JSONObject = JSONObject()
+        .put("action_id", result.actionId)
+        .put("success", result.success)
+        .put("observed_app", result.observedApp)
+        .put("observed_title", result.observedTitle)
+        .put("visible_text_count", result.visibleTextCount)
+        .put("clickable_node_count", result.clickableNodeCount)
+        .put("evidence", result.evidence)
+        .put("timestamp_millis", result.timestampMillis)
+
+    private fun decodeVerificationResults(array: JSONArray?): List<AgentVerificationResult> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                add(
+                    AgentVerificationResult(
+                        actionId = item.optString("action_id"),
+                        success = item.optBoolean("success"),
+                        observedApp = item.optString("observed_app"),
+                        observedTitle = item.optString("observed_title"),
+                        visibleTextCount = item.optInt("visible_text_count"),
+                        clickableNodeCount = item.optInt("clickable_node_count"),
+                        evidence = item.optString("evidence"),
+                        timestampMillis = item.optLong("timestamp_millis")
+                    )
+                )
+            }
+        }
     }
 
     private fun encodeStep(step: AgentStep): JSONObject = JSONObject()
@@ -1282,6 +1349,31 @@ data class ScreenContext(
     val snapshotAgeMillis: Long = 0L
 )
 
+private fun ScreenContext.isDifferentFrom(other: ScreenContext): Boolean =
+    foregroundApp != other.foregroundApp ||
+        pageTitle != other.pageTitle ||
+        visibleTextCount != other.visibleTextCount ||
+        clickableNodeCount != other.clickableNodeCount ||
+        inputFieldCount != other.inputFieldCount
+
+private fun AgentActionKind.mayChangeScreen(): Boolean = when (this) {
+    AgentActionKind.TAP,
+    AgentActionKind.SWIPE,
+    AgentActionKind.LONG_PRESS,
+    AgentActionKind.BACK,
+    AgentActionKind.HOME,
+    AgentActionKind.RECENTS,
+    AgentActionKind.OPEN_APP,
+    AgentActionKind.OPEN_URL,
+    AgentActionKind.SET_ALARM -> true
+    AgentActionKind.READ_SCREEN,
+    AgentActionKind.DRAFT_PLAN,
+    AgentActionKind.TYPE_TEXT,
+    AgentActionKind.COPY_SCREEN_TEXT,
+    AgentActionKind.CALL_CONNECTOR,
+    AgentActionKind.CONTROL_DEVICE -> false
+}
+
 data class AgentPlan(
     val goal: String,
     val screen: ScreenContext,
@@ -1297,6 +1389,7 @@ data class AgentPlan(
     val plannerProfile: String = "rule-based-local",
     val contextDigest: String = "",
     val validation: AgentPlanValidation = AgentPlanValidation(),
+    val verificationResults: List<AgentVerificationResult> = emptyList(),
     val safetyReview: AgentSafetyReview = AgentSafetyReview()
 ) {
     fun withSafetyReview(review: AgentSafetyReview): AgentPlan {
@@ -1340,6 +1433,12 @@ data class AgentPlan(
                 else -> step
             }
         }
+    )
+
+    fun addVerification(result: AgentVerificationResult): AgentPlan = copy(
+        verificationResults = verificationResults
+            .filterNot { it.actionId == result.actionId }
+            .plus(result)
     )
 }
 
@@ -1386,6 +1485,33 @@ data class AgentActionResult(
     val message: String
 )
 
+data class AgentVerificationResult(
+    val actionId: String,
+    val success: Boolean,
+    val observedApp: String,
+    val observedTitle: String,
+    val visibleTextCount: Int,
+    val clickableNodeCount: Int,
+    val evidence: String,
+    val timestampMillis: Long = System.currentTimeMillis()
+) {
+    companion object {
+        fun from(
+            actionId: String,
+            actionResult: AgentActionResult?,
+            screen: ScreenContext
+        ): AgentVerificationResult = AgentVerificationResult(
+            actionId = actionId,
+            success = actionResult?.success == true,
+            observedApp = screen.foregroundApp,
+            observedTitle = screen.pageTitle,
+            visibleTextCount = screen.visibleTextCount,
+            clickableNodeCount = screen.clickableNodeCount,
+            evidence = actionResult?.message.orEmpty()
+        )
+    }
+}
+
 data class AgentMemoryItem(
     val kind: AgentMemoryKind,
     val value: String,
@@ -1405,6 +1531,7 @@ enum class AgentPhase {
     PLANNING,
     WAITING_CONFIRMATION,
     EXECUTING,
+    VERIFYING,
     COMPLETED,
     FAILED
 }
