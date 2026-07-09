@@ -13,6 +13,7 @@ Product scope is defined in `docs/product/PRODUCT_REQUIREMENTS.md`.
 | Android UI smoke | `npm run smoke:android:ui` | Main navigation, contacts, cloud model entry, security center, settings entry points, voice settings, backup, protocol quality, and destructive-data screens can be opened on a real device or emulator. |
 | Android friend flow | `npm run smoke:android:friends` | New-friend approval, deleted-contact blocking, re-add flow, contact detail routing, and contact deletion evidence work on Android. |
 | Android contact rename | `npm run smoke:android:contact-rename` | Agent contact display names can be renamed, persist with user-renamed evidence, and render on the contact detail page. |
+| Android contact type tags | `npm run smoke:android:contact-tags` | Agent, Model, and Device contacts render their type labels in the Android Contacts page. |
 | Android cloud models | `npm run smoke:android:cloud-models` | Direct mobile cloud provider contacts keep provider-only names, preserve multiple model configs, and persist selected chat-header models. |
 | Android background delivery | `npm run smoke:android:background` | Offline or background message persistence, notification history, unread badge, list timestamp, bubble timestamp, stable MQTT client identity, and QoS 1 delivery evidence are present. |
 | Android agent replies | `npm run smoke:android:agent-replies` | Hermes and Codex chat replies preserve full text and delivery trace evidence after contact switching and UI refresh. |
@@ -42,7 +43,7 @@ Run `npm run audit:release` to print the release gate checklist and the latest p
 
 | Product area | Primary evidence |
 | --- | --- |
-| Mobile chat and contacts | `npm run smoke:android:ui`, `npm run smoke:android:friends`, `npm run smoke:android:contact-rename`, `npm run smoke:android:cloud-models`, `npm run smoke:android:background`, `npm run smoke:android:agent-replies`, `npm run smoke:android:voice-reply`, `npm run smoke:android:backup`, `npm run smoke:android:reset` |
+| Mobile chat and contacts | `npm run smoke:android:ui`, `npm run smoke:android:friends`, `npm run smoke:android:contact-rename`, `npm run smoke:android:contact-tags`, `npm run smoke:android:cloud-models`, `npm run smoke:android:background`, `npm run smoke:android:agent-replies`, `npm run smoke:android:voice-reply`, `npm run smoke:android:backup`, `npm run smoke:android:reset` |
 | QR pairing and fingerprint trust | `npm run smoke:desktop:pairing`, `npm run smoke:android:ui`, `npm run smoke:desktop:e2e` |
 | SignalASI Link encrypted messaging | `npm run check`, `npm run smoke:desktop:pairing`, `npm run smoke:desktop:e2e` |
 | Hermes, Codex, Claude Code, Local LLM, Custom Agent, and MCP contacts | `npm run smoke:desktop`, `npm run smoke:desktop:e2e`, `npm run smoke:android:agent-replies` |

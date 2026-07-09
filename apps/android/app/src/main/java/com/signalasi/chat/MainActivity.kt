@@ -1620,6 +1620,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val openSignalLinkProtocol = intent?.getBooleanExtra("signalasi_debug_open_signal_link_protocol", false) == true
         val openAdvancedOptions = intent?.getBooleanExtra("signalasi_debug_open_advanced_options", false) == true
         val openMessages = intent?.getBooleanExtra("signalasi_debug_open_messages", false) == true
+        val openContacts = intent?.getBooleanExtra("signalasi_debug_open_contacts", false) == true
         val openContactId = intent?.getStringExtra("signalasi_debug_open_contact")?.trim().orEmpty()
         val openContactDetailId = intent?.getStringExtra("signalasi_debug_open_contact_detail")?.trim().orEmpty()
         val openNewFriends = intent?.getBooleanExtra("signalasi_debug_open_new_friends", false) == true
@@ -1752,6 +1753,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             intent?.removeExtra("signalasi_debug_rename_name")
             intent?.removeExtra("signalasi_debug_rename_name_b64")
             intent?.removeExtra("signalasi_debug_open_messages")
+            intent?.removeExtra("signalasi_debug_open_contacts")
             val seededCloudContact = if (seedCloudProvider.isNotBlank() || openCloudSwitchProvider.isNotBlank()) {
                 debugSeedCloudProvider(seedCloudProvider.ifBlank { openCloudSwitchProvider })
             } else {
@@ -1760,6 +1762,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             if (openMessages) {
                 reloadChatHistoryIfChanged(force = true)
                 showMainTab(PAGE_MESSAGES)
+            }
+            if (openContacts) {
+                reloadChatHistoryIfChanged(force = true)
+                showMainTab(PAGE_CONTACTS)
             }
             if (openContactId.isNotBlank()) {
                 reloadChatHistoryIfChanged(force = true)
@@ -1859,10 +1865,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         intent?.removeExtra("signalasi_debug_rename_name")
         intent?.removeExtra("signalasi_debug_rename_name_b64")
         intent?.removeExtra("signalasi_debug_open_messages")
+        intent?.removeExtra("signalasi_debug_open_contacts")
         intent?.removeExtra("signalasi_debug_incoming")
         intent?.removeExtra("signalasi_debug_incoming_b64")
         Log.i("SignalASIDebug", "Processing debug incoming payload")
         onMessage(payload)
+        if (openContacts) {
+            reloadChatHistoryIfChanged(force = true)
+            showMainTab(PAGE_CONTACTS)
+        }
         if (openContactId.isNotBlank()) {
             reloadChatHistoryIfChanged(force = true)
             showChatPage(contactById(openContactId))

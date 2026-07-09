@@ -21,6 +21,7 @@ const required = [
   "scripts/smoke-android-ui.js",
   "scripts/smoke-android-friends.js",
   "scripts/smoke-android-contact-rename.js",
+  "scripts/smoke-android-contact-tags.js",
   "scripts/smoke-android-cloud-models.js",
   "scripts/smoke-android-background-message.js",
   "scripts/smoke-android-agent-replies.js",
@@ -73,6 +74,7 @@ const smokeUi = fs.readFileSync(path.join(root, "scripts/smoke-ui.js"), "utf8");
 const smokeAndroidUi = fs.readFileSync(path.join(root, "scripts/smoke-android-ui.js"), "utf8");
 const smokeAndroidFriends = fs.readFileSync(path.join(root, "scripts/smoke-android-friends.js"), "utf8");
 const smokeAndroidContactRename = fs.readFileSync(path.join(root, "scripts/smoke-android-contact-rename.js"), "utf8");
+const smokeAndroidContactTags = fs.readFileSync(path.join(root, "scripts/smoke-android-contact-tags.js"), "utf8");
 const smokeAndroidCloudModels = fs.readFileSync(path.join(root, "scripts/smoke-android-cloud-models.js"), "utf8");
 const smokeAndroidBackground = fs.readFileSync(path.join(root, "scripts/smoke-android-background-message.js"), "utf8");
 const smokeAndroidAgentReplies = fs.readFileSync(path.join(root, "scripts/smoke-android-agent-replies.js"), "utf8");
@@ -341,6 +343,7 @@ for (const requiredText of [
   "smoke:android-ui",
   "smoke:android-friends",
   "smoke:android-contact-rename",
+  "smoke:android-contact-tags",
   "smoke:android-cloud-models",
   "smoke:android-background",
   "smoke:android-agent-replies",
@@ -435,6 +438,11 @@ for (const requiredText of [
   "signalasi_debug_rename_name_b64",
   "user_renamed",
   "smoke:android-contact-rename",
+  "signalasi_debug_open_contacts",
+  "Tag Agent Smoke",
+  "Tag Model Smoke",
+  "Tag Device Smoke",
+  "smoke:android-contact-tags",
   "signalasi_debug_cloud_models_roundtrip",
   "cloud_models_roundtrip_result",
   "deepseek-v4-flash",
@@ -482,7 +490,7 @@ for (const requiredText of [
   "scripts/smoke.js",
   "SignalASI Link Protocol"
 ]) {
-  if (![main, preload, html, renderer, packageJson, packager, androidAdb, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidBackground, smokeAndroidAgentReplies, smokeAndroidBackup, smokeAndroidVoiceReply, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeVoiceStt, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendGateway, backendAgentConfig, backendPushAuth, backendSignalasiNotify, backendStt, androidMainActivity, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
+if (![main, preload, html, renderer, packageJson, packager, androidAdb, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidContactTags, smokeAndroidBackground, smokeAndroidAgentReplies, smokeAndroidBackup, smokeAndroidVoiceReply, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeVoiceStt, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendGateway, backendAgentConfig, backendPushAuth, backendSignalasiNotify, backendStt, androidMainActivity, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
     throw new Error(`Missing desktop connector capability: ${requiredText}`);
   }
 }
