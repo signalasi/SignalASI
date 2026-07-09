@@ -150,6 +150,9 @@ class MobileNativeAgent(
         if (safetyReview.blocked) {
             recordAudit(AgentAuditEvent.ACTION_BLOCKED, safetyReview.reason.ifBlank { "blocked" })
         }
+        if (!safetyReview.blocked && !safetyReview.requiresConfirmation) {
+            return executeFirstPendingAction()
+        }
         saveTaskRecord()
         return snapshot()
     }
@@ -169,6 +172,18 @@ class MobileNativeAgent(
         }
         val nextAction = plan.actions.firstOrNull { it.status == AgentActionStatus.PENDING_CONFIRMATION }
             ?: return snapshot()
+        return executePlannedAction(plan, nextAction)
+    }
+
+    private fun executeFirstPendingAction(): AgentUiState {
+        val plan = currentPlan ?: return snapshot()
+        val nextAction = plan.actions.firstOrNull {
+            it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
+        } ?: return snapshot()
+        return executePlannedAction(plan, nextAction)
+    }
+
+    private fun executePlannedAction(plan: AgentPlan, nextAction: AgentAction): AgentUiState {
         phase = AgentPhase.EXECUTING
         currentPlan = plan.markAction(nextAction.id, AgentActionStatus.RUNNING)
         currentScreen = perceptionProvider.capture()
