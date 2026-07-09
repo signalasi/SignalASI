@@ -159,6 +159,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentKnowledgeText: TextView
     private lateinit var agentScreenSearchInput: EditText
     private lateinit var agentScreenDetailList: LinearLayout
+    private lateinit var agentActionQueueList: LinearLayout
     private lateinit var agentAuditTrailList: LinearLayout
     private lateinit var agentRecentTaskList: LinearLayout
     private lateinit var agentGoalInput: EditText
@@ -331,6 +332,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentKnowledgeText = findViewById(R.id.agentKnowledgeText)
         agentScreenSearchInput = findViewById(R.id.agentScreenSearchInput)
         agentScreenDetailList = findViewById(R.id.agentScreenDetailList)
+        agentActionQueueList = findViewById(R.id.agentActionQueueList)
         agentAuditTrailList = findViewById(R.id.agentAuditTrailList)
         agentRecentTaskList = findViewById(R.id.agentRecentTaskList)
         agentGoalInput = findViewById(R.id.agentGoalInput)
@@ -1620,6 +1622,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
             )
         }
+        renderAgentActionQueue(state)
         renderAgentRecentTasks(state)
         renderAgentAuditTrail(state)
         latestAgentScreenContext = state.currentScreen
@@ -1637,6 +1640,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
+    private fun renderAgentActionQueue(state: AgentUiState) {
+        agentActionQueueList.removeAllViews()
+        val actions = state.plan?.actions.orEmpty()
+        if (actions.isEmpty()) {
+            agentActionQueueList.addView(agentActionQueueEmptyRow())
+            return
+        }
+        actions.forEachIndexed { index, action ->
+            agentActionQueueList.addView(agentActionQueueRow(action, index))
+        }
+    }
+
     private fun renderAgentAuditTrail(state: AgentUiState) {
         agentAuditTrailList.removeAllViews()
         val events = state.auditTrail.takeLast(6).asReversed()
@@ -1646,6 +1661,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         events.forEachIndexed { index, entry ->
             agentAuditTrailList.addView(agentAuditRow(entry, index))
+        }
+    }
+
+    private fun agentActionQueueEmptyRow(): View {
+        return TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48)
+            )
+            setBackgroundResource(R.drawable.agent_step_background)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), 0, dp(14), 0)
+            setTextColor(getColorCompat(R.color.text_secondary))
+            textSize = 13f
+            text = getString(R.string.agent_action_queue_empty)
         }
     }
 
@@ -1747,6 +1777,87 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 text = statusText
             })
         }
+    }
+
+    private fun agentActionQueueRow(action: AgentAction, index: Int): View {
+        val statusColor = agentActionStatusColor(action.status)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundResource(R.drawable.agent_step_background)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                if (index > 0) topMargin = dp(8)
+            }
+
+            addView(TextView(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(28), dp(28)).apply {
+                    marginEnd = dp(10)
+                }
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(statusColor)
+                }
+                gravity = Gravity.CENTER
+                setTextColor(getColorCompat(R.color.white))
+                textSize = 12f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                text = "${index + 1}"
+            })
+
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+
+                addView(TextView(this@MainActivity).apply {
+                    setTextColor(getColorCompat(R.color.text_primary))
+                    textSize = 14f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    text = action.description.ifBlank { action.kind.name.lowercase(Locale.US) }
+                })
+
+                addView(TextView(this@MainActivity).apply {
+                    setTextColor(getColorCompat(R.color.text_secondary))
+                    textSize = 12f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    text = getString(
+                        R.string.agent_action_queue_meta,
+                        action.target.ifBlank { action.kind.name.lowercase(Locale.US) },
+                        action.risk.name.lowercase(Locale.US)
+                    )
+                })
+
+                if (action.result.isNotBlank()) {
+                    addView(TextView(this@MainActivity).apply {
+                        setTextColor(getColorCompat(R.color.text_secondary))
+                        textSize = 11f
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                        text = getString(R.string.agent_action_queue_result, action.result)
+                    })
+                }
+            })
+
+            addView(TextView(this@MainActivity).apply {
+                setTextColor(statusColor)
+                textSize = 12f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                text = action.status.name.lowercase(Locale.US).replace('_', ' ')
+            })
+        }
+    }
+
+    private fun agentActionStatusColor(status: AgentActionStatus): Int = when (status) {
+        AgentActionStatus.COMPLETED -> getColorCompat(R.color.wechat_green)
+        AgentActionStatus.FAILED,
+        AgentActionStatus.BLOCKED -> getColorCompat(R.color.unread_red)
+        AgentActionStatus.RUNNING -> getColorCompat(R.color.signalasi_green)
+        else -> getColorCompat(R.color.text_secondary)
     }
 
     private fun agentAuditRow(entry: AgentAuditEntry, index: Int): View {
