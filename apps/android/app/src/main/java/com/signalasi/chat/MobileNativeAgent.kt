@@ -138,6 +138,9 @@ class MobileNativeAgent(
         }
 
         currentScreen = perceptionProvider.capture()
+        memoryCaptureCommandValue(currentGoal)?.let { enabled ->
+            return setMemoryCaptureCommand(enabled)
+        }
         memoryCommandValue(currentGoal)?.let { memoryValue ->
             return saveMemoryCommand(memoryValue)
         }
@@ -371,6 +374,22 @@ class MobileNativeAgent(
         return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
     }
 
+    private fun memoryCaptureCommandValue(goal: String): Boolean? {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return when (normalized) {
+            "private mode on",
+            "privacy mode on",
+            "pause memory",
+            "stop memory",
+            "disable memory capture" -> false
+            "private mode off",
+            "privacy mode off",
+            "resume memory",
+            "enable memory capture" -> true
+            else -> null
+        }
+    }
+
     private fun forgetMemoryCommandValue(goal: String): String? {
         val prefixes = listOf("forget memory ", "delete memory ", "remove memory ", "forget note ")
         val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
@@ -441,6 +460,49 @@ class MobileNativeAgent(
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
         saveTaskRecord(result = resultMessage)
+        return snapshot()
+    }
+
+    private fun setMemoryCaptureCommand(enabled: Boolean): AgentUiState {
+        safetySettingsStore.save(safetySettingsStore.load().copy(memoryCapture = enabled))
+        val result = if (enabled) "Memory capture resumed" else "Private mode enabled; memory capture paused"
+        val action = AgentAction(
+            id = "set-memory-capture",
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Privacy",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.COMPLETED,
+            description = if (enabled) "Resume memory capture" else "Pause memory capture",
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Privacy",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "agent-privacy",
+                kind = AgentRouteKind.LOCAL_SYSTEM,
+                targetId = "agent-privacy",
+                targetTitle = "Agent Privacy",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.TASK_EXECUTION)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "memory_capture:$enabled")
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        saveTaskRecord(result = result)
         return snapshot()
     }
 
