@@ -350,6 +350,11 @@ class RuleBasedAgentPlanner : AgentPlanner {
                 description = "Swipe up on the current screen",
                 parameters = mapOf("from_x" to "540", "from_y" to "1700", "to_x" to "540", "to_y" to "700")
             )
+            lower.contains("cloud") ||
+                lower.contains("gpt") ||
+                lower.contains("deepseek") ||
+                lower.contains("gemini") ||
+                lower.contains("qwen") -> connectorAction(request, "cloud-models", "Send task to cloud model")
             lower.contains("codex") -> connectorAction(request, "codex", "Send task to Codex")
             lower.contains("claude") -> connectorAction(request, "claude-code", "Send task to Claude Code")
             lower.contains("hermes") -> connectorAction(request, "hermes", "Send task to Hermes")
@@ -390,7 +395,10 @@ class RuleBasedAgentPlanner : AgentPlanner {
             risk = AgentRisk.HIGH,
             status = AgentActionStatus.PENDING_CONFIRMATION,
             description = "Control a trusted device connector",
-            parameters = mapOf("prompt" to request.goal)
+            parameters = mapOf(
+                "connector_id" to (target?.id ?: "home-assistant"),
+                "prompt" to request.goal
+            )
         )
     }
 
@@ -421,7 +429,8 @@ object AgentPlanFactory {
             expectedResult = expectedResultFor(action),
             timeoutSeconds = timeoutFor(action),
             plannerProfile = "rule-based-local",
-            contextDigest = request.runtimeContext.compactSummary().hashCode().toString()
+            contextDigest = request.runtimeContext.compactSummary().hashCode().toString(),
+            route = AgentRouteResolver.resolve(action, request.targets)
         )
         return plan.copy(validation = AgentPlanValidator.validate(plan))
     }
@@ -509,6 +518,57 @@ object AgentPlanFactory {
     }
 }
 
+object AgentRouteResolver {
+    fun resolve(action: AgentAction, targets: List<AgentCallableTarget>): AgentRoute {
+        val connectorId = action.parameters["connector_id"].orEmpty()
+        val target = targets.firstOrNull { candidate ->
+            candidate.id == connectorId || candidate.title == action.target
+        }
+        val kind = when (action.kind) {
+            AgentActionKind.CALL_CONNECTOR -> when (target?.kind) {
+                AgentConnectorKind.MODEL -> if (target.id == "local-llm") AgentRouteKind.LOCAL_MODEL else AgentRouteKind.CLOUD_MODEL
+                AgentConnectorKind.AGENT -> AgentRouteKind.DESKTOP_AGENT
+                AgentConnectorKind.DEVICE -> AgentRouteKind.DEVICE_CONNECTOR
+                AgentConnectorKind.KNOWLEDGE -> AgentRouteKind.KNOWLEDGE
+                null -> AgentRouteKind.UNKNOWN
+            }
+            AgentActionKind.CONTROL_DEVICE -> AgentRouteKind.DEVICE_CONNECTOR
+            AgentActionKind.READ_SCREEN,
+            AgentActionKind.DRAFT_PLAN,
+            AgentActionKind.TAP,
+            AgentActionKind.TYPE_TEXT,
+            AgentActionKind.SWIPE,
+            AgentActionKind.LONG_PRESS,
+            AgentActionKind.BACK,
+            AgentActionKind.HOME,
+            AgentActionKind.RECENTS,
+            AgentActionKind.OPEN_APP,
+            AgentActionKind.OPEN_URL,
+            AgentActionKind.SET_ALARM,
+            AgentActionKind.COPY_SCREEN_TEXT -> AgentRouteKind.LOCAL_SYSTEM
+        }
+        return AgentRoute(
+            routeId = connectorId.ifBlank { action.id },
+            kind = kind,
+            targetId = target?.id ?: connectorId.ifBlank { action.target },
+            targetTitle = target?.title ?: action.target,
+            status = target?.status ?: AgentConnectorStatus.AVAILABLE,
+            deliveryMode = deliveryModeFor(kind),
+            capabilities = target?.capabilities ?: emptyList()
+        )
+    }
+
+    private fun deliveryModeFor(kind: AgentRouteKind): String = when (kind) {
+        AgentRouteKind.LOCAL_SYSTEM -> "local_system"
+        AgentRouteKind.CLOUD_MODEL -> "mobile_cloud_api"
+        AgentRouteKind.LOCAL_MODEL -> "local_model"
+        AgentRouteKind.DESKTOP_AGENT -> "pc_connector"
+        AgentRouteKind.DEVICE_CONNECTOR -> "device_connector"
+        AgentRouteKind.KNOWLEDGE -> "knowledge"
+        AgentRouteKind.UNKNOWN -> "unknown"
+    }
+}
+
 object AgentPlanValidator {
     fun validate(plan: AgentPlan): AgentPlanValidation {
         val issues = mutableListOf<String>()
@@ -526,6 +586,10 @@ object AgentPlanValidator {
         }
         if (plan.safetyReview.risk.weight >= AgentRisk.HIGH.weight && !plan.confirmationRequired) {
             issues += "high_risk_without_confirmation"
+        }
+        if (plan.actions.any { it.kind == AgentActionKind.CALL_CONNECTOR || it.kind == AgentActionKind.CONTROL_DEVICE } &&
+            plan.route.kind == AgentRouteKind.UNKNOWN) {
+            issues += "route_unknown"
         }
         return AgentPlanValidation(
             valid = issues.isEmpty(),
@@ -749,6 +813,9 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
     private fun dispatchConnectorTask(action: AgentAction): AgentActionResult {
         val connectorId = action.parameters["connector_id"].orEmpty()
         val prompt = action.parameters["prompt"].orEmpty().ifBlank { action.description }
+        if (connectorAliases("cloud-models").any { it == connectorId }) {
+            return dispatchCloudModelTask(action, prompt)
+        }
         val contactId = resolveConnectorContactId(connectorId)
             ?: return AgentActionResult(action.id, false, "${action.target} is not paired")
         return dispatchContactTask(action, contactId, prompt)
@@ -799,6 +866,63 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         )
     }
 
+    private fun dispatchCloudModelTask(action: AgentAction, prompt: String): AgentActionResult {
+        val contact = resolveCloudModelContact()
+            ?: return AgentActionResult(action.id, false, "No cloud model contact is configured")
+        val contactId = contact.optString("id").ifBlank { contact.optString("signalasi_id") }
+        val selectedModel = AppStore.selectedCloudModelContact(context, contactId) ?: contact
+        val trace = JSONArray()
+            .put(JSONObject()
+                .put("stage", "agent_confirmed")
+                .put("at", System.currentTimeMillis())
+                .put("detail", action.target))
+            .put(JSONObject()
+                .put("stage", "route_selected")
+                .put("at", System.currentTimeMillis())
+                .put("detail", selectedModel.optString("cloud_model")))
+        val messageId = ChatHistoryStore.appendOutgoing(
+            context = context,
+            contactId = contactId,
+            content = prompt,
+            deliveryStatus = context.getString(R.string.delivery_status_requesting),
+            deliveryTrace = trace
+        )
+        Thread {
+            val appContext = context.applicationContext
+            val result = runCatching { CloudModelClient.send(appContext, selectedModel, prompt) }
+            val reply = result.getOrElse { error ->
+                appContext.getString(
+                    R.string.cloud_request_failed,
+                    error.message?.take(220) ?: appContext.getString(R.string.cloud_unknown_error)
+                )
+            }
+            ChatHistoryStore.markOutgoingDelivery(
+                context = appContext,
+                contactId = contactId,
+                messageId = messageId,
+                stage = if (result.isSuccess) "cloud_model_replied" else "cloud_model_failed",
+                detail = selectedModel.optString("cloud_model"),
+                status = appContext.getString(
+                    if (result.isSuccess) R.string.delivery_status_replied else R.string.delivery_status_failed
+                )
+            )
+            ChatHistoryStore.appendIncoming(
+                appContext,
+                JSONObject()
+                    .put("sender", contactId)
+                    .put("contact_id", contactId)
+                    .put("content", reply)
+                    .put("delivery_trace", trace)
+                    .toString()
+            )
+        }.start()
+        return AgentActionResult(
+            actionId = action.id,
+            success = true,
+            message = "Queued cloud model task to ${contact.optString("name", contactId)}"
+        )
+    }
+
     private fun resolveConnectorContactId(connectorId: String): String? {
         val aliases = connectorAliases(connectorId)
         if ("hermes" in aliases && AppStore.contactById(context, "hermes") != null) return "hermes"
@@ -812,6 +936,19 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             if (id in aliases || agentId in aliases || signalasiId in aliases) {
                 return id.ifBlank { signalasiId.ifBlank { agentId } }
             }
+        }
+        return null
+    }
+
+    private fun resolveCloudModelContact(): JSONObject? {
+        val contacts = AppStore.contacts(context)
+        for (index in 0 until contacts.length()) {
+            val contact = contacts.optJSONObject(index) ?: continue
+            if (contact.optBoolean("deleted", false)) continue
+            if (contact.optString("delivery_mode") != "cloud_api") continue
+            if (contact.optString("setup_status").ifBlank { "ready" } != "ready") continue
+            if (contact.optString("cloud_model").isBlank()) continue
+            return contact
         }
         return null
     }
@@ -1081,6 +1218,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("timeout_seconds", plan.timeoutSeconds)
         .put("planner_profile", plan.plannerProfile)
         .put("context_digest", plan.contextDigest)
+        .put("route", encodeRoute(plan.route))
         .put("validation", encodePlanValidation(plan.validation))
         .put("verification_results", JSONArray().also { array ->
             plan.verificationResults.forEach { array.put(encodeVerificationResult(it)) }
@@ -1107,10 +1245,44 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         timeoutSeconds = json.optInt("timeout_seconds", 60),
         plannerProfile = json.optString("planner_profile", "rule-based-local"),
         contextDigest = json.optString("context_digest"),
+        route = decodeRoute(json.optJSONObject("route")),
         validation = decodePlanValidation(json.optJSONObject("validation")),
         verificationResults = decodeVerificationResults(json.optJSONArray("verification_results")),
         safetyReview = decodeSafetyReview(json.optJSONObject("safety_review"))
     )
+
+    private fun encodeRoute(route: AgentRoute): JSONObject = JSONObject()
+        .put("route_id", route.routeId)
+        .put("kind", route.kind.name)
+        .put("target_id", route.targetId)
+        .put("target_title", route.targetTitle)
+        .put("status", route.status.name)
+        .put("delivery_mode", route.deliveryMode)
+        .put("capabilities", JSONArray().also { array ->
+            route.capabilities.forEach { array.put(it.name) }
+        })
+
+    private fun decodeRoute(json: JSONObject?): AgentRoute {
+        if (json == null) return AgentRoute()
+        return AgentRoute(
+            routeId = json.optString("route_id"),
+            kind = enumOrDefault(json.optString("kind"), AgentRouteKind.UNKNOWN),
+            targetId = json.optString("target_id"),
+            targetTitle = json.optString("target_title"),
+            status = enumOrDefault(json.optString("status"), AgentConnectorStatus.DISCONNECTED),
+            deliveryMode = json.optString("delivery_mode"),
+            capabilities = decodeCapabilities(json.optJSONArray("capabilities"))
+        )
+    }
+
+    private fun decodeCapabilities(array: JSONArray?): List<AgentCapability> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                add(enumOrDefault(array.optString(index), AgentCapability.CHAT))
+            }
+        }
+    }
 
     private fun encodePermissions(permissions: List<AgentPermissionRequirement>): JSONArray = JSONArray().also { array ->
         permissions.forEach { permission ->
@@ -1456,6 +1628,7 @@ data class AgentPlan(
     val timeoutSeconds: Int = 60,
     val plannerProfile: String = "rule-based-local",
     val contextDigest: String = "",
+    val route: AgentRoute = AgentRoute(),
     val validation: AgentPlanValidation = AgentPlanValidation(),
     val verificationResults: List<AgentVerificationResult> = emptyList(),
     val safetyReview: AgentSafetyReview = AgentSafetyReview()
@@ -1526,6 +1699,16 @@ data class AgentStep(
     val order: Int,
     val kind: AgentStepKind,
     val status: AgentStepStatus
+)
+
+data class AgentRoute(
+    val routeId: String = "",
+    val kind: AgentRouteKind = AgentRouteKind.UNKNOWN,
+    val targetId: String = "",
+    val targetTitle: String = "",
+    val status: AgentConnectorStatus = AgentConnectorStatus.DISCONNECTED,
+    val deliveryMode: String = "",
+    val capabilities: List<AgentCapability> = emptyList()
 )
 
 data class AgentAction(
@@ -1689,6 +1872,16 @@ enum class AgentConnectorStatus {
     AVAILABLE,
     NEEDS_SETUP,
     DISCONNECTED
+}
+
+enum class AgentRouteKind {
+    LOCAL_SYSTEM,
+    CLOUD_MODEL,
+    LOCAL_MODEL,
+    DESKTOP_AGENT,
+    DEVICE_CONNECTOR,
+    KNOWLEDGE,
+    UNKNOWN
 }
 
 enum class AgentCapability {
