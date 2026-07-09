@@ -246,15 +246,33 @@ object AgentSystemToolPlanner {
             intentAction = MediaStore.ACTION_IMAGE_CAPTURE,
             risk = AgentRisk.LOW
         )
-        lower.contains("install app") ||
-            lower.contains("uninstall app") ||
+        lower.contains("install apk") || lower.contains("install app") -> intentAction(
+            id = "select-apk-install",
+            target = "APK Installer",
+            description = "Select an APK for owner-confirmed installation",
+            intentAction = Intent.ACTION_OPEN_DOCUMENT,
+            type = "application/vnd.android.package-archive",
+            category = Intent.CATEGORY_OPENABLE,
+            risk = AgentRisk.HIGH
+        )
+        lower.contains("unknown app sources") ||
+            lower.contains("install unknown apps") ||
+            lower.contains("apk install permission") -> intentAction(
+                id = "open-unknown-app-sources",
+                target = "Install Unknown Apps",
+                description = "Open install unknown apps permission settings",
+                intentAction = Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                uri = "package:com.signalasi.chat",
+                risk = AgentRisk.HIGH
+            )
+        lower.contains("uninstall app") ||
             lower.contains("delete app") ||
             lower.contains("factory reset") ||
             lower.contains("erase phone") ||
             lower.contains("clear all data") -> blockedSensitiveAction(
             id = "blocked-app-installation",
             target = "Package Manager",
-            description = "App installation, removal, or device wipe requires explicit owner control"
+            description = "App removal or device wipe requires explicit owner control"
         )
         lower.contains("unlock phone") || lower.contains("disable lock") || lower.contains("change screen lock") -> blockedSensitiveAction(
             id = "blocked-lock-control",
