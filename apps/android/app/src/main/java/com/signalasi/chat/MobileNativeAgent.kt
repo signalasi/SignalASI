@@ -178,6 +178,12 @@ class MobileNativeAgent(
         taskSearchCommandValue(currentGoal)?.let { query ->
             return searchTasksCommand(query)
         }
+        if (memoryOverviewCommand(currentGoal)) {
+            return showMemoryOverviewCommand()
+        }
+        if (knowledgeOverviewCommand(currentGoal)) {
+            return showKnowledgeOverviewCommand()
+        }
         memoryCaptureCommandValue(currentGoal)?.let { enabled ->
             return setMemoryCaptureCommand(enabled)
         }
@@ -599,6 +605,26 @@ class MobileNativeAgent(
             "enable memory capture" -> true
             else -> null
         }
+    }
+
+    private fun memoryOverviewCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "memory status" ||
+            normalized == "show memory" ||
+            normalized == "list memories" ||
+            normalized == "recent memories" ||
+            normalized == "show recent memories" ||
+            normalized == "what do you remember"
+    }
+
+    private fun knowledgeOverviewCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "knowledge status" ||
+            normalized == "knowledge base status" ||
+            normalized == "show knowledge" ||
+            normalized == "list knowledge" ||
+            normalized == "recent knowledge" ||
+            normalized == "show recent knowledge"
     }
 
     private fun forgetMemoryCommandValue(goal: String): String? {
@@ -1407,6 +1433,106 @@ class MobileNativeAgent(
         recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "memory_capture:$enabled")
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
         saveTaskRecord(result = result)
+        return snapshot()
+    }
+
+    private fun showMemoryOverviewCommand(): AgentUiState {
+        val recent = memoryStore.recent(limit = 10)
+        val count = memoryStore.count()
+        val captureEnabled = safetySettingsStore.load().memoryCapture
+        val result = buildString {
+            append("Personal memory: ").append(count)
+            append("; capture=").append(if (captureEnabled) "on" else "paused")
+            if (recent.isEmpty()) {
+                append("\nNo saved memories")
+            } else {
+                recent.forEach { item ->
+                    append("\n").append(item.kind.name.lowercase(Locale.US))
+                    append(": ").append(item.value.replace(Regex("\\s+"), " ").take(120))
+                }
+            }
+        }
+        return completePersonalDataOverviewCommand(
+            actionId = "show-memory-overview",
+            target = "Agent Memory",
+            description = "Show personal memory status and recent items",
+            result = result,
+            parameters = mapOf("memory_count" to count.toString(), "capture_enabled" to captureEnabled.toString())
+        )
+    }
+
+    private fun showKnowledgeOverviewCommand(): AgentUiState {
+        val stats = knowledgeStore.stats()
+        val recent = knowledgeStore.search(query = "", limit = 10)
+        val result = buildString {
+            append("Knowledge base: ").append(stats.itemCount)
+            append(" items; sources=").append(stats.sourceCount)
+            if (recent.isEmpty()) {
+                append("\nNo knowledge items")
+            } else {
+                recent.forEach { item ->
+                    append("\n").append(item.kind.name.lowercase(Locale.US))
+                    append(": ").append(item.title.replace(Regex("\\s+"), " ").take(100))
+                    if (item.source.isNotBlank()) append(" [").append(item.source.take(48)).append("]")
+                }
+            }
+        }
+        return completePersonalDataOverviewCommand(
+            actionId = "show-knowledge-overview",
+            target = "Agent Knowledge",
+            description = "Show knowledge base status and recent items",
+            result = result,
+            parameters = mapOf(
+                "item_count" to stats.itemCount.toString(),
+                "source_count" to stats.sourceCount.toString()
+            )
+        )
+    }
+
+    private fun completePersonalDataOverviewCommand(
+        actionId: String,
+        target: String,
+        description: String,
+        result: String,
+        parameters: Map<String, String>
+    ): AgentUiState {
+        val action = AgentAction(
+            id = actionId,
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = target,
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.COMPLETED,
+            description = description,
+            parameters = parameters,
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = target,
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = actionId,
+                kind = AgentRouteKind.KNOWLEDGE,
+                targetId = actionId,
+                targetTitle = target,
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.KNOWLEDGE_SEARCH)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
         return snapshot()
     }
 
@@ -3250,6 +3376,8 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
 interface AgentMemoryStore {
     fun remember(item: AgentMemoryItem)
     fun recall(query: String): List<AgentMemoryItem>
+    fun recent(limit: Int = 10): List<AgentMemoryItem>
+    fun count(): Int
     fun delete(query: String): Int
 }
 
@@ -3263,6 +3391,10 @@ class InMemoryAgentMemoryStore : AgentMemoryStore {
     override fun recall(query: String): List<AgentMemoryItem> = items
         .filter { it.value.contains(query, ignoreCase = true) || query.contains(it.value, ignoreCase = true) }
         .takeLast(5)
+
+    override fun recent(limit: Int): List<AgentMemoryItem> = items.takeLast(limit.coerceAtLeast(0)).asReversed()
+
+    override fun count(): Int = items.size
 
     override fun delete(query: String): Int {
         val before = items.size
@@ -3296,6 +3428,12 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
             .map { it.first }
             .take(MAX_RECALL_ITEMS)
     }
+
+    override fun recent(limit: Int): List<AgentMemoryItem> = loadItems()
+        .takeLast(limit.coerceAtLeast(0))
+        .asReversed()
+
+    override fun count(): Int = loadItems().size
 
     override fun delete(query: String): Int {
         val cleanQuery = query.trim()
