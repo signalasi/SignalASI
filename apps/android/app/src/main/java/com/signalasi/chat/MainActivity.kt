@@ -2515,7 +2515,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         } else {
             getString(
                 R.string.agent_screen_notification_summary,
-                item.packageName.ifBlank { "-" },
+                item.category.ifBlank { item.packageName.ifBlank { "-" } },
                 item.textPreview.ifBlank { title }
             )
         }

@@ -53,6 +53,7 @@ class SignalASINotificationListenerService : NotificationListenerService() {
             packageName = sbn.packageName,
             title = title.take(80),
             textPreview = content.take(120),
+            category = notificationCategory(sbn.packageName, combined),
             postedAtMillis = sbn.postTime,
             sensitiveFlags = notificationSensitiveFlags(combined)
         )
@@ -89,9 +90,21 @@ data class AgentNotificationItem(
     val packageName: String = "",
     val title: String = "",
     val textPreview: String = "",
+    val category: String = "app",
     val postedAtMillis: Long = 0L,
     val sensitiveFlags: List<String> = emptyList()
 )
+
+private fun notificationCategory(packageName: String, value: String): String {
+    val lower = "$packageName $value".lowercase(Locale.US)
+    return when {
+        listOf("sms", "mms", "message", "messages").any { lower.contains(it) } -> "sms"
+        listOf("phone", "dialer", "missed call", "incoming call", "voicemail").any { lower.contains(it) } -> "call"
+        listOf("wechat", "whatsapp", "telegram", "signal", "messenger", "chat").any { lower.contains(it) } -> "chat"
+        listOf("android system", "system ui", "permission", "settings").any { lower.contains(it) } -> "system"
+        else -> "app"
+    }
+}
 
 private fun notificationSensitiveFlags(value: String): List<String> {
     val lower = value.lowercase(Locale.US)

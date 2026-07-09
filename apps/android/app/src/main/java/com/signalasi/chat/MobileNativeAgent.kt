@@ -981,6 +981,17 @@ class RuleBasedAgentPlanner : AgentPlanner {
                 status = AgentActionStatus.PENDING_CONFIRMATION,
                 description = "Read current notification context"
             )
+            lower.contains("read sms") ||
+                lower.contains("read messages") ||
+                lower.contains("read calls") ||
+                lower.contains("missed calls") -> AgentAction(
+                    id = "read-notifications",
+                    kind = AgentActionKind.READ_SCREEN,
+                    target = "Communication Notifications",
+                    risk = AgentRisk.LOW,
+                    status = AgentActionStatus.PENDING_CONFIRMATION,
+                    description = "Read current communication notification context"
+                )
             lower.contains("device status") ||
                 lower.contains("phone status") ||
                 lower.contains("battery status") ||
@@ -1873,10 +1884,16 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 .joinToString(", ")
                 .ifBlank { "none" }
             val sensitiveCount = screen.notifications.items.count { it.sensitiveFlags.isNotEmpty() }
+            val categories = screen.notifications.items
+                .groupingBy { it.category.ifBlank { "app" } }
+                .eachCount()
+                .entries
+                .joinToString(", ") { "${it.key}=${it.value}" }
+                .ifBlank { "none" }
             return AgentActionResult(
                 actionId = action.id,
                 success = true,
-                message = "Read ${screen.notifications.items.size} notifications from $packages; sensitive=$sensitiveCount"
+                message = "Read ${screen.notifications.items.size} notifications from $packages; categories=$categories; sensitive=$sensitiveCount"
             )
         }
         if (action.id == "read-device-status") {
@@ -2509,6 +2526,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
                     .put("package_name", item.packageName)
                     .put("title", item.title)
                     .put("text_preview", item.textPreview)
+                    .put("category", item.category)
                     .put("posted_at_millis", item.postedAtMillis)
                     .put("sensitive_flags", JSONArray().also { flags ->
                         item.sensitiveFlags.forEach { flags.put(it) }
@@ -2539,6 +2557,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
                         packageName = item.optString("package_name"),
                         title = item.optString("title"),
                         textPreview = item.optString("text_preview"),
+                        category = item.optString("category", "app"),
                         postedAtMillis = item.optLong("posted_at_millis"),
                         sensitiveFlags = decodeStringList(item.optJSONArray("sensitive_flags"))
                     )
