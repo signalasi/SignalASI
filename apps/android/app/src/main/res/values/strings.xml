@@ -330,6 +330,7 @@
     <string name="agent_screen_launchable_app_summary">%1$s / %2$s</string>
     <string name="agent_screen_actions">Actions</string>
     <string name="agent_screen_fields">Input Fields</string>
+    <string name="agent_screen_scrollable_regions">Scrollable Regions</string>
     <string name="agent_screen_empty">No matching screen items</string>
     <string name="agent_screen_disabled">Enable screen access to inspect this page</string>
     <string name="agent_screen_bounds">Bounds: %1$s</string>

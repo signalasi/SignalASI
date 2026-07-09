@@ -2020,7 +2020,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         return AgentActionResult(
             actionId = action.id,
             success = true,
-            message = "Read ${screen.visibleTextCount} text items, ${screen.clickableNodeCount} actions, ${screen.inputFieldCount} fields, focused=${screen.focusedInputField != null}, and ${screen.installedApps.size} launchable apps"
+            message = "Read ${screen.visibleTextCount} text items, ${screen.clickableNodeCount} actions, ${screen.inputFieldCount} fields, ${screen.scrollableRegionCount} scroll regions, focused=${screen.focusedInputField != null}, and ${screen.installedApps.size} launchable apps"
         )
     }
 

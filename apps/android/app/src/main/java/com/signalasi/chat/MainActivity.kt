@@ -2390,6 +2390,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val fields = screen.inputFields
             .filter { matchesScreenQuery(it.label, normalizedQuery) || matchesScreenQuery(it.viewId, normalizedQuery) }
             .take(5)
+        val scrollRegions = screen.scrollableRegions
+            .filter { matchesScreenQuery(it.label, normalizedQuery) || matchesScreenQuery(it.viewId, normalizedQuery) }
+            .take(5)
         val clipboardMatches = screen.clipboard.hasText && (
             normalizedQuery.isBlank() ||
                 matchesScreenQuery(screen.clipboard.preview, normalizedQuery) ||
@@ -2417,7 +2420,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             .take(if (normalizedQuery.isBlank()) 4 else 8)
 
-        val hasAny = selectedTextMatches || focusedInputField != null || clipboardMatches || notificationsMatch || deviceStatusMatches || launchableApps.isNotEmpty() || visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty()
+        val hasAny = selectedTextMatches || focusedInputField != null || clipboardMatches || notificationsMatch || deviceStatusMatches || launchableApps.isNotEmpty() || visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty() || scrollRegions.isNotEmpty()
         agentScreenDetailList.addView(agentScreenSummaryRow(screen))
         if (!hasAny) {
             agentScreenDetailList.addView(agentScreenEmptyRow(getString(R.string.agent_screen_empty)))
@@ -2442,6 +2445,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         addScreenTextSection(getString(R.string.agent_screen_texts), visibleTexts)
         addScreenElementSection(getString(R.string.agent_screen_actions), actions, AgentScreenCommandKind.TAP)
         addScreenElementSection(getString(R.string.agent_screen_fields), fields, AgentScreenCommandKind.TYPE)
+        addScreenElementSection(getString(R.string.agent_screen_scrollable_regions), scrollRegions, AgentScreenCommandKind.SCROLL)
     }
 
     private fun matchesScreenQuery(value: String, normalizedQuery: String): Boolean =
@@ -2697,6 +2701,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun agentScreenCommand(label: String, kind: AgentScreenCommandKind): String = when (kind) {
         AgentScreenCommandKind.TAP -> "tap $label"
         AgentScreenCommandKind.TYPE -> "type text into $label"
+        AgentScreenCommandKind.SCROLL -> "swipe up"
     }
 
     private fun prefillAgentGoal(command: String) {
@@ -6885,7 +6890,8 @@ data class ContactTypeTag(val text: String, val textColor: Int, val bgColor: Int
 
 private enum class AgentScreenCommandKind {
     TAP,
-    TYPE
+    TYPE,
+    SCROLL
 }
 
 // ===== ContactAdapter =====
