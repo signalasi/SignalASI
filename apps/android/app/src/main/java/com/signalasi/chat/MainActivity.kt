@@ -65,6 +65,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
@@ -93,6 +94,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_IMPORT_BACKUP = 2003
         private const val REQUEST_EXPORT_BACKUP = 2004
         private const val REQUEST_PICK_AVATAR = 2005
+        private const val REQUEST_IMPORT_KNOWLEDGE = 2006
+        private const val MAX_KNOWLEDGE_IMPORT_BYTES = 180_000
         private const val HISTORY_PREFS = "signalasi_chat_history"
         private const val OLD_HISTORY_PREFS = "hermes_chat_history"
         private const val HISTORY_KEY = "messages"
@@ -540,6 +543,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             importBackupFromUri(data?.data ?: return)
             return
         }
+        if (requestCode == REQUEST_IMPORT_KNOWLEDGE && resultCode == RESULT_OK) {
+            importAgentKnowledgeFromUri(data?.data ?: return)
+            return
+        }
         if (requestCode == REQUEST_EXPORT_BACKUP) {
             if (resultCode == RESULT_OK && data?.data != null) {
                 exportBackupToUri(data.data!!)
@@ -716,6 +723,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             }
         }
+        agentKnowledgeText.setOnClickListener { openAgentKnowledgeImportPicker() }
         agentSubmitButton.setOnClickListener { handleAgentPrimaryAction() }
         agentGoalInput.setOnEditorActionListener { _, _, _ ->
             submitAgentGoal()
@@ -5786,6 +5794,96 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(messageInput.windowToken, 0)
     }
 
+    private fun openAgentKnowledgeImportPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            type = "*/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf(
+                "text/*",
+                "application/json",
+                "application/pdf",
+                "application/msword",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/octet-stream"
+            ))
+        }
+        startActivityForResult(intent, REQUEST_IMPORT_KNOWLEDGE)
+    }
+
+    private fun importAgentKnowledgeFromUri(uri: Uri) {
+        runCatching {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val meta = documentMeta(uri)
+        val mimeType = contentResolver.getType(uri).orEmpty()
+        val content = readKnowledgeDocumentContent(uri, meta, mimeType)
+        SharedPreferencesAgentKnowledgeStore(this).upsert(
+            AgentKnowledgeItem(
+                kind = AgentKnowledgeKind.DOCUMENT,
+                title = meta.name,
+                content = content,
+                source = uri.toString(),
+                tags = listOfNotNull(
+                    "import",
+                    "file",
+                    mimeType.ifBlank { null },
+                    meta.name.substringAfterLast('.', "").takeIf { it.isNotBlank() }
+                )
+            )
+        )
+        Toast.makeText(this, getString(R.string.agent_knowledge_imported, meta.name), Toast.LENGTH_SHORT).show()
+        renderAgentState(mobileNativeAgent.snapshot())
+    }
+
+    private fun readKnowledgeDocumentContent(uri: Uri, meta: DocumentMeta, mimeType: String): String {
+        val textLike = mimeType.startsWith("text/") ||
+            mimeType == "application/json" ||
+            meta.name.endsWith(".md", ignoreCase = true) ||
+            meta.name.endsWith(".txt", ignoreCase = true) ||
+            meta.name.endsWith(".json", ignoreCase = true) ||
+            meta.name.endsWith(".csv", ignoreCase = true)
+        if (!textLike) {
+            return buildString {
+                append("Imported document index\n")
+                append("File: ").append(meta.name).append('\n')
+                append("Type: ").append(mimeType.ifBlank { "unknown" }).append('\n')
+                append("Size: ").append(meta.size).append(" bytes\n")
+                append("Source: ").append(uri)
+            }
+        }
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(4096)
+        var remaining = MAX_KNOWLEDGE_IMPORT_BYTES
+        contentResolver.openInputStream(uri)?.use { input ->
+            while (remaining > 0) {
+                val read = input.read(buffer, 0, minOf(buffer.size, remaining))
+                if (read <= 0) break
+                output.write(buffer, 0, read)
+                remaining -= read
+            }
+        }
+        val text = output.toString(Charsets.UTF_8.name()).trim()
+        return if (text.isBlank()) {
+            "Imported empty text document: ${meta.name}"
+        } else {
+            text
+        }
+    }
+
+    private fun documentMeta(uri: Uri): DocumentMeta {
+        var name = "document"
+        var size = 0L
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME).let { if (it >= 0) name = cursor.getString(it) ?: name }
+                cursor.getColumnIndex(OpenableColumns.SIZE).let { if (it >= 0) size = cursor.getLong(it) }
+            }
+        }
+        return DocumentMeta(name, size)
+    }
+
     // ===== Media =====
     private fun imageMeta(uri: Uri): ImageMeta {
         var name = "image"
@@ -5878,6 +5976,7 @@ data class ContactSummary(
 )
 
 data class ImageMeta(val name: String, val size: Long)
+data class DocumentMeta(val name: String, val size: Long)
 data class UploadedFile(val fileId: String, val name: String, val size: Long, val contentType: String)
 data class CloudModelPreset(
     val provider: String,
