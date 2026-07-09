@@ -165,6 +165,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentScreenDetailList: LinearLayout
     private lateinit var agentActionQueueList: LinearLayout
     private lateinit var agentRequirementList: LinearLayout
+    private lateinit var agentPlanContextList: LinearLayout
     private lateinit var agentAuditTrailList: LinearLayout
     private lateinit var agentRecentTaskList: LinearLayout
     private lateinit var agentGoalInput: EditText
@@ -343,6 +344,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentScreenDetailList = findViewById(R.id.agentScreenDetailList)
         agentActionQueueList = findViewById(R.id.agentActionQueueList)
         agentRequirementList = findViewById(R.id.agentRequirementList)
+        agentPlanContextList = findViewById(R.id.agentPlanContextList)
         agentAuditTrailList = findViewById(R.id.agentAuditTrailList)
         agentRecentTaskList = findViewById(R.id.agentRecentTaskList)
         agentGoalInput = findViewById(R.id.agentGoalInput)
@@ -1646,6 +1648,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         renderAgentActionQueue(state)
         renderAgentRequirements(state)
+        renderAgentPlanContext(state)
         renderAgentRecentTasks(state)
         renderAgentAuditTrail(state)
         latestAgentScreenContext = state.currentScreen
@@ -1687,6 +1690,30 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
+    private fun renderAgentPlanContext(state: AgentUiState) {
+        agentPlanContextList.removeAllViews()
+        val plan = state.plan
+        if (plan == null) {
+            agentPlanContextList.addView(agentPlanContextEmptyRow())
+            return
+        }
+
+        val routeLabel = listOfNotNull(
+            plan.route.kind.name.lowercase(Locale.US).replace('_', ' '),
+            plan.route.targetTitle.ifBlank { plan.selectedAgentOrModel }.ifBlank { null }
+        ).joinToString(" / ")
+        val rows = listOf(
+            R.string.agent_plan_context_goal to state.currentGoal.ifBlank { plan.goal },
+            R.string.agent_plan_context_route to routeLabel.ifBlank { plan.selectedAgentOrModel.ifBlank { "-" } },
+            R.string.agent_plan_context_expected to plan.expectedResult.ifBlank { "-" },
+            R.string.agent_plan_context_rollback to plan.rollbackStrategy.ifBlank { "-" },
+            R.string.agent_plan_context_timeout to getString(R.string.agent_plan_context_timeout_value, plan.timeoutSeconds)
+        )
+        rows.forEachIndexed { index, row ->
+            agentPlanContextList.addView(agentPlanContextRow(getString(row.first), row.second, index))
+        }
+    }
+
     private fun renderAgentAuditTrail(state: AgentUiState) {
         agentAuditTrailList.removeAllViews()
         val events = state.auditTrail.takeLast(6).asReversed()
@@ -1696,6 +1723,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         events.forEachIndexed { index, entry ->
             agentAuditTrailList.addView(agentAuditRow(entry, index))
+        }
+    }
+
+    private fun agentPlanContextEmptyRow(): View {
+        return TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48)
+            )
+            setBackgroundResource(R.drawable.agent_step_background)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), 0, dp(14), 0)
+            setTextColor(getColorCompat(R.color.text_secondary))
+            textSize = 13f
+            text = getString(R.string.agent_plan_context_empty)
         }
     }
 
@@ -1756,6 +1798,40 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             setTextColor(getColorCompat(R.color.text_secondary))
             textSize = 13f
             text = getString(R.string.agent_audit_empty)
+        }
+    }
+
+    private fun agentPlanContextRow(title: String, value: String, index: Int): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundResource(R.drawable.agent_step_background)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                if (index > 0) topMargin = dp(8)
+            }
+
+            addView(TextView(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(82), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    marginEnd = dp(10)
+                }
+                setTextColor(getColorCompat(R.color.text_secondary))
+                textSize = 12f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                text = title
+            })
+
+            addView(TextView(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                setTextColor(getColorCompat(R.color.text_primary))
+                textSize = 13f
+                maxLines = 2
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                text = value
+            })
         }
     }
 

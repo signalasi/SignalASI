@@ -269,6 +269,14 @@
     <string name="agent_requirements_empty">No active execution requirements</string>
     <string name="agent_requirement_granted">Ready</string>
     <string name="agent_requirement_missing">Needed</string>
+    <string name="agent_section_plan_context">Plan Context</string>
+    <string name="agent_plan_context_empty">No active plan context</string>
+    <string name="agent_plan_context_goal">Goal</string>
+    <string name="agent_plan_context_route">Route</string>
+    <string name="agent_plan_context_expected">Expected</string>
+    <string name="agent_plan_context_rollback">Rollback</string>
+    <string name="agent_plan_context_timeout">Timeout</string>
+    <string name="agent_plan_context_timeout_value">%1$ds</string>
     <string name="agent_current_app_value">Current app: %1$s</string>
     <string name="agent_callable_targets_value">Callable targets: %1$d</string>
     <string name="agent_running_tasks_value">Running tasks: %1$d</string>
