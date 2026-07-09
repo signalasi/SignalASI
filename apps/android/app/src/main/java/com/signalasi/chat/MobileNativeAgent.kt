@@ -145,6 +145,12 @@ class MobileNativeAgent(
         callableSearchCommandValue(currentGoal)?.let { query ->
             return searchCallableInventoryCommand(query)
         }
+        if (installedAppsCommand(currentGoal)) {
+            return showInstalledAppsCommand()
+        }
+        installedAppSearchCommandValue(currentGoal)?.let { query ->
+            return searchInstalledAppsCommand(query)
+        }
         permissionModeCommandValue(currentGoal)?.let { mode ->
             return setPermissionModeCommand(mode)
         }
@@ -458,6 +464,28 @@ class MobileNativeAgent(
             normalized == "agent permission status" ||
             normalized == "safety status" ||
             normalized == "privacy status"
+    }
+
+    private fun installedAppsCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "list apps" ||
+            normalized == "show apps" ||
+            normalized == "installed apps" ||
+            normalized == "list installed apps" ||
+            normalized == "show installed apps"
+    }
+
+    private fun installedAppSearchCommandValue(goal: String): String? {
+        val prefixes = listOf(
+            "search installed apps ",
+            "find installed apps ",
+            "search apps ",
+            "find apps ",
+            "search app ",
+            "find app "
+        )
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
     }
 
     private fun permissionModeCommandValue(goal: String): PermissionMode? {
@@ -862,6 +890,98 @@ class MobileNativeAgent(
                 status = AgentConnectorStatus.AVAILABLE,
                 deliveryMode = "local",
                 capabilities = listOf(AgentCapability.TASK_EXECUTION)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        return snapshot()
+    }
+
+    private fun showInstalledAppsCommand(): AgentUiState {
+        val apps = currentScreen.installedApps
+        val result = if (apps.isEmpty()) {
+            "No launchable apps are visible to SignalASI"
+        } else {
+            buildString {
+                append("Launchable apps: ").append(apps.size)
+                apps.take(30).forEach { app ->
+                    append("\n").append(app.label).append(" | ").append(app.packageName)
+                }
+                if (apps.size > 30) append("\n+").append(apps.size - 30).append(" more")
+            }
+        }
+        return completeInstalledAppsCommand(
+            actionId = "list-installed-apps",
+            description = "List launchable apps on this device",
+            result = result,
+            parameters = mapOf("app_count" to apps.size.toString())
+        )
+    }
+
+    private fun searchInstalledAppsCommand(query: String): AgentUiState {
+        val normalizedQuery = query.normalizeAppName()
+        val matches = currentScreen.installedApps.filter { app ->
+            normalizedQuery.isNotBlank() &&
+                (app.label.normalizeAppName().contains(normalizedQuery) ||
+                    app.packageName.normalizeAppName().contains(normalizedQuery))
+        }
+        val result = if (matches.isEmpty()) {
+            "No launchable apps match '$query'"
+        } else {
+            buildString {
+                append("App matches: ").append(matches.size)
+                matches.take(20).forEach { app ->
+                    append("\n").append(app.label).append(" | ").append(app.packageName)
+                }
+            }
+        }
+        return completeInstalledAppsCommand(
+            actionId = "search-installed-apps",
+            description = "Search launchable apps on this device",
+            result = result,
+            parameters = mapOf("query" to query, "match_count" to matches.size.toString())
+        )
+    }
+
+    private fun completeInstalledAppsCommand(
+        actionId: String,
+        description: String,
+        result: String,
+        parameters: Map<String, String>
+    ): AgentUiState {
+        val action = AgentAction(
+            id = actionId,
+            kind = AgentActionKind.READ_SCREEN,
+            target = "Installed Apps",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.COMPLETED,
+            description = description,
+            parameters = parameters,
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Android App Inventory",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "android-app-inventory",
+                kind = AgentRouteKind.LOCAL_SYSTEM,
+                targetId = "android-app-inventory",
+                targetTitle = "Android App Inventory",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.SCREEN_READING)
             ),
             safetyReview = AgentSafetyReview(
                 risk = AgentRisk.LOW,
