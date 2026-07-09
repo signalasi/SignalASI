@@ -272,6 +272,10 @@ class RuleBasedAgentPlanner : AgentPlanner {
                 description = "Swipe up on the current screen",
                 parameters = mapOf("from_x" to "540", "from_y" to "1700", "to_x" to "540", "to_y" to "700")
             )
+            lower.contains("codex") -> connectorAction(request, "codex", "Send task to Codex")
+            lower.contains("claude") -> connectorAction(request, "claude-code", "Send task to Claude Code")
+            lower.contains("hermes") -> connectorAction(request, "hermes", "Send task to Hermes")
+            lower.contains("home assistant") || lower.contains("smart home") || lower.contains("device") -> deviceAction(request)
             else -> AgentAction(
                 id = "draft-plan",
                 kind = AgentActionKind.DRAFT_PLAN,
@@ -281,6 +285,35 @@ class RuleBasedAgentPlanner : AgentPlanner {
                 description = "Create a safe local task plan"
             )
         }
+    }
+
+    private fun connectorAction(request: AgentRequest, connectorId: String, description: String): AgentAction {
+        val target = request.targets.firstOrNull { it.id == connectorId }
+        return AgentAction(
+            id = "connector-$connectorId",
+            kind = AgentActionKind.CALL_CONNECTOR,
+            target = target?.title ?: connectorId,
+            risk = AgentRisk.MEDIUM,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = description,
+            parameters = mapOf(
+                "connector_id" to connectorId,
+                "prompt" to request.goal
+            )
+        )
+    }
+
+    private fun deviceAction(request: AgentRequest): AgentAction {
+        val target = request.targets.firstOrNull { it.kind == AgentConnectorKind.DEVICE }
+        return AgentAction(
+            id = "device-control",
+            kind = AgentActionKind.CONTROL_DEVICE,
+            target = target?.title ?: "Home Assistant",
+            risk = AgentRisk.HIGH,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = "Control a trusted device connector",
+            parameters = mapOf("prompt" to request.goal)
+        )
     }
 
     private fun riskFor(goal: String): AgentRisk = when {
@@ -500,17 +533,53 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
 }
 
 interface AgentConnectorRegistry {
-    fun availableTargets(): List<String>
+    fun availableTargets(): List<AgentCallableTarget>
 }
 
 class StaticAgentConnectorRegistry : AgentConnectorRegistry {
-    override fun availableTargets(): List<String> = listOf(
-        "Cloud Models",
-        "Local LLM",
-        "Hermes",
-        "Codex",
-        "Claude Code",
-        "Home Assistant"
+    override fun availableTargets(): List<AgentCallableTarget> = listOf(
+        AgentCallableTarget(
+            id = "cloud-models",
+            title = "Cloud Models",
+            kind = AgentConnectorKind.MODEL,
+            status = AgentConnectorStatus.AVAILABLE,
+            capabilities = listOf(AgentCapability.CHAT, AgentCapability.REASONING)
+        ),
+        AgentCallableTarget(
+            id = "local-llm",
+            title = "Local LLM",
+            kind = AgentConnectorKind.MODEL,
+            status = AgentConnectorStatus.NEEDS_SETUP,
+            capabilities = listOf(AgentCapability.CHAT, AgentCapability.LOCAL_INFERENCE)
+        ),
+        AgentCallableTarget(
+            id = "hermes",
+            title = "Hermes",
+            kind = AgentConnectorKind.AGENT,
+            status = AgentConnectorStatus.AVAILABLE,
+            capabilities = listOf(AgentCapability.CHAT, AgentCapability.RESEARCH)
+        ),
+        AgentCallableTarget(
+            id = "codex",
+            title = "Codex",
+            kind = AgentConnectorKind.AGENT,
+            status = AgentConnectorStatus.AVAILABLE,
+            capabilities = listOf(AgentCapability.CODE, AgentCapability.TASK_EXECUTION)
+        ),
+        AgentCallableTarget(
+            id = "claude-code",
+            title = "Claude Code",
+            kind = AgentConnectorKind.AGENT,
+            status = AgentConnectorStatus.NEEDS_SETUP,
+            capabilities = listOf(AgentCapability.CODE, AgentCapability.TASK_EXECUTION)
+        ),
+        AgentCallableTarget(
+            id = "home-assistant",
+            title = "Home Assistant",
+            kind = AgentConnectorKind.DEVICE,
+            status = AgentConnectorStatus.NEEDS_SETUP,
+            capabilities = listOf(AgentCapability.SMART_HOME, AgentCapability.DEVICE_CONTROL)
+        )
     )
 }
 
@@ -781,7 +850,7 @@ data class AgentUiState(
     val currentScreen: ScreenContext,
     val permissionMode: PermissionMode,
     val highRiskGuard: Boolean,
-    val callableTargets: List<String>,
+    val callableTargets: List<AgentCallableTarget>,
     val runningTaskCount: Int,
     val steps: List<AgentStep>,
     val lastEvent: AgentEvent,
@@ -806,8 +875,16 @@ data class AgentSessionSnapshot(
 data class AgentRequest(
     val goal: String,
     val screen: ScreenContext,
-    val targets: List<String>,
+    val targets: List<AgentCallableTarget>,
     val memories: List<AgentMemoryItem>
+)
+
+data class AgentCallableTarget(
+    val id: String,
+    val title: String,
+    val kind: AgentConnectorKind,
+    val status: AgentConnectorStatus,
+    val capabilities: List<AgentCapability>
 )
 
 data class ScreenContext(
@@ -961,6 +1038,31 @@ enum class AgentMemoryKind {
     PREFERENCE,
     KNOWLEDGE,
     SAFETY
+}
+
+enum class AgentConnectorKind {
+    MODEL,
+    AGENT,
+    DEVICE,
+    KNOWLEDGE
+}
+
+enum class AgentConnectorStatus {
+    AVAILABLE,
+    NEEDS_SETUP,
+    DISCONNECTED
+}
+
+enum class AgentCapability {
+    CHAT,
+    REASONING,
+    LOCAL_INFERENCE,
+    RESEARCH,
+    CODE,
+    TASK_EXECUTION,
+    SMART_HOME,
+    DEVICE_CONTROL,
+    KNOWLEDGE_SEARCH
 }
 
 enum class AgentAuditEvent {
