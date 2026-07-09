@@ -151,6 +151,12 @@ class MobileNativeAgent(
         installedAppSearchCommandValue(currentGoal)?.let { query ->
             return searchInstalledAppsCommand(query)
         }
+        if (notificationInboxCommand(currentGoal)) {
+            return showNotificationInboxCommand()
+        }
+        notificationSearchCommandValue(currentGoal)?.let { query ->
+            return searchNotificationsCommand(query)
+        }
         permissionModeCommandValue(currentGoal)?.let { mode ->
             return setPermissionModeCommand(mode)
         }
@@ -483,6 +489,27 @@ class MobileNativeAgent(
             "find apps ",
             "search app ",
             "find app "
+        )
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
+    private fun notificationInboxCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "notifications" ||
+            normalized == "read notifications" ||
+            normalized == "list notifications" ||
+            normalized == "show notifications" ||
+            normalized == "notification inbox" ||
+            normalized == "show notification inbox"
+    }
+
+    private fun notificationSearchCommandValue(goal: String): String? {
+        val prefixes = listOf(
+            "search notifications ",
+            "find notifications ",
+            "search notification ",
+            "find notification "
         )
         val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
         return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
@@ -993,6 +1020,116 @@ class MobileNativeAgent(
         lastActionResult = AgentActionResult(action.id, true, result)
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        return snapshot()
+    }
+
+    private fun showNotificationInboxCommand(): AgentUiState {
+        val notifications = currentScreen.notifications
+        val result = when {
+            !notifications.hasAccess -> "Notification access is disabled"
+            notifications.items.isEmpty() -> "No active notifications"
+            else -> notificationSummary(notifications.items, "Active notifications")
+        }
+        return completeNotificationCommand(
+            actionId = "show-notification-inbox",
+            description = "Show privacy-protected notification inbox",
+            result = result,
+            parameters = mapOf(
+                "has_access" to notifications.hasAccess.toString(),
+                "notification_count" to notifications.items.size.toString()
+            )
+        )
+    }
+
+    private fun searchNotificationsCommand(query: String): AgentUiState {
+        val notifications = currentScreen.notifications
+        val normalizedQuery = query.lowercase(Locale.US)
+        val matches = notifications.items.filter { item ->
+            item.packageName.lowercase(Locale.US).contains(normalizedQuery) ||
+                item.category.lowercase(Locale.US).contains(normalizedQuery) ||
+                item.title.lowercase(Locale.US).contains(normalizedQuery) ||
+                item.textPreview.lowercase(Locale.US).contains(normalizedQuery)
+        }
+        val result = when {
+            !notifications.hasAccess -> "Notification access is disabled"
+            matches.isEmpty() -> "No active notifications match '$query'"
+            else -> notificationSummary(matches, "Notification matches")
+        }
+        return completeNotificationCommand(
+            actionId = "search-notifications",
+            description = "Search privacy-protected notifications",
+            result = result,
+            parameters = mapOf("query" to query, "match_count" to matches.size.toString())
+        )
+    }
+
+    private fun notificationSummary(items: List<AgentNotificationItem>, heading: String): String =
+        buildString {
+            append(heading).append(": ").append(items.size)
+            items.take(12).forEach { item ->
+                val appLabel = currentScreen.installedApps
+                    .firstOrNull { it.packageName == item.packageName }
+                    ?.label
+                    ?: item.packageName
+                append("\n").append(appLabel).append(" [").append(item.category).append("] ")
+                if (item.sensitiveFlags.isNotEmpty()) {
+                    append("[sensitive content hidden]")
+                } else {
+                    append(item.title.ifBlank { "Notification" })
+                    if (item.textPreview.isNotBlank()) append(": ").append(item.textPreview)
+                }
+            }
+        }
+
+    private fun completeNotificationCommand(
+        actionId: String,
+        description: String,
+        result: String,
+        parameters: Map<String, String>
+    ): AgentUiState {
+        val success = currentScreen.notifications.hasAccess
+        val status = if (success) AgentActionStatus.COMPLETED else AgentActionStatus.FAILED
+        val action = AgentAction(
+            id = actionId,
+            kind = AgentActionKind.READ_SCREEN,
+            target = "Notification Inbox",
+            risk = AgentRisk.LOW,
+            status = status,
+            description = description,
+            parameters = parameters,
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Notification Context",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "notification-inbox",
+                kind = AgentRouteKind.LOCAL_SYSTEM,
+                targetId = "notification-inbox",
+                targetTitle = "Notification Context",
+                status = if (currentScreen.notifications.hasAccess) {
+                    AgentConnectorStatus.AVAILABLE
+                } else {
+                    AgentConnectorStatus.NEEDS_SETUP
+                },
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.SCREEN_READING)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = if (success) AgentPhase.COMPLETED else AgentPhase.FAILED
+        lastActionResult = AgentActionResult(action.id, success, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:$status")
         return snapshot()
     }
 
