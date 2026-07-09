@@ -8,6 +8,7 @@ import android.net.Uri
 import android.provider.AlarmClock
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 import java.util.UUID
 
 /**
@@ -382,6 +383,8 @@ class RuleBasedAgentPlanner : AgentPlanner {
                 status = AgentActionStatus.PENDING_CONFIRMATION,
                 description = "Read current screen structure"
             )
+            (lower.startsWith("type ") || lower.startsWith("input ")) && lower.contains(" into ") ->
+                namedTextInputAction(request)
             lower.startsWith("type ") -> AgentAction(
                 id = "type-text",
                 kind = AgentActionKind.TYPE_TEXT,
@@ -403,6 +406,8 @@ class RuleBasedAgentPlanner : AgentPlanner {
                     parameters = mapOf("bounds" to firstElement?.bounds.orEmpty())
                 )
             }
+            lower.startsWith("tap ") || lower.startsWith("click ") -> namedTapAction(request)
+            lower.startsWith("long press ") || lower.startsWith("press and hold ") -> namedLongPressAction(request)
             lower.contains("swipe up") -> AgentAction(
                 id = "swipe-up",
                 kind = AgentActionKind.SWIPE,
@@ -429,6 +434,83 @@ class RuleBasedAgentPlanner : AgentPlanner {
                 status = AgentActionStatus.PENDING_CONFIRMATION,
                 description = "Create a safe local task plan"
             )
+        }
+    }
+
+    private fun namedTapAction(request: AgentRequest): AgentAction {
+        val query = request.goal
+            .removePrefixIgnoreCase("tap ")
+            .removePrefixIgnoreCase("click ")
+            .trim()
+        val element = findElementByQuery(request.screen.clickableElements, query)
+        return AgentAction(
+            id = "tap-named-action",
+            kind = AgentActionKind.TAP,
+            target = element?.label?.ifBlank { query } ?: query.ifBlank { request.screen.foregroundApp },
+            risk = AgentRisk.MEDIUM,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = if (query.isBlank()) "Tap a matching element" else "Tap $query",
+            parameters = mapOf(
+                "bounds" to element?.bounds.orEmpty(),
+                "query" to query,
+                "matched_label" to element?.label.orEmpty()
+            )
+        )
+    }
+
+    private fun namedLongPressAction(request: AgentRequest): AgentAction {
+        val query = request.goal
+            .removePrefixIgnoreCase("long press ")
+            .removePrefixIgnoreCase("press and hold ")
+            .trim()
+        val element = findElementByQuery(request.screen.clickableElements, query)
+        return AgentAction(
+            id = "long-press-named-action",
+            kind = AgentActionKind.LONG_PRESS,
+            target = element?.label?.ifBlank { query } ?: query.ifBlank { request.screen.foregroundApp },
+            risk = AgentRisk.MEDIUM,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = if (query.isBlank()) "Long press a matching element" else "Long press $query",
+            parameters = mapOf(
+                "bounds" to element?.bounds.orEmpty(),
+                "query" to query,
+                "matched_label" to element?.label.orEmpty()
+            )
+        )
+    }
+
+    private fun namedTextInputAction(request: AgentRequest): AgentAction {
+        val goal = request.goal.trim()
+        val prefix = if (goal.startsWith("input ", ignoreCase = true)) "input " else "type "
+        val payload = goal.drop(prefix.length)
+        val splitIndex = payload.lowercase(Locale.US).lastIndexOf(" into ")
+        val text = if (splitIndex >= 0) payload.take(splitIndex).trim() else payload.trim()
+        val query = if (splitIndex >= 0) payload.drop(splitIndex + " into ".length).trim() else ""
+        val field = findElementByQuery(request.screen.inputFields, query)
+            ?: request.screen.inputFields.firstOrNull()
+        return AgentAction(
+            id = "type-into-named-field",
+            kind = AgentActionKind.TYPE_TEXT,
+            target = field?.label?.ifBlank { query } ?: query.ifBlank { request.screen.foregroundApp },
+            risk = AgentRisk.MEDIUM,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = if (query.isBlank()) "Type text into an input field" else "Type text into $query",
+            parameters = mapOf(
+                "text" to text,
+                "field_bounds" to field?.bounds.orEmpty(),
+                "query" to query,
+                "matched_label" to field?.label.orEmpty()
+            )
+        )
+    }
+
+    private fun findElementByQuery(elements: List<ScreenElement>, query: String): ScreenElement? {
+        val normalizedQuery = query.normalizedElementQuery()
+        if (normalizedQuery.isBlank()) return elements.firstOrNull()
+        return elements.firstOrNull { element ->
+            element.label.normalizedElementQuery().contains(normalizedQuery) ||
+                element.viewId.normalizedElementQuery().contains(normalizedQuery) ||
+                element.className.normalizedElementQuery().contains(normalizedQuery)
         }
     }
 
@@ -746,11 +828,16 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         }
         AgentActionKind.TYPE_TEXT -> {
             val text = action.parameters["text"].orEmpty()
+            val fieldBounds = action.parameters["field_bounds"].orEmpty()
             if (text.isBlank()) {
                 AgentActionResult(action.id, false, "No text was provided")
             } else {
                 serviceAction(action.id, "Text input executed") {
-                    SignalASIAccessibilityService.performTextInput(text)
+                    if (fieldBounds.isBlank()) {
+                        SignalASIAccessibilityService.performTextInput(text)
+                    } else {
+                        SignalASIAccessibilityService.performTextInput(fieldBounds, text)
+                    }
                 }
             }
         }
@@ -1587,6 +1674,12 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
 
 private inline fun <reified T : Enum<T>> enumOrDefault(value: String, default: T): T =
     runCatching { enumValueOf<T>(value) }.getOrElse { default }
+
+private fun String.removePrefixIgnoreCase(prefix: String): String =
+    if (startsWith(prefix, ignoreCase = true)) drop(prefix.length) else this
+
+private fun String.normalizedElementQuery(): String =
+    lowercase(Locale.US).replace(Regex("[^\\p{L}\\p{N}]+"), "")
 
 data class AgentUiState(
     val phase: AgentPhase,

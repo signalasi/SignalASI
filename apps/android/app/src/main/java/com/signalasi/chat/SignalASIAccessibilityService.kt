@@ -101,10 +101,32 @@ class SignalASIAccessibilityService : AccessibilityService() {
 
     private fun typeIntoFocusedField(text: String): Boolean {
         val node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+        return setNodeText(node, text)
+    }
+
+    private fun typeIntoField(bounds: String, text: String): Boolean {
+        val targetBounds = parseBounds(bounds) ?: return false
+        val node = findNodeByBounds(rootInActiveWindow, targetBounds) ?: return false
+        return setNodeText(node, text)
+    }
+
+    private fun setNodeText(node: AccessibilityNodeInfo, text: String): Boolean {
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
         return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    private fun findNodeByBounds(node: AccessibilityNodeInfo?, targetBounds: Rect): AccessibilityNodeInfo? {
+        if (node == null) return null
+        val nodeBounds = Rect()
+        node.getBoundsInScreen(nodeBounds)
+        if (nodeBounds == targetBounds && node.isEditable) return node
+        for (index in 0 until node.childCount) {
+            val match = findNodeByBounds(node.getChild(index), targetBounds)
+            if (match != null) return match
+        }
+        return if (nodeBounds == targetBounds) node else null
     }
 
     private fun parseBounds(bounds: String): Rect? {
@@ -136,6 +158,9 @@ class SignalASIAccessibilityService : AccessibilityService() {
             activeService?.swipe(fromX, fromY, toX, toY) == true
 
         fun performTextInput(text: String): Boolean = activeService?.typeIntoFocusedField(text) == true
+
+        fun performTextInput(bounds: String, text: String): Boolean =
+            activeService?.typeIntoField(bounds, text) == true
     }
 }
 
