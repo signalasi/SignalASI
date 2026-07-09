@@ -205,9 +205,20 @@ class MobileNativeAgent(
         } else {
             AgentActionStatus.FAILED
         }
-        currentPlan = currentPlan?.markAction(nextAction.id, finalStatus, lastActionResult)
+        val updatedPlan = currentPlan?.markAction(nextAction.id, finalStatus, lastActionResult)
             ?.addVerification(AgentVerificationResult.from(nextAction.id, lastActionResult, verificationScreen))
-        phase = if (lastActionResult?.success == true) AgentPhase.COMPLETED else AgentPhase.FAILED
+        currentPlan = updatedPlan
+        val hasNextAction = updatedPlan?.actions?.any { it.status == AgentActionStatus.PENDING_CONFIRMATION } == true
+        phase = when {
+            lastActionResult?.success != true -> AgentPhase.FAILED
+            hasNextAction && updatedPlan?.safetyReview?.requiresConfirmation == false -> {
+                recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${nextAction.kind}:${finalStatus}")
+                saveTaskRecord()
+                return executeFirstPendingAction()
+            }
+            hasNextAction -> AgentPhase.WAITING_CONFIRMATION
+            else -> AgentPhase.COMPLETED
+        }
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${nextAction.kind}:${finalStatus}")
         saveTaskRecord()
         return snapshot()
@@ -457,9 +468,23 @@ interface AgentPlanner {
 
 class RuleBasedAgentPlanner : AgentPlanner {
     override fun plan(request: AgentRequest): AgentPlan {
-        val action = actionFor(request)
-        return AgentPlanFactory.singleAction(request, action)
+        val actions = actionsFor(request)
+        return AgentPlanFactory.actions(request, actions)
     }
+
+    private fun actionsFor(request: AgentRequest): List<AgentAction> {
+        val segments = splitGoalSegments(request.goal)
+        if (segments.size <= 1) return listOf(actionFor(request))
+        return segments.mapIndexed { index, segment ->
+            actionFor(request.copy(goal = segment)).copy(id = "queue-${index + 1}-${segment.stableActionId()}")
+        }
+    }
+
+    private fun splitGoalSegments(goal: String): List<String> =
+        goal.split(Regex("""\s+(?:and\s+then|then)\s+|[;\n]+""", RegexOption.IGNORE_CASE))
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .take(8)
 
     private fun actionFor(request: AgentRequest): AgentAction {
         val goal = request.goal.trim()
@@ -693,6 +718,25 @@ class RuleBasedAgentPlanner : AgentPlanner {
 
 object AgentPlanFactory {
     fun singleAction(request: AgentRequest, action: AgentAction): AgentPlan {
+        return actions(request, listOf(action))
+    }
+
+    fun actions(request: AgentRequest, actions: List<AgentAction>): AgentPlan {
+        val plannedActions = actions.ifEmpty {
+            listOf(
+                AgentAction(
+                    id = "draft-plan",
+                    kind = AgentActionKind.DRAFT_PLAN,
+                    target = "local-agent-runtime",
+                    risk = AgentRisk.LOW,
+                    status = AgentActionStatus.PENDING_CONFIRMATION,
+                    description = "Create a safe local task plan"
+                )
+            )
+        }
+        val routeAction = plannedActions.firstOrNull {
+            it.kind == AgentActionKind.CALL_CONNECTOR || it.kind == AgentActionKind.CONTROL_DEVICE
+        } ?: plannedActions.first()
         val plan = AgentPlan(
             goal = request.goal,
             screen = request.screen,
@@ -702,18 +746,25 @@ object AgentPlanFactory {
                 AgentStep(3, AgentStepKind.BUILD_PLAN, AgentStepStatus.DONE),
                 AgentStep(4, AgentStepKind.CONFIRM_AND_ACT, AgentStepStatus.CURRENT)
             ),
-            actions = listOf(action),
-            selectedAgentOrModel = selectedAgentOrModel(action),
-            requiredPermissions = permissionsFor(action, request),
+            actions = plannedActions,
+            selectedAgentOrModel = selectedAgentOrModel(plannedActions),
+            requiredPermissions = plannedActions
+                .flatMap { permissionsFor(it, request) }
+                .distinctBy { "${it.id}:${it.title}" },
             confirmationRequired = true,
-            rollbackStrategy = rollbackStrategyFor(action),
-            expectedResult = expectedResultFor(action),
-            timeoutSeconds = timeoutFor(action),
+            rollbackStrategy = rollbackStrategyFor(plannedActions),
+            expectedResult = expectedResultFor(plannedActions),
+            timeoutSeconds = plannedActions.sumOf { timeoutFor(it) }.coerceAtMost(240),
             plannerProfile = "rule-based-local",
             contextDigest = request.runtimeContext.compactSummary().hashCode().toString(),
-            route = AgentRouteResolver.resolve(action, request.targets)
+            route = AgentRouteResolver.resolve(routeAction, request.targets)
         )
         return plan.copy(validation = AgentPlanValidator.validate(plan))
+    }
+
+    private fun selectedAgentOrModel(actions: List<AgentAction>): String {
+        val distinctTargets = actions.map { selectedAgentOrModel(it) }.distinct()
+        return if (distinctTargets.size == 1) distinctTargets.first() else "Multiple Executors"
     }
 
     private fun selectedAgentOrModel(action: AgentAction): String = when (action.kind) {
@@ -790,6 +841,9 @@ object AgentPlanFactory {
         else -> "Stop execution and ask the user before retrying."
     }
 
+    private fun rollbackStrategyFor(actions: List<AgentAction>): String =
+        if (actions.size == 1) rollbackStrategyFor(actions.first()) else "Stop the queue and ask the user before retrying the next action."
+
     private fun expectedResultFor(action: AgentAction): String = when (action.kind) {
         AgentActionKind.OPEN_APP -> "The requested Android screen opens."
         AgentActionKind.OPEN_URL -> "The requested URL opens in a browser or matching app."
@@ -801,6 +855,9 @@ object AgentPlanFactory {
         AgentActionKind.CONTROL_DEVICE -> "The trusted device connector receives the task."
         else -> action.description
     }
+
+    private fun expectedResultFor(actions: List<AgentAction>): String =
+        if (actions.size == 1) expectedResultFor(actions.first()) else "Run ${actions.size} queued actions in order."
 
     private fun timeoutFor(action: AgentAction): Int = when (action.kind) {
         AgentActionKind.CALL_CONNECTOR,
@@ -1893,6 +1950,9 @@ private fun String.removePrefixIgnoreCase(prefix: String): String =
 private fun String.normalizedElementQuery(): String =
     lowercase(Locale.US).replace(Regex("[^\\p{L}\\p{N}]+"), "")
 
+private fun String.stableActionId(): String =
+    normalizedElementQuery().take(24).ifBlank { "action" }
+
 data class AgentUiState(
     val phase: AgentPhase,
     val currentGoal: String,
@@ -2027,8 +2087,8 @@ data class AgentPlan(
         actionId: String,
         status: AgentActionStatus,
         result: AgentActionResult? = null
-    ): AgentPlan = copy(
-        actions = actions.map { action ->
+    ): AgentPlan {
+        val nextActions = actions.map { action ->
             if (action.id == actionId) {
                 action.copy(
                     status = status,
@@ -2038,25 +2098,29 @@ data class AgentPlan(
             } else {
                 action
             }
-        },
-        steps = steps.map { step ->
-            when {
-                status == AgentActionStatus.COMPLETED && step.kind == AgentStepKind.CONFIRM_AND_ACT -> {
-                    step.copy(status = AgentStepStatus.DONE)
-                }
-                status == AgentActionStatus.FAILED && step.kind == AgentStepKind.CONFIRM_AND_ACT -> {
-                    step.copy(status = AgentStepStatus.CURRENT)
-                }
-                step.kind == AgentStepKind.ANALYZE_GOAL || step.kind == AgentStepKind.BUILD_PLAN -> {
-                    step.copy(status = AgentStepStatus.DONE)
-                }
-                step.kind == AgentStepKind.CONFIRM_AND_ACT && status == AgentActionStatus.RUNNING -> {
-                    step.copy(status = AgentStepStatus.CURRENT)
-                }
-                else -> step
-            }
         }
-    )
+        val hasPendingAction = nextActions.any { it.status == AgentActionStatus.PENDING_CONFIRMATION }
+        return copy(
+            actions = nextActions,
+            steps = steps.map { step ->
+                when {
+                    status == AgentActionStatus.COMPLETED && step.kind == AgentStepKind.CONFIRM_AND_ACT -> {
+                        step.copy(status = if (hasPendingAction) AgentStepStatus.CURRENT else AgentStepStatus.DONE)
+                    }
+                    status == AgentActionStatus.FAILED && step.kind == AgentStepKind.CONFIRM_AND_ACT -> {
+                        step.copy(status = AgentStepStatus.CURRENT)
+                    }
+                    step.kind == AgentStepKind.ANALYZE_GOAL || step.kind == AgentStepKind.BUILD_PLAN -> {
+                        step.copy(status = AgentStepStatus.DONE)
+                    }
+                    step.kind == AgentStepKind.CONFIRM_AND_ACT && status == AgentActionStatus.RUNNING -> {
+                        step.copy(status = AgentStepStatus.CURRENT)
+                    }
+                    else -> step
+                }
+            }
+        )
+    }
 
     fun addVerification(result: AgentVerificationResult): AgentPlan = copy(
         verificationResults = verificationResults
