@@ -257,6 +257,8 @@
     <string name="agent_action_risk_value">Risk: %1$s / target: %2$s</string>
     <string name="agent_blocked_detail_value">Blocked: %1$s / missing: %2$s</string>
     <string name="agent_safety_policy_value">Policy: %1$s / risk: %2$s</string>
+    <string name="agent_memory_value">Memory hits: %1$d</string>
+    <string name="agent_knowledge_value">Knowledge: %1$d items / %2$d sources / %3$d hits</string>
     <string name="agent_goal_hint">Voice or text input goal</string>
     <string name="agent_voice_button">Talk</string>
     <string name="agent_confirm_button">✓</string>

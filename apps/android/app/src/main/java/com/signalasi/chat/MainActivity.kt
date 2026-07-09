@@ -152,6 +152,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentCurrentAppText: TextView
     private lateinit var agentCallableTargetsText: TextView
     private lateinit var agentRunningTasksText: TextView
+    private lateinit var agentMemoryText: TextView
+    private lateinit var agentKnowledgeText: TextView
     private lateinit var agentRecentTaskList: LinearLayout
     private lateinit var agentGoalInput: EditText
     private lateinit var agentVoiceButton: TextView
@@ -317,6 +319,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentCurrentAppText = findViewById(R.id.agentCurrentAppText)
         agentCallableTargetsText = findViewById(R.id.agentCallableTargetsText)
         agentRunningTasksText = findViewById(R.id.agentRunningTasksText)
+        agentMemoryText = findViewById(R.id.agentMemoryText)
+        agentKnowledgeText = findViewById(R.id.agentKnowledgeText)
         agentRecentTaskList = findViewById(R.id.agentRecentTaskList)
         agentGoalInput = findViewById(R.id.agentGoalInput)
         agentVoiceButton = findViewById(R.id.agentVoiceButton)
@@ -1480,6 +1484,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 state.runtimeContext.callableCount
             )
         }
+        agentMemoryText.text = getString(
+            R.string.agent_memory_value,
+            state.runtimeContext.memories.size
+        )
+        agentKnowledgeText.text = getString(
+            R.string.agent_knowledge_value,
+            state.runtimeContext.knowledgeStats.itemCount,
+            state.runtimeContext.knowledgeStats.sourceCount,
+            state.runtimeContext.knowledgeItems.size
+        )
         agentVoiceButton.text = if (pendingAction != null) getString(R.string.agent_cancel_button) else getString(R.string.agent_voice_button)
         agentSubmitButton.text = if (pendingAction != null) getString(R.string.agent_confirm_button) else "›"
 

@@ -44,11 +44,12 @@ class MobileNativeAgent(
 
     fun snapshot(): AgentUiState {
         val targets = connectorRegistry.availableTargets()
+        val memories = if (currentGoal.isNotBlank()) memoryStore.recall(currentGoal) else emptyList()
         val context = buildRuntimeContext(
             goal = currentGoal,
             screen = currentScreen,
             targets = targets,
-            memories = emptyList(),
+            memories = memories,
             knowledgeItems = knowledgeStore.search(currentGoal),
             knowledgeStats = knowledgeStore.stats()
         )
