@@ -1163,11 +1163,7 @@ object AgentPlanFactory {
             )
             AgentActionKind.OPEN_APP,
             AgentActionKind.OPEN_URL,
-            AgentActionKind.SET_ALARM -> permissions += AgentPermissionRequirement(
-                id = "android_intent",
-                title = "Android system intent",
-                granted = true
-            )
+            AgentActionKind.SET_ALARM -> permissions += intentPermissionFor(action)
             AgentActionKind.CALL_CONNECTOR,
             AgentActionKind.CONTROL_DEVICE -> {
                 val connectorId = action.parameters["connector_id"]
@@ -1197,6 +1193,36 @@ object AgentPlanFactory {
             )
         }
         return permissions
+    }
+
+    private fun intentPermissionFor(action: AgentAction): AgentPermissionRequirement {
+        val id = when {
+            action.id.contains("notification-listener") -> "notification_listener_settings"
+            action.id.contains("accessibility") -> "accessibility_settings"
+            action.id == "open-installed-app" -> "launch_installed_app"
+            action.id.contains("camera") -> "camera_app_handoff"
+            action.id.contains("phone") -> "phone_dialer_handoff"
+            action.id.contains("messages") -> "messages_app_handoff"
+            action.kind == AgentActionKind.SET_ALARM -> "alarm_handoff"
+            action.kind == AgentActionKind.OPEN_URL -> "external_url_handoff"
+            else -> "android_intent"
+        }
+        val title = when (id) {
+            "notification_listener_settings" -> "Notification access settings"
+            "accessibility_settings" -> "Accessibility settings"
+            "launch_installed_app" -> "Launch installed app"
+            "camera_app_handoff" -> "Camera app handoff"
+            "phone_dialer_handoff" -> "Phone dialer handoff"
+            "messages_app_handoff" -> "Messages app handoff"
+            "alarm_handoff" -> "Alarm app handoff"
+            "external_url_handoff" -> "External URL handoff"
+            else -> "Android system intent"
+        }
+        return AgentPermissionRequirement(
+            id = id,
+            title = title,
+            granted = true
+        )
     }
 
     private fun rollbackStrategyFor(action: AgentAction): String = when (action.kind) {
