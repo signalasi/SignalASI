@@ -4281,15 +4281,58 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun showDeviceFeaturePage() {
+        val homeAssistant = HomeAssistantSettingsStore.load(this)
         showFeaturePage(getString(R.string.device_management_title))
         featureContent.addView(featureHeroCard(getString(R.string.device_management_title), getString(R.string.device_management_subtitle), R.drawable.ic_device_node, "#5B6CFF", getString(R.string.count_devices, 3)))
         addSectionTitle(getString(R.string.section_my_devices))
         featureContent.addView(featureRow("Phone Agent", getString(R.string.device_phone_agent_subtitle), R.drawable.ic_device_node, getString(R.string.status_online)))
         featureContent.addView(featureRow("PC Agent", getString(R.string.device_pc_agent_subtitle), R.drawable.ic_device_node, getString(R.string.status_online)))
-        featureContent.addView(featureRow("Home Hub", getString(R.string.device_home_hub_subtitle), R.drawable.ic_device_node, getString(R.string.status_pending_connection)))
+        featureContent.addView(featureRow(
+            getString(R.string.device_home_assistant),
+            getString(R.string.device_home_assistant_subtitle),
+            R.drawable.ic_device_node,
+            getString(if (homeAssistant.configured) R.string.device_home_assistant_configured else R.string.device_home_assistant_not_configured)
+        ))
+        addSectionTitle(getString(R.string.device_home_assistant))
+        featureContent.addView(featureRow(getString(R.string.device_home_assistant), getString(R.string.device_home_assistant_subtitle), R.drawable.ic_security_shield, onOffLabel(homeAssistant.enabled)).apply {
+            setOnClickListener {
+                HomeAssistantSettingsStore.setEnabled(this@MainActivity, !homeAssistant.enabled)
+                showDeviceFeaturePage()
+            }
+        })
+        featureContent.addView(featureRow(getString(R.string.device_home_assistant_url), homeAssistant.baseUrl.ifBlank { getString(R.string.device_home_assistant_url_subtitle) }, R.drawable.ic_protocol_link, getString(R.string.common_edit)).apply {
+            setOnClickListener {
+                showTextSettingDialog(getString(R.string.device_home_assistant_url), homeAssistant.baseUrl) {
+                    HomeAssistantSettingsStore.setBaseUrl(this@MainActivity, it)
+                    showDeviceFeaturePage()
+                }
+            }
+        })
+        featureContent.addView(featureRow(getString(R.string.device_home_assistant_token), maskedSecret(homeAssistant.accessToken).ifBlank { getString(R.string.device_home_assistant_token_subtitle) }, R.drawable.ic_security_shield, getString(R.string.common_edit)).apply {
+            setOnClickListener {
+                showTextSettingDialog(getString(R.string.device_home_assistant_token), homeAssistant.accessToken) {
+                    HomeAssistantSettingsStore.setAccessToken(this@MainActivity, it)
+                    showDeviceFeaturePage()
+                }
+            }
+        })
+        featureContent.addView(featureRow(getString(R.string.device_home_assistant_default_entity), homeAssistant.defaultEntityId.ifBlank { getString(R.string.device_home_assistant_default_entity_subtitle) }, R.drawable.ic_device_node, getString(R.string.common_edit)).apply {
+            setOnClickListener {
+                showTextSettingDialog(getString(R.string.device_home_assistant_default_entity), homeAssistant.defaultEntityId) {
+                    HomeAssistantSettingsStore.setDefaultEntityId(this@MainActivity, it)
+                    showDeviceFeaturePage()
+                }
+            }
+        })
         addSectionTitle(getString(R.string.section_device_capabilities))
         featureContent.addView(featureRow(getString(R.string.device_file_sync), getString(R.string.device_file_sync_subtitle), R.drawable.ic_import, getString(R.string.status_enabled)))
         featureContent.addView(featureRow(getString(R.string.device_remote_control), getString(R.string.device_remote_control_subtitle), R.drawable.ic_security_shield, getString(R.string.status_protected)))
+    }
+
+    private fun maskedSecret(value: String): String = when {
+        value.isBlank() -> ""
+        value.length <= 8 -> "****"
+        else -> "${value.take(4)}****${value.takeLast(4)}"
     }
 
     private fun showAutomationFeaturePage() {

@@ -860,6 +860,7 @@ object AppStore {
         context.getSharedPreferences(OLD_SIGNAL_STORE_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_runtime", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_memory", Context.MODE_PRIVATE).edit().clear().commit()
+        HomeAssistantSettingsStore.clear(context)
         SignalASICrypto.resetLocalIdentity(context)
         context.cacheDir.deleteRecursively()
         context.filesDir.resolve("backups").deleteRecursively()

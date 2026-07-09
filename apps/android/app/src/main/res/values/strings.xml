@@ -143,6 +143,16 @@
     <string name="device_phone_agent_subtitle">This Android phone, online</string>
     <string name="device_pc_agent_subtitle">Windows backend and file service</string>
     <string name="device_home_hub_subtitle">Home gateway, pending connection</string>
+    <string name="device_home_assistant">Home Assistant</string>
+    <string name="device_home_assistant_subtitle">Local smart home control API</string>
+    <string name="device_home_assistant_url">Server URL</string>
+    <string name="device_home_assistant_url_subtitle">Example: http://homeassistant.local:8123</string>
+    <string name="device_home_assistant_token">Access Token</string>
+    <string name="device_home_assistant_token_subtitle">Long-lived access token stored on this device</string>
+    <string name="device_home_assistant_default_entity">Default Entity</string>
+    <string name="device_home_assistant_default_entity_subtitle">Example: light.living_room</string>
+    <string name="device_home_assistant_configured">Configured</string>
+    <string name="device_home_assistant_not_configured">Not configured</string>
     <string name="section_device_capabilities">Device Capabilities</string>
     <string name="device_file_sync">File Sync</string>
     <string name="device_file_sync_subtitle">Transfer images, voice, and backup files</string>

@@ -1141,6 +1141,10 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
 
     private fun dispatchDeviceTask(action: AgentAction): AgentActionResult {
         val prompt = action.parameters["prompt"].orEmpty().ifBlank { action.description }
+        val localHomeAssistant = HomeAssistantDeviceClient.control(context, prompt)
+        if (localHomeAssistant.handled) {
+            return AgentActionResult(action.id, localHomeAssistant.success, localHomeAssistant.message)
+        }
         val contactId = resolveConnectorContactId("home-assistant")
             ?: resolveConnectorContactId("home_hub")
             ?: return AgentActionResult(action.id, false, "Home Assistant is not configured")
