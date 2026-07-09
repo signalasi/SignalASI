@@ -22,7 +22,8 @@ class MobileNativeAgent(
     context: Context,
     private val perceptionProvider: ScreenPerceptionProvider = AndroidScreenPerceptionProvider(context),
     private val planner: AgentPlanner = RuleBasedAgentPlanner(),
-    private val safetyPolicy: AgentSafetyPolicy = DefaultAgentSafetyPolicy(),
+    private val safetySettingsStore: AgentSafetySettingsStore = SharedPreferencesAgentSafetySettingsStore(context),
+    private val safetyPolicy: AgentSafetyPolicy = DefaultAgentSafetyPolicy(safetySettingsStore),
     private val actionExecutor: AgentActionExecutor = AndroidAgentActionExecutor(context),
     private val memoryStore: AgentMemoryStore = SharedPreferencesAgentMemoryStore(context),
     private val knowledgeStore: AgentKnowledgeStore = SharedPreferencesAgentKnowledgeStore(context),
@@ -220,6 +221,20 @@ class MobileNativeAgent(
         currentPlan = null
         lastActionResult = null
         recordAudit(AgentAuditEvent.TASK_CANCELLED, "cancelled")
+        return snapshot()
+    }
+
+    fun safetySettings(): AgentSafetySettings = safetySettingsStore.load()
+
+    fun updatePermissionMode(mode: PermissionMode): AgentUiState {
+        safetySettingsStore.save(safetySettingsStore.load().copy(permissionMode = mode))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "permission_mode:${mode.name}")
+        return snapshot()
+    }
+
+    fun updateHighRiskGuard(enabled: Boolean): AgentUiState {
+        safetySettingsStore.save(safetySettingsStore.load().copy(highRiskGuard = enabled))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "high_risk_guard:$enabled")
         return snapshot()
     }
 
@@ -749,10 +764,14 @@ interface AgentSafetyPolicy {
     fun review(plan: AgentPlan): AgentSafetyReview
 }
 
-class DefaultAgentSafetyPolicy : AgentSafetyPolicy {
-    override fun permissionMode(): PermissionMode = PermissionMode.ASK_BEFORE_ACTION
+class DefaultAgentSafetyPolicy(
+    private val settingsStore: AgentSafetySettingsStore? = null
+) : AgentSafetyPolicy {
+    override fun permissionMode(): PermissionMode =
+        settingsStore?.load()?.permissionMode ?: PermissionMode.ASK_BEFORE_ACTION
 
-    override fun highRiskGuardEnabled(): Boolean = true
+    override fun highRiskGuardEnabled(): Boolean =
+        settingsStore?.load()?.highRiskGuard ?: true
 
     override fun review(plan: AgentPlan): AgentSafetyReview {
         val mode = permissionMode()
@@ -2073,7 +2092,8 @@ enum class AgentAuditEvent {
     GOAL_RECEIVED,
     ACTION_EXECUTED,
     ACTION_BLOCKED,
-    TASK_CANCELLED
+    TASK_CANCELLED,
+    SETTINGS_UPDATED
 }
 
 enum class AgentEvent {

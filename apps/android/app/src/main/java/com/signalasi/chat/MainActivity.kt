@@ -4567,6 +4567,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun showOnDeviceAgentFeaturePage() {
         showFeaturePage(getString(R.string.on_device_agent_title))
+        val safetySettings = mobileNativeAgent.safetySettings()
         featureContent.addView(featureHeroCard(
             getString(R.string.on_device_agent_hero_title),
             getString(R.string.on_device_agent_hero_subtitle),
@@ -4574,11 +4575,54 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "#5B6CFF",
             getString(R.string.on_device_agent_status_running)
         ))
+        addSectionTitle(getString(R.string.on_device_agent_section_execution))
+        featureContent.addView(featureValueRow(
+            getString(R.string.on_device_agent_permission_mode),
+            getString(R.string.on_device_agent_permission_mode_subtitle),
+            R.drawable.ic_security_shield,
+            permissionModeLabel(safetySettings.permissionMode)
+        ).apply {
+            setOnClickListener { cycleAgentPermissionMode() }
+        })
+        featureContent.addView(featureSwitchRow(
+            getString(R.string.on_device_agent_high_risk_guard),
+            getString(R.string.on_device_agent_high_risk_guard_subtitle),
+            R.drawable.ic_security_shield,
+            safetySettings.highRiskGuard
+        ).apply {
+            setOnClickListener { toggleAgentHighRiskGuard() }
+        })
         addSectionTitle(getString(R.string.on_device_agent_section_permissions))
         featureContent.addView(featureRow(getString(R.string.on_device_agent_microphone), getString(R.string.on_device_agent_microphone_subtitle), R.drawable.ic_agent_node, getString(R.string.permission_allowed)))
         featureContent.addView(featureRow(getString(R.string.on_device_agent_camera), getString(R.string.on_device_agent_camera_subtitle), R.drawable.ic_scan, getString(R.string.permission_allowed)))
         featureContent.addView(featureRow(getString(R.string.on_device_agent_location), getString(R.string.on_device_agent_location_subtitle), R.drawable.ic_device_node, getString(R.string.permission_while_using)))
         featureContent.addView(featureRow(getString(R.string.on_device_agent_notifications), getString(R.string.on_device_agent_notifications_subtitle), R.drawable.ic_agent_node, getString(R.string.permission_allowed)))
+    }
+
+    private fun cycleAgentPermissionMode() {
+        val current = mobileNativeAgent.safetySettings().permissionMode
+        val next = when (current) {
+            PermissionMode.OBSERVE_ONLY -> PermissionMode.SUGGEST_ONLY
+            PermissionMode.SUGGEST_ONLY -> PermissionMode.ASK_BEFORE_ACTION
+            PermissionMode.ASK_BEFORE_ACTION -> PermissionMode.AUTO_LOW_RISK
+            PermissionMode.AUTO_LOW_RISK -> PermissionMode.OBSERVE_ONLY
+        }
+        mobileNativeAgent.updatePermissionMode(next)
+        Toast.makeText(this, getString(R.string.on_device_agent_mode_changed, permissionModeLabel(next)), Toast.LENGTH_SHORT).show()
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun toggleAgentHighRiskGuard() {
+        val next = !mobileNativeAgent.safetySettings().highRiskGuard
+        mobileNativeAgent.updateHighRiskGuard(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun permissionModeLabel(mode: PermissionMode): String = when (mode) {
+        PermissionMode.OBSERVE_ONLY -> getString(R.string.permission_mode_observe_only)
+        PermissionMode.SUGGEST_ONLY -> getString(R.string.permission_mode_suggest_only)
+        PermissionMode.ASK_BEFORE_ACTION -> getString(R.string.permission_mode_ask_before_action)
+        PermissionMode.AUTO_LOW_RISK -> getString(R.string.permission_mode_auto_low_risk)
     }
 
     private fun showLanguageSettingsPage() {

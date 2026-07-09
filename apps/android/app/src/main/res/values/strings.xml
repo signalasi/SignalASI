@@ -558,6 +558,16 @@
     <string name="on_device_agent_hero_title">On-device Agent</string>
     <string name="on_device_agent_hero_subtitle">Manage perception, voice, and automation permissions</string>
     <string name="on_device_agent_status_running">Running</string>
+    <string name="on_device_agent_section_execution">Execution</string>
+    <string name="on_device_agent_permission_mode">Execution Mode</string>
+    <string name="on_device_agent_permission_mode_subtitle">Tap to switch observation, suggestion, confirmation, or low-risk automation</string>
+    <string name="on_device_agent_high_risk_guard">High-risk Guard</string>
+    <string name="on_device_agent_high_risk_guard_subtitle">Always protect payments, deletion, privacy sharing, installation, and security changes</string>
+    <string name="on_device_agent_mode_changed">Mode: %1$s</string>
+    <string name="permission_mode_observe_only">Observe Only</string>
+    <string name="permission_mode_suggest_only">Suggest Only</string>
+    <string name="permission_mode_ask_before_action">Ask Before Action</string>
+    <string name="permission_mode_auto_low_risk">Auto Low-risk</string>
     <string name="on_device_agent_section_permissions">Permissions</string>
     <string name="on_device_agent_microphone">Microphone</string>
     <string name="on_device_agent_microphone_subtitle">Voice input and hold-to-talk</string>
