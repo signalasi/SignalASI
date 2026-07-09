@@ -13,6 +13,7 @@ object AgentSystemToolPlanner {
     fun actionFor(request: AgentRequest): AgentAction? {
         val goal = request.goal.trim()
         val lower = goal.lowercase()
+        namedAppSettingsAction(request, lower)?.let { return it }
         commonToolAction(goal, lower)?.let { return it }
         return when {
             lower.contains("open wifi settings") || lower == "wifi settings" -> intentAction(
@@ -399,6 +400,46 @@ object AgentSystemToolPlanner {
             risk = AgentRisk.LOW
         )
         else -> null
+    }
+
+    private fun namedAppSettingsAction(request: AgentRequest, lower: String): AgentAction? {
+        if (!lower.startsWith("open ")) return null
+        if (!lower.contains(" app settings") &&
+            !lower.contains(" app info") &&
+            !lower.contains(" app permissions") &&
+            !lower.contains(" permission settings")
+        ) return null
+        if (lower.contains("current app") ||
+            lower.contains("notification") ||
+            lower.contains("accessibility") ||
+            lower.contains("unknown app") ||
+            lower.contains("screen agent")
+        ) return null
+        val query = lower
+            .removePrefix("open ")
+            .replace("app settings", "")
+            .replace("app info", "")
+            .replace("app permissions", "")
+            .replace("permission settings", "")
+            .trim()
+        if (query.isBlank()) return null
+        val app = request.screen.installedApps.firstOrNull { installed ->
+            val label = installed.label.lowercase()
+            val packageName = installed.packageName.lowercase()
+            label == query ||
+                packageName == query ||
+                label.contains(query) ||
+                query.contains(label) ||
+                packageName.contains(query)
+        } ?: return null
+        return intentAction(
+            id = "open-named-app-settings",
+            target = "${app.label} Settings",
+            description = "Open app details settings",
+            intentAction = Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            uri = "package:${app.packageName}",
+            risk = AgentRisk.MEDIUM
+        )
     }
 
     private fun intentAction(
