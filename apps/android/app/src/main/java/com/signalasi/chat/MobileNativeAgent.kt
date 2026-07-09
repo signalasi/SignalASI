@@ -134,20 +134,14 @@ interface ScreenPerceptionProvider {
 }
 
 class AndroidScreenPerceptionProvider(private val context: Context) : ScreenPerceptionProvider {
-    override fun capture(): ScreenContext = ScreenContext(
-        foregroundApp = "SignalASI",
-        pageTitle = context.getString(R.string.tab_agent),
-        visibleTextCount = 0,
-        clickableNodeCount = 0,
-        sensitiveFlagCount = 0
+    override fun capture(): ScreenContext = ScreenPerceptionState.current(
+        defaultApp = "SignalASI",
+        defaultTitle = context.getString(R.string.tab_agent)
     )
 
-    override fun capture(foregroundApp: String, pageTitle: String): ScreenContext = ScreenContext(
-        foregroundApp = foregroundApp,
-        pageTitle = pageTitle,
-        visibleTextCount = 0,
-        clickableNodeCount = 0,
-        sensitiveFlagCount = 0
+    override fun capture(foregroundApp: String, pageTitle: String): ScreenContext = ScreenPerceptionState.current(
+        defaultApp = foregroundApp,
+        defaultTitle = pageTitle
     )
 }
 
@@ -274,10 +268,20 @@ data class AgentRequest(
 
 data class ScreenContext(
     val foregroundApp: String,
+    val activityName: String = "",
     val pageTitle: String,
     val visibleTextCount: Int = 0,
     val clickableNodeCount: Int = 0,
-    val sensitiveFlagCount: Int = 0
+    val inputFieldCount: Int = 0,
+    val scrollableRegionCount: Int = 0,
+    val sensitiveFlagCount: Int = 0,
+    val visibleTexts: List<String> = emptyList(),
+    val clickableElements: List<ScreenElement> = emptyList(),
+    val inputFields: List<ScreenElement> = emptyList(),
+    val scrollableRegions: List<ScreenElement> = emptyList(),
+    val sensitiveFlags: List<String> = emptyList(),
+    val isAccessibilityEnabled: Boolean = false,
+    val snapshotAgeMillis: Long = 0L
 )
 
 data class AgentPlan(

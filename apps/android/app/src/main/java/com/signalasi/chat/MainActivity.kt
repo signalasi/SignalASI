@@ -23,6 +23,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -144,6 +145,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var mainPage: LinearLayout
     private lateinit var mainTopBar: LinearLayout
     private lateinit var agentPage: LinearLayout
+    private lateinit var agentStatusCard: LinearLayout
     private lateinit var agentStatusTitle: TextView
     private lateinit var agentStatusSubtitle: TextView
     private lateinit var agentSafetyBadge: TextView
@@ -307,6 +309,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         mainPage = findViewById(R.id.mainPage)
         mainTopBar = findViewById(R.id.mainTopBar)
         agentPage = findViewById(R.id.agentPage)
+        agentStatusCard = findViewById(R.id.agentStatusCard)
         agentStatusTitle = findViewById(R.id.agentStatusTitle)
         agentStatusSubtitle = findViewById(R.id.agentStatusSubtitle)
         agentSafetyBadge = findViewById(R.id.agentSafetyBadge)
@@ -692,6 +695,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun configureAgentPage() {
         renderAgentState(mobileNativeAgent.observeCurrentScreen())
+        agentStatusCard.setOnClickListener {
+            val state = mobileNativeAgent.snapshot()
+            if (state.currentScreen.isAccessibilityEnabled) {
+                renderAgentState(mobileNativeAgent.observeCurrentScreen())
+            } else {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+        }
         agentSubmitButton.setOnClickListener { submitAgentGoal() }
         agentGoalInput.setOnEditorActionListener { _, _, _ ->
             submitAgentGoal()
@@ -1378,20 +1389,34 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun renderAgentState(state: AgentUiState) {
         val isPlanning = state.phase != AgentPhase.OBSERVING
-        agentStatusTitle.text = if (isPlanning) {
-            getString(R.string.agent_status_planning)
-        } else {
-            getString(R.string.agent_status_observing)
+        val screenAccessEnabled = state.currentScreen.isAccessibilityEnabled
+        agentStatusTitle.text = when {
+            !screenAccessEnabled && !isPlanning -> getString(R.string.agent_status_accessibility_needed)
+            isPlanning -> getString(R.string.agent_status_planning)
+            else -> getString(R.string.agent_status_observing)
         }
-        agentStatusSubtitle.text = if (isPlanning) {
-            getString(R.string.agent_status_goal_subtitle)
-        } else {
-            getString(R.string.agent_status_default_subtitle)
+        agentStatusSubtitle.text = when {
+            !screenAccessEnabled && !isPlanning -> getString(R.string.agent_status_accessibility_needed_subtitle)
+            isPlanning -> getString(R.string.agent_status_goal_subtitle)
+            else -> getString(R.string.agent_status_default_subtitle)
         }
         agentSafetyBadge.text = getString(R.string.agent_badge_safe)
         agentCurrentAppText.text = getString(R.string.agent_current_app_value, state.currentScreen.foregroundApp)
-        agentCallableTargetsText.text = getString(R.string.agent_callable_targets_value, state.callableTargets.size)
-        agentRunningTasksText.text = getString(R.string.agent_running_tasks_value, state.runningTaskCount)
+        agentCallableTargetsText.text = if (screenAccessEnabled) {
+            getString(
+                R.string.agent_screen_context_value,
+                state.currentScreen.visibleTextCount,
+                state.currentScreen.clickableNodeCount,
+                state.currentScreen.inputFieldCount
+            )
+        } else {
+            getString(R.string.agent_accessibility_status_disabled)
+        }
+        agentRunningTasksText.text = getString(
+            R.string.agent_running_tasks_targets_value,
+            state.runningTaskCount,
+            state.callableTargets.size
+        )
 
         val statusViews = mapOf(
             AgentStepKind.OBSERVE_SCREEN to Pair(agentStepObserveNumber, agentStepObserveStatus),
