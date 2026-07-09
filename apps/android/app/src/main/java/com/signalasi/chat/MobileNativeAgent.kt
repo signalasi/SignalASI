@@ -1991,6 +1991,32 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 message = message
             )
         }
+        if (action.id == "summarize-screen") {
+            val summary = if (screen.sensitiveFlags.isNotEmpty()) {
+                "Screen ${screen.pageTitle.ifBlank { screen.foregroundApp }} has ${screen.visibleTextCount} text items and sensitive flags=${screen.sensitiveFlags.joinToString(",")}"
+            } else {
+                buildString {
+                    append("Screen: ").append(screen.pageTitle.ifBlank { screen.foregroundApp })
+                    append(" / app=").append(screen.foregroundApp)
+                    screen.focusedInputField?.let { field ->
+                        append(" / focused=").append(field.label.ifBlank { field.viewId.ifBlank { field.className } })
+                    }
+                    val topTexts = screen.visibleTexts
+                        .map { it.replace(Regex("\\s+"), " ").trim() }
+                        .filter { it.isNotBlank() }
+                        .distinct()
+                        .take(6)
+                    if (topTexts.isNotEmpty()) {
+                        append(" / visible=").append(topTexts.joinToString(" | ") { it.take(80) })
+                    }
+                }
+            }
+            return AgentActionResult(
+                actionId = action.id,
+                success = true,
+                message = summary
+            )
+        }
         return AgentActionResult(
             actionId = action.id,
             success = true,

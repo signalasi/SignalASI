@@ -122,6 +122,17 @@ object AgentSystemToolPlanner {
                 status = AgentActionStatus.PENDING_CONFIRMATION,
                 description = "Copy current screen text"
             )
+            lower.contains("summarize screen") ||
+                lower.contains("explain screen") ||
+                lower.contains("what is on screen") ||
+                lower.contains("what is this screen") -> AgentAction(
+                    id = "summarize-screen",
+                    kind = AgentActionKind.READ_SCREEN,
+                    target = request.screen.foregroundApp,
+                    risk = AgentRisk.LOW,
+                    status = AgentActionStatus.PENDING_CONFIRMATION,
+                    description = "Summarize current screen"
+                )
             lower.contains("read clipboard") || lower.contains("clipboard status") -> AgentAction(
                 id = "read-clipboard",
                 kind = AgentActionKind.READ_SCREEN,
@@ -586,7 +597,7 @@ object AgentSystemToolPlanner {
             kind = AgentActionKind.COPY_SCREEN_TEXT,
             risk = AgentRisk.LOW,
             capabilities = listOf(AgentCapability.SCREEN_READING, AgentCapability.CLIPBOARD),
-            examples = listOf("copy screen text", "read clipboard", "paste clipboard", "clear text")
+            examples = listOf("summarize screen", "copy screen text", "read clipboard", "paste clipboard", "clear text")
         ),
         AgentSystemTool(
             id = "share-text",
