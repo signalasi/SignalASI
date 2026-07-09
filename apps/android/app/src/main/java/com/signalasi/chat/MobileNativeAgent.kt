@@ -12,6 +12,22 @@ import org.json.JSONObject
 import java.util.Locale
 import java.util.UUID
 
+private val SENSITIVE_MEMORY_TERMS = listOf(
+    "password",
+    "passcode",
+    "verification code",
+    "otp",
+    "2fa",
+    "bank card",
+    "credit card",
+    "cvv",
+    "private key",
+    "secret key",
+    "access token",
+    "api key",
+    "seed phrase"
+)
+
 /**
  * Phone-native Agent runtime scaffold.
  *
@@ -493,6 +509,10 @@ class MobileNativeAgent(
         append("\npage=").append(screen.pageTitle)
         append("\ntexts=").append(screen.visibleTextCount)
         append("\nactions=").append(screen.clickableNodeCount)
+        if (screen.clipboard.hasText) {
+            append("\nclipboard_hash=").append(screen.clipboard.textHash)
+            append("\nclipboard_length=").append(screen.clipboard.textLength)
+        }
         append("\nmode=").append(context.permissionMode.name)
         if (context.knowledgeItems.isNotEmpty()) {
             append("\nrelated_knowledge=")
@@ -509,6 +529,10 @@ class MobileNativeAgent(
         if (screen.sensitiveFlagCount > 0) {
             val flags = screen.sensitiveFlags.joinToString("|").take(80).ifBlank { "screen" }
             return "Memory skipped for sensitive screen context: $flags"
+        }
+        if (screen.clipboard.sensitiveFlags.isNotEmpty()) {
+            val flags = screen.clipboard.sensitiveFlags.joinToString("|").take(80)
+            return "Memory skipped for sensitive clipboard context: $flags"
         }
         val lower = value.lowercase(Locale.US)
         val matchedTerm = SENSITIVE_MEMORY_TERMS.firstOrNull { lower.contains(it) }
@@ -610,21 +634,6 @@ class MobileNativeAgent(
 
     companion object {
         private const val MAX_AUDIT_ITEMS = 20
-        val SENSITIVE_MEMORY_TERMS = listOf(
-            "password",
-            "passcode",
-            "verification code",
-            "otp",
-            "2fa",
-            "bank card",
-            "credit card",
-            "cvv",
-            "private key",
-            "secret key",
-            "access token",
-            "api key",
-            "seed phrase"
-        )
     }
 }
 
@@ -636,23 +645,50 @@ interface ScreenPerceptionProvider {
 class AndroidScreenPerceptionProvider(private val context: Context) : ScreenPerceptionProvider {
     override fun capture(): ScreenContext {
         val defaultTitle = context.getString(R.string.tab_agent)
-        return SignalASIAccessibilityService.captureCurrentScreen(
+        val screen = SignalASIAccessibilityService.captureCurrentScreen(
             defaultApp = "SignalASI",
             defaultTitle = defaultTitle
         ) ?: ScreenPerceptionState.current(
             defaultApp = "SignalASI",
             defaultTitle = defaultTitle
         )
+        return screen.withClipboardContext()
     }
 
-    override fun capture(foregroundApp: String, pageTitle: String): ScreenContext =
-        SignalASIAccessibilityService.captureCurrentScreen(
+    override fun capture(foregroundApp: String, pageTitle: String): ScreenContext {
+        val screen = SignalASIAccessibilityService.captureCurrentScreen(
             defaultApp = foregroundApp,
             defaultTitle = pageTitle
         ) ?: ScreenPerceptionState.current(
             defaultApp = foregroundApp,
             defaultTitle = pageTitle
         )
+        return screen.withClipboardContext()
+    }
+
+    private fun ScreenContext.withClipboardContext(): ScreenContext =
+        copy(clipboard = clipboardContext())
+
+    private fun clipboardContext(): ClipboardContext {
+        val text = runCatching {
+            val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return@runCatching ""
+            clipboard.primaryClip
+                ?.takeIf { it.itemCount > 0 }
+                ?.getItemAt(0)
+                ?.coerceToText(context)
+                ?.toString()
+                .orEmpty()
+        }.getOrDefault("")
+        if (text.isBlank()) return ClipboardContext()
+        val normalized = text.replace(Regex("\\s+"), " ").trim()
+        return ClipboardContext(
+            hasText = true,
+            textLength = text.length,
+            textHash = text.hashCode().toString(),
+            preview = normalized.take(96),
+            sensitiveFlags = sensitiveFlagsForText(text)
+        )
+    }
 }
 
 interface AgentPlanner {
@@ -1352,6 +1388,12 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
     }
 
     private fun saveScreenKnowledge(action: AgentAction, screen: ScreenContext): AgentActionResult {
+        if (screen.sensitiveFlagCount > 0) {
+            return AgentActionResult(action.id, false, "Screen contains sensitive content; knowledge save skipped")
+        }
+        if (screen.clipboard.sensitiveFlags.isNotEmpty()) {
+            return AgentActionResult(action.id, false, "Clipboard contains sensitive content; knowledge save skipped")
+        }
         val title = screen.pageTitle.ifBlank { screen.foregroundApp }.ifBlank { "Screen snapshot" }
         val content = buildString {
             append("App: ").append(screen.foregroundApp).append('\n')
@@ -1360,6 +1402,10 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             append("Visible text count: ").append(screen.visibleTextCount).append('\n')
             append("Clickable action count: ").append(screen.clickableNodeCount).append('\n')
             append("Input field count: ").append(screen.inputFieldCount).append('\n')
+            if (screen.clipboard.hasText) {
+                append("Clipboard: ").append(screen.clipboard.textLength)
+                    .append(" chars / hash ").append(screen.clipboard.textHash).append('\n')
+            }
             if (screen.visibleTexts.isNotEmpty()) {
                 append("\nVisible text:\n")
                 screen.visibleTexts.take(40).forEach { append("- ").append(it).append('\n') }
@@ -1879,6 +1925,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("sensitive_flags", JSONArray().also { array ->
             screen.sensitiveFlags.forEach { array.put(it) }
         })
+        .put("clipboard_context", encodeClipboardContext(screen.clipboard))
         .put("is_accessibility_enabled", screen.isAccessibilityEnabled)
         .put("snapshot_age_millis", screen.snapshotAgeMillis)
 
@@ -1898,8 +1945,29 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
             inputFields = decodeElements(json.optJSONArray("input_fields")),
             scrollableRegions = decodeElements(json.optJSONArray("scrollable_regions")),
             sensitiveFlags = decodeStringList(json.optJSONArray("sensitive_flags")),
+            clipboard = decodeClipboardContext(json.optJSONObject("clipboard_context")),
             isAccessibilityEnabled = json.optBoolean("is_accessibility_enabled"),
             snapshotAgeMillis = json.optLong("snapshot_age_millis")
+        )
+    }
+
+    private fun encodeClipboardContext(clipboard: ClipboardContext): JSONObject = JSONObject()
+        .put("has_text", clipboard.hasText)
+        .put("text_length", clipboard.textLength)
+        .put("text_hash", clipboard.textHash)
+        .put("preview", clipboard.preview)
+        .put("sensitive_flags", JSONArray().also { array ->
+            clipboard.sensitiveFlags.forEach { array.put(it) }
+        })
+
+    private fun decodeClipboardContext(json: JSONObject?): ClipboardContext {
+        if (json == null) return ClipboardContext()
+        return ClipboardContext(
+            hasText = json.optBoolean("has_text"),
+            textLength = json.optInt("text_length"),
+            textHash = json.optString("text_hash"),
+            preview = json.optString("preview"),
+            sensitiveFlags = decodeStringList(json.optJSONArray("sensitive_flags"))
         )
     }
 
@@ -2234,6 +2302,17 @@ private fun String.normalizedElementQuery(): String =
 private fun String.stableActionId(): String =
     normalizedElementQuery().take(24).ifBlank { "action" }
 
+private fun sensitiveFlagsForText(value: String): List<String> {
+    val lower = value.lowercase(Locale.US)
+    val flags = SENSITIVE_MEMORY_TERMS.filter { lower.contains(it) }.toMutableList()
+    if (Regex("\\b\\d{4,8}\\b").containsMatchIn(value) &&
+        listOf("code", "otp", "verification", "2fa", "sms").any { lower.contains(it) }
+    ) {
+        flags += "verification_code"
+    }
+    return flags.distinct().take(6)
+}
+
 data class AgentUiState(
     val phase: AgentPhase,
     val currentGoal: String,
@@ -2294,8 +2373,17 @@ data class ScreenContext(
     val inputFields: List<ScreenElement> = emptyList(),
     val scrollableRegions: List<ScreenElement> = emptyList(),
     val sensitiveFlags: List<String> = emptyList(),
+    val clipboard: ClipboardContext = ClipboardContext(),
     val isAccessibilityEnabled: Boolean = false,
     val snapshotAgeMillis: Long = 0L
+)
+
+data class ClipboardContext(
+    val hasText: Boolean = false,
+    val textLength: Int = 0,
+    val textHash: String = "",
+    val preview: String = "",
+    val sensitiveFlags: List<String> = emptyList()
 )
 
 private fun ScreenContext.isDifferentFrom(other: ScreenContext): Boolean =

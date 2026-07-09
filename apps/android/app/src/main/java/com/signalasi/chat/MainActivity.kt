@@ -2380,12 +2380,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val fields = screen.inputFields
             .filter { matchesScreenQuery(it.label, normalizedQuery) || matchesScreenQuery(it.viewId, normalizedQuery) }
             .take(5)
+        val clipboardMatches = screen.clipboard.hasText && (
+            normalizedQuery.isBlank() ||
+                matchesScreenQuery(screen.clipboard.preview, normalizedQuery) ||
+                matchesScreenQuery(screen.clipboard.textHash, normalizedQuery) ||
+                screen.clipboard.sensitiveFlags.any { matchesScreenQuery(it, normalizedQuery) }
+            )
 
-        val hasAny = visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty()
+        val hasAny = clipboardMatches || visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty()
         agentScreenDetailList.addView(agentScreenSummaryRow(screen))
         if (!hasAny) {
             agentScreenDetailList.addView(agentScreenEmptyRow(getString(R.string.agent_screen_empty)))
             return
+        }
+        if (clipboardMatches) {
+            addScreenClipboardSection(screen.clipboard)
         }
         addScreenTextSection(getString(R.string.agent_screen_texts), visibleTexts)
         addScreenElementSection(getString(R.string.agent_screen_actions), actions, AgentScreenCommandKind.TAP)
@@ -2403,6 +2412,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
+    private fun addScreenClipboardSection(clipboard: ClipboardContext) {
+        agentScreenDetailList.addView(agentScreenSectionTitle(getString(R.string.agent_screen_clipboard)))
+        agentScreenDetailList.addView(agentClipboardRow(clipboard))
+    }
+
     private fun addScreenElementSection(
         title: String,
         items: List<ScreenElement>,
@@ -2412,6 +2426,32 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentScreenDetailList.addView(agentScreenSectionTitle(title))
         items.forEach { item ->
             agentScreenDetailList.addView(agentScreenElementRow(item, commandKind))
+        }
+    }
+
+    private fun agentClipboardRow(clipboard: ClipboardContext): View {
+        val summary = if (clipboard.sensitiveFlags.isNotEmpty()) {
+            getString(R.string.agent_screen_clipboard_sensitive, clipboard.textLength)
+        } else {
+            getString(
+                R.string.agent_screen_clipboard_summary,
+                clipboard.textLength,
+                clipboard.preview.ifBlank { clipboard.textHash.ifBlank { "-" } }
+            )
+        }
+        return TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(6) }
+            setBackgroundResource(R.drawable.agent_step_background)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            setTextColor(getColorCompat(R.color.text_primary))
+            textSize = 13f
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            text = summary
+            setOnClickListener { prefillAgentGoal("paste clipboard") }
         }
     }
 
