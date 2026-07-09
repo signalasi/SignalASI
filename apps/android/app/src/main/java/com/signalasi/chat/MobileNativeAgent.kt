@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import android.provider.AlarmClock
+import android.provider.CalendarContract
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
@@ -691,6 +692,8 @@ object AgentPlanFactory {
             AgentActionKind.TAP,
             AgentActionKind.LONG_PRESS,
             AgentActionKind.TYPE_TEXT,
+            AgentActionKind.DELETE_TEXT,
+            AgentActionKind.PASTE_TEXT,
             AgentActionKind.SWIPE,
             AgentActionKind.BACK,
             AgentActionKind.HOME,
@@ -720,6 +723,13 @@ object AgentPlanFactory {
             }
             AgentActionKind.DRAFT_PLAN -> Unit
         }
+        if (action.kind == AgentActionKind.PASTE_TEXT) {
+            permissions += AgentPermissionRequirement(
+                id = "clipboard_read",
+                title = "Clipboard read",
+                granted = true
+            )
+        }
         if (action.kind == AgentActionKind.COPY_SCREEN_TEXT) {
             permissions += AgentPermissionRequirement(
                 id = "clipboard_write",
@@ -731,7 +741,9 @@ object AgentPlanFactory {
     }
 
     private fun rollbackStrategyFor(action: AgentAction): String = when (action.kind) {
-        AgentActionKind.TYPE_TEXT -> "Stop before sending or submitting anything."
+        AgentActionKind.TYPE_TEXT,
+        AgentActionKind.DELETE_TEXT,
+        AgentActionKind.PASTE_TEXT -> "Stop before sending or submitting anything."
         AgentActionKind.TAP,
         AgentActionKind.LONG_PRESS,
         AgentActionKind.SWIPE -> "Observe the result and go back if the page changed unexpectedly."
@@ -745,6 +757,8 @@ object AgentPlanFactory {
         AgentActionKind.OPEN_URL -> "The requested URL opens in a browser or matching app."
         AgentActionKind.SET_ALARM -> "Android alarm setup is opened or handed off."
         AgentActionKind.COPY_SCREEN_TEXT -> "Visible screen text is copied to the clipboard."
+        AgentActionKind.DELETE_TEXT -> "Text is cleared from the active input field."
+        AgentActionKind.PASTE_TEXT -> "Clipboard text is pasted into the active input field."
         AgentActionKind.CALL_CONNECTOR -> "The task is sent to the paired agent contact."
         AgentActionKind.CONTROL_DEVICE -> "The trusted device connector receives the task."
         else -> action.description
@@ -779,6 +793,8 @@ object AgentRouteResolver {
             AgentActionKind.DRAFT_PLAN,
             AgentActionKind.TAP,
             AgentActionKind.TYPE_TEXT,
+            AgentActionKind.DELETE_TEXT,
+            AgentActionKind.PASTE_TEXT,
             AgentActionKind.SWIPE,
             AgentActionKind.LONG_PRESS,
             AgentActionKind.BACK,
@@ -943,6 +959,31 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 }
             }
         }
+        AgentActionKind.DELETE_TEXT -> {
+            val fieldBounds = action.parameters["field_bounds"].orEmpty()
+            serviceAction(action.id, "Text cleared") {
+                if (fieldBounds.isBlank()) {
+                    SignalASIAccessibilityService.performClearText()
+                } else {
+                    SignalASIAccessibilityService.performClearText(fieldBounds)
+                }
+            }
+        }
+        AgentActionKind.PASTE_TEXT -> {
+            val fieldBounds = action.parameters["field_bounds"].orEmpty()
+            val clipboardText = clipboardText()
+            if (clipboardText.isBlank()) {
+                AgentActionResult(action.id, false, "Clipboard text is empty")
+            } else {
+                serviceAction(action.id, "Clipboard pasted") {
+                    if (fieldBounds.isBlank()) {
+                        SignalASIAccessibilityService.performTextInput(clipboardText)
+                    } else {
+                        SignalASIAccessibilityService.performTextInput(fieldBounds, clipboardText)
+                    }
+                }
+            }
+        }
         AgentActionKind.SWIPE -> {
             val fromX = action.parameters["from_x"]?.toIntOrNull() ?: 0
             val fromY = action.parameters["from_y"]?.toIntOrNull() ?: 0
@@ -981,6 +1022,9 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         val uri = action.parameters["uri"].orEmpty()
         val type = action.parameters["type"].orEmpty()
         val category = action.parameters["category"].orEmpty()
+        val extraText = action.parameters["extra_text"].orEmpty()
+        val title = action.parameters["title"].orEmpty()
+        val calendarTitle = action.parameters["calendar_title"].orEmpty()
         val intent = when {
             intentAction.isNotBlank() -> Intent(intentAction).apply {
                 when {
@@ -989,11 +1033,24 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                     type.isNotBlank() -> setType(type)
                 }
                 if (category.isNotBlank()) addCategory(category)
+                if (extraText.isNotBlank()) putExtra(Intent.EXTRA_TEXT, extraText)
+                if (title.isNotBlank()) putExtra(Intent.EXTRA_TITLE, title)
+                if (calendarTitle.isNotBlank()) putExtra(CalendarContract.Events.TITLE, calendarTitle)
             }
             packageName.isNotBlank() -> context.packageManager.getLaunchIntentForPackage(packageName)
             else -> null
         } ?: return AgentActionResult(action.id, false, "No launch target is available")
         return launchIntent(action.id, intent, "Opened ${action.target}")
+    }
+
+    private fun clipboardText(): String {
+        val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return ""
+        return clipboard.primaryClip
+            ?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)
+            ?.coerceToText(context)
+            ?.toString()
+            .orEmpty()
     }
 
     private fun copyScreenText(action: AgentAction, screen: ScreenContext): AgentActionResult {
@@ -1874,12 +1931,14 @@ private fun AgentActionKind.mayChangeScreen(): Boolean = when (this) {
     AgentActionKind.OPEN_APP,
     AgentActionKind.OPEN_URL,
     AgentActionKind.SET_ALARM -> true
-    AgentActionKind.READ_SCREEN,
-    AgentActionKind.DRAFT_PLAN,
-    AgentActionKind.TYPE_TEXT,
-    AgentActionKind.COPY_SCREEN_TEXT,
-    AgentActionKind.CALL_CONNECTOR,
-    AgentActionKind.CONTROL_DEVICE -> false
+        AgentActionKind.READ_SCREEN,
+        AgentActionKind.DRAFT_PLAN,
+        AgentActionKind.TYPE_TEXT,
+        AgentActionKind.DELETE_TEXT,
+        AgentActionKind.PASTE_TEXT,
+        AgentActionKind.COPY_SCREEN_TEXT,
+        AgentActionKind.CALL_CONNECTOR,
+        AgentActionKind.CONTROL_DEVICE -> false
 }
 
 data class AgentPlan(
@@ -2100,6 +2159,8 @@ enum class AgentActionKind {
     OPEN_URL,
     SET_ALARM,
     COPY_SCREEN_TEXT,
+    DELETE_TEXT,
+    PASTE_TEXT,
     CALL_CONNECTOR,
     CONTROL_DEVICE
 }

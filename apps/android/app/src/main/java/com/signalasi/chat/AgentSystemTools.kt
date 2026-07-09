@@ -1,6 +1,7 @@
 package com.signalasi.chat
 
 import android.content.Intent
+import android.provider.CalendarContract
 import android.provider.MediaStore
 import android.provider.Settings
 
@@ -66,6 +67,52 @@ object AgentSystemToolPlanner {
                 status = AgentActionStatus.PENDING_CONFIRMATION,
                 description = "Copy current screen text"
             )
+            lower.contains("clear text") || lower.contains("delete text") -> textEditAction(
+                id = "clear-focused-text",
+                kind = AgentActionKind.DELETE_TEXT,
+                target = request.screen.inputFields.firstOrNull()?.label?.ifBlank { request.screen.foregroundApp } ?: request.screen.foregroundApp,
+                description = "Clear text from the active input field",
+                fieldBounds = request.screen.inputFields.firstOrNull()?.bounds.orEmpty()
+            )
+            lower.contains("paste clipboard") || lower == "paste" -> textEditAction(
+                id = "paste-clipboard",
+                kind = AgentActionKind.PASTE_TEXT,
+                target = request.screen.inputFields.firstOrNull()?.label?.ifBlank { request.screen.foregroundApp } ?: request.screen.foregroundApp,
+                description = "Paste clipboard text into the active input field",
+                fieldBounds = request.screen.inputFields.firstOrNull()?.bounds.orEmpty()
+            )
+            lower.startsWith("share text ") -> intentAction(
+                id = "share-text",
+                target = "Android Share Sheet",
+                description = "Share text",
+                intentAction = Intent.ACTION_SEND,
+                type = "text/plain",
+                risk = AgentRisk.MEDIUM,
+                extras = mapOf("extra_text" to goal.substring("share text ".length).trim())
+            )
+            lower.contains("open calendar") -> intentAction(
+                id = "open-calendar",
+                target = "Calendar",
+                description = "Open calendar",
+                intentAction = Intent.ACTION_VIEW,
+                uri = CalendarContract.CONTENT_URI.toString(),
+                risk = AgentRisk.LOW
+            )
+            lower.startsWith("create calendar event ") || lower.startsWith("add calendar event ") -> {
+                val title = goal
+                    .removePrefixIgnoreCase("create calendar event ")
+                    .removePrefixIgnoreCase("add calendar event ")
+                    .trim()
+                intentAction(
+                    id = "create-calendar-event",
+                    target = "Calendar",
+                    description = "Create calendar event",
+                    intentAction = Intent.ACTION_INSERT,
+                    uri = CalendarContract.Events.CONTENT_URI.toString(),
+                    risk = AgentRisk.MEDIUM,
+                    extras = mapOf("calendar_title" to title.ifBlank { "SignalASI task" })
+                )
+            }
             lower.startsWith("open url ") || lower.startsWith("open website ") -> {
                 val url = if (lower.startsWith("open url ")) {
                     goal.substring("open url ".length).trim()
@@ -166,7 +213,8 @@ object AgentSystemToolPlanner {
         uri: String = "",
         type: String = "",
         category: String = "",
-        risk: AgentRisk = AgentRisk.LOW
+        risk: AgentRisk = AgentRisk.LOW,
+        extras: Map<String, String> = emptyMap()
     ): AgentAction = AgentAction(
         id = id,
         kind = AgentActionKind.OPEN_APP,
@@ -179,7 +227,26 @@ object AgentSystemToolPlanner {
             if (uri.isNotBlank()) put("uri", uri)
             if (type.isNotBlank()) put("type", type)
             if (category.isNotBlank()) put("category", category)
+            extras.forEach { (key, value) ->
+                if (value.isNotBlank()) put(key, value)
+            }
         }
+    )
+
+    private fun textEditAction(
+        id: String,
+        kind: AgentActionKind,
+        target: String,
+        description: String,
+        fieldBounds: String
+    ): AgentAction = AgentAction(
+        id = id,
+        kind = kind,
+        target = target,
+        risk = AgentRisk.MEDIUM,
+        status = AgentActionStatus.PENDING_CONFIRMATION,
+        description = description,
+        parameters = mapOf("field_bounds" to fieldBounds)
     )
 
     private fun packageAction(
@@ -225,6 +292,9 @@ object AgentSystemToolPlanner {
         return if (value.startsWith("http://") || value.startsWith("https://")) value else "https://$value"
     }
 
+    private fun String.removePrefixIgnoreCase(prefix: String): String =
+        if (startsWith(prefix, ignoreCase = true)) drop(prefix.length) else this
+
     private val SYSTEM_TOOLS = listOf(
         AgentSystemTool(
             id = "screen-copy",
@@ -232,7 +302,15 @@ object AgentSystemToolPlanner {
             kind = AgentActionKind.COPY_SCREEN_TEXT,
             risk = AgentRisk.LOW,
             capabilities = listOf(AgentCapability.SCREEN_READING, AgentCapability.CLIPBOARD),
-            examples = listOf("copy screen text", "copy current screen")
+            examples = listOf("copy screen text", "copy current screen", "paste clipboard", "clear text")
+        ),
+        AgentSystemTool(
+            id = "share-text",
+            title = "Share Text",
+            kind = AgentActionKind.OPEN_APP,
+            risk = AgentRisk.MEDIUM,
+            capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.TASK_EXECUTION),
+            examples = listOf("share text hello", "create calendar event Project review")
         ),
         AgentSystemTool(
             id = "system-settings",

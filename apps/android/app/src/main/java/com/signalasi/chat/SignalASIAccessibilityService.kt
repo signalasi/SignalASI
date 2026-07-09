@@ -110,6 +110,17 @@ class SignalASIAccessibilityService : AccessibilityService() {
         return setNodeText(node, text)
     }
 
+    private fun clearFocusedField(): Boolean {
+        val node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+        return setNodeText(node, "")
+    }
+
+    private fun clearField(bounds: String): Boolean {
+        val targetBounds = parseBounds(bounds) ?: return false
+        val node = findNodeByBounds(rootInActiveWindow, targetBounds) ?: return false
+        return setNodeText(node, "")
+    }
+
     private fun setNodeText(node: AccessibilityNodeInfo, text: String): Boolean {
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
@@ -161,6 +172,10 @@ class SignalASIAccessibilityService : AccessibilityService() {
 
         fun performTextInput(bounds: String, text: String): Boolean =
             activeService?.typeIntoField(bounds, text) == true
+
+        fun performClearText(): Boolean = activeService?.clearFocusedField() == true
+
+        fun performClearText(bounds: String): Boolean = activeService?.clearField(bounds) == true
     }
 }
 
