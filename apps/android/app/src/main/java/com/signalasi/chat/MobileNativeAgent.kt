@@ -20,7 +20,7 @@ class MobileNativeAgent(
     private val planner: AgentPlanner = RuleBasedAgentPlanner(),
     private val safetyPolicy: AgentSafetyPolicy = DefaultAgentSafetyPolicy(),
     private val actionExecutor: AgentActionExecutor = AndroidAgentActionExecutor(context),
-    private val memoryStore: AgentMemoryStore = InMemoryAgentMemoryStore(),
+    private val memoryStore: AgentMemoryStore = SharedPreferencesAgentMemoryStore(context),
     private val connectorRegistry: AgentConnectorRegistry = StaticAgentConnectorRegistry(),
     private val sessionStore: AgentSessionStore = SharedPreferencesAgentSessionStore(context)
 ) {
@@ -410,6 +410,93 @@ class InMemoryAgentMemoryStore : AgentMemoryStore {
     override fun recall(query: String): List<AgentMemoryItem> = items
         .filter { it.value.contains(query, ignoreCase = true) || query.contains(it.value, ignoreCase = true) }
         .takeLast(5)
+}
+
+class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
+    private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    override fun remember(item: AgentMemoryItem) {
+        val cleanValue = item.value.trim()
+        if (cleanValue.isBlank()) return
+        val nextItem = item.copy(value = cleanValue)
+        val items = loadItems()
+            .filterNot { it.kind == nextItem.kind && it.value.equals(nextItem.value, ignoreCase = true) }
+            .plus(nextItem)
+            .sortedBy { it.timestampMillis }
+            .takeLast(MAX_ITEMS)
+        saveItems(items)
+    }
+
+    override fun recall(query: String): List<AgentMemoryItem> {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) return emptyList()
+        return loadItems()
+            .map { item -> item to score(item, cleanQuery) }
+            .filter { (_, score) -> score > 0 }
+            .sortedWith(compareByDescending<Pair<AgentMemoryItem, Int>> { it.second }.thenByDescending { it.first.timestampMillis })
+            .map { it.first }
+            .take(MAX_RECALL_ITEMS)
+    }
+
+    private fun score(item: AgentMemoryItem, query: String): Int {
+        val value = item.value.lowercase()
+        val cleanQuery = query.lowercase()
+        var score = 0
+        if (value == cleanQuery) score += 12
+        if (value.contains(cleanQuery) || cleanQuery.contains(value)) score += 8
+        cleanQuery
+            .split(Regex("\\s+"))
+            .filter { it.length >= MIN_TOKEN_LENGTH }
+            .forEach { token ->
+                if (value.contains(token)) score += 1
+            }
+        return score
+    }
+
+    private fun loadItems(): List<AgentMemoryItem> {
+        val raw = prefs.getString(KEY_ITEMS, "[]") ?: "[]"
+        return runCatching {
+            val array = JSONArray(raw)
+            buildList {
+                for (index in 0 until array.length()) {
+                    decodeMemoryItem(array.optJSONObject(index) ?: continue)?.let { add(it) }
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun saveItems(items: List<AgentMemoryItem>) {
+        val array = JSONArray()
+        items.forEach { array.put(encodeMemoryItem(it)) }
+        prefs.edit().putString(KEY_ITEMS, array.toString()).apply()
+    }
+
+    private fun encodeMemoryItem(item: AgentMemoryItem): JSONObject = JSONObject()
+        .put("id", item.id)
+        .put("kind", item.kind.name)
+        .put("value", item.value)
+        .put("source", item.source)
+        .put("timestamp_millis", item.timestampMillis)
+
+    private fun decodeMemoryItem(json: JSONObject): AgentMemoryItem? {
+        val value = json.optString("value").trim()
+        if (value.isBlank()) return null
+        return AgentMemoryItem(
+            kind = enumOrDefault(json.optString("kind"), AgentMemoryKind.TASK),
+            value = value,
+            timestampMillis = json.optLong("timestamp_millis", System.currentTimeMillis()),
+            id = json.optString("id").ifBlank { UUID.randomUUID().toString() },
+            source = json.optString("source", "agent")
+        )
+    }
+
+    companion object {
+        private const val PREFS = "signalasi_agent_memory"
+        private const val KEY_ITEMS = "items"
+        private const val MAX_ITEMS = 200
+        private const val MAX_RECALL_ITEMS = 8
+        private const val MIN_TOKEN_LENGTH = 3
+    }
 }
 
 interface AgentConnectorRegistry {
@@ -805,7 +892,9 @@ data class AgentActionResult(
 data class AgentMemoryItem(
     val kind: AgentMemoryKind,
     val value: String,
-    val timestampMillis: Long = System.currentTimeMillis()
+    val timestampMillis: Long = System.currentTimeMillis(),
+    val id: String = UUID.randomUUID().toString(),
+    val source: String = "agent"
 )
 
 data class AgentAuditEntry(
