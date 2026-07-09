@@ -282,6 +282,7 @@
     <string name="agent_plan_context_empty">No active plan context</string>
     <string name="agent_plan_context_goal">Goal</string>
     <string name="agent_plan_context_route">Route</string>
+    <string name="agent_plan_context_reason">Reason</string>
     <string name="agent_plan_context_expected">Expected</string>
     <string name="agent_plan_context_rollback">Rollback</string>
     <string name="agent_plan_context_timeout">Timeout</string>

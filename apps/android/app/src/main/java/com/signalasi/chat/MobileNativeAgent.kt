@@ -881,7 +881,8 @@ object AgentPlanFactory {
             timeoutSeconds = plannedActions.sumOf { timeoutFor(it) }.coerceAtMost(240),
             plannerProfile = "rule-based-local",
             contextDigest = request.runtimeContext.compactSummary().hashCode().toString(),
-            route = AgentRouteResolver.resolve(routeAction, request.targets)
+            route = AgentRouteResolver.resolve(routeAction, request.targets),
+            routeRationale = routeRationaleFor(routeAction, request)
         )
         return plan.copy(validation = AgentPlanValidator.validate(plan))
     }
@@ -992,6 +993,37 @@ object AgentPlanFactory {
         AgentActionKind.OPEN_APP,
         AgentActionKind.SET_ALARM -> 30
         else -> 20
+    }
+
+    private fun routeRationaleFor(action: AgentAction, request: AgentRequest): String = when (action.kind) {
+        AgentActionKind.CALL_CONNECTOR -> {
+            val connectorId = action.parameters["connector_id"].orEmpty()
+            val target = request.targets.firstOrNull { it.id == connectorId || it.title == action.target }
+            when (target?.kind) {
+                AgentConnectorKind.MODEL -> "Model route selected for reasoning or generation outside the phone UI."
+                AgentConnectorKind.AGENT -> "Desktop Agent route selected for specialist work beyond local Android actions."
+                AgentConnectorKind.DEVICE -> "Device connector route selected for trusted external device control."
+                AgentConnectorKind.KNOWLEDGE -> "Knowledge route selected for memory or document retrieval."
+                null -> "Connector route selected from the requested target, but the contact is not available yet."
+            }
+        }
+        AgentActionKind.CONTROL_DEVICE -> "Device route selected because the goal targets Home Assistant or smart devices."
+        AgentActionKind.READ_SCREEN,
+        AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
+        AgentActionKind.COPY_SCREEN_TEXT -> "Local perception route selected because the task depends on the current phone screen."
+        AgentActionKind.TAP,
+        AgentActionKind.TYPE_TEXT,
+        AgentActionKind.DELETE_TEXT,
+        AgentActionKind.PASTE_TEXT,
+        AgentActionKind.SWIPE,
+        AgentActionKind.LONG_PRESS,
+        AgentActionKind.BACK,
+        AgentActionKind.HOME,
+        AgentActionKind.RECENTS -> "Mobile executor route selected because the task changes the current Android UI."
+        AgentActionKind.OPEN_APP,
+        AgentActionKind.OPEN_URL,
+        AgentActionKind.SET_ALARM -> "Android intent route selected because the task maps to a system app or system handoff."
+        AgentActionKind.DRAFT_PLAN -> "Local planning route selected because the task needs clarification or a safe plan first."
     }
 }
 
@@ -1804,6 +1836,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("timeout_seconds", plan.timeoutSeconds)
         .put("planner_profile", plan.plannerProfile)
         .put("context_digest", plan.contextDigest)
+        .put("route_rationale", plan.routeRationale)
         .put("route", encodeRoute(plan.route))
         .put("validation", encodePlanValidation(plan.validation))
         .put("verification_results", JSONArray().also { array ->
@@ -1831,6 +1864,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         timeoutSeconds = json.optInt("timeout_seconds", 60),
         plannerProfile = json.optString("planner_profile", "rule-based-local"),
         contextDigest = json.optString("context_digest"),
+        routeRationale = json.optString("route_rationale"),
         route = decodeRoute(json.optJSONObject("route")),
         validation = decodePlanValidation(json.optJSONObject("validation")),
         verificationResults = decodeVerificationResults(json.optJSONArray("verification_results")),
@@ -2227,6 +2261,7 @@ data class AgentPlan(
     val timeoutSeconds: Int = 60,
     val plannerProfile: String = "rule-based-local",
     val contextDigest: String = "",
+    val routeRationale: String = "",
     val route: AgentRoute = AgentRoute(),
     val validation: AgentPlanValidation = AgentPlanValidation(),
     val verificationResults: List<AgentVerificationResult> = emptyList(),

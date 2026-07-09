@@ -1778,6 +1778,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val rows = listOf(
             R.string.agent_plan_context_goal to state.currentGoal.ifBlank { plan.goal },
             R.string.agent_plan_context_route to routeLabel.ifBlank { plan.selectedAgentOrModel.ifBlank { "-" } },
+            R.string.agent_plan_context_reason to plan.routeRationale.ifBlank { "-" },
             R.string.agent_plan_context_expected to plan.expectedResult.ifBlank { "-" },
             R.string.agent_plan_context_rollback to plan.rollbackStrategy.ifBlank { "-" },
             R.string.agent_plan_context_timeout to getString(R.string.agent_plan_context_timeout_value, plan.timeoutSeconds)
