@@ -23,6 +23,47 @@ object ChatHistoryStore {
     private const val CONTACT_SYSTEM = "system"
 
     @Synchronized
+    fun appendOutgoing(
+        context: Context,
+        contactId: String,
+        content: String,
+        deliveryStatus: String = "",
+        deliveryTrace: JSONArray = JSONArray()
+    ): Long {
+        val cleanContent = content.trim()
+        if (contactId.isBlank() || cleanContent.isBlank()) return 0L
+        val appContext = context.applicationContext
+        AppStore.ensureInitialized(appContext)
+        migrateHistoryPrefs(appContext)
+        val prefs = appContext.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
+        val root = runCatching {
+            JSONObject(prefs.getString(HISTORY_KEY, null).orEmpty())
+        }.getOrElse { JSONObject() }
+        val nextId = maxMessageId(root) + 1L
+        val trace = JSONArray()
+        for (index in 0 until deliveryTrace.length()) {
+            deliveryTrace.optJSONObject(index)?.let { trace.put(it) }
+        }
+        appendTrace(trace, "created", "agent_runtime")
+        val array = root.optJSONArray(contactId) ?: JSONArray()
+        array.put(JSONObject()
+            .put("id", nextId)
+            .put("content", cleanContent)
+            .put("isMine", true)
+            .put("contactId", contactId)
+            .put("isSystem", false)
+            .put("timestamp", System.currentTimeMillis())
+            .put("deliveryStatus", deliveryStatus)
+            .put("deliveryTrace", trace))
+        root.put(contactId, trim(array))
+        prefs.edit()
+            .putString(HISTORY_KEY, root.toString())
+            .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis())
+            .apply()
+        return nextId
+    }
+
+    @Synchronized
     fun appendIncoming(context: Context, payload: String): StoredIncomingMessage? {
         val appContext = context.applicationContext
         AppStore.ensureInitialized(appContext)
@@ -71,6 +112,11 @@ object ChatHistoryStore {
             "system_notification",
             context.getString(R.string.delivery_status_notified)
         )
+    }
+
+    @Synchronized
+    fun markOutgoingDelivery(context: Context, contactId: String, messageId: Long, stage: String, detail: String, status: String) {
+        markMessageTrace(context, contactId, messageId, stage, detail, status)
     }
 
     private fun markMessageTrace(context: Context, contactId: String, messageId: Long, stage: String, detail: String, status: String) {

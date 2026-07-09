@@ -394,12 +394,8 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 SignalASIAccessibilityService.performSwipe(fromX, fromY, toX, toY)
             }
         }
-        AgentActionKind.CALL_CONNECTOR,
-        AgentActionKind.CONTROL_DEVICE -> AgentActionResult(
-            actionId = action.id,
-            success = false,
-            message = "This executor is not connected yet"
-        )
+        AgentActionKind.CALL_CONNECTOR -> dispatchConnectorTask(action)
+        AgentActionKind.CONTROL_DEVICE -> dispatchDeviceTask(action)
     }
 
     private fun openApp(action: AgentAction): AgentActionResult {
@@ -425,6 +421,83 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             success = success,
             message = if (success) successMessage else "Screen Agent could not perform the action"
         )
+    }
+
+    private fun dispatchConnectorTask(action: AgentAction): AgentActionResult {
+        val connectorId = action.parameters["connector_id"].orEmpty()
+        val prompt = action.parameters["prompt"].orEmpty().ifBlank { action.description }
+        val contactId = resolveConnectorContactId(connectorId)
+            ?: return AgentActionResult(action.id, false, "${action.target} is not paired")
+        return dispatchContactTask(action, contactId, prompt)
+    }
+
+    private fun dispatchDeviceTask(action: AgentAction): AgentActionResult {
+        val prompt = action.parameters["prompt"].orEmpty().ifBlank { action.description }
+        val contactId = resolveConnectorContactId("home-assistant")
+            ?: resolveConnectorContactId("home_hub")
+            ?: return AgentActionResult(action.id, false, "Home Assistant is not configured")
+        return dispatchContactTask(action, contactId, prompt)
+    }
+
+    private fun dispatchContactTask(action: AgentAction, contactId: String, prompt: String): AgentActionResult {
+        val topic = AppStore.outgoingTopicForContact(context, contactId)
+            ?: return AgentActionResult(action.id, false, "${action.target} is not verified")
+        val trace = JSONArray()
+            .put(JSONObject()
+                .put("stage", "agent_confirmed")
+                .put("at", System.currentTimeMillis())
+                .put("detail", action.target))
+        val messageId = ChatHistoryStore.appendOutgoing(
+            context = context,
+            contactId = contactId,
+            content = prompt,
+            deliveryStatus = context.getString(R.string.delivery_status_sending),
+            deliveryTrace = trace
+        )
+        val published = SignalASIMqttClient.publishUserMessage(
+            content = prompt,
+            contactId = contactId,
+            topicOverride = topic,
+            clientMessageId = messageId.takeIf { it > 0L },
+            deliveryTrace = trace
+        )
+        ChatHistoryStore.markOutgoingDelivery(
+            context = context,
+            contactId = contactId,
+            messageId = messageId,
+            stage = if (published) "mqtt_published" else "publish_failed",
+            detail = topic,
+            status = context.getString(if (published) R.string.delivery_status_sent else R.string.delivery_status_failed)
+        )
+        return AgentActionResult(
+            actionId = action.id,
+            success = published,
+            message = if (published) "Sent task to ${action.target}" else "Could not send task to ${action.target}"
+        )
+    }
+
+    private fun resolveConnectorContactId(connectorId: String): String? {
+        val aliases = connectorAliases(connectorId)
+        if ("hermes" in aliases && AppStore.contactById(context, "hermes") != null) return "hermes"
+        val contacts = AppStore.contacts(context)
+        for (index in 0 until contacts.length()) {
+            val contact = contacts.optJSONObject(index) ?: continue
+            if (contact.optBoolean("deleted", false)) continue
+            val id = contact.optString("id")
+            val agentId = contact.optString("agent_id")
+            val signalasiId = contact.optString("signalasi_id").ifBlank { contact.optString("hermes_id") }
+            if (id in aliases || agentId in aliases || signalasiId in aliases) {
+                return id.ifBlank { signalasiId.ifBlank { agentId } }
+            }
+        }
+        return null
+    }
+
+    private fun connectorAliases(connectorId: String): Set<String> = when (connectorId) {
+        "claude-code" -> setOf("claude-code", "claude")
+        "home-assistant" -> setOf("home-assistant", "home_hub", "home-hub", "living-room-hub")
+        "cloud-models" -> setOf("cloud-models", "cloud-model")
+        else -> setOf(connectorId)
     }
 }
 
