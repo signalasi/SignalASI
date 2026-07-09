@@ -148,6 +148,9 @@ class MobileNativeAgent(
         forgetMemoryCommandValue(currentGoal)?.let { query ->
             return forgetMemoryCommand(query)
         }
+        forgetKnowledgeCommandValue(currentGoal)?.let { query ->
+            return forgetKnowledgeCommand(query)
+        }
         knowledgeSearchCommandValue(currentGoal)?.let { query ->
             return searchKnowledgeCommand(query)
         }
@@ -403,6 +406,12 @@ class MobileNativeAgent(
         return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
     }
 
+    private fun forgetKnowledgeCommandValue(goal: String): String? {
+        val prefixes = listOf("forget knowledge ", "delete knowledge ", "remove knowledge ", "forget document ", "delete document ")
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
     private fun saveMemoryCommand(value: String): AgentUiState {
         val blockReason = memoryBlockReason(value, currentScreen)
         val resultMessage = if (blockReason == null) {
@@ -599,6 +608,55 @@ class MobileNativeAgent(
         lastActionResult = AgentActionResult(action.id, true, result)
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
         recordAudit(AgentAuditEvent.MEMORY_FORGOTTEN, "query:$query deleted:$deletedCount")
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        saveTaskRecord(result = result)
+        return snapshot()
+    }
+
+    private fun forgetKnowledgeCommand(query: String): AgentUiState {
+        val deletedCount = knowledgeStore.delete(query)
+        val result = if (deletedCount == 0) {
+            "No matching knowledge for \"$query\""
+        } else {
+            "Deleted $deletedCount matching knowledge items"
+        }
+        val action = AgentAction(
+            id = "forget-knowledge",
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Knowledge",
+            risk = AgentRisk.MEDIUM,
+            status = AgentActionStatus.COMPLETED,
+            description = "Delete matching Agent knowledge",
+            parameters = mapOf("query" to query),
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Knowledge",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "agent-knowledge",
+                kind = AgentRouteKind.KNOWLEDGE,
+                targetId = "agent-knowledge",
+                targetTitle = "Agent Knowledge",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.KNOWLEDGE_SEARCH)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.MEDIUM,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.MEMORY_FORGOTTEN, "knowledge_query:$query deleted:$deletedCount")
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
         saveTaskRecord(result = result)
         return snapshot()

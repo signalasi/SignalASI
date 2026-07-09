@@ -32,6 +32,7 @@ enum class AgentKnowledgeKind {
 interface AgentKnowledgeStore {
     fun upsert(item: AgentKnowledgeItem)
     fun search(query: String, limit: Int = 5): List<AgentKnowledgeItem>
+    fun delete(query: String): Int
     fun stats(): AgentKnowledgeStats
 }
 
@@ -63,6 +64,16 @@ class SharedPreferencesAgentKnowledgeStore(context: Context) : AgentKnowledgeSto
             .take(limit)
             .map { it.first }
             .toList()
+    }
+
+    override fun delete(query: String): Int {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) return 0
+        val tokens = cleanQuery.lowercase().split(Regex("\\s+")).filter { it.length >= 2 }
+        val items = loadItems()
+        val kept = items.filter { item -> score(item, cleanQuery, tokens) <= 0 }
+        if (kept.size != items.size) saveItems(kept)
+        return items.size - kept.size
     }
 
     override fun stats(): AgentKnowledgeStats {
