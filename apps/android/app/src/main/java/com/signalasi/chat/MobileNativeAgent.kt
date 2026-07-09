@@ -151,6 +151,9 @@ class MobileNativeAgent(
         if (auditTrailCommand(currentGoal)) {
             return showAuditTrailCommand()
         }
+        if (clearTaskHistoryCommand(currentGoal)) {
+            return clearTaskHistoryCommand()
+        }
         if (recentTasksCommand(currentGoal)) {
             return showRecentTasksCommand()
         }
@@ -459,6 +462,14 @@ class MobileNativeAgent(
             normalized == "show audit log" ||
             normalized == "execution log" ||
             normalized == "show execution log"
+    }
+
+    private fun clearTaskHistoryCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "clear task history" ||
+            normalized == "clear recent tasks" ||
+            normalized == "delete task history" ||
+            normalized == "delete recent tasks"
     }
 
     private fun recentTasksCommand(goal: String): Boolean {
@@ -866,6 +877,49 @@ class MobileNativeAgent(
         phase = AgentPhase.COMPLETED
         lastActionResult = AgentActionResult(action.id, true, result)
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        return snapshot()
+    }
+
+    private fun clearTaskHistoryCommand(): AgentUiState {
+        taskStore.clear()
+        val result = "Cleared Agent task history"
+        val action = AgentAction(
+            id = "clear-task-history",
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Task History",
+            risk = AgentRisk.MEDIUM,
+            status = AgentActionStatus.COMPLETED,
+            description = "Clear Agent task history",
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Task History",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "agent-task-history",
+                kind = AgentRouteKind.LOCAL_SYSTEM,
+                targetId = "agent-task-history",
+                targetTitle = "Agent Task History",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.TASK_EXECUTION)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.MEDIUM,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "task_history_cleared")
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
         return snapshot()
     }
