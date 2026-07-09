@@ -13,6 +13,10 @@ const PACKAGED_BACKEND_DIR = path.resolve(APP_ROOT, "..", "signalasi-link", "bac
 const BACKEND_DIR = fs.existsSync(DEV_BACKEND_DIR) ? DEV_BACKEND_DIR : PACKAGED_BACKEND_DIR;
 const RUNTIME_ROOT = fs.existsSync(DEV_BACKEND_DIR) ? APP_ROOT : path.resolve(APP_ROOT, "..");
 const UI_SMOKE = process.env.SIGNALASI_UI_SMOKE === "1";
+if (UI_SMOKE) {
+  const smokeUserData = path.join(process.env.SIGNALASI_UI_SMOKE_DIR || path.join(RUNTIME_ROOT, "ui-smoke"), "user-data");
+  app.setPath("userData", smokeUserData);
+}
 
 let mainWindow;
 let backendProcess;
@@ -44,6 +48,8 @@ function createWindow() {
 async function runUiSmoke() {
   const outDir = process.env.SIGNALASI_UI_SMOKE_DIR || path.join(RUNTIME_ROOT, "ui-smoke");
   const overviewPath = path.join(outDir, "desktop-overview.png");
+  const languageEnPath = path.join(outDir, "desktop-language-en.png");
+  const languageZhPath = path.join(outDir, "desktop-language-zh.png");
   const setupPath = path.join(outDir, "desktop-setup-guide.png");
   const matrixPath = path.join(outDir, "desktop-status-matrix.png");
   const agentsPath = path.join(outDir, "desktop-agents.png");
@@ -73,6 +79,51 @@ async function runUiSmoke() {
     }
     if (!state || !state.setupTitle.trim() || state.setupItems < 6 || !state.matrixTitle.trim() || state.rows < 5) {
       throw new Error(`Setup guide or status matrix did not render: ${JSON.stringify(state)}`);
+    }
+    const defaultLanguage = await mainWindow.webContents.executeJavaScript(`
+      (() => ({
+        lang: document.documentElement.lang,
+        selected: document.querySelector("#languageSelect")?.value || "",
+        title: document.querySelector(".topbar h2")?.textContent || ""
+      }))()
+    `);
+    if (defaultLanguage.lang !== "en" || defaultLanguage.selected !== "en" || defaultLanguage.title !== "Local Agent Connector") {
+      throw new Error(`Desktop did not default to English: ${JSON.stringify(defaultLanguage)}`);
+    }
+    await captureSmokeScreenshot(languageEnPath);
+    const zhLanguage = await mainWindow.webContents.executeJavaScript(`
+      (async () => {
+        const select = document.querySelector("#languageSelect");
+        select.value = "zh-CN";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        return {
+          lang: document.documentElement.lang,
+          selected: select.value,
+          title: document.querySelector(".topbar h2")?.textContent || "",
+          overview: document.querySelector('[data-target="overview"]')?.textContent || ""
+        };
+      })()
+    `);
+    if (zhLanguage.lang !== "zh-Hans" || zhLanguage.selected !== "zh-CN" || zhLanguage.title !== "\u672c\u5730 Agent \u8fde\u63a5\u5668") {
+      throw new Error(`Desktop Simplified Chinese language switch failed: ${JSON.stringify(zhLanguage)}`);
+    }
+    await captureSmokeScreenshot(languageZhPath);
+    const restoredLanguage = await mainWindow.webContents.executeJavaScript(`
+      (async () => {
+        const select = document.querySelector("#languageSelect");
+        select.value = "en";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        return {
+          lang: document.documentElement.lang,
+          selected: select.value,
+          title: document.querySelector(".topbar h2")?.textContent || ""
+        };
+      })()
+    `);
+    if (restoredLanguage.lang !== "en" || restoredLanguage.selected !== "en" || restoredLanguage.title !== "Local Agent Connector") {
+      throw new Error(`Desktop English language restore failed: ${JSON.stringify(restoredLanguage)}`);
     }
     await captureSmokeScreenshot(overviewPath);
     await mainWindow.webContents.executeJavaScript(`
@@ -107,6 +158,8 @@ async function runUiSmoke() {
     await new Promise((resolve) => setTimeout(resolve, 250));
     await captureSmokeScreenshot(agentsPath);
     console.log(`[ui-smoke] screenshot: ${overviewPath}`);
+    console.log(`[ui-smoke] screenshot: ${languageEnPath}`);
+    console.log(`[ui-smoke] screenshot: ${languageZhPath}`);
     console.log(`[ui-smoke] screenshot: ${setupPath}`);
     console.log(`[ui-smoke] screenshot: ${matrixPath}`);
     console.log(`[ui-smoke] screenshot: ${agentsPath}`);

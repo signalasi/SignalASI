@@ -40,6 +40,7 @@ SignalASI is a private superintelligence interface for trusted communication bet
 | Agent execution | Desktop can call local CLI agents, stdin custom agents, MCP wrappers, and local model endpoints. | `npm run smoke:desktop:e2e` |
 | Agent push | Long-running agents can call the local push API with `X-SignalASI-Token` and publish results to the paired phone route. | `npm run smoke:desktop:agent-push` |
 | Diagnostics | Desktop reports structured status, setup guidance, pairing state, execution logs, and runtime requirements. | `npm run smoke:desktop`, `npm run smoke:desktop:e2e` |
+| Language | Desktop defaults to English and can switch between English and Simplified Chinese without using a browser. | `npm run smoke:desktop:ui` |
 | Packaging | Windows Desktop packaging includes the backend, docs, sidecar hooks, dependency installer, and packaged smoke evidence. | `npm run package:desktop:win`, `npm run smoke:desktop:packaged` |
 | Local-only data | Pairing state, tokens, logs, databases, uploads, downloads, screenshots, and packaged binaries remain ignored and untracked. | `npm run check` |
 

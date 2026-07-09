@@ -8,6 +8,8 @@ const electronCli = path.join(root, ".electron-runtime", "node_modules", "electr
 const screenshotDir = path.join(root, "ui-smoke");
 const screenshots = [
   path.join(screenshotDir, "desktop-overview.png"),
+  path.join(screenshotDir, "desktop-language-en.png"),
+  path.join(screenshotDir, "desktop-language-zh.png"),
   path.join(screenshotDir, "desktop-setup-guide.png"),
   path.join(screenshotDir, "desktop-status-matrix.png"),
   path.join(screenshotDir, "desktop-agents.png")

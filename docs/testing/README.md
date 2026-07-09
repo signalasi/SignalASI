@@ -27,7 +27,7 @@ Product scope is defined in `docs/product/PRODUCT_REQUIREMENTS.md`.
 | Desktop agent push smoke | `npm run smoke:desktop:agent-push` | Long-running agents and scripts can call the local push API with token validation and publish messages to the paired phone path. |
 | Desktop voice STT smoke | `npm run smoke:desktop:voice-stt` | Inline phone voice payloads are saved, routed through the Desktop STT bridge, and cleaned before Agent reply handling. |
 | Desktop MQTT persistence smoke | `npm run smoke:desktop:mqtt-persistence` | Desktop and Android MQTT topics use persistent client identity and QoS settings required for delayed delivery. |
-| Desktop UI smoke | `npm run smoke:desktop:ui` | Electron renderer loads, connector panels are visible, Desktop UI screenshots can be captured, and localized UI wiring does not regress. |
+| Desktop UI smoke | `npm run smoke:desktop:ui` | Electron renderer loads, connector panels are visible, Desktop defaults to English, Simplified Chinese switching works, and Desktop UI screenshots can be captured. |
 | Desktop end-to-end smoke | `npm run smoke:desktop:e2e` | Hermes, Codex, Claude Code, Local LLM, Custom Agent, MCP wrapper, status matrix, execution log, and setup helpers work together through the source backend. |
 | Windows package build | `npm run package:desktop:win` | The Windows Desktop package is assembled with the backend, docs, sidecar runtime hooks, dependency installer, and packaged scripts. |
 | Packaged Desktop smoke | `npm run smoke:desktop:packaged` | The packaged Windows Desktop app uses the current source backend layout, includes required runtime files, exposes diagnostics, and captures packaged UI evidence. |
