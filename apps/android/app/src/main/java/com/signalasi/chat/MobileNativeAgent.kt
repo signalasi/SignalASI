@@ -3,6 +3,9 @@ package com.signalasi.chat
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.UUID
 
 /**
  * Phone-native Agent runtime scaffold.
@@ -18,14 +21,20 @@ class MobileNativeAgent(
     private val safetyPolicy: AgentSafetyPolicy = DefaultAgentSafetyPolicy(),
     private val actionExecutor: AgentActionExecutor = AndroidAgentActionExecutor(context),
     private val memoryStore: AgentMemoryStore = InMemoryAgentMemoryStore(),
-    private val connectorRegistry: AgentConnectorRegistry = StaticAgentConnectorRegistry()
+    private val connectorRegistry: AgentConnectorRegistry = StaticAgentConnectorRegistry(),
+    private val sessionStore: AgentSessionStore = SharedPreferencesAgentSessionStore(context)
 ) {
+    private var sessionId: String = UUID.randomUUID().toString()
     private var phase: AgentPhase = AgentPhase.OBSERVING
     private var currentGoal: String = ""
     private var currentScreen: ScreenContext = perceptionProvider.capture()
     private var currentPlan: AgentPlan? = null
     private var lastActionResult: AgentActionResult? = null
     private val auditTrail = mutableListOf<AgentAuditEntry>()
+
+    init {
+        restoreSession(sessionStore.load())
+    }
 
     fun snapshot(): AgentUiState = AgentUiState(
         phase = phase,
@@ -37,6 +46,7 @@ class MobileNativeAgent(
         runningTaskCount = if (phase == AgentPhase.PLANNING || phase == AgentPhase.WAITING_CONFIRMATION || phase == AgentPhase.EXECUTING) 1 else 0,
         steps = currentPlan?.steps ?: defaultSteps(),
         lastEvent = if (currentGoal.isBlank()) AgentEvent.WAITING_FOR_GOAL else AgentEvent.GOAL_RECEIVED,
+        sessionId = sessionId,
         plan = currentPlan,
         pendingAction = currentPlan?.actions?.firstOrNull { it.status == AgentActionStatus.PENDING_CONFIRMATION },
         auditTrail = auditTrail.toList(),
@@ -131,6 +141,34 @@ class MobileNativeAgent(
         if (auditTrail.size > MAX_AUDIT_ITEMS) {
             auditTrail.removeAt(0)
         }
+        persistSession()
+    }
+
+    private fun restoreSession(session: AgentSessionSnapshot?) {
+        if (session == null) return
+        sessionId = session.sessionId.ifBlank { UUID.randomUUID().toString() }
+        phase = session.phase
+        currentGoal = session.currentGoal
+        currentScreen = session.currentScreen
+        currentPlan = session.currentPlan
+        lastActionResult = session.lastActionResult
+        auditTrail.clear()
+        auditTrail.addAll(session.auditTrail.takeLast(MAX_AUDIT_ITEMS))
+    }
+
+    private fun persistSession() {
+        sessionStore.save(
+            AgentSessionSnapshot(
+                sessionId = sessionId,
+                phase = phase,
+                currentGoal = currentGoal,
+                currentScreen = currentScreen,
+                currentPlan = currentPlan,
+                auditTrail = auditTrail.toList(),
+                lastActionResult = lastActionResult,
+                updatedAtMillis = System.currentTimeMillis()
+            )
+        )
     }
 
     companion object {
@@ -389,6 +427,267 @@ class StaticAgentConnectorRegistry : AgentConnectorRegistry {
     )
 }
 
+interface AgentSessionStore {
+    fun load(): AgentSessionSnapshot?
+    fun save(snapshot: AgentSessionSnapshot)
+    fun clear()
+}
+
+class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
+    private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    override fun load(): AgentSessionSnapshot? {
+        val raw = prefs.getString(KEY_SESSION, null) ?: return null
+        return runCatching {
+            decodeSession(JSONObject(raw))
+        }.getOrNull()
+    }
+
+    override fun save(snapshot: AgentSessionSnapshot) {
+        prefs.edit().putString(KEY_SESSION, encodeSession(snapshot).toString()).apply()
+    }
+
+    override fun clear() {
+        prefs.edit().clear().apply()
+    }
+
+    private fun encodeSession(snapshot: AgentSessionSnapshot): JSONObject = JSONObject()
+        .put("version", 1)
+        .put("session_id", snapshot.sessionId)
+        .put("phase", snapshot.phase.name)
+        .put("current_goal", snapshot.currentGoal)
+        .put("current_screen", encodeScreen(snapshot.currentScreen))
+        .put("current_plan", snapshot.currentPlan?.let { encodePlan(it) })
+        .put("audit_trail", JSONArray().also { array ->
+            snapshot.auditTrail.forEach { array.put(encodeAudit(it)) }
+        })
+        .put("last_action_result", snapshot.lastActionResult?.let { encodeActionResult(it) })
+        .put("updated_at", snapshot.updatedAtMillis)
+
+    private fun decodeSession(json: JSONObject): AgentSessionSnapshot = AgentSessionSnapshot(
+        sessionId = json.optString("session_id"),
+        phase = enumOrDefault(json.optString("phase"), AgentPhase.OBSERVING),
+        currentGoal = json.optString("current_goal"),
+        currentScreen = decodeScreen(json.optJSONObject("current_screen")),
+        currentPlan = json.optJSONObject("current_plan")?.let { decodePlan(it) },
+        auditTrail = decodeAuditTrail(json.optJSONArray("audit_trail")),
+        lastActionResult = json.optJSONObject("last_action_result")?.let { decodeActionResult(it) },
+        updatedAtMillis = json.optLong("updated_at", 0L)
+    )
+
+    private fun encodeScreen(screen: ScreenContext): JSONObject = JSONObject()
+        .put("foreground_app", screen.foregroundApp)
+        .put("activity_name", screen.activityName)
+        .put("page_title", screen.pageTitle)
+        .put("visible_text_count", screen.visibleTextCount)
+        .put("clickable_node_count", screen.clickableNodeCount)
+        .put("input_field_count", screen.inputFieldCount)
+        .put("scrollable_region_count", screen.scrollableRegionCount)
+        .put("sensitive_flag_count", screen.sensitiveFlagCount)
+        .put("visible_texts", JSONArray().also { array ->
+            screen.visibleTexts.forEach { array.put(it) }
+        })
+        .put("clickable_elements", encodeElements(screen.clickableElements))
+        .put("input_fields", encodeElements(screen.inputFields))
+        .put("scrollable_regions", encodeElements(screen.scrollableRegions))
+        .put("sensitive_flags", JSONArray().also { array ->
+            screen.sensitiveFlags.forEach { array.put(it) }
+        })
+        .put("is_accessibility_enabled", screen.isAccessibilityEnabled)
+        .put("snapshot_age_millis", screen.snapshotAgeMillis)
+
+    private fun decodeScreen(json: JSONObject?): ScreenContext {
+        if (json == null) return ScreenContext(foregroundApp = "SignalASI", pageTitle = "Agent")
+        return ScreenContext(
+            foregroundApp = json.optString("foreground_app", "SignalASI"),
+            activityName = json.optString("activity_name"),
+            pageTitle = json.optString("page_title", "Agent"),
+            visibleTextCount = json.optInt("visible_text_count"),
+            clickableNodeCount = json.optInt("clickable_node_count"),
+            inputFieldCount = json.optInt("input_field_count"),
+            scrollableRegionCount = json.optInt("scrollable_region_count"),
+            sensitiveFlagCount = json.optInt("sensitive_flag_count"),
+            visibleTexts = decodeStringList(json.optJSONArray("visible_texts")),
+            clickableElements = decodeElements(json.optJSONArray("clickable_elements")),
+            inputFields = decodeElements(json.optJSONArray("input_fields")),
+            scrollableRegions = decodeElements(json.optJSONArray("scrollable_regions")),
+            sensitiveFlags = decodeStringList(json.optJSONArray("sensitive_flags")),
+            isAccessibilityEnabled = json.optBoolean("is_accessibility_enabled"),
+            snapshotAgeMillis = json.optLong("snapshot_age_millis")
+        )
+    }
+
+    private fun encodePlan(plan: AgentPlan): JSONObject = JSONObject()
+        .put("goal", plan.goal)
+        .put("screen", encodeScreen(plan.screen))
+        .put("steps", JSONArray().also { array ->
+            plan.steps.forEach { array.put(encodeStep(it)) }
+        })
+        .put("actions", JSONArray().also { array ->
+            plan.actions.forEach { array.put(encodeAction(it)) }
+        })
+        .put("safety_review", encodeSafetyReview(plan.safetyReview))
+
+    private fun decodePlan(json: JSONObject): AgentPlan = AgentPlan(
+        goal = json.optString("goal"),
+        screen = decodeScreen(json.optJSONObject("screen")),
+        steps = decodeSteps(json.optJSONArray("steps")),
+        actions = decodeActions(json.optJSONArray("actions")),
+        safetyReview = decodeSafetyReview(json.optJSONObject("safety_review"))
+    )
+
+    private fun encodeStep(step: AgentStep): JSONObject = JSONObject()
+        .put("order", step.order)
+        .put("kind", step.kind.name)
+        .put("status", step.status.name)
+
+    private fun decodeSteps(array: JSONArray?): List<AgentStep> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                add(
+                    AgentStep(
+                        order = item.optInt("order"),
+                        kind = enumOrDefault(item.optString("kind"), AgentStepKind.OBSERVE_SCREEN),
+                        status = enumOrDefault(item.optString("status"), AgentStepStatus.WAITING)
+                    )
+                )
+            }
+        }
+    }
+
+    private fun encodeAction(action: AgentAction): JSONObject = JSONObject()
+        .put("id", action.id)
+        .put("kind", action.kind.name)
+        .put("target", action.target)
+        .put("risk", action.risk.name)
+        .put("status", action.status.name)
+        .put("description", action.description)
+        .put("parameters", JSONObject(action.parameters))
+
+    private fun decodeActions(array: JSONArray?): List<AgentAction> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                add(
+                    AgentAction(
+                        id = item.optString("id"),
+                        kind = enumOrDefault(item.optString("kind"), AgentActionKind.DRAFT_PLAN),
+                        target = item.optString("target"),
+                        risk = enumOrDefault(item.optString("risk"), AgentRisk.LOW),
+                        status = enumOrDefault(item.optString("status"), AgentActionStatus.PENDING_CONFIRMATION),
+                        description = item.optString("description"),
+                        parameters = decodeStringMap(item.optJSONObject("parameters"))
+                    )
+                )
+            }
+        }
+    }
+
+    private fun encodeSafetyReview(review: AgentSafetyReview): JSONObject = JSONObject()
+        .put("risk", review.risk.name)
+        .put("requires_confirmation", review.requiresConfirmation)
+        .put("blocked", review.blocked)
+
+    private fun decodeSafetyReview(json: JSONObject?): AgentSafetyReview {
+        if (json == null) return AgentSafetyReview()
+        return AgentSafetyReview(
+            risk = enumOrDefault(json.optString("risk"), AgentRisk.LOW),
+            requiresConfirmation = json.optBoolean("requires_confirmation", true),
+            blocked = json.optBoolean("blocked")
+        )
+    }
+
+    private fun encodeActionResult(result: AgentActionResult): JSONObject = JSONObject()
+        .put("action_id", result.actionId)
+        .put("success", result.success)
+        .put("message", result.message)
+
+    private fun decodeActionResult(json: JSONObject): AgentActionResult = AgentActionResult(
+        actionId = json.optString("action_id"),
+        success = json.optBoolean("success"),
+        message = json.optString("message")
+    )
+
+    private fun encodeAudit(audit: AgentAuditEntry): JSONObject = JSONObject()
+        .put("event", audit.event.name)
+        .put("detail", audit.detail)
+        .put("timestamp_millis", audit.timestampMillis)
+
+    private fun decodeAuditTrail(array: JSONArray?): List<AgentAuditEntry> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                add(
+                    AgentAuditEntry(
+                        event = enumOrDefault(item.optString("event"), AgentAuditEvent.SCREEN_OBSERVED),
+                        detail = item.optString("detail"),
+                        timestampMillis = item.optLong("timestamp_millis")
+                    )
+                )
+            }
+        }
+    }
+
+    private fun encodeElements(elements: List<ScreenElement>): JSONArray = JSONArray().also { array ->
+        elements.forEach { element ->
+            array.put(
+                JSONObject()
+                    .put("label", element.label)
+                    .put("view_id", element.viewId)
+                    .put("class_name", element.className)
+                    .put("bounds", element.bounds)
+            )
+        }
+    }
+
+    private fun decodeElements(array: JSONArray?): List<ScreenElement> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                add(
+                    ScreenElement(
+                        label = item.optString("label"),
+                        viewId = item.optString("view_id"),
+                        className = item.optString("class_name"),
+                        bounds = item.optString("bounds")
+                    )
+                )
+            }
+        }
+    }
+
+    private fun decodeStringList(array: JSONArray?): List<String> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                array.optString(index).takeIf { it.isNotBlank() }?.let { add(it) }
+            }
+        }
+    }
+
+    private fun decodeStringMap(json: JSONObject?): Map<String, String> {
+        if (json == null) return emptyMap()
+        return buildMap {
+            json.keys().forEach { key ->
+                put(key, json.optString(key))
+            }
+        }
+    }
+
+    companion object {
+        private const val PREFS = "signalasi_agent_runtime"
+        private const val KEY_SESSION = "session"
+    }
+}
+
+private inline fun <reified T : Enum<T>> enumOrDefault(value: String, default: T): T =
+    runCatching { enumValueOf<T>(value) }.getOrElse { default }
+
 data class AgentUiState(
     val phase: AgentPhase,
     val currentGoal: String,
@@ -399,10 +698,22 @@ data class AgentUiState(
     val runningTaskCount: Int,
     val steps: List<AgentStep>,
     val lastEvent: AgentEvent,
+    val sessionId: String,
     val plan: AgentPlan? = null,
     val pendingAction: AgentAction? = null,
     val auditTrail: List<AgentAuditEntry> = emptyList(),
     val lastActionResult: AgentActionResult? = null
+)
+
+data class AgentSessionSnapshot(
+    val sessionId: String,
+    val phase: AgentPhase,
+    val currentGoal: String,
+    val currentScreen: ScreenContext,
+    val currentPlan: AgentPlan?,
+    val auditTrail: List<AgentAuditEntry>,
+    val lastActionResult: AgentActionResult?,
+    val updatedAtMillis: Long
 )
 
 data class AgentRequest(

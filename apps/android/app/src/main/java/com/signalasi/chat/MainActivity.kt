@@ -694,7 +694,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun configureAgentPage() {
-        renderAgentState(mobileNativeAgent.observeCurrentScreen())
+        renderAgentState(restoredOrFreshAgentState())
         agentStatusCard.setOnClickListener {
             val state = mobileNativeAgent.snapshot()
             if (state.currentScreen.isAccessibilityEnabled) {
@@ -715,6 +715,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 Toast.makeText(this, getString(R.string.agent_voice_not_ready), Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    private fun restoredOrFreshAgentState(): AgentUiState {
+        val state = mobileNativeAgent.snapshot()
+        val hasRecoverableState = state.currentGoal.isNotBlank() ||
+            state.pendingAction != null ||
+            state.lastActionResult != null
+        return if (hasRecoverableState) state else mobileNativeAgent.observeCurrentScreen()
     }
 
     private fun handleAgentPrimaryAction() {
