@@ -158,6 +158,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentQuickPermissionsButton: TextView
     private lateinit var agentPermissionModeButton: TextView
     private lateinit var agentHighRiskGuardButton: TextView
+    private lateinit var agentMemoryCaptureButton: TextView
     private lateinit var agentToolboxList: LinearLayout
     private lateinit var agentCurrentAppText: TextView
     private lateinit var agentCallableTargetsText: TextView
@@ -341,6 +342,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentQuickPermissionsButton = findViewById(R.id.agentQuickPermissionsButton)
         agentPermissionModeButton = findViewById(R.id.agentPermissionModeButton)
         agentHighRiskGuardButton = findViewById(R.id.agentHighRiskGuardButton)
+        agentMemoryCaptureButton = findViewById(R.id.agentMemoryCaptureButton)
         agentToolboxList = findViewById(R.id.agentToolboxList)
         agentCurrentAppText = findViewById(R.id.agentCurrentAppText)
         agentCallableTargetsText = findViewById(R.id.agentCallableTargetsText)
@@ -767,6 +769,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentHighRiskGuardButton.setOnClickListener {
             val next = !mobileNativeAgent.safetySettings().highRiskGuard
             renderAgentState(mobileNativeAgent.updateHighRiskGuard(next))
+        }
+        agentMemoryCaptureButton.setOnClickListener {
+            val next = !mobileNativeAgent.safetySettings().memoryCapture
+            renderAgentState(mobileNativeAgent.updateMemoryCapture(next))
         }
         agentKnowledgeText.setOnClickListener { openAgentKnowledgeImportPicker() }
         agentSubmitButton.setOnClickListener { handleAgentPrimaryAction() }
@@ -1640,6 +1646,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         )
         agentHighRiskGuardButton.setTextColor(
             if (safetySettings.highRiskGuard) getColorCompat(R.color.wechat_green) else getColorCompat(R.color.text_secondary)
+        )
+        agentMemoryCaptureButton.text = getString(
+            R.string.agent_safety_memory_capture_value,
+            onOffLabel(safetySettings.memoryCapture)
+        )
+        agentMemoryCaptureButton.setTextColor(
+            if (safetySettings.memoryCapture) getColorCompat(R.color.wechat_green) else getColorCompat(R.color.text_secondary)
         )
         agentVoiceButton.text = if (pendingAction != null) getString(R.string.agent_cancel_button) else getString(R.string.agent_voice_button)
         agentSubmitButton.text = if (pendingAction != null) getString(R.string.agent_confirm_button) else "›"
@@ -5431,6 +5444,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         ).apply {
             setOnClickListener { toggleAgentHighRiskGuard() }
         })
+        featureContent.addView(featureSwitchRow(
+            getString(R.string.on_device_agent_memory_capture),
+            getString(R.string.on_device_agent_memory_capture_subtitle),
+            R.drawable.ic_agent_node,
+            safetySettings.memoryCapture
+        ).apply {
+            setOnClickListener { toggleAgentMemoryCapture() }
+        })
         addSectionTitle(getString(R.string.on_device_agent_section_permissions))
         featureContent.addView(featureRow(getString(R.string.on_device_agent_microphone), getString(R.string.on_device_agent_microphone_subtitle), R.drawable.ic_agent_node, getString(R.string.permission_allowed)))
         featureContent.addView(featureRow(getString(R.string.on_device_agent_camera), getString(R.string.on_device_agent_camera_subtitle), R.drawable.ic_scan, getString(R.string.permission_allowed)))
@@ -5456,6 +5477,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun toggleAgentHighRiskGuard() {
         val next = !mobileNativeAgent.safetySettings().highRiskGuard
         mobileNativeAgent.updateHighRiskGuard(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun toggleAgentMemoryCapture() {
+        val next = !mobileNativeAgent.safetySettings().memoryCapture
+        mobileNativeAgent.updateMemoryCapture(next)
         showOnDeviceAgentFeaturePage()
     }
 

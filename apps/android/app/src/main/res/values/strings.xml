@@ -243,6 +243,7 @@
     <string name="agent_quick_permissions">Permissions</string>
     <string name="agent_safety_permission_mode_value">Mode: %1$s</string>
     <string name="agent_safety_high_risk_guard_value">High-risk Guard: %1$s</string>
+    <string name="agent_safety_memory_capture_value">Memory: %1$s</string>
     <string name="agent_section_toolbox">Toolbox</string>
     <string name="agent_toolbox_empty">No local tools are available</string>
     <string name="agent_toolbox_meta">%1$s / %2$s risk</string>
@@ -616,6 +617,8 @@
     <string name="on_device_agent_permission_mode_subtitle">Tap to switch observation, suggestion, confirmation, or low-risk automation</string>
     <string name="on_device_agent_high_risk_guard">High-risk Guard</string>
     <string name="on_device_agent_high_risk_guard_subtitle">Always protect payments, deletion, privacy sharing, installation, and security changes</string>
+    <string name="on_device_agent_memory_capture">Memory Capture</string>
+    <string name="on_device_agent_memory_capture_subtitle">Allow Agent tasks and explicit notes to update long-term memory and knowledge</string>
     <string name="on_device_agent_mode_changed">Mode: %1$s</string>
     <string name="permission_mode_observe_only">Observe Only</string>
     <string name="permission_mode_suggest_only">Suggest Only</string>

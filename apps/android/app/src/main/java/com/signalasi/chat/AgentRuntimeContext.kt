@@ -6,6 +6,7 @@ data class AgentRuntimeContext(
     val screen: ScreenContext,
     val permissionMode: PermissionMode,
     val highRiskGuard: Boolean,
+    val memoryCapture: Boolean,
     val systemTools: List<AgentSystemTool>,
     val callableTargets: List<AgentCallableTarget>,
     val memories: List<AgentMemoryItem>,
@@ -27,6 +28,7 @@ data class AgentRuntimeContext(
         append("; knowledge=").append(knowledgeStats.itemCount)
         append("; knowledge_hits=").append(knowledgeItems.size)
         append("; mode=").append(permissionMode.name)
+        append("; memory_capture=").append(memoryCapture)
     }
 }
 
@@ -46,6 +48,7 @@ object AgentRuntimeContextBuilder {
         screen: ScreenContext,
         permissionMode: PermissionMode,
         highRiskGuard: Boolean,
+        memoryCapture: Boolean,
         callableTargets: List<AgentCallableTarget>,
         memories: List<AgentMemoryItem>,
         knowledgeItems: List<AgentKnowledgeItem> = emptyList(),
@@ -56,6 +59,7 @@ object AgentRuntimeContextBuilder {
         screen = screen,
         permissionMode = permissionMode,
         highRiskGuard = highRiskGuard,
+        memoryCapture = memoryCapture,
         systemTools = AgentSystemToolPlanner.availableTools(),
         callableTargets = callableTargets,
         memories = memories,

@@ -143,16 +143,18 @@ class MobileNativeAgent(
             else -> AgentPhase.PLANNING
         }
         lastActionResult = null
-        memoryStore.remember(AgentMemoryItem(kind = AgentMemoryKind.TASK, value = currentGoal))
-        knowledgeStore.upsert(
-            AgentKnowledgeItem(
-                kind = AgentKnowledgeKind.TASK,
-                title = currentGoal.take(80),
-                content = buildKnowledgeContent(currentGoal, currentScreen, context),
-                source = "agent_runtime",
-                tags = listOf("task", currentScreen.foregroundApp)
+        if (safetySettingsStore.load().memoryCapture) {
+            memoryStore.remember(AgentMemoryItem(kind = AgentMemoryKind.TASK, value = currentGoal))
+            knowledgeStore.upsert(
+                AgentKnowledgeItem(
+                    kind = AgentKnowledgeKind.TASK,
+                    title = currentGoal.take(80),
+                    content = buildKnowledgeContent(currentGoal, currentScreen, context),
+                    source = "agent_runtime",
+                    tags = listOf("task", currentScreen.foregroundApp)
+                )
             )
-        )
+        }
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, "goal:${currentGoal.take(48)}")
         if (safetyReview.blocked) {
             recordAudit(AgentAuditEvent.ACTION_BLOCKED, safetyReview.reason.ifBlank { "blocked" })
@@ -271,6 +273,12 @@ class MobileNativeAgent(
         return snapshot()
     }
 
+    fun updateMemoryCapture(enabled: Boolean): AgentUiState {
+        safetySettingsStore.save(safetySettingsStore.load().copy(memoryCapture = enabled))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "memory_capture:$enabled")
+        return snapshot()
+    }
+
     private fun memoryCommandValue(goal: String): String? {
         val prefixes = listOf("remember ", "save note ", "save memory ", "memorize ")
         val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
@@ -284,6 +292,12 @@ class MobileNativeAgent(
     }
 
     private fun saveMemoryCommand(value: String): AgentUiState {
+        val captureEnabled = safetySettingsStore.load().memoryCapture
+        val resultMessage = if (captureEnabled) {
+            "Saved personal memory"
+        } else {
+            "Memory capture is paused"
+        }
         val action = AgentAction(
             id = "save-memory",
             kind = AgentActionKind.DRAFT_PLAN,
@@ -291,7 +305,7 @@ class MobileNativeAgent(
             risk = AgentRisk.LOW,
             status = AgentActionStatus.COMPLETED,
             description = "Save personal memory",
-            result = "Saved memory"
+            result = resultMessage
         )
         currentPlan = AgentPlan(
             goal = currentGoal,
@@ -300,7 +314,7 @@ class MobileNativeAgent(
             actions = listOf(action),
             selectedAgentOrModel = "Agent Memory",
             confirmationRequired = false,
-            expectedResult = "Saved personal memory",
+            expectedResult = resultMessage,
             route = AgentRoute(
                 routeId = "agent-memory",
                 kind = AgentRouteKind.KNOWLEDGE,
@@ -317,20 +331,22 @@ class MobileNativeAgent(
             )
         )
         phase = AgentPhase.COMPLETED
-        lastActionResult = AgentActionResult(action.id, true, "Saved personal memory")
-        memoryStore.remember(AgentMemoryItem(kind = AgentMemoryKind.KNOWLEDGE, value = value, source = "agent_memory_command"))
-        knowledgeStore.upsert(
-            AgentKnowledgeItem(
-                kind = AgentKnowledgeKind.NOTE,
-                title = value.take(80),
-                content = value,
-                source = "agent_memory_command",
-                tags = listOf("memory", "note")
+        lastActionResult = AgentActionResult(action.id, true, resultMessage)
+        if (captureEnabled) {
+            memoryStore.remember(AgentMemoryItem(kind = AgentMemoryKind.KNOWLEDGE, value = value, source = "agent_memory_command"))
+            knowledgeStore.upsert(
+                AgentKnowledgeItem(
+                    kind = AgentKnowledgeKind.NOTE,
+                    title = value.take(80),
+                    content = value,
+                    source = "agent_memory_command",
+                    tags = listOf("memory", "note")
+                )
             )
-        )
+        }
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, "goal:${currentGoal.take(48)}")
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
-        saveTaskRecord(result = "Saved personal memory")
+        saveTaskRecord(result = resultMessage)
         return snapshot()
     }
 
@@ -409,6 +425,7 @@ class MobileNativeAgent(
         screen = screen,
         permissionMode = safetyPolicy.permissionMode(),
         highRiskGuard = safetyPolicy.highRiskGuardEnabled(),
+        memoryCapture = safetySettingsStore.load().memoryCapture,
         callableTargets = targets,
         memories = memories,
         knowledgeItems = knowledgeItems,
