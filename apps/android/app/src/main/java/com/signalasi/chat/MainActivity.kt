@@ -245,6 +245,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var wakeTranscriptText: TextView? = null
     private var wakeReplyPanel: ScrollView? = null
     private var speechRecognizer: SpeechRecognizer? = null
+    private var agentVoiceListening = false
     private var voiceAssistantListening = false
     private var voiceAssistantAwake = false
     private var voiceAssistantSpeaking = false
@@ -556,6 +557,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (requestCode == REQUEST_RECORD_AUDIO && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             Toast.makeText(this, getString(R.string.voice_record_permission_granted), Toast.LENGTH_SHORT).show()
             if (activeMainTab == PAGE_VOICE) startVoiceAssistant()
+            if (activeMainTab == PAGE_AGENT) startAgentVoiceInput()
         }
     }
 
@@ -717,8 +719,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentVoiceButton.setOnClickListener {
             if (mobileNativeAgent.snapshot().pendingAction != null) {
                 renderAgentState(mobileNativeAgent.cancelCurrentTask())
+            } else if (agentVoiceListening) {
+                stopAgentVoiceInput()
             } else {
-                Toast.makeText(this, getString(R.string.agent_voice_not_ready), Toast.LENGTH_SHORT).show()
+                startAgentVoiceInput()
             }
         }
     }
@@ -748,6 +752,55 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         renderAgentState(mobileNativeAgent.submitGoal(goal))
         agentGoalInput.setText("")
         hideKeyboard()
+    }
+
+    private fun startAgentVoiceInput() {
+        if (!ensureRecordPermission()) return
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            Toast.makeText(this, getString(R.string.voice_status_asr_unavailable), Toast.LENGTH_SHORT).show()
+            return
+        }
+        stopVoiceAssistant()
+        ensureSpeechRecognizer()
+        val config = VoiceAssistantSettings.get(this)
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, config.asrLanguage)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 800L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 800L)
+        }
+        runCatching {
+            agentVoiceListening = true
+            agentVoiceButton.text = getString(R.string.agent_voice_listening)
+            speechRecognizer?.startListening(intent)
+        }.onFailure {
+            agentVoiceListening = false
+            agentVoiceButton.text = getString(R.string.agent_voice_button)
+            Toast.makeText(this, it.message ?: getString(R.string.voice_status_retry_later), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun stopAgentVoiceInput() {
+        if (!agentVoiceListening) return
+        agentVoiceListening = false
+        runCatching { speechRecognizer?.cancel() }
+        agentVoiceButton.text = getString(R.string.agent_voice_button)
+    }
+
+    private fun handleAgentVoiceResult(text: String) {
+        agentVoiceListening = false
+        agentVoiceButton.text = getString(R.string.agent_voice_button)
+        if (text.isBlank()) {
+            Toast.makeText(this, getString(R.string.voice_error_no_valid_speech), Toast.LENGTH_SHORT).show()
+            return
+        }
+        agentGoalInput.setText(text)
+        agentGoalInput.setSelection(agentGoalInput.text?.length ?: 0)
+        submitAgentGoal()
     }
 
     private fun configureWakePage() {
@@ -882,6 +935,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 override fun onError(error: Int) {
                     Log.w("SignalASIVoice", "ASR error=$error awake=$voiceAssistantAwake")
                     voiceAssistantListening = false
+                    if (agentVoiceListening) {
+                        agentVoiceListening = false
+                        agentVoiceButton.text = getString(R.string.agent_voice_button)
+                        Toast.makeText(this@MainActivity, speechErrorDetail(error), Toast.LENGTH_SHORT).show()
+                        return
+                    }
                     if (activeMainTab == PAGE_VOICE && !voiceAssistantSpeaking) {
                         updateWakeVoiceUi(
                             if (voiceAssistantAwake) getString(R.string.voice_status_continue_listening) else getString(R.string.voice_status_low_power),
@@ -894,10 +953,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     voiceAssistantListening = false
                     val text = bestSpeechResult(results)
                     Log.i("SignalASIVoice", "ASR result=$text awake=$voiceAssistantAwake")
+                    if (agentVoiceListening) {
+                        handleAgentVoiceResult(text)
+                        return
+                    }
                     handleVoiceRecognitionText(text)
                 }
                 override fun onPartialResults(partialResults: Bundle?) {
                     val text = bestSpeechResult(partialResults)
+                    if (agentVoiceListening) {
+                        if (text.isNotBlank()) {
+                            agentGoalInput.setText(text)
+                            agentGoalInput.setSelection(agentGoalInput.text?.length ?: 0)
+                        }
+                        return
+                    }
                     if (text.isNotBlank()) {
                         updateWakeVoiceUi(
                             if (voiceAssistantAwake) getString(R.string.voice_status_recognizing) else getString(R.string.voice_status_low_power),
@@ -1640,6 +1710,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun showMainTab(tab: String) {
         val inactive = getColorCompat(R.color.text_secondary)
+        if (tab != PAGE_AGENT && agentVoiceListening) {
+            stopAgentVoiceInput()
+        }
         activeMainTab = tab
         wakePage.visibility = if (tab == PAGE_VOICE) View.VISIBLE else View.GONE
         chatPage.visibility = View.GONE

@@ -261,6 +261,7 @@
     <string name="agent_knowledge_value">Knowledge: %1$d items / %2$d sources / %3$d hits</string>
     <string name="agent_goal_hint">Voice or text input goal</string>
     <string name="agent_voice_button">Talk</string>
+    <string name="agent_voice_listening">Listening</string>
     <string name="agent_confirm_button">✓</string>
     <string name="agent_cancel_button">×</string>
     <string name="agent_empty_goal">Enter a goal for SignalASI Agent</string>
