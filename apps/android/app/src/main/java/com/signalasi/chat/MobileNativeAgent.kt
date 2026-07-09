@@ -144,7 +144,8 @@ class MobileNativeAgent(
             else -> AgentPhase.PLANNING
         }
         lastActionResult = null
-        if (safetySettingsStore.load().memoryCapture) {
+        val memoryBlockReason = memoryBlockReason(currentGoal, currentScreen)
+        if (memoryBlockReason == null) {
             memoryStore.remember(AgentMemoryItem(kind = AgentMemoryKind.TASK, value = currentGoal))
             knowledgeStore.upsert(
                 AgentKnowledgeItem(
@@ -155,8 +156,10 @@ class MobileNativeAgent(
                     tags = listOf("task", currentScreen.foregroundApp)
                 )
             )
+        } else {
+            recordAudit(AgentAuditEvent.MEMORY_SKIPPED, memoryBlockReason)
         }
-        recordAudit(AgentAuditEvent.GOAL_RECEIVED, "goal:${currentGoal.take(48)}")
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
         if (safetyReview.blocked) {
             recordAudit(AgentAuditEvent.ACTION_BLOCKED, safetyReview.reason.ifBlank { "blocked" })
         }
@@ -338,11 +341,11 @@ class MobileNativeAgent(
     }
 
     private fun saveMemoryCommand(value: String): AgentUiState {
-        val captureEnabled = safetySettingsStore.load().memoryCapture
-        val resultMessage = if (captureEnabled) {
+        val blockReason = memoryBlockReason(value, currentScreen)
+        val resultMessage = if (blockReason == null) {
             "Saved personal memory"
         } else {
-            "Memory capture is paused"
+            blockReason
         }
         val action = AgentAction(
             id = "save-memory",
@@ -378,7 +381,7 @@ class MobileNativeAgent(
         )
         phase = AgentPhase.COMPLETED
         lastActionResult = AgentActionResult(action.id, true, resultMessage)
-        if (captureEnabled) {
+        if (blockReason == null) {
             memoryStore.remember(AgentMemoryItem(kind = AgentMemoryKind.KNOWLEDGE, value = value, source = "agent_memory_command"))
             knowledgeStore.upsert(
                 AgentKnowledgeItem(
@@ -389,8 +392,10 @@ class MobileNativeAgent(
                     tags = listOf("memory", "note")
                 )
             )
+        } else {
+            recordAudit(AgentAuditEvent.MEMORY_SKIPPED, blockReason)
         }
-        recordAudit(AgentAuditEvent.GOAL_RECEIVED, "goal:${currentGoal.take(48)}")
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
         saveTaskRecord(result = resultMessage)
         return snapshot()
@@ -438,7 +443,7 @@ class MobileNativeAgent(
         )
         phase = AgentPhase.COMPLETED
         lastActionResult = AgentActionResult(action.id, true, result)
-        recordAudit(AgentAuditEvent.GOAL_RECEIVED, "goal:${currentGoal.take(48)}")
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
         saveTaskRecord(result = result)
         return snapshot()
@@ -495,13 +500,37 @@ class MobileNativeAgent(
         }
     }
 
+    private fun memoryBlockReason(value: String, screen: ScreenContext): String? {
+        if (!safetySettingsStore.load().memoryCapture) return "Memory capture is paused"
+        return sensitiveMemoryReason(value, screen)
+    }
+
+    private fun sensitiveMemoryReason(value: String, screen: ScreenContext): String? {
+        if (screen.sensitiveFlagCount > 0) {
+            val flags = screen.sensitiveFlags.joinToString("|").take(80).ifBlank { "screen" }
+            return "Memory skipped for sensitive screen context: $flags"
+        }
+        val lower = value.lowercase(Locale.US)
+        val matchedTerm = SENSITIVE_MEMORY_TERMS.firstOrNull { lower.contains(it) }
+        if (matchedTerm != null) return "Memory skipped for sensitive content: $matchedTerm"
+        if (Regex("\\b\\d{4,8}\\b").containsMatchIn(value) &&
+            listOf("code", "otp", "verification", "2fa", "sms").any { lower.contains(it) }
+        ) {
+            return "Memory skipped for verification code"
+        }
+        return null
+    }
+
+    private fun goalAuditDetail(goal: String): String =
+        "goal_hash=${goal.hashCode()}; length=${goal.length}"
+
     private fun saveTaskRecord(result: String = lastActionResult?.message.orEmpty()) {
         val plan = currentPlan ?: return
         taskStore.upsert(
             AgentTaskRecord(
                 taskId = plan.planId,
                 sessionId = sessionId,
-                goal = currentGoal,
+                goal = if (sensitiveMemoryReason(currentGoal, currentScreen) == null) currentGoal else "Sensitive goal withheld",
                 phase = phase,
                 routeKind = plan.route.kind,
                 targetTitle = plan.route.targetTitle.ifBlank { plan.selectedAgentOrModel },
@@ -581,6 +610,21 @@ class MobileNativeAgent(
 
     companion object {
         private const val MAX_AUDIT_ITEMS = 20
+        val SENSITIVE_MEMORY_TERMS = listOf(
+            "password",
+            "passcode",
+            "verification code",
+            "otp",
+            "2fa",
+            "bank card",
+            "credit card",
+            "cvv",
+            "private key",
+            "secret key",
+            "access token",
+            "api key",
+            "seed phrase"
+        )
     }
 }
 
@@ -2582,6 +2626,7 @@ enum class AgentAuditEvent {
     SCREEN_OBSERVED,
     GOAL_RECEIVED,
     INVOCATION_AUDIT,
+    MEMORY_SKIPPED,
     ACTION_EXECUTED,
     ACTION_BLOCKED,
     TASK_CANCELLED,
