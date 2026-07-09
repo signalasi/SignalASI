@@ -237,6 +237,10 @@
     <string name="agent_status_result_subtitle">%1$s</string>
     <string name="agent_badge_safe">Safe</string>
     <string name="agent_badge_blocked">Blocked</string>
+    <string name="agent_quick_understand">Understand</string>
+    <string name="agent_quick_save_screen">Save Screen</string>
+    <string name="agent_quick_search_knowledge">Search Knowledge</string>
+    <string name="agent_quick_permissions">Permissions</string>
     <string name="agent_section_process">Process</string>
     <string name="agent_section_recent_tasks">Recent Tasks</string>
     <string name="agent_recent_empty">No recent Agent tasks yet</string>

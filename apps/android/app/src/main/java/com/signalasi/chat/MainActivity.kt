@@ -152,6 +152,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentStatusTitle: TextView
     private lateinit var agentStatusSubtitle: TextView
     private lateinit var agentSafetyBadge: TextView
+    private lateinit var agentQuickUnderstandButton: TextView
+    private lateinit var agentQuickSaveScreenButton: TextView
+    private lateinit var agentQuickSearchKnowledgeButton: TextView
+    private lateinit var agentQuickPermissionsButton: TextView
     private lateinit var agentCurrentAppText: TextView
     private lateinit var agentCallableTargetsText: TextView
     private lateinit var agentRunningTasksText: TextView
@@ -326,6 +330,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentStatusTitle = findViewById(R.id.agentStatusTitle)
         agentStatusSubtitle = findViewById(R.id.agentStatusSubtitle)
         agentSafetyBadge = findViewById(R.id.agentSafetyBadge)
+        agentQuickUnderstandButton = findViewById(R.id.agentQuickUnderstandButton)
+        agentQuickSaveScreenButton = findViewById(R.id.agentQuickSaveScreenButton)
+        agentQuickSearchKnowledgeButton = findViewById(R.id.agentQuickSearchKnowledgeButton)
+        agentQuickPermissionsButton = findViewById(R.id.agentQuickPermissionsButton)
         agentCurrentAppText = findViewById(R.id.agentCurrentAppText)
         agentCallableTargetsText = findViewById(R.id.agentCallableTargetsText)
         agentRunningTasksText = findViewById(R.id.agentRunningTasksText)
@@ -728,6 +736,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             } else {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             }
+        }
+        agentQuickUnderstandButton.setOnClickListener {
+            renderAgentState(mobileNativeAgent.observeCurrentScreen())
+        }
+        agentQuickSaveScreenButton.setOnClickListener {
+            prefillAgentGoal("save screen")
+        }
+        agentQuickSearchKnowledgeButton.setOnClickListener {
+            prefillAgentGoal("search knowledge ")
+        }
+        agentQuickPermissionsButton.setOnClickListener {
+            showOnDeviceAgentFeaturePage()
         }
         agentKnowledgeText.setOnClickListener { openAgentKnowledgeImportPicker() }
         agentSubmitButton.setOnClickListener { handleAgentPrimaryAction() }
