@@ -1,8 +1,11 @@
 package com.signalasi.chat
 
 import android.content.Context
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
-import android.provider.Settings
+import android.net.Uri
+import android.provider.AlarmClock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -182,15 +185,25 @@ interface ScreenPerceptionProvider {
 }
 
 class AndroidScreenPerceptionProvider(private val context: Context) : ScreenPerceptionProvider {
-    override fun capture(): ScreenContext = ScreenPerceptionState.current(
-        defaultApp = "SignalASI",
-        defaultTitle = context.getString(R.string.tab_agent)
-    )
+    override fun capture(): ScreenContext {
+        val defaultTitle = context.getString(R.string.tab_agent)
+        return SignalASIAccessibilityService.captureCurrentScreen(
+            defaultApp = "SignalASI",
+            defaultTitle = defaultTitle
+        ) ?: ScreenPerceptionState.current(
+            defaultApp = "SignalASI",
+            defaultTitle = defaultTitle
+        )
+    }
 
-    override fun capture(foregroundApp: String, pageTitle: String): ScreenContext = ScreenPerceptionState.current(
-        defaultApp = foregroundApp,
-        defaultTitle = pageTitle
-    )
+    override fun capture(foregroundApp: String, pageTitle: String): ScreenContext =
+        SignalASIAccessibilityService.captureCurrentScreen(
+            defaultApp = foregroundApp,
+            defaultTitle = pageTitle
+        ) ?: ScreenPerceptionState.current(
+            defaultApp = foregroundApp,
+            defaultTitle = pageTitle
+        )
 }
 
 interface AgentPlanner {
@@ -216,16 +229,8 @@ class RuleBasedAgentPlanner : AgentPlanner {
     private fun actionFor(request: AgentRequest): AgentAction {
         val goal = request.goal.trim()
         val lower = goal.lowercase()
+        AgentSystemToolPlanner.actionFor(request)?.let { return it }
         return when {
-            lower.contains("open settings") || lower == "settings" -> AgentAction(
-                id = "open-settings",
-                kind = AgentActionKind.OPEN_APP,
-                target = "Android Settings",
-                risk = AgentRisk.LOW,
-                status = AgentActionStatus.PENDING_CONFIRMATION,
-                description = "Open Android Settings",
-                parameters = mapOf("intent_action" to Settings.ACTION_SETTINGS)
-            )
             lower == "back" || lower.contains("go back") -> AgentAction(
                 id = "go-back",
                 kind = AgentActionKind.BACK,
@@ -394,6 +399,25 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 SignalASIAccessibilityService.performSwipe(fromX, fromY, toX, toY)
             }
         }
+        AgentActionKind.LONG_PRESS -> {
+            val bounds = action.parameters["bounds"].orEmpty()
+            if (bounds.isBlank()) {
+                AgentActionResult(action.id, false, "No long-press target is available")
+            } else {
+                serviceAction(action.id, "Long press action executed") {
+                    SignalASIAccessibilityService.performLongPress(bounds)
+                }
+            }
+        }
+        AgentActionKind.HOME -> serviceAction(action.id, "Home action executed") {
+            SignalASIAccessibilityService.performGlobalHome()
+        }
+        AgentActionKind.RECENTS -> serviceAction(action.id, "Recent apps opened") {
+            SignalASIAccessibilityService.performGlobalRecents()
+        }
+        AgentActionKind.COPY_SCREEN_TEXT -> copyScreenText(action, screen)
+        AgentActionKind.OPEN_URL -> openUrl(action)
+        AgentActionKind.SET_ALARM -> setAlarm(action)
         AgentActionKind.CALL_CONNECTOR -> dispatchConnectorTask(action)
         AgentActionKind.CONTROL_DEVICE -> dispatchDeviceTask(action)
     }
@@ -406,9 +430,70 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             packageName.isNotBlank() -> context.packageManager.getLaunchIntentForPackage(packageName)
             else -> null
         } ?: return AgentActionResult(action.id, false, "No launch target is available")
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(intent)
-        return AgentActionResult(action.id, true, "Opened ${action.target}")
+        return launchIntent(action.id, intent, "Opened ${action.target}")
+    }
+
+    private fun copyScreenText(action: AgentAction, screen: ScreenContext): AgentActionResult {
+        val latestScreen = SignalASIAccessibilityService.captureCurrentScreen(
+            defaultApp = screen.foregroundApp,
+            defaultTitle = screen.pageTitle
+        ) ?: screen
+        val text = latestScreen.visibleTexts
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString(separator = "\n")
+        if (text.isBlank()) {
+            return AgentActionResult(action.id, false, "No screen text is available")
+        }
+        val clipboard = context.getSystemService(ClipboardManager::class.java)
+            ?: return AgentActionResult(action.id, false, "Clipboard is not available")
+        clipboard.setPrimaryClip(ClipData.newPlainText("SignalASI screen text", text))
+        return AgentActionResult(
+            actionId = action.id,
+            success = true,
+            message = "Copied ${latestScreen.visibleTextCount} screen text items"
+        )
+    }
+
+    private fun openUrl(action: AgentAction): AgentActionResult {
+        val url = action.parameters["url"].orEmpty()
+        if (url.isBlank()) {
+            return AgentActionResult(action.id, false, "No URL was provided")
+        }
+        return launchIntent(
+            actionId = action.id,
+            intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)),
+            successMessage = "Opened $url"
+        )
+    }
+
+    private fun setAlarm(action: AgentAction): AgentActionResult {
+        val hour = action.parameters["hour"]?.toIntOrNull()
+        val minute = action.parameters["minute"]?.toIntOrNull()
+        val intent = if (hour != null && minute != null) {
+            Intent(AlarmClock.ACTION_SET_ALARM)
+                .putExtra(AlarmClock.EXTRA_HOUR, hour)
+                .putExtra(AlarmClock.EXTRA_MINUTES, minute)
+                .putExtra(AlarmClock.EXTRA_MESSAGE, "SignalASI")
+        } else {
+            Intent(AlarmClock.ACTION_SHOW_ALARMS)
+        }
+        return launchIntent(
+            actionId = action.id,
+            intent = intent,
+            successMessage = if (hour != null && minute != null) "Alarm handoff started" else "Opened alarm app"
+        )
+    }
+
+    private fun launchIntent(actionId: String, intent: Intent, successMessage: String): AgentActionResult {
+        return try {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+            AgentActionResult(actionId, true, successMessage)
+        } catch (error: Exception) {
+            AgentActionResult(actionId, false, error.message ?: "Could not start system activity")
+        }
     }
 
     private fun serviceAction(actionId: String, successMessage: String, block: () -> Boolean): AgentActionResult {
@@ -1082,8 +1167,14 @@ enum class AgentActionKind {
     TAP,
     TYPE_TEXT,
     SWIPE,
+    LONG_PRESS,
     BACK,
+    HOME,
+    RECENTS,
     OPEN_APP,
+    OPEN_URL,
+    SET_ALARM,
+    COPY_SCREEN_TEXT,
     CALL_CONNECTOR,
     CONTROL_DEVICE
 }

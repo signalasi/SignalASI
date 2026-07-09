@@ -46,6 +46,17 @@ class SignalASIAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() = Unit
 
+    private fun captureScreen(defaultApp: String, defaultTitle: String): ScreenContext? {
+        val root = rootInActiveWindow ?: return null
+        val snapshot = AccessibilityTreeReader.snapshot(
+            root = root,
+            packageName = root.packageName?.toString().orEmpty(),
+            className = root.className?.toString().orEmpty()
+        )
+        ScreenPerceptionState.update(snapshot)
+        return ScreenPerceptionState.current(defaultApp, defaultTitle)
+    }
+
     private fun tap(bounds: String): Boolean {
         val rect = parseBounds(bounds) ?: return false
         val path = Path().apply {
@@ -54,6 +65,20 @@ class SignalASIAccessibilityService : AccessibilityService() {
         return dispatchGesture(
             GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
+                .build(),
+            null,
+            null
+        )
+    }
+
+    private fun longPress(bounds: String): Boolean {
+        val rect = parseBounds(bounds) ?: return false
+        val path = Path().apply {
+            moveTo(rect.centerX().toFloat(), rect.centerY().toFloat())
+        }
+        return dispatchGesture(
+            GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 650))
                 .build(),
             null,
             null
@@ -94,9 +119,18 @@ class SignalASIAccessibilityService : AccessibilityService() {
 
         fun isActive(): Boolean = activeService != null
 
+        fun captureCurrentScreen(defaultApp: String, defaultTitle: String): ScreenContext? =
+            activeService?.captureScreen(defaultApp, defaultTitle)
+
         fun performGlobalBack(): Boolean = activeService?.performGlobalAction(GLOBAL_ACTION_BACK) == true
 
+        fun performGlobalHome(): Boolean = activeService?.performGlobalAction(GLOBAL_ACTION_HOME) == true
+
+        fun performGlobalRecents(): Boolean = activeService?.performGlobalAction(GLOBAL_ACTION_RECENTS) == true
+
         fun performTap(bounds: String): Boolean = activeService?.tap(bounds) == true
+
+        fun performLongPress(bounds: String): Boolean = activeService?.longPress(bounds) == true
 
         fun performSwipe(fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean =
             activeService?.swipe(fromX, fromY, toX, toY) == true
