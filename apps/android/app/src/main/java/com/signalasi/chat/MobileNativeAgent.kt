@@ -654,6 +654,9 @@ class MobileNativeAgent(
         if (screen.selectedText.isNotBlank()) {
             append("\nselected_text_length=").append(screen.selectedText.length)
         }
+        screen.focusedInputField?.let { field ->
+            append("\nfocused_input=").append(field.label.ifBlank { field.viewId.ifBlank { field.bounds } })
+        }
         if (screen.notifications.items.isNotEmpty()) {
             append("\nnotification_count=").append(screen.notifications.items.size)
             append("\nnotification_packages=")
@@ -1835,6 +1838,12 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             if (screen.selectedText.isNotBlank()) {
                 append("Selected text: ").append(screen.selectedText.take(500)).append('\n')
             }
+            screen.focusedInputField?.let { field ->
+                append("Focused input: ")
+                    .append(field.label.ifBlank { field.viewId.ifBlank { field.className } })
+                    .append(" / ").append(field.bounds)
+                    .append('\n')
+            }
             if (screen.clipboard.hasText) {
                 append("Clipboard: ").append(screen.clipboard.textLength)
                     .append(" chars / hash ").append(screen.clipboard.textHash).append('\n')
@@ -1913,7 +1922,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         return AgentActionResult(
             actionId = action.id,
             success = true,
-            message = "Read ${screen.visibleTextCount} text items, ${screen.clickableNodeCount} actions, and ${screen.installedApps.size} launchable apps"
+            message = "Read ${screen.visibleTextCount} text items, ${screen.clickableNodeCount} actions, ${screen.inputFieldCount} fields, focused=${screen.focusedInputField != null}, and ${screen.installedApps.size} launchable apps"
         )
     }
 
@@ -2463,6 +2472,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("scrollable_region_count", screen.scrollableRegionCount)
         .put("sensitive_flag_count", screen.sensitiveFlagCount)
         .put("selected_text", screen.selectedText)
+        .put("focused_input_field", screen.focusedInputField?.let { encodeElement(it) } ?: JSONObject.NULL)
         .put("visible_texts", JSONArray().also { array ->
             screen.visibleTexts.forEach { array.put(it) }
         })
@@ -2491,6 +2501,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
             scrollableRegionCount = json.optInt("scrollable_region_count"),
             sensitiveFlagCount = json.optInt("sensitive_flag_count"),
             selectedText = json.optString("selected_text"),
+            focusedInputField = decodeElement(json.optJSONObject("focused_input_field")),
             visibleTexts = decodeStringList(json.optJSONArray("visible_texts")),
             clickableElements = decodeElements(json.optJSONArray("clickable_elements")),
             inputFields = decodeElements(json.optJSONArray("input_fields")),
@@ -2884,31 +2895,34 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
 
     private fun encodeElements(elements: List<ScreenElement>): JSONArray = JSONArray().also { array ->
         elements.forEach { element ->
-            array.put(
-                JSONObject()
-                    .put("label", element.label)
-                    .put("view_id", element.viewId)
-                    .put("class_name", element.className)
-                    .put("bounds", element.bounds)
-            )
+            array.put(encodeElement(element))
         }
     }
+
+    private fun encodeElement(element: ScreenElement): JSONObject = JSONObject()
+        .put("label", element.label)
+        .put("view_id", element.viewId)
+        .put("class_name", element.className)
+        .put("bounds", element.bounds)
 
     private fun decodeElements(array: JSONArray?): List<ScreenElement> {
         if (array == null) return emptyList()
         return buildList {
             for (index in 0 until array.length()) {
                 val item = array.optJSONObject(index) ?: continue
-                add(
-                    ScreenElement(
-                        label = item.optString("label"),
-                        viewId = item.optString("view_id"),
-                        className = item.optString("class_name"),
-                        bounds = item.optString("bounds")
-                    )
-                )
+                decodeElement(item)?.let { add(it) }
             }
         }
+    }
+
+    private fun decodeElement(item: JSONObject?): ScreenElement? {
+        if (item == null) return null
+        return ScreenElement(
+            label = item.optString("label"),
+            viewId = item.optString("view_id"),
+            className = item.optString("class_name"),
+            bounds = item.optString("bounds")
+        )
     }
 
     private fun decodeStringList(array: JSONArray?): List<String> {
@@ -3015,6 +3029,7 @@ data class ScreenContext(
     val sensitiveFlagCount: Int = 0,
     val visibleTexts: List<String> = emptyList(),
     val selectedText: String = "",
+    val focusedInputField: ScreenElement? = null,
     val clickableElements: List<ScreenElement> = emptyList(),
     val inputFields: List<ScreenElement> = emptyList(),
     val scrollableRegions: List<ScreenElement> = emptyList(),

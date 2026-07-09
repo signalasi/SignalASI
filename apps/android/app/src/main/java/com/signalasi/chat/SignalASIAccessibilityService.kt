@@ -229,6 +229,7 @@ private object AccessibilityTreeReader {
         private val sensitiveFlags = mutableListOf<String>()
         private val packageCounts = mutableMapOf<String, Int>()
         private var selectedText = ""
+        private var focusedInputField: ScreenElement? = null
 
         fun collect(node: AccessibilityNodeInfo?) {
             if (node == null || visitedNodes >= MAX_NODES) return
@@ -255,7 +256,13 @@ private object AccessibilityTreeReader {
                 bounds = boundsOf(node)
             )
             if (node.isClickable) addLimited(clickableElements, element, MAX_ELEMENT_ITEMS)
-            if (node.isEditable) addLimited(inputFields, element, MAX_ELEMENT_ITEMS)
+            if (node.isEditable) {
+                addLimited(inputFields, element, MAX_ELEMENT_ITEMS)
+                if (node.isFocused && focusedInputField == null) {
+                    focusedInputField = element
+                    if (displayLabel.isNotBlank()) maybeFlagSensitive(displayLabel)
+                }
+            }
             if (node.isScrollable) addLimited(scrollableRegions, element, MAX_ELEMENT_ITEMS)
 
             for (index in 0 until node.childCount) {
@@ -269,6 +276,7 @@ private object AccessibilityTreeReader {
             pageTitle = firstTitle,
             visibleTexts = visibleTexts.toList(),
             selectedText = selectedText,
+            focusedInputField = focusedInputField,
             clickableElements = clickableElements.toList(),
             inputFields = inputFields.toList(),
             scrollableRegions = scrollableRegions.toList(),

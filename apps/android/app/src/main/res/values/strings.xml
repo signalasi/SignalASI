@@ -316,6 +316,7 @@
     <string name="agent_screen_summary">Page: %1$s / age: %2$ds</string>
     <string name="agent_screen_texts">Visible Text</string>
     <string name="agent_screen_selected_text">Selected Text</string>
+    <string name="agent_screen_focused_input">Focused Input</string>
     <string name="agent_screen_clipboard">Clipboard</string>
     <string name="agent_screen_clipboard_summary">Clipboard: %1$d chars / %2$s</string>
     <string name="agent_screen_clipboard_sensitive">Clipboard: sensitive / %1$d chars</string>

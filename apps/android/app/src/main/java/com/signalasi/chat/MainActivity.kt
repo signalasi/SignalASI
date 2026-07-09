@@ -2379,6 +2379,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .take(5)
         val selectedTextMatches = screen.selectedText.isNotBlank() &&
             matchesScreenQuery(screen.selectedText, normalizedQuery)
+        val focusedInputField = screen.focusedInputField?.takeIf { field ->
+            matchesScreenQuery(field.label, normalizedQuery) ||
+                matchesScreenQuery(field.viewId, normalizedQuery) ||
+                matchesScreenQuery(field.className, normalizedQuery)
+        }
         val actions = screen.clickableElements
             .filter { matchesScreenQuery(it.label, normalizedQuery) || matchesScreenQuery(it.viewId, normalizedQuery) }
             .take(5)
@@ -2412,7 +2417,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             .take(if (normalizedQuery.isBlank()) 4 else 8)
 
-        val hasAny = selectedTextMatches || clipboardMatches || notificationsMatch || deviceStatusMatches || launchableApps.isNotEmpty() || visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty()
+        val hasAny = selectedTextMatches || focusedInputField != null || clipboardMatches || notificationsMatch || deviceStatusMatches || launchableApps.isNotEmpty() || visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty()
         agentScreenDetailList.addView(agentScreenSummaryRow(screen))
         if (!hasAny) {
             agentScreenDetailList.addView(agentScreenEmptyRow(getString(R.string.agent_screen_empty)))
@@ -2420,6 +2425,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         if (selectedTextMatches) {
             addScreenTextSection(getString(R.string.agent_screen_selected_text), listOf(screen.selectedText))
+        }
+        focusedInputField?.let {
+            addScreenElementSection(getString(R.string.agent_screen_focused_input), listOf(it), AgentScreenCommandKind.TYPE)
         }
         if (clipboardMatches) {
             addScreenClipboardSection(screen.clipboard)
