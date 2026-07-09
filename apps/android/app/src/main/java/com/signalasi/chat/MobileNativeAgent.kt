@@ -112,6 +112,9 @@ class MobileNativeAgent(
         memoryCommandValue(currentGoal)?.let { memoryValue ->
             return saveMemoryCommand(memoryValue)
         }
+        knowledgeSearchCommandValue(currentGoal)?.let { query ->
+            return searchKnowledgeCommand(query)
+        }
         val targets = connectorRegistry.availableTargets()
         val memories = memoryStore.recall(currentGoal)
         val knowledgeItems = knowledgeStore.search(currentGoal)
@@ -274,6 +277,12 @@ class MobileNativeAgent(
         return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
     }
 
+    private fun knowledgeSearchCommandValue(goal: String): String? {
+        val prefixes = listOf("search knowledge ", "find knowledge ", "search memory ", "find memory ")
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
     private fun saveMemoryCommand(value: String): AgentUiState {
         val action = AgentAction(
             id = "save-memory",
@@ -322,6 +331,54 @@ class MobileNativeAgent(
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, "goal:${currentGoal.take(48)}")
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
         saveTaskRecord(result = "Saved personal memory")
+        return snapshot()
+    }
+
+    private fun searchKnowledgeCommand(query: String): AgentUiState {
+        val hits = knowledgeStore.search(query, limit = 5)
+        val result = if (hits.isEmpty()) {
+            "No knowledge hits for \"$query\""
+        } else {
+            hits.joinToString(" | ") { it.title.take(64) }
+        }
+        val action = AgentAction(
+            id = "search-knowledge",
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Knowledge",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.COMPLETED,
+            description = "Search Agent knowledge",
+            parameters = mapOf("query" to query),
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Knowledge",
+            confirmationRequired = false,
+            expectedResult = "Returned local knowledge search hits",
+            route = AgentRoute(
+                routeId = "agent-knowledge",
+                kind = AgentRouteKind.KNOWLEDGE,
+                targetId = "agent-knowledge",
+                targetTitle = "Agent Knowledge",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.KNOWLEDGE_SEARCH)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, "goal:${currentGoal.take(48)}")
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        saveTaskRecord(result = result)
         return snapshot()
     }
 
