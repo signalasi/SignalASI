@@ -499,6 +499,16 @@ class RuleBasedAgentPlanner : AgentPlanner {
                 status = AgentActionStatus.PENDING_CONFIRMATION,
                 description = "Go back one screen"
             )
+            lower.contains("save screen") ||
+                lower.contains("remember screen") ||
+                lower.contains("capture screen to knowledge") -> AgentAction(
+                id = "save-screen-knowledge",
+                kind = AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
+                target = request.screen.foregroundApp,
+                risk = AgentRisk.LOW,
+                status = AgentActionStatus.PENDING_CONFIRMATION,
+                description = "Save current screen to Agent knowledge"
+            )
             lower.contains("read screen") || lower.contains("scan screen") -> AgentAction(
                 id = "read-screen",
                 kind = AgentActionKind.READ_SCREEN,
@@ -777,6 +787,7 @@ object AgentPlanFactory {
         val permissions = mutableListOf<AgentPermissionRequirement>()
         when (action.kind) {
             AgentActionKind.READ_SCREEN,
+            AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
             AgentActionKind.COPY_SCREEN_TEXT,
             AgentActionKind.TAP,
             AgentActionKind.LONG_PRESS,
@@ -849,6 +860,7 @@ object AgentPlanFactory {
         AgentActionKind.OPEN_URL -> "The requested URL opens in a browser or matching app."
         AgentActionKind.SET_ALARM -> "Android alarm setup is opened or handed off."
         AgentActionKind.COPY_SCREEN_TEXT -> "Visible screen text is copied to the clipboard."
+        AgentActionKind.SAVE_SCREEN_KNOWLEDGE -> "Current screen is saved into Agent knowledge."
         AgentActionKind.DELETE_TEXT -> "Text is cleared from the active input field."
         AgentActionKind.PASTE_TEXT -> "Clipboard text is pasted into the active input field."
         AgentActionKind.CALL_CONNECTOR -> "The task is sent to the paired agent contact."
@@ -885,6 +897,7 @@ object AgentRouteResolver {
             }
             AgentActionKind.CONTROL_DEVICE -> AgentRouteKind.DEVICE_CONNECTOR
             AgentActionKind.READ_SCREEN,
+            AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
             AgentActionKind.DRAFT_PLAN,
             AgentActionKind.TAP,
             AgentActionKind.TYPE_TEXT,
@@ -1021,6 +1034,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             success = true,
             message = "Read ${screen.visibleTextCount} text items and ${screen.clickableNodeCount} actions"
         )
+        AgentActionKind.SAVE_SCREEN_KNOWLEDGE -> saveScreenKnowledge(action, screen)
         AgentActionKind.DRAFT_PLAN -> AgentActionResult(
             actionId = action.id,
             success = true,
@@ -1110,6 +1124,46 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         AgentActionKind.SET_ALARM -> setAlarm(action)
         AgentActionKind.CALL_CONNECTOR -> dispatchConnectorTask(action)
         AgentActionKind.CONTROL_DEVICE -> dispatchDeviceTask(action)
+    }
+
+    private fun saveScreenKnowledge(action: AgentAction, screen: ScreenContext): AgentActionResult {
+        val title = screen.pageTitle.ifBlank { screen.foregroundApp }.ifBlank { "Screen snapshot" }
+        val content = buildString {
+            append("App: ").append(screen.foregroundApp).append('\n')
+            append("Activity: ").append(screen.activityName.ifBlank { "-" }).append('\n')
+            append("Page: ").append(title).append('\n')
+            append("Visible text count: ").append(screen.visibleTextCount).append('\n')
+            append("Clickable action count: ").append(screen.clickableNodeCount).append('\n')
+            append("Input field count: ").append(screen.inputFieldCount).append('\n')
+            if (screen.visibleTexts.isNotEmpty()) {
+                append("\nVisible text:\n")
+                screen.visibleTexts.take(40).forEach { append("- ").append(it).append('\n') }
+            }
+            if (screen.clickableElements.isNotEmpty()) {
+                append("\nActions:\n")
+                screen.clickableElements.take(30).forEach { element ->
+                    append("- ").append(element.label.ifBlank { element.viewId.ifBlank { element.className } })
+                        .append(" / ").append(element.bounds).append('\n')
+                }
+            }
+            if (screen.inputFields.isNotEmpty()) {
+                append("\nInput fields:\n")
+                screen.inputFields.take(20).forEach { element ->
+                    append("- ").append(element.label.ifBlank { element.viewId.ifBlank { element.className } })
+                        .append(" / ").append(element.bounds).append('\n')
+                }
+            }
+        }
+        SharedPreferencesAgentKnowledgeStore(context).upsert(
+            AgentKnowledgeItem(
+                kind = AgentKnowledgeKind.SCREEN,
+                title = title,
+                content = content,
+                source = "screen:${screen.foregroundApp}",
+                tags = listOf("screen", screen.foregroundApp, title).filter { it.isNotBlank() }
+            )
+        )
+        return AgentActionResult(action.id, true, "Saved screen snapshot to Agent knowledge")
     }
 
     private fun openApp(action: AgentAction): AgentActionResult {
@@ -2033,8 +2087,9 @@ private fun AgentActionKind.mayChangeScreen(): Boolean = when (this) {
     AgentActionKind.RECENTS,
     AgentActionKind.OPEN_APP,
     AgentActionKind.OPEN_URL,
-    AgentActionKind.SET_ALARM -> true
+        AgentActionKind.SET_ALARM -> true
         AgentActionKind.READ_SCREEN,
+        AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
         AgentActionKind.DRAFT_PLAN,
         AgentActionKind.TYPE_TEXT,
         AgentActionKind.DELETE_TEXT,
@@ -2254,6 +2309,7 @@ enum class AgentStepStatus {
 
 enum class AgentActionKind {
     READ_SCREEN,
+    SAVE_SCREEN_KNOWLEDGE,
     DRAFT_PLAN,
     TAP,
     TYPE_TEXT,
