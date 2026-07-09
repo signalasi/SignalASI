@@ -1837,8 +1837,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             return
         }
         addScreenTextSection(getString(R.string.agent_screen_texts), visibleTexts)
-        addScreenElementSection(getString(R.string.agent_screen_actions), actions)
-        addScreenElementSection(getString(R.string.agent_screen_fields), fields)
+        addScreenElementSection(getString(R.string.agent_screen_actions), actions, AgentScreenCommandKind.TAP)
+        addScreenElementSection(getString(R.string.agent_screen_fields), fields, AgentScreenCommandKind.TYPE)
     }
 
     private fun matchesScreenQuery(value: String, normalizedQuery: String): Boolean =
@@ -1852,11 +1852,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
-    private fun addScreenElementSection(title: String, items: List<ScreenElement>) {
+    private fun addScreenElementSection(
+        title: String,
+        items: List<ScreenElement>,
+        commandKind: AgentScreenCommandKind
+    ) {
         if (items.isEmpty()) return
         agentScreenDetailList.addView(agentScreenSectionTitle(title))
         items.forEach { item ->
-            agentScreenDetailList.addView(agentScreenElementRow(item))
+            agentScreenDetailList.addView(agentScreenElementRow(item, commandKind))
         }
     }
 
@@ -1909,7 +1913,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
-    private fun agentScreenElementRow(item: ScreenElement): View {
+    private fun agentScreenElementRow(item: ScreenElement, commandKind: AgentScreenCommandKind): View {
         val label = item.label.ifBlank { item.viewId.ifBlank { item.className } }
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1919,6 +1923,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(6) }
+            setOnClickListener {
+                prefillAgentGoal(agentScreenCommand(label, commandKind))
+            }
 
             addView(TextView(this@MainActivity).apply {
                 setTextColor(getColorCompat(R.color.text_primary))
@@ -1935,6 +1942,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 text = getString(R.string.agent_screen_bounds, item.bounds.ifBlank { "-" })
             })
         }
+    }
+
+    private fun agentScreenCommand(label: String, kind: AgentScreenCommandKind): String = when (kind) {
+        AgentScreenCommandKind.TAP -> "tap $label"
+        AgentScreenCommandKind.TYPE -> "type text into $label"
+    }
+
+    private fun prefillAgentGoal(command: String) {
+        agentGoalInput.setText(command)
+        agentGoalInput.setSelection(agentGoalInput.text?.length ?: 0)
+        agentGoalInput.requestFocus()
+        getSystemService(InputMethodManager::class.java).showSoftInput(agentGoalInput, InputMethodManager.SHOW_IMPLICIT)
     }
 
     private fun agentScreenEmptyRow(message: String): View {
@@ -6078,6 +6097,11 @@ data class CloudModelPreset(
     val apiStyle: String
 )
 data class ContactTypeTag(val text: String, val textColor: Int, val bgColor: Int, val strokeColor: Int)
+
+private enum class AgentScreenCommandKind {
+    TAP,
+    TYPE
+}
 
 // ===== ContactAdapter =====
 private class ContactAdapter(
