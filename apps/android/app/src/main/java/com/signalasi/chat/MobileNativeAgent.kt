@@ -678,7 +678,8 @@ class AndroidScreenPerceptionProvider(private val context: Context) : ScreenPerc
     private fun ScreenContext.withClipboardContext(): ScreenContext =
         copy(
             clipboard = clipboardContext(),
-            notifications = SignalASINotificationListenerService.currentContext()
+            notifications = SignalASINotificationListenerService.currentContext(),
+            installedApps = installedApps()
         )
 
     private fun clipboardContext(): ClipboardContext {
@@ -700,6 +701,24 @@ class AndroidScreenPerceptionProvider(private val context: Context) : ScreenPerc
             preview = normalized.take(96),
             sensitiveFlags = sensitiveFlagsForText(text)
         )
+    }
+
+    private fun installedApps(): List<InstalledAppInfo> {
+        val packageManager = context.packageManager
+        val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        return runCatching {
+            packageManager.queryIntentActivities(launcherIntent, 0)
+                .mapNotNull { resolveInfo ->
+                    val activityInfo = resolveInfo.activityInfo ?: return@mapNotNull null
+                    val label = resolveInfo.loadLabel(packageManager)?.toString().orEmpty().trim()
+                    val packageName = activityInfo.packageName.orEmpty()
+                    if (label.isBlank() || packageName.isBlank()) return@mapNotNull null
+                    InstalledAppInfo(label = label.take(80), packageName = packageName)
+                }
+                .distinctBy { it.packageName }
+                .sortedBy { it.label.lowercase(Locale.US) }
+                .take(120)
+        }.getOrDefault(emptyList())
     }
 }
 
@@ -731,6 +750,7 @@ class RuleBasedAgentPlanner : AgentPlanner {
         val goal = request.goal.trim()
         val lower = goal.lowercase()
         AgentSystemToolPlanner.actionFor(request)?.let { return it }
+        installedAppOpenAction(request)?.let { return it }
         return when {
             lower == "back" || lower.contains("go back") -> AgentAction(
                 id = "go-back",
@@ -928,6 +948,49 @@ class RuleBasedAgentPlanner : AgentPlanner {
             )
         )
     }
+
+    private fun installedAppOpenAction(request: AgentRequest): AgentAction? {
+        val query = appOpenQuery(request.goal).takeIf { it.isNotBlank() } ?: return null
+        val app = findInstalledApp(request.screen.installedApps, query) ?: return null
+        return AgentAction(
+            id = "open-installed-app",
+            kind = AgentActionKind.OPEN_APP,
+            target = app.label,
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = "Open ${app.label}",
+            parameters = mapOf("package" to app.packageName)
+        )
+    }
+
+    private fun appOpenQuery(goal: String): String {
+        val trimmed = goal.trim()
+        val rawQuery = when {
+            trimmed.startsWith("open ", ignoreCase = true) ->
+                trimmed.removePrefixIgnoreCase("open ").removeSuffixIgnoreCase(" app").trim()
+            trimmed.startsWith("launch ", ignoreCase = true) ->
+                trimmed.removePrefixIgnoreCase("launch ").removeSuffixIgnoreCase(" app").trim()
+            trimmed.startsWith("start ", ignoreCase = true) ->
+                trimmed.removePrefixIgnoreCase("start ").removeSuffixIgnoreCase(" app").trim()
+            else -> ""
+        }
+        val query = rawQuery.removePrefixIgnoreCase("app ").trim()
+        return if (query.equals("app", ignoreCase = true)) "" else query
+    }
+
+    private fun findInstalledApp(apps: List<InstalledAppInfo>, query: String): InstalledAppInfo? {
+        val normalizedQuery = query.normalizeAppName()
+        if (normalizedQuery.isBlank()) return null
+        return apps.firstOrNull { it.label.normalizeAppName() == normalizedQuery } ?:
+            apps.firstOrNull { it.label.normalizeAppName().contains(normalizedQuery) } ?:
+            apps.firstOrNull { it.packageName.normalizeAppName().contains(normalizedQuery) }
+    }
+
+    private fun String.removeSuffixIgnoreCase(suffix: String): String =
+        if (endsWith(suffix, ignoreCase = true)) dropLast(suffix.length) else this
+
+    private fun String.normalizeAppName(): String =
+        lowercase(Locale.US).replace(Regex("[^\\p{L}\\p{N}]+"), "")
 
     private fun riskFor(goal: String): AgentRisk = when {
         containsBlockedGoal(goal) -> AgentRisk.BLOCKED
@@ -1536,7 +1599,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         return AgentActionResult(
             actionId = action.id,
             success = true,
-            message = "Read ${screen.visibleTextCount} text items and ${screen.clickableNodeCount} actions"
+            message = "Read ${screen.visibleTextCount} text items, ${screen.clickableNodeCount} actions, and ${screen.installedApps.size} launchable apps"
         )
     }
 
@@ -2030,6 +2093,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         })
         .put("clipboard_context", encodeClipboardContext(screen.clipboard))
         .put("notification_context", encodeNotificationContext(screen.notifications))
+        .put("installed_apps", encodeInstalledApps(screen.installedApps))
         .put("is_accessibility_enabled", screen.isAccessibilityEnabled)
         .put("snapshot_age_millis", screen.snapshotAgeMillis)
 
@@ -2051,6 +2115,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
             sensitiveFlags = decodeStringList(json.optJSONArray("sensitive_flags")),
             clipboard = decodeClipboardContext(json.optJSONObject("clipboard_context")),
             notifications = decodeNotificationContext(json.optJSONObject("notification_context")),
+            installedApps = decodeInstalledApps(json.optJSONArray("installed_apps")),
             isAccessibilityEnabled = json.optBoolean("is_accessibility_enabled"),
             snapshotAgeMillis = json.optLong("snapshot_age_millis")
         )
@@ -2119,6 +2184,28 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
                         sensitiveFlags = decodeStringList(item.optJSONArray("sensitive_flags"))
                     )
                 )
+            }
+        }
+    }
+
+    private fun encodeInstalledApps(apps: List<InstalledAppInfo>): JSONArray = JSONArray().also { array ->
+        apps.forEach { app ->
+            array.put(JSONObject()
+                .put("label", app.label)
+                .put("package_name", app.packageName))
+        }
+    }
+
+    private fun decodeInstalledApps(array: JSONArray?): List<InstalledAppInfo> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val label = item.optString("label")
+                val packageName = item.optString("package_name")
+                if (label.isNotBlank() && packageName.isNotBlank()) {
+                    add(InstalledAppInfo(label = label, packageName = packageName))
+                }
             }
         }
     }
@@ -2527,8 +2614,14 @@ data class ScreenContext(
     val sensitiveFlags: List<String> = emptyList(),
     val clipboard: ClipboardContext = ClipboardContext(),
     val notifications: AgentNotificationContext = AgentNotificationContext(),
+    val installedApps: List<InstalledAppInfo> = emptyList(),
     val isAccessibilityEnabled: Boolean = false,
     val snapshotAgeMillis: Long = 0L
+)
+
+data class InstalledAppInfo(
+    val label: String = "",
+    val packageName: String = ""
 )
 
 data class ClipboardContext(
