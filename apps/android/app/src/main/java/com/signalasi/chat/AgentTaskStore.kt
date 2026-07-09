@@ -22,6 +22,7 @@ data class AgentTaskRecord(
 interface AgentTaskStore {
     fun upsert(record: AgentTaskRecord)
     fun recent(limit: Int = 20): List<AgentTaskRecord>
+    fun search(query: String, limit: Int = 10): List<AgentTaskRecord>
     fun clear()
 }
 
@@ -41,8 +42,40 @@ class SharedPreferencesAgentTaskStore(context: Context) : AgentTaskStore {
     override fun recent(limit: Int): List<AgentTaskRecord> =
         loadItems().sortedByDescending { it.updatedAtMillis }.take(limit)
 
+    override fun search(query: String, limit: Int): List<AgentTaskRecord> {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) return recent(limit)
+        val tokens = cleanQuery.lowercase().split(Regex("\\s+")).filter { it.length >= 2 }
+        return loadItems()
+            .map { item -> item to score(item, cleanQuery, tokens) }
+            .filter { it.second > 0 }
+            .sortedWith(compareByDescending<Pair<AgentTaskRecord, Int>> { it.second }.thenByDescending { it.first.updatedAtMillis })
+            .map { it.first }
+            .take(limit)
+    }
+
     override fun clear() {
         prefs.edit().clear().apply()
+    }
+
+    private fun score(item: AgentTaskRecord, query: String, tokens: List<String>): Int {
+        val haystack = listOf(
+            item.goal,
+            item.targetTitle,
+            item.result,
+            item.verification,
+            item.phase.name,
+            item.routeKind.name,
+            item.risk.name
+        ).joinToString("\n").lowercase()
+        var total = 0
+        if (haystack.contains(query.lowercase())) total += 10
+        tokens.forEach { token ->
+            if (haystack.contains(token)) total += 2
+            if (item.goal.lowercase().contains(token)) total += 3
+            if (item.targetTitle.lowercase().contains(token)) total += 2
+        }
+        return total
     }
 
     private fun loadItems(): List<AgentTaskRecord> {

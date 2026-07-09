@@ -142,6 +142,9 @@ class MobileNativeAgent(
         if (recentTasksCommand(currentGoal)) {
             return showRecentTasksCommand()
         }
+        taskSearchCommandValue(currentGoal)?.let { query ->
+            return searchTasksCommand(query)
+        }
         memoryCaptureCommandValue(currentGoal)?.let { enabled ->
             return setMemoryCaptureCommand(enabled)
         }
@@ -391,6 +394,12 @@ class MobileNativeAgent(
             normalized == "show last tasks"
     }
 
+    private fun taskSearchCommandValue(goal: String): String? {
+        val prefixes = listOf("search tasks ", "find tasks ", "search task ", "find task ")
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
     private fun memoryCaptureCommandValue(goal: String): Boolean? {
         val normalized = goal.trim().lowercase(Locale.US)
         return when (normalized) {
@@ -509,6 +518,62 @@ class MobileNativeAgent(
             risk = AgentRisk.LOW,
             status = AgentActionStatus.COMPLETED,
             description = "Show recent Agent tasks",
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Task History",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "agent-task-history",
+                kind = AgentRouteKind.LOCAL_SYSTEM,
+                targetId = "agent-task-history",
+                targetTitle = "Agent Task History",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.TASK_EXECUTION)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        return snapshot()
+    }
+
+    private fun searchTasksCommand(query: String): AgentUiState {
+        val tasks = taskStore.search(query, limit = 8)
+        val result = if (tasks.isEmpty()) {
+            "No task history hits for \"$query\""
+        } else {
+            tasks.joinToString(" | ") { task ->
+                val status = when {
+                    task.blocked -> "blocked"
+                    task.phase == AgentPhase.COMPLETED -> "done"
+                    task.phase == AgentPhase.FAILED -> "failed"
+                    task.phase == AgentPhase.CANCELLED -> "cancelled"
+                    else -> task.phase.name.lowercase(Locale.US)
+                }
+                "${task.goal.take(48)}:$status:${task.targetTitle.take(32)}"
+            }
+        }
+        val action = AgentAction(
+            id = "search-task-history",
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Task History",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.COMPLETED,
+            description = "Search Agent task history",
+            parameters = mapOf("query" to query),
             result = result
         )
         currentPlan = AgentPlan(
