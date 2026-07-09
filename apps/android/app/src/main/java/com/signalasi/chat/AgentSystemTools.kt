@@ -1,6 +1,7 @@
 package com.signalasi.chat
 
 import android.content.Intent
+import android.net.Uri
 import android.provider.CalendarContract
 import android.provider.MediaStore
 import android.provider.Settings
@@ -36,6 +37,36 @@ object AgentSystemToolPlanner {
                 target = "Notification Settings",
                 description = "Open notification settings",
                 intentAction = "android.settings.NOTIFICATION_SETTINGS"
+            )
+            lower.contains("open battery settings") || lower == "battery settings" -> intentAction(
+                id = "open-battery-settings",
+                target = "Battery Settings",
+                description = "Open battery settings",
+                intentAction = Settings.ACTION_BATTERY_SAVER_SETTINGS
+            )
+            lower.contains("open display settings") || lower == "display settings" -> intentAction(
+                id = "open-display-settings",
+                target = "Display Settings",
+                description = "Open display settings",
+                intentAction = Settings.ACTION_DISPLAY_SETTINGS
+            )
+            lower.contains("open location settings") || lower == "location settings" -> intentAction(
+                id = "open-location-settings",
+                target = "Location Settings",
+                description = "Open location settings",
+                intentAction = Settings.ACTION_LOCATION_SOURCE_SETTINGS
+            )
+            lower.contains("open app settings") || lower == "app settings" -> intentAction(
+                id = "open-app-settings",
+                target = "App Settings",
+                description = "Open app settings",
+                intentAction = Settings.ACTION_APPLICATION_SETTINGS
+            )
+            lower.contains("open keyboard settings") || lower.contains("open input settings") -> intentAction(
+                id = "open-input-settings",
+                target = "Keyboard Settings",
+                description = "Open keyboard settings",
+                intentAction = Settings.ACTION_INPUT_METHOD_SETTINGS
             )
             lower.contains("open settings") || lower == "settings" -> intentAction(
                 id = "open-settings",
@@ -127,6 +158,38 @@ object AgentSystemToolPlanner {
                     status = AgentActionStatus.PENDING_CONFIRMATION,
                     description = "Open URL",
                     parameters = mapOf("url" to normalizeUrl(url))
+                )
+            }
+            lower.startsWith("search web ") || lower.startsWith("google ") -> {
+                val query = if (lower.startsWith("search web ")) {
+                    goal.substring("search web ".length).trim()
+                } else {
+                    goal.substring("google ".length).trim()
+                }
+                val url = "https://www.google.com/search?q=${Uri.encode(query)}"
+                AgentAction(
+                    id = "search-web",
+                    kind = AgentActionKind.OPEN_URL,
+                    target = "Web Search",
+                    risk = AgentRisk.MEDIUM,
+                    status = AgentActionStatus.PENDING_CONFIRMATION,
+                    description = "Search the web",
+                    parameters = mapOf("url" to url)
+                )
+            }
+            lower.startsWith("open map ") || lower.startsWith("map ") || lower.startsWith("navigate to ") -> {
+                val query = when {
+                    lower.startsWith("open map ") -> goal.substring("open map ".length).trim()
+                    lower.startsWith("map ") -> goal.substring("map ".length).trim()
+                    else -> goal.substring("navigate to ".length).trim()
+                }
+                intentAction(
+                    id = "open-map",
+                    target = "Maps",
+                    description = "Open map location",
+                    intentAction = Intent.ACTION_VIEW,
+                    uri = "geo:0,0?q=${Uri.encode(query)}",
+                    risk = AgentRisk.MEDIUM
                 )
             }
             lower.contains("set alarm") || lower.contains("open alarms") || lower.contains("open alarm") -> alarmAction(goal, lower)
@@ -352,7 +415,7 @@ object AgentSystemToolPlanner {
             kind = AgentActionKind.OPEN_APP,
             risk = AgentRisk.LOW,
             capabilities = listOf(AgentCapability.SYSTEM_SETTINGS, AgentCapability.APP_NAVIGATION),
-            examples = listOf("open settings", "open wifi settings", "open bluetooth settings")
+            examples = listOf("open settings", "open wifi settings", "open battery settings", "open display settings")
         ),
         AgentSystemTool(
             id = "navigation",
@@ -368,7 +431,7 @@ object AgentSystemToolPlanner {
             kind = AgentActionKind.OPEN_URL,
             risk = AgentRisk.MEDIUM,
             capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.TASK_EXECUTION),
-            examples = listOf("open url https://example.com")
+            examples = listOf("open url https://example.com", "search web SignalASI", "open map Shenzhen")
         ),
         AgentSystemTool(
             id = "alarm",
