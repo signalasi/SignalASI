@@ -139,6 +139,9 @@ class MobileNativeAgent(
         }
 
         currentScreen = perceptionProvider.capture()
+        if (recentTasksCommand(currentGoal)) {
+            return showRecentTasksCommand()
+        }
         memoryCaptureCommandValue(currentGoal)?.let { enabled ->
             return setMemoryCaptureCommand(enabled)
         }
@@ -378,6 +381,16 @@ class MobileNativeAgent(
         return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
     }
 
+    private fun recentTasksCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "recent tasks" ||
+            normalized == "show recent tasks" ||
+            normalized == "task history" ||
+            normalized == "show task history" ||
+            normalized == "last tasks" ||
+            normalized == "show last tasks"
+    }
+
     private fun memoryCaptureCommandValue(goal: String): Boolean? {
         val normalized = goal.trim().lowercase(Locale.US)
         return when (normalized) {
@@ -470,6 +483,61 @@ class MobileNativeAgent(
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
         saveTaskRecord(result = resultMessage)
+        return snapshot()
+    }
+
+    private fun showRecentTasksCommand(): AgentUiState {
+        val tasks = taskStore.recent(limit = 8)
+        val result = if (tasks.isEmpty()) {
+            "No recent Agent tasks"
+        } else {
+            tasks.joinToString(" | ") { task ->
+                val status = when {
+                    task.blocked -> "blocked"
+                    task.phase == AgentPhase.COMPLETED -> "done"
+                    task.phase == AgentPhase.FAILED -> "failed"
+                    task.phase == AgentPhase.CANCELLED -> "cancelled"
+                    else -> task.phase.name.lowercase(Locale.US)
+                }
+                "${task.goal.take(48)}:$status:${task.targetTitle.take(32)}"
+            }
+        }
+        val action = AgentAction(
+            id = "show-recent-tasks",
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Task History",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.COMPLETED,
+            description = "Show recent Agent tasks",
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Task History",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "agent-task-history",
+                kind = AgentRouteKind.LOCAL_SYSTEM,
+                targetId = "agent-task-history",
+                targetTitle = "Agent Task History",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.TASK_EXECUTION)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
         return snapshot()
     }
 
