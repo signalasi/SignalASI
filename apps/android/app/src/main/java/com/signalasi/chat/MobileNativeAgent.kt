@@ -145,6 +145,9 @@ class MobileNativeAgent(
         callableSearchCommandValue(currentGoal)?.let { query ->
             return searchCallableInventoryCommand(query)
         }
+        if (securityStatusCommand(currentGoal)) {
+            return showSecurityStatusCommand()
+        }
         if (recentTasksCommand(currentGoal)) {
             return showRecentTasksCommand()
         }
@@ -433,6 +436,16 @@ class MobileNativeAgent(
         )
         val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
         return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
+    private fun securityStatusCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "security status" ||
+            normalized == "permission status" ||
+            normalized == "agent security status" ||
+            normalized == "agent permission status" ||
+            normalized == "safety status" ||
+            normalized == "privacy status"
     }
 
     private fun recentTasksCommand(goal: String): Boolean {
@@ -728,6 +741,58 @@ class MobileNativeAgent(
                 kind = AgentRouteKind.LOCAL_SYSTEM,
                 targetId = "agent-tool-router",
                 targetTitle = "Agent Tool Router",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.TASK_EXECUTION)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        return snapshot()
+    }
+
+    private fun showSecurityStatusCommand(): AgentUiState {
+        val settings = safetySettingsStore.load()
+        val result = buildString {
+            append("mode=").append(settings.permissionMode.name.lowercase(Locale.US))
+            append("; high_risk_guard=").append(settings.highRiskGuard)
+            append("; memory_capture=").append(settings.memoryCapture)
+            append("; accessibility=").append(currentScreen.isAccessibilityEnabled)
+            append("; notifications=").append(currentScreen.notifications.hasAccess)
+            append("; clipboard=").append(currentScreen.clipboard.hasText)
+            append("; sensitive_screen_flags=").append(currentScreen.sensitiveFlagCount)
+            append("; sensitive_notifications=").append(currentScreen.notifications.sensitiveFlags.size)
+            append("; sensitive_clipboard=").append(currentScreen.clipboard.sensitiveFlags.size)
+        }
+        val action = AgentAction(
+            id = "show-security-status",
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Security",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.COMPLETED,
+            description = "Show Agent security and permission status",
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Security",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "agent-security",
+                kind = AgentRouteKind.LOCAL_SYSTEM,
+                targetId = "agent-security",
+                targetTitle = "Agent Security",
                 status = AgentConnectorStatus.AVAILABLE,
                 deliveryMode = "local",
                 capabilities = listOf(AgentCapability.TASK_EXECUTION)
