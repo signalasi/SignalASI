@@ -227,6 +227,8 @@
     <string name="agent_status_accessibility_needed_subtitle">Tap here to open Accessibility settings</string>
     <string name="agent_status_waiting_confirmation">Confirm action</string>
     <string name="agent_status_executing">Executing action</string>
+    <string name="agent_status_paused">Task paused</string>
+    <string name="agent_status_paused_subtitle">Execution is paused. Resume when you are ready.</string>
     <string name="agent_status_blocked">Action blocked</string>
     <string name="agent_status_blocked_subtitle">Safety policy stopped this task</string>
     <string name="agent_status_completed">Action completed</string>
@@ -255,6 +257,7 @@
     <string name="agent_recent_status_done">Done</string>
     <string name="agent_recent_status_failed">Failed</string>
     <string name="agent_recent_status_running">Running</string>
+    <string name="agent_recent_status_paused">Paused</string>
     <string name="agent_section_audit_trail">Audit Trail</string>
     <string name="agent_audit_empty">No Agent audit events yet</string>
     <string name="agent_audit_meta">%1$s ago</string>
@@ -318,6 +321,8 @@
     <string name="agent_voice_listening">Listening</string>
     <string name="agent_confirm_button">✓</string>
     <string name="agent_cancel_button">×</string>
+    <string name="agent_pause_button">Pause</string>
+    <string name="agent_resume_button">Resume</string>
     <string name="agent_empty_goal">Enter a goal for SignalASI Agent</string>
     <string name="agent_voice_not_ready">Voice command binding is coming next</string>
     <string name="pairing_confirm_title">Confirm Pairing</string>

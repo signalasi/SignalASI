@@ -788,8 +788,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             override fun afterTextChanged(s: Editable?) = Unit
         })
         agentVoiceButton.setOnClickListener {
-            if (mobileNativeAgent.snapshot().pendingAction != null) {
-                renderAgentState(mobileNativeAgent.cancelCurrentTask())
+            val state = mobileNativeAgent.snapshot()
+            if (state.phase == AgentPhase.PAUSED) {
+                renderAgentState(mobileNativeAgent.resumeCurrentTask())
+            } else if (state.pendingAction != null) {
+                renderAgentState(mobileNativeAgent.pauseCurrentTask())
             } else if (agentVoiceListening) {
                 stopAgentVoiceInput()
             } else {
@@ -801,13 +804,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun restoredOrFreshAgentState(): AgentUiState {
         val state = mobileNativeAgent.snapshot()
         val hasRecoverableState = state.currentGoal.isNotBlank() ||
+            state.phase == AgentPhase.PAUSED ||
             state.pendingAction != null ||
             state.lastActionResult != null
         return if (hasRecoverableState) state else mobileNativeAgent.observeCurrentScreen()
     }
 
     private fun handleAgentPrimaryAction() {
-        if (mobileNativeAgent.snapshot().pendingAction != null) {
+        val state = mobileNativeAgent.snapshot()
+        if (state.phase == AgentPhase.PAUSED) {
+            renderAgentState(mobileNativeAgent.resumeCurrentTask())
+        } else if (state.pendingAction != null) {
             renderAgentState(mobileNativeAgent.approveNextAction())
         } else {
             submitAgentGoal()
@@ -1563,6 +1570,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             state.phase == AgentPhase.BLOCKED -> getString(R.string.agent_status_blocked)
             state.phase == AgentPhase.WAITING_CONFIRMATION -> getString(R.string.agent_status_waiting_confirmation)
             state.phase == AgentPhase.EXECUTING -> getString(R.string.agent_status_executing)
+            state.phase == AgentPhase.PAUSED -> getString(R.string.agent_status_paused)
             state.phase == AgentPhase.COMPLETED -> getString(R.string.agent_status_completed)
             state.phase == AgentPhase.FAILED -> getString(R.string.agent_status_failed)
             isPlanning -> getString(R.string.agent_status_planning)
@@ -1573,6 +1581,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             state.phase == AgentPhase.BLOCKED -> state.plan?.safetyReview?.reason
                 ?.ifBlank { getString(R.string.agent_status_blocked_subtitle) }
                 ?: getString(R.string.agent_status_blocked_subtitle)
+            state.phase == AgentPhase.PAUSED -> getString(R.string.agent_status_paused_subtitle)
             pendingAction != null -> getString(R.string.agent_status_confirm_subtitle, pendingAction.description)
             state.lastActionResult != null -> getString(R.string.agent_status_result_subtitle, state.lastActionResult.message)
             isPlanning -> getString(R.string.agent_status_goal_subtitle)
@@ -1654,8 +1663,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentMemoryCaptureButton.setTextColor(
             if (safetySettings.memoryCapture) getColorCompat(R.color.wechat_green) else getColorCompat(R.color.text_secondary)
         )
-        agentVoiceButton.text = if (pendingAction != null) getString(R.string.agent_cancel_button) else getString(R.string.agent_voice_button)
-        agentSubmitButton.text = if (pendingAction != null) getString(R.string.agent_confirm_button) else "›"
+        agentVoiceButton.text = when {
+            state.phase == AgentPhase.PAUSED -> getString(R.string.agent_resume_button)
+            pendingAction != null -> getString(R.string.agent_pause_button)
+            else -> getString(R.string.agent_voice_button)
+        }
+        agentSubmitButton.text = when {
+            state.phase == AgentPhase.PAUSED -> "›"
+            pendingAction != null -> getString(R.string.agent_confirm_button)
+            else -> "›"
+        }
 
         val statusViews = mapOf(
             AgentStepKind.OBSERVE_SCREEN to Pair(agentStepObserveNumber, agentStepObserveStatus),
@@ -2084,6 +2101,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             task.blocked -> getColorCompat(R.color.unread_red)
             task.phase == AgentPhase.COMPLETED -> getColorCompat(R.color.wechat_green)
             task.phase == AgentPhase.FAILED -> getColorCompat(R.color.unread_red)
+            task.phase == AgentPhase.PAUSED -> getColorCompat(R.color.text_secondary)
             else -> getColorCompat(R.color.signalasi_green)
         }
         return LinearLayout(this).apply {
@@ -2510,6 +2528,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         task.blocked -> getString(R.string.agent_recent_status_blocked)
         task.phase == AgentPhase.COMPLETED -> getString(R.string.agent_recent_status_done)
         task.phase == AgentPhase.FAILED -> getString(R.string.agent_recent_status_failed)
+        task.phase == AgentPhase.PAUSED -> getString(R.string.agent_recent_status_paused)
         task.phase == AgentPhase.EXECUTING ||
             task.phase == AgentPhase.VERIFYING ||
             task.phase == AgentPhase.PLANNING ||

@@ -66,7 +66,8 @@ class MobileNativeAgent(
             runningTaskCount = if (phase == AgentPhase.PLANNING ||
                 phase == AgentPhase.WAITING_CONFIRMATION ||
                 phase == AgentPhase.EXECUTING ||
-                phase == AgentPhase.VERIFYING) 1 else 0,
+                phase == AgentPhase.VERIFYING ||
+                phase == AgentPhase.PAUSED) 1 else 0,
             steps = currentPlan?.steps ?: defaultSteps(),
             lastEvent = if (currentGoal.isBlank()) AgentEvent.WAITING_FOR_GOAL else AgentEvent.GOAL_RECEIVED,
             sessionId = sessionId,
@@ -168,6 +169,7 @@ class MobileNativeAgent(
 
     fun approveNextAction(): AgentUiState {
         val plan = currentPlan ?: return snapshot()
+        if (phase == AgentPhase.PAUSED) return snapshot()
         if (plan.safetyReview.blocked) {
             phase = AgentPhase.BLOCKED
             lastActionResult = AgentActionResult(
@@ -256,6 +258,44 @@ class MobileNativeAgent(
         currentPlan = null
         lastActionResult = null
         recordAudit(AgentAuditEvent.TASK_CANCELLED, "cancelled")
+        return snapshot()
+    }
+
+    fun pauseCurrentTask(): AgentUiState {
+        if (currentPlan == null ||
+            phase == AgentPhase.OBSERVING ||
+            phase == AgentPhase.BLOCKED ||
+            phase == AgentPhase.COMPLETED ||
+            phase == AgentPhase.FAILED
+        ) {
+            return snapshot()
+        }
+        phase = AgentPhase.PAUSED
+        lastActionResult = AgentActionResult(
+            actionId = "agent-paused",
+            success = true,
+            message = "Task paused"
+        )
+        recordAudit(AgentAuditEvent.TASK_PAUSED, "paused")
+        persistSession()
+        return snapshot()
+    }
+
+    fun resumeCurrentTask(): AgentUiState {
+        if (phase != AgentPhase.PAUSED) return snapshot()
+        val plan = currentPlan ?: return observeCurrentScreen()
+        phase = if (plan.actions.any { it.status == AgentActionStatus.PENDING_CONFIRMATION }) {
+            AgentPhase.WAITING_CONFIRMATION
+        } else {
+            AgentPhase.PLANNING
+        }
+        lastActionResult = AgentActionResult(
+            actionId = "agent-resumed",
+            success = true,
+            message = "Task resumed"
+        )
+        recordAudit(AgentAuditEvent.TASK_RESUMED, "resumed")
+        persistSession()
         return snapshot()
     }
 
@@ -2362,6 +2402,7 @@ enum class AgentPhase {
     WAITING_CONFIRMATION,
     EXECUTING,
     VERIFYING,
+    PAUSED,
     BLOCKED,
     COMPLETED,
     FAILED
@@ -2473,6 +2514,8 @@ enum class AgentAuditEvent {
     ACTION_EXECUTED,
     ACTION_BLOCKED,
     TASK_CANCELLED,
+    TASK_PAUSED,
+    TASK_RESUMED,
     SETTINGS_UPDATED
 }
 
