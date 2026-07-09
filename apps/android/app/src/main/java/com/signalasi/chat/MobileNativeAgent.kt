@@ -4,7 +4,14 @@ import android.content.Context
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.content.IntentFilter
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.BatteryManager
+import android.os.Environment
+import android.os.PowerManager
+import android.os.StatFs
 import android.provider.AlarmClock
 import android.provider.CalendarContract
 import org.json.JSONArray
@@ -679,7 +686,8 @@ class AndroidScreenPerceptionProvider(private val context: Context) : ScreenPerc
         copy(
             clipboard = clipboardContext(),
             notifications = SignalASINotificationListenerService.currentContext(),
-            installedApps = installedApps()
+            installedApps = installedApps(),
+            deviceStatus = deviceStatus()
         )
 
     private fun clipboardContext(): ClipboardContext {
@@ -720,6 +728,52 @@ class AndroidScreenPerceptionProvider(private val context: Context) : ScreenPerc
                 .take(120)
         }.getOrDefault(emptyList())
     }
+
+    private fun deviceStatus(): AgentDeviceStatusContext {
+        val batteryIntent = runCatching {
+            context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        }.getOrNull()
+        val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val percent = if (level >= 0 && scale > 0) ((level * 100f) / scale).toInt().coerceIn(0, 100) else -1
+        val batteryStatus = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val charging = batteryStatus == BatteryManager.BATTERY_STATUS_CHARGING ||
+            batteryStatus == BatteryManager.BATTERY_STATUS_FULL
+        val powerSave = runCatching {
+            context.getSystemService(PowerManager::class.java)?.isPowerSaveMode == true
+        }.getOrDefault(false)
+        val network = networkStatus()
+        val storage = storageStatus()
+        return AgentDeviceStatusContext(
+            batteryPercent = percent,
+            charging = charging,
+            powerSaveMode = powerSave,
+            network = network,
+            freeStorageMb = storage.first,
+            totalStorageMb = storage.second
+        )
+    }
+
+    private fun networkStatus(): String = runCatching {
+        val connectivity = context.getSystemService(ConnectivityManager::class.java) ?: return@runCatching "unknown"
+        val network = connectivity.activeNetwork ?: return@runCatching "offline"
+        val capabilities = connectivity.getNetworkCapabilities(network) ?: return@runCatching "unknown"
+        when {
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) -> "internet"
+            else -> "offline"
+        }
+    }.getOrDefault("unknown")
+
+    private fun storageStatus(): Pair<Long, Long> = runCatching {
+        val statFs = StatFs(Environment.getDataDirectory().absolutePath)
+        val freeMb = statFs.availableBytes / (1024L * 1024L)
+        val totalMb = statFs.totalBytes / (1024L * 1024L)
+        freeMb to totalMb
+    }.getOrDefault(0L to 0L)
 }
 
 interface AgentPlanner {
@@ -786,6 +840,18 @@ class RuleBasedAgentPlanner : AgentPlanner {
                 status = AgentActionStatus.PENDING_CONFIRMATION,
                 description = "Read current notification context"
             )
+            lower.contains("device status") ||
+                lower.contains("phone status") ||
+                lower.contains("battery status") ||
+                lower.contains("storage status") ||
+                lower.contains("network status") -> AgentAction(
+                    id = "read-device-status",
+                    kind = AgentActionKind.READ_SCREEN,
+                    target = "Device Status",
+                    risk = AgentRisk.LOW,
+                    status = AgentActionStatus.PENDING_CONFIRMATION,
+                    description = "Read current device status"
+                )
             (lower.startsWith("type ") || lower.startsWith("input ")) && lower.contains(" into ") ->
                 namedTextInputAction(request)
             lower.startsWith("type ") -> AgentAction(
@@ -1622,6 +1688,14 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 message = "Read ${screen.notifications.items.size} notifications from $packages; sensitive=$sensitiveCount"
             )
         }
+        if (action.id == "read-device-status") {
+            val status = screen.deviceStatus
+            return AgentActionResult(
+                actionId = action.id,
+                success = true,
+                message = "Battery ${status.batteryPercent}% / charging=${status.charging} / powerSave=${status.powerSaveMode} / network=${status.network} / storage=${status.freeStorageMb}MB free"
+            )
+        }
         return AgentActionResult(
             actionId = action.id,
             success = true,
@@ -2120,6 +2194,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("clipboard_context", encodeClipboardContext(screen.clipboard))
         .put("notification_context", encodeNotificationContext(screen.notifications))
         .put("installed_apps", encodeInstalledApps(screen.installedApps))
+        .put("device_status", encodeDeviceStatus(screen.deviceStatus))
         .put("is_accessibility_enabled", screen.isAccessibilityEnabled)
         .put("snapshot_age_millis", screen.snapshotAgeMillis)
 
@@ -2142,6 +2217,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
             clipboard = decodeClipboardContext(json.optJSONObject("clipboard_context")),
             notifications = decodeNotificationContext(json.optJSONObject("notification_context")),
             installedApps = decodeInstalledApps(json.optJSONArray("installed_apps")),
+            deviceStatus = decodeDeviceStatus(json.optJSONObject("device_status")),
             isAccessibilityEnabled = json.optBoolean("is_accessibility_enabled"),
             snapshotAgeMillis = json.optLong("snapshot_age_millis")
         )
@@ -2234,6 +2310,26 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
                 }
             }
         }
+    }
+
+    private fun encodeDeviceStatus(status: AgentDeviceStatusContext): JSONObject = JSONObject()
+        .put("battery_percent", status.batteryPercent)
+        .put("charging", status.charging)
+        .put("power_save_mode", status.powerSaveMode)
+        .put("network", status.network)
+        .put("free_storage_mb", status.freeStorageMb)
+        .put("total_storage_mb", status.totalStorageMb)
+
+    private fun decodeDeviceStatus(json: JSONObject?): AgentDeviceStatusContext {
+        if (json == null) return AgentDeviceStatusContext()
+        return AgentDeviceStatusContext(
+            batteryPercent = json.optInt("battery_percent", -1),
+            charging = json.optBoolean("charging"),
+            powerSaveMode = json.optBoolean("power_save_mode"),
+            network = json.optString("network", "unknown"),
+            freeStorageMb = json.optLong("free_storage_mb"),
+            totalStorageMb = json.optLong("total_storage_mb")
+        )
     }
 
     private fun encodePlan(plan: AgentPlan): JSONObject = JSONObject()
@@ -2641,6 +2737,7 @@ data class ScreenContext(
     val clipboard: ClipboardContext = ClipboardContext(),
     val notifications: AgentNotificationContext = AgentNotificationContext(),
     val installedApps: List<InstalledAppInfo> = emptyList(),
+    val deviceStatus: AgentDeviceStatusContext = AgentDeviceStatusContext(),
     val isAccessibilityEnabled: Boolean = false,
     val snapshotAgeMillis: Long = 0L
 )
@@ -2648,6 +2745,15 @@ data class ScreenContext(
 data class InstalledAppInfo(
     val label: String = "",
     val packageName: String = ""
+)
+
+data class AgentDeviceStatusContext(
+    val batteryPercent: Int = -1,
+    val charging: Boolean = false,
+    val powerSaveMode: Boolean = false,
+    val network: String = "unknown",
+    val freeStorageMb: Long = 0L,
+    val totalStorageMb: Long = 0L
 )
 
 data class ClipboardContext(

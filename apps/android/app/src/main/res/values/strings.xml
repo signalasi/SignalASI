@@ -319,6 +319,8 @@
     <string name="agent_screen_notifications_locked">Notification access is not enabled</string>
     <string name="agent_screen_notification_summary">%1$s / %2$s</string>
     <string name="agent_screen_notification_sensitive">%1$s / sensitive notification</string>
+    <string name="agent_screen_device_status">Device Status</string>
+    <string name="agent_screen_device_status_summary">Battery %1$d%% / %2$s / %3$s / %4$dMB free</string>
     <string name="agent_screen_actions">Actions</string>
     <string name="agent_screen_fields">Input Fields</string>
     <string name="agent_screen_empty">No matching screen items</string>

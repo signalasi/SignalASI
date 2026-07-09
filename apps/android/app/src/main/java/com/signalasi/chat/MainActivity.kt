@@ -2396,8 +2396,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .take(3)
         val showNotificationAccessRow = !screen.notifications.hasAccess && normalizedQuery.isBlank()
         val notificationsMatch = notificationItems.isNotEmpty() || showNotificationAccessRow
+        val deviceStatusMatches = normalizedQuery.isBlank() ||
+            matchesScreenQuery(screen.deviceStatus.network, normalizedQuery) ||
+            matchesScreenQuery(screen.deviceStatus.batteryPercent.toString(), normalizedQuery) ||
+            matchesScreenQuery(screen.deviceStatus.freeStorageMb.toString(), normalizedQuery)
 
-        val hasAny = clipboardMatches || notificationsMatch || visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty()
+        val hasAny = clipboardMatches || notificationsMatch || deviceStatusMatches || visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty()
         agentScreenDetailList.addView(agentScreenSummaryRow(screen))
         if (!hasAny) {
             agentScreenDetailList.addView(agentScreenEmptyRow(getString(R.string.agent_screen_empty)))
@@ -2408,6 +2412,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         if (notificationsMatch) {
             addScreenNotificationSection(notificationItems, showNotificationAccessRow)
+        }
+        if (deviceStatusMatches) {
+            addScreenDeviceStatusSection(screen.deviceStatus)
         }
         addScreenTextSection(getString(R.string.agent_screen_texts), visibleTexts)
         addScreenElementSection(getString(R.string.agent_screen_actions), actions, AgentScreenCommandKind.TAP)
@@ -2438,6 +2445,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         items.forEach { item ->
             agentScreenDetailList.addView(agentNotificationRow(item))
         }
+    }
+
+    private fun addScreenDeviceStatusSection(status: AgentDeviceStatusContext) {
+        agentScreenDetailList.addView(agentScreenSectionTitle(getString(R.string.agent_screen_device_status)))
+        agentScreenDetailList.addView(agentDeviceStatusRow(status))
     }
 
     private fun addScreenElementSection(
@@ -2513,6 +2525,30 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 text = detail
             })
+        }
+    }
+
+    private fun agentDeviceStatusRow(status: AgentDeviceStatusContext): View {
+        val power = if (status.powerSaveMode) "power save" else if (status.charging) "charging" else "battery"
+        return TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(6) }
+            setBackgroundResource(R.drawable.agent_step_background)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            setTextColor(getColorCompat(R.color.text_primary))
+            textSize = 13f
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            text = getString(
+                R.string.agent_screen_device_status_summary,
+                status.batteryPercent,
+                power,
+                status.network,
+                status.freeStorageMb
+            )
+            setOnClickListener { prefillAgentGoal("device status") }
         }
     }
 

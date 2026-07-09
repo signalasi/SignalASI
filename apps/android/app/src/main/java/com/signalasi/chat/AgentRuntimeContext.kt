@@ -24,6 +24,8 @@ data class AgentRuntimeContext(
         append("; actions=").append(screen.clickableNodeCount)
         append("; notifications=").append(screen.notifications.items.size)
         append("; apps=").append(screen.installedApps.size)
+        append("; battery=").append(screen.deviceStatus.batteryPercent)
+        append("; network=").append(screen.deviceStatus.network)
         append("; tools=").append(systemTools.size)
         append("; targets=").append(callableTargets.size)
         append("; memories=").append(memories.size)
