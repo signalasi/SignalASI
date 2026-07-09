@@ -25,6 +25,7 @@ class MobileNativeAgent(
     private val actionExecutor: AgentActionExecutor = AndroidAgentActionExecutor(context),
     private val memoryStore: AgentMemoryStore = SharedPreferencesAgentMemoryStore(context),
     private val knowledgeStore: AgentKnowledgeStore = SharedPreferencesAgentKnowledgeStore(context),
+    private val taskStore: AgentTaskStore = SharedPreferencesAgentTaskStore(context),
     private val connectorRegistry: AgentConnectorRegistry = StaticAgentConnectorRegistry(),
     private val sessionStore: AgentSessionStore = SharedPreferencesAgentSessionStore(context)
 ) {
@@ -145,6 +146,7 @@ class MobileNativeAgent(
         if (safetyReview.blocked) {
             recordAudit(AgentAuditEvent.ACTION_BLOCKED, safetyReview.reason.ifBlank { "blocked" })
         }
+        saveTaskRecord()
         return snapshot()
     }
 
@@ -158,6 +160,7 @@ class MobileNativeAgent(
                 message = plan.safetyReview.reason.ifBlank { "Action blocked by safety policy" }
             )
             recordAudit(AgentAuditEvent.ACTION_BLOCKED, plan.safetyReview.reason.ifBlank { "blocked" })
+            saveTaskRecord()
             return snapshot()
         }
         val nextAction = plan.actions.firstOrNull { it.status == AgentActionStatus.PENDING_CONFIRMATION }
@@ -183,6 +186,7 @@ class MobileNativeAgent(
             ?.addVerification(AgentVerificationResult.from(nextAction.id, lastActionResult, verificationScreen))
         phase = if (lastActionResult?.success == true) AgentPhase.COMPLETED else AgentPhase.FAILED
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${nextAction.kind}:${finalStatus}")
+        saveTaskRecord()
         return snapshot()
     }
 
@@ -207,6 +211,7 @@ class MobileNativeAgent(
     }
 
     fun cancelCurrentTask(): AgentUiState {
+        saveTaskRecord(result = "Cancelled")
         phase = AgentPhase.OBSERVING
         currentGoal = ""
         currentPlan = null
@@ -256,6 +261,26 @@ class MobileNativeAgent(
             append("\nrelated_knowledge=")
             append(context.knowledgeItems.joinToString("; ") { it.title.take(60) })
         }
+    }
+
+    private fun saveTaskRecord(result: String = lastActionResult?.message.orEmpty()) {
+        val plan = currentPlan ?: return
+        taskStore.upsert(
+            AgentTaskRecord(
+                taskId = plan.planId,
+                sessionId = sessionId,
+                goal = currentGoal,
+                phase = phase,
+                routeKind = plan.route.kind,
+                targetTitle = plan.route.targetTitle.ifBlank { plan.selectedAgentOrModel },
+                risk = plan.safetyReview.risk,
+                blocked = plan.safetyReview.blocked,
+                result = result.ifBlank { plan.safetyReview.reason },
+                verification = plan.verificationResults.lastOrNull()?.let { verification ->
+                    "${verification.observedApp}:${verification.observedTitle}:${verification.success}"
+                }.orEmpty()
+            )
+        )
     }
 
     private fun recordAudit(event: AgentAuditEvent, detail: String) {
