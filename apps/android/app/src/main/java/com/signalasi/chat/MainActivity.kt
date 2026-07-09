@@ -703,13 +703,25 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             }
         }
-        agentSubmitButton.setOnClickListener { submitAgentGoal() }
+        agentSubmitButton.setOnClickListener { handleAgentPrimaryAction() }
         agentGoalInput.setOnEditorActionListener { _, _, _ ->
             submitAgentGoal()
             true
         }
         agentVoiceButton.setOnClickListener {
-            Toast.makeText(this, getString(R.string.agent_voice_not_ready), Toast.LENGTH_SHORT).show()
+            if (mobileNativeAgent.snapshot().pendingAction != null) {
+                renderAgentState(mobileNativeAgent.cancelCurrentTask())
+            } else {
+                Toast.makeText(this, getString(R.string.agent_voice_not_ready), Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun handleAgentPrimaryAction() {
+        if (mobileNativeAgent.snapshot().pendingAction != null) {
+            renderAgentState(mobileNativeAgent.approveNextAction())
+        } else {
+            submitAgentGoal()
         }
     }
 
@@ -1390,33 +1402,53 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun renderAgentState(state: AgentUiState) {
         val isPlanning = state.phase != AgentPhase.OBSERVING
         val screenAccessEnabled = state.currentScreen.isAccessibilityEnabled
+        val pendingAction = state.pendingAction
         agentStatusTitle.text = when {
             !screenAccessEnabled && !isPlanning -> getString(R.string.agent_status_accessibility_needed)
+            state.phase == AgentPhase.WAITING_CONFIRMATION -> getString(R.string.agent_status_waiting_confirmation)
+            state.phase == AgentPhase.EXECUTING -> getString(R.string.agent_status_executing)
+            state.phase == AgentPhase.COMPLETED -> getString(R.string.agent_status_completed)
+            state.phase == AgentPhase.FAILED -> getString(R.string.agent_status_failed)
             isPlanning -> getString(R.string.agent_status_planning)
             else -> getString(R.string.agent_status_observing)
         }
         agentStatusSubtitle.text = when {
             !screenAccessEnabled && !isPlanning -> getString(R.string.agent_status_accessibility_needed_subtitle)
+            pendingAction != null -> getString(R.string.agent_status_confirm_subtitle, pendingAction.description)
+            state.lastActionResult != null -> getString(R.string.agent_status_result_subtitle, state.lastActionResult.message)
             isPlanning -> getString(R.string.agent_status_goal_subtitle)
             else -> getString(R.string.agent_status_default_subtitle)
         }
         agentSafetyBadge.text = getString(R.string.agent_badge_safe)
         agentCurrentAppText.text = getString(R.string.agent_current_app_value, state.currentScreen.foregroundApp)
-        agentCallableTargetsText.text = if (screenAccessEnabled) {
+        agentCallableTargetsText.text = when {
+            state.lastActionResult != null -> getString(R.string.agent_action_result_value, state.lastActionResult.message)
+            pendingAction != null -> getString(R.string.agent_pending_action_value, pendingAction.description)
+            screenAccessEnabled -> {
+                getString(
+                    R.string.agent_screen_context_value,
+                    state.currentScreen.visibleTextCount,
+                    state.currentScreen.clickableNodeCount,
+                    state.currentScreen.inputFieldCount
+                )
+            }
+            else -> getString(R.string.agent_accessibility_status_disabled)
+        }
+        agentRunningTasksText.text = if (pendingAction != null) {
             getString(
-                R.string.agent_screen_context_value,
-                state.currentScreen.visibleTextCount,
-                state.currentScreen.clickableNodeCount,
-                state.currentScreen.inputFieldCount
+                R.string.agent_action_risk_value,
+                pendingAction.risk.name.lowercase(Locale.US),
+                pendingAction.target
             )
         } else {
-            getString(R.string.agent_accessibility_status_disabled)
+            getString(
+                R.string.agent_running_tasks_targets_value,
+                state.runningTaskCount,
+                state.callableTargets.size
+            )
         }
-        agentRunningTasksText.text = getString(
-            R.string.agent_running_tasks_targets_value,
-            state.runningTaskCount,
-            state.callableTargets.size
-        )
+        agentVoiceButton.text = if (pendingAction != null) getString(R.string.agent_cancel_button) else getString(R.string.agent_voice_button)
+        agentSubmitButton.text = if (pendingAction != null) getString(R.string.agent_confirm_button) else "›"
 
         val statusViews = mapOf(
             AgentStepKind.OBSERVE_SCREEN to Pair(agentStepObserveNumber, agentStepObserveStatus),

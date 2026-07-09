@@ -1,11 +1,19 @@
 package com.signalasi.chat
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.graphics.Rect
+import android.os.Bundle
+import android.graphics.Path
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
 class SignalASIAccessibilityService : AccessibilityService() {
+    override fun onCreate() {
+        super.onCreate()
+        activeService = this
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val root = rootInActiveWindow ?: return
         val packageName = event?.packageName?.toString().orEmpty()
@@ -31,7 +39,70 @@ class SignalASIAccessibilityService : AccessibilityService() {
         }
     }
 
+    override fun onDestroy() {
+        if (activeService === this) activeService = null
+        super.onDestroy()
+    }
+
     override fun onInterrupt() = Unit
+
+    private fun tap(bounds: String): Boolean {
+        val rect = parseBounds(bounds) ?: return false
+        val path = Path().apply {
+            moveTo(rect.centerX().toFloat(), rect.centerY().toFloat())
+        }
+        return dispatchGesture(
+            GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
+                .build(),
+            null,
+            null
+        )
+    }
+
+    private fun swipe(fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean {
+        val path = Path().apply {
+            moveTo(fromX.toFloat(), fromY.toFloat())
+            lineTo(toX.toFloat(), toY.toFloat())
+        }
+        return dispatchGesture(
+            GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 320))
+                .build(),
+            null,
+            null
+        )
+    }
+
+    private fun typeIntoFocusedField(text: String): Boolean {
+        val node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+        val args = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        }
+        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    private fun parseBounds(bounds: String): Rect? {
+        val parts = bounds.split(",").mapNotNull { it.trim().toIntOrNull() }
+        if (parts.size != 4) return null
+        return Rect(parts[0], parts[1], parts[2], parts[3])
+    }
+
+    companion object {
+        @Volatile
+        private var activeService: SignalASIAccessibilityService? = null
+
+        fun isActive(): Boolean = activeService != null
+
+        fun performGlobalBack(): Boolean = activeService?.performGlobalAction(GLOBAL_ACTION_BACK) == true
+
+        fun performTap(bounds: String): Boolean = activeService?.tap(bounds) == true
+
+        fun performSwipe(fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean =
+            activeService?.swipe(fromX, fromY, toX, toY) == true
+
+        fun performTextInput(text: String): Boolean = activeService?.typeIntoFocusedField(text) == true
+    }
 }
 
 private object AccessibilityTreeReader {

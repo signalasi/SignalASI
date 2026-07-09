@@ -617,4 +617,15 @@
     <string name="agent_accessibility_status_enabled">屏幕访问：已开启</string>
     <string name="agent_accessibility_status_disabled">屏幕访问：需要授权</string>
     <string name="agent_running_tasks_targets_value">运行任务：%1$d / 可调用对象：%2$d</string>
+    <string name="agent_status_waiting_confirmation">确认动作</string>
+    <string name="agent_status_executing">正在执行动作</string>
+    <string name="agent_status_completed">动作已完成</string>
+    <string name="agent_status_failed">动作失败</string>
+    <string name="agent_status_confirm_subtitle">%1$s</string>
+    <string name="agent_status_result_subtitle">%1$s</string>
+    <string name="agent_pending_action_value">待确认动作：%1$s</string>
+    <string name="agent_action_result_value">上次结果：%1$s</string>
+    <string name="agent_action_risk_value">风险：%1$s / 目标：%2$s</string>
+    <string name="agent_confirm_button">✓</string>
+    <string name="agent_cancel_button">×</string>
 </resources>
