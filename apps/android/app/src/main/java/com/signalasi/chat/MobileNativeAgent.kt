@@ -646,10 +646,48 @@ class RuleBasedAgentPlanner : AgentPlanner {
     }
 
     private fun riskFor(goal: String): AgentRisk = when {
-        goal.contains("delete") -> AgentRisk.HIGH
+        containsBlockedGoal(goal) -> AgentRisk.BLOCKED
+        containsHighRiskGoal(goal) -> AgentRisk.HIGH
         goal.contains("send") -> AgentRisk.MEDIUM
-        goal.contains("pay") -> AgentRisk.HIGH
         else -> AgentRisk.LOW
+    }
+
+    private fun containsBlockedGoal(goal: String): Boolean {
+        val blockedTerms = listOf(
+            "install app",
+            "uninstall app",
+            "delete app",
+            "unlock phone",
+            "disable lock",
+            "change screen lock",
+            "answer call",
+            "listen call",
+            "record call",
+            "send wechat",
+            "reply wechat",
+            "send message to"
+        )
+        return blockedTerms.any { goal.contains(it) }
+    }
+
+    private fun containsHighRiskGoal(goal: String): Boolean {
+        val highRiskTerms = listOf(
+            "delete",
+            "clear all",
+            "send sms",
+            "make phone call",
+            "pay",
+            "payment",
+            "purchase",
+            "order",
+            "authorize",
+            "grant permission",
+            "share private",
+            "share password",
+            "export key",
+            "security setting"
+        )
+        return highRiskTerms.any { goal.contains(it) }
     }
 }
 
@@ -890,6 +928,7 @@ class DefaultAgentSafetyPolicy(
             PermissionMode.AUTO_LOW_RISK -> highestRisk.weight >= AgentRisk.MEDIUM.weight
         }
         val warnings = buildList {
+            if (highestRisk == AgentRisk.BLOCKED) add("blocked_action")
             if (highestRisk.weight >= AgentRisk.HIGH.weight) add("high_risk_action")
             if (deniedPermissions.isNotEmpty()) add("missing_required_permission")
             if (blocksScreenAction) add("observe_only_mode")

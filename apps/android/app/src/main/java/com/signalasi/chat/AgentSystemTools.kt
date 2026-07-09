@@ -161,13 +161,33 @@ object AgentSystemToolPlanner {
             intentAction = MediaStore.ACTION_IMAGE_CAPTURE,
             risk = AgentRisk.LOW
         )
+        lower.contains("install app") || lower.contains("uninstall app") || lower.contains("delete app") -> blockedSensitiveAction(
+            id = "blocked-app-installation",
+            target = "Package Manager",
+            description = "App installation or removal requires explicit owner control"
+        )
+        lower.contains("unlock phone") || lower.contains("disable lock") || lower.contains("change screen lock") -> blockedSensitiveAction(
+            id = "blocked-lock-control",
+            target = "Screen Lock",
+            description = "Lock screen and unlock changes are protected"
+        )
+        lower.contains("answer call") || lower.contains("listen call") || lower.contains("record call") -> blockedSensitiveAction(
+            id = "blocked-call-control",
+            target = "Phone Call",
+            description = "Phone call handling requires explicit owner control"
+        )
+        lower.contains("send wechat") || lower.contains("reply wechat") || lower.contains("send message to") -> blockedSensitiveAction(
+            id = "blocked-third-party-send",
+            target = "Third-party messaging",
+            description = "Sending to third parties is protected"
+        )
         lower.contains("open phone") || lower.contains("open dialer") || lower.contains("make phone call") -> intentAction(
             id = "open-phone",
             target = "Phone",
             description = "Open phone dialer",
             intentAction = Intent.ACTION_DIAL,
             uri = "tel:",
-            risk = AgentRisk.MEDIUM
+            risk = AgentRisk.HIGH
         )
         lower.contains("open messages") || lower.contains("open sms") || lower.contains("send sms") -> intentAction(
             id = "open-messages",
@@ -175,7 +195,7 @@ object AgentSystemToolPlanner {
             description = "Open messages",
             intentAction = Intent.ACTION_VIEW,
             uri = "sms:",
-            risk = AgentRisk.MEDIUM
+            risk = if (lower.contains("send sms")) AgentRisk.HIGH else AgentRisk.MEDIUM
         )
         lower.contains("open browser") -> intentAction(
             id = "open-browser",
@@ -263,6 +283,20 @@ object AgentSystemToolPlanner {
         status = AgentActionStatus.PENDING_CONFIRMATION,
         description = description,
         parameters = mapOf("package" to packageName)
+    )
+
+    private fun blockedSensitiveAction(
+        id: String,
+        target: String,
+        description: String
+    ): AgentAction = AgentAction(
+        id = id,
+        kind = AgentActionKind.DRAFT_PLAN,
+        target = target,
+        risk = AgentRisk.BLOCKED,
+        status = AgentActionStatus.PENDING_CONFIRMATION,
+        description = description,
+        parameters = mapOf("blocked_reason" to description)
     )
 
     private fun alarmAction(goal: String, lower: String): AgentAction {
