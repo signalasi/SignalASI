@@ -154,6 +154,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentRunningTasksText: TextView
     private lateinit var agentMemoryText: TextView
     private lateinit var agentKnowledgeText: TextView
+    private lateinit var agentScreenSearchInput: EditText
+    private lateinit var agentScreenDetailList: LinearLayout
     private lateinit var agentRecentTaskList: LinearLayout
     private lateinit var agentGoalInput: EditText
     private lateinit var agentVoiceButton: TextView
@@ -235,6 +237,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var voiceMode = false
     private var secureChannelReady = false
     private var scanMode = "security"
+    private var latestAgentScreenContext: ScreenContext? = null
     private val directoryContacts = mutableListOf<Contact>()
     private var pendingExportPassword: String? = null
     private var pendingExportIncludeMessages = true
@@ -322,6 +325,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentRunningTasksText = findViewById(R.id.agentRunningTasksText)
         agentMemoryText = findViewById(R.id.agentMemoryText)
         agentKnowledgeText = findViewById(R.id.agentKnowledgeText)
+        agentScreenSearchInput = findViewById(R.id.agentScreenSearchInput)
+        agentScreenDetailList = findViewById(R.id.agentScreenDetailList)
         agentRecentTaskList = findViewById(R.id.agentRecentTaskList)
         agentGoalInput = findViewById(R.id.agentGoalInput)
         agentVoiceButton = findViewById(R.id.agentVoiceButton)
@@ -716,6 +721,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             submitAgentGoal()
             true
         }
+        agentScreenSearchInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                latestAgentScreenContext?.let { renderAgentScreenDetails(it) }
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
         agentVoiceButton.setOnClickListener {
             if (mobileNativeAgent.snapshot().pendingAction != null) {
                 renderAgentState(mobileNativeAgent.cancelCurrentTask())
@@ -1599,6 +1611,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             )
         }
         renderAgentRecentTasks(state)
+        latestAgentScreenContext = state.currentScreen
+        renderAgentScreenDetails(state.currentScreen)
     }
 
     private fun renderAgentRecentTasks(state: AgentUiState) {
@@ -1694,6 +1708,147 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 setTypeface(null, android.graphics.Typeface.BOLD)
                 text = statusText
             })
+        }
+    }
+
+    private fun renderAgentScreenDetails(screen: ScreenContext) {
+        agentScreenDetailList.removeAllViews()
+        if (!screen.isAccessibilityEnabled) {
+            agentScreenDetailList.addView(agentScreenEmptyRow(getString(R.string.agent_screen_disabled)))
+            return
+        }
+
+        val query = agentScreenSearchInput.text?.toString()?.trim().orEmpty()
+        val normalizedQuery = query.lowercase(Locale.US)
+        val visibleTexts = screen.visibleTexts
+            .filter { matchesScreenQuery(it, normalizedQuery) }
+            .take(5)
+        val actions = screen.clickableElements
+            .filter { matchesScreenQuery(it.label, normalizedQuery) || matchesScreenQuery(it.viewId, normalizedQuery) }
+            .take(5)
+        val fields = screen.inputFields
+            .filter { matchesScreenQuery(it.label, normalizedQuery) || matchesScreenQuery(it.viewId, normalizedQuery) }
+            .take(5)
+
+        val hasAny = visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty()
+        agentScreenDetailList.addView(agentScreenSummaryRow(screen))
+        if (!hasAny) {
+            agentScreenDetailList.addView(agentScreenEmptyRow(getString(R.string.agent_screen_empty)))
+            return
+        }
+        addScreenTextSection(getString(R.string.agent_screen_texts), visibleTexts)
+        addScreenElementSection(getString(R.string.agent_screen_actions), actions)
+        addScreenElementSection(getString(R.string.agent_screen_fields), fields)
+    }
+
+    private fun matchesScreenQuery(value: String, normalizedQuery: String): Boolean =
+        normalizedQuery.isBlank() || value.lowercase(Locale.US).contains(normalizedQuery)
+
+    private fun addScreenTextSection(title: String, items: List<String>) {
+        if (items.isEmpty()) return
+        agentScreenDetailList.addView(agentScreenSectionTitle(title))
+        items.forEach { item ->
+            agentScreenDetailList.addView(agentScreenTextRow(item))
+        }
+    }
+
+    private fun addScreenElementSection(title: String, items: List<ScreenElement>) {
+        if (items.isEmpty()) return
+        agentScreenDetailList.addView(agentScreenSectionTitle(title))
+        items.forEach { item ->
+            agentScreenDetailList.addView(agentScreenElementRow(item))
+        }
+    }
+
+    private fun agentScreenSummaryRow(screen: ScreenContext): View {
+        val pageTitle = screen.pageTitle.ifBlank { screen.foregroundApp }
+        val ageSeconds = maxOf(0L, screen.snapshotAgeMillis / 1000L)
+        return TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(44)
+            )
+            setBackgroundResource(R.drawable.agent_step_background)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), 0, dp(14), 0)
+            setTextColor(getColorCompat(R.color.text_primary))
+            textSize = 14f
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            text = getString(R.string.agent_screen_summary, pageTitle, ageSeconds)
+        }
+    }
+
+    private fun agentScreenSectionTitle(title: String): View {
+        return TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(10) }
+            setPadding(dp(4), 0, dp(4), dp(4))
+            setTextColor(getColorCompat(R.color.text_secondary))
+            textSize = 12f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            text = title
+        }
+    }
+
+    private fun agentScreenTextRow(value: String): View {
+        return TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(6) }
+            setBackgroundResource(R.drawable.agent_step_background)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            setTextColor(getColorCompat(R.color.text_primary))
+            textSize = 13f
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            text = value
+        }
+    }
+
+    private fun agentScreenElementRow(item: ScreenElement): View {
+        val label = item.label.ifBlank { item.viewId.ifBlank { item.className } }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundResource(R.drawable.agent_step_background)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(6) }
+
+            addView(TextView(this@MainActivity).apply {
+                setTextColor(getColorCompat(R.color.text_primary))
+                textSize = 13f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                text = label
+            })
+            addView(TextView(this@MainActivity).apply {
+                setTextColor(getColorCompat(R.color.text_secondary))
+                textSize = 11f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                text = getString(R.string.agent_screen_bounds, item.bounds.ifBlank { "-" })
+            })
+        }
+    }
+
+    private fun agentScreenEmptyRow(message: String): View {
+        return TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48)
+            ).apply { topMargin = dp(8) }
+            setBackgroundResource(R.drawable.agent_step_background)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), 0, dp(14), 0)
+            setTextColor(getColorCompat(R.color.text_secondary))
+            textSize = 13f
+            text = message
         }
     }
 

@@ -478,6 +478,38 @@
                                 android:textColor="@color/text_primary"
                                 android:textSize="15sp" />
                         </LinearLayout>
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="4dp"
+                            android:layout_marginTop="18dp"
+                            android:text="@string/agent_section_screen_details"
+                            android:textColor="@color/text_primary"
+                            android:textSize="18sp"
+                            android:textStyle="bold" />
+
+                        <EditText
+                            android:id="@+id/agentScreenSearchInput"
+                            android:layout_width="match_parent"
+                            android:layout_height="44dp"
+                            android:layout_marginTop="10dp"
+                            android:background="@drawable/search_background"
+                            android:hint="@string/agent_screen_search_hint"
+                            android:inputType="text"
+                            android:paddingStart="14dp"
+                            android:paddingEnd="14dp"
+                            android:singleLine="true"
+                            android:textColor="@color/text_primary"
+                            android:textColorHint="@color/text_secondary"
+                            android:textSize="14sp" />
+
+                        <LinearLayout
+                            android:id="@+id/agentScreenDetailList"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="10dp"
+                            android:orientation="vertical" />
                     </LinearLayout>
                 </ScrollView>
 
