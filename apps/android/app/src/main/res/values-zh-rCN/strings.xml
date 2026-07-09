@@ -624,6 +624,7 @@
     <string name="agent_status_confirm_subtitle">%1$s</string>
     <string name="agent_status_result_subtitle">%1$s</string>
     <string name="agent_pending_action_value">待确认动作：%1$s</string>
+    <string name="agent_pending_plan_value">待确认：%1$s / 预期：%2$s</string>
     <string name="agent_action_result_value">上次结果：%1$s</string>
     <string name="agent_action_risk_value">风险：%1$s / 目标：%2$s</string>
     <string name="agent_confirm_button">✓</string>

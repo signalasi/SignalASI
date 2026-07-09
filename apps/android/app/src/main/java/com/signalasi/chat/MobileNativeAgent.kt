@@ -136,7 +136,7 @@ class MobileNativeAgent(
         } else {
             AgentActionStatus.FAILED
         }
-        currentPlan = currentPlan?.markAction(nextAction.id, finalStatus)
+        currentPlan = currentPlan?.markAction(nextAction.id, finalStatus, lastActionResult)
         phase = if (lastActionResult?.success == true) AgentPhase.COMPLETED else AgentPhase.FAILED
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${nextAction.kind}:${finalStatus}")
         return snapshot()
@@ -247,17 +247,7 @@ interface AgentPlanner {
 class RuleBasedAgentPlanner : AgentPlanner {
     override fun plan(request: AgentRequest): AgentPlan {
         val action = actionFor(request)
-        return AgentPlan(
-            goal = request.goal,
-            screen = request.screen,
-            steps = listOf(
-                AgentStep(1, AgentStepKind.OBSERVE_SCREEN, AgentStepStatus.DONE),
-                AgentStep(2, AgentStepKind.ANALYZE_GOAL, AgentStepStatus.DONE),
-                AgentStep(3, AgentStepKind.BUILD_PLAN, AgentStepStatus.DONE),
-                AgentStep(4, AgentStepKind.CONFIRM_AND_ACT, AgentStepStatus.CURRENT)
-            ),
-            actions = listOf(action)
-        )
+        return AgentPlanFactory.singleAction(request, action)
     }
 
     private fun actionFor(request: AgentRequest): AgentAction {
@@ -360,6 +350,132 @@ class RuleBasedAgentPlanner : AgentPlanner {
         goal.contains("send") -> AgentRisk.MEDIUM
         goal.contains("pay") -> AgentRisk.HIGH
         else -> AgentRisk.LOW
+    }
+}
+
+object AgentPlanFactory {
+    fun singleAction(request: AgentRequest, action: AgentAction): AgentPlan {
+        val plan = AgentPlan(
+            goal = request.goal,
+            screen = request.screen,
+            steps = listOf(
+                AgentStep(1, AgentStepKind.OBSERVE_SCREEN, AgentStepStatus.DONE),
+                AgentStep(2, AgentStepKind.ANALYZE_GOAL, AgentStepStatus.DONE),
+                AgentStep(3, AgentStepKind.BUILD_PLAN, AgentStepStatus.DONE),
+                AgentStep(4, AgentStepKind.CONFIRM_AND_ACT, AgentStepStatus.CURRENT)
+            ),
+            actions = listOf(action),
+            selectedAgentOrModel = selectedAgentOrModel(action),
+            requiredPermissions = permissionsFor(action, request),
+            confirmationRequired = true,
+            rollbackStrategy = rollbackStrategyFor(action),
+            expectedResult = expectedResultFor(action),
+            timeoutSeconds = timeoutFor(action),
+            plannerProfile = "rule-based-local",
+            contextDigest = request.runtimeContext.compactSummary().hashCode().toString()
+        )
+        return plan.copy(validation = AgentPlanValidator.validate(plan))
+    }
+
+    private fun selectedAgentOrModel(action: AgentAction): String = when (action.kind) {
+        AgentActionKind.CALL_CONNECTOR,
+        AgentActionKind.CONTROL_DEVICE -> action.target
+        else -> "Mobile Executor"
+    }
+
+    private fun permissionsFor(action: AgentAction, request: AgentRequest): List<AgentPermissionRequirement> {
+        val permissions = mutableListOf<AgentPermissionRequirement>()
+        when (action.kind) {
+            AgentActionKind.READ_SCREEN,
+            AgentActionKind.COPY_SCREEN_TEXT,
+            AgentActionKind.TAP,
+            AgentActionKind.LONG_PRESS,
+            AgentActionKind.TYPE_TEXT,
+            AgentActionKind.SWIPE,
+            AgentActionKind.BACK,
+            AgentActionKind.HOME,
+            AgentActionKind.RECENTS -> permissions += AgentPermissionRequirement(
+                id = "accessibility_service",
+                title = "Screen Agent permission",
+                granted = request.screen.isAccessibilityEnabled
+            )
+            AgentActionKind.OPEN_APP,
+            AgentActionKind.OPEN_URL,
+            AgentActionKind.SET_ALARM -> permissions += AgentPermissionRequirement(
+                id = "android_intent",
+                title = "Android system intent",
+                granted = true
+            )
+            AgentActionKind.CALL_CONNECTOR,
+            AgentActionKind.CONTROL_DEVICE -> permissions += AgentPermissionRequirement(
+                id = "paired_contact",
+                title = "Verified SignalASI contact",
+                granted = false
+            )
+            AgentActionKind.DRAFT_PLAN -> Unit
+        }
+        if (action.kind == AgentActionKind.COPY_SCREEN_TEXT) {
+            permissions += AgentPermissionRequirement(
+                id = "clipboard_write",
+                title = "Clipboard write",
+                granted = true
+            )
+        }
+        return permissions
+    }
+
+    private fun rollbackStrategyFor(action: AgentAction): String = when (action.kind) {
+        AgentActionKind.TYPE_TEXT -> "Stop before sending or submitting anything."
+        AgentActionKind.TAP,
+        AgentActionKind.LONG_PRESS,
+        AgentActionKind.SWIPE -> "Observe the result and go back if the page changed unexpectedly."
+        AgentActionKind.CALL_CONNECTOR,
+        AgentActionKind.CONTROL_DEVICE -> "Keep the task in chat history and report delivery failure."
+        else -> "Stop execution and ask the user before retrying."
+    }
+
+    private fun expectedResultFor(action: AgentAction): String = when (action.kind) {
+        AgentActionKind.OPEN_APP -> "The requested Android screen opens."
+        AgentActionKind.OPEN_URL -> "The requested URL opens in a browser or matching app."
+        AgentActionKind.SET_ALARM -> "Android alarm setup is opened or handed off."
+        AgentActionKind.COPY_SCREEN_TEXT -> "Visible screen text is copied to the clipboard."
+        AgentActionKind.CALL_CONNECTOR -> "The task is sent to the paired agent contact."
+        AgentActionKind.CONTROL_DEVICE -> "The trusted device connector receives the task."
+        else -> action.description
+    }
+
+    private fun timeoutFor(action: AgentAction): Int = when (action.kind) {
+        AgentActionKind.CALL_CONNECTOR,
+        AgentActionKind.CONTROL_DEVICE -> 120
+        AgentActionKind.OPEN_URL,
+        AgentActionKind.OPEN_APP,
+        AgentActionKind.SET_ALARM -> 30
+        else -> 20
+    }
+}
+
+object AgentPlanValidator {
+    fun validate(plan: AgentPlan): AgentPlanValidation {
+        val issues = mutableListOf<String>()
+        if (plan.goal.isBlank()) issues += "goal_blank"
+        if (plan.actions.isEmpty()) issues += "actions_empty"
+        plan.actions.forEach { action ->
+            if (action.description.isBlank()) issues += "action_description_blank:${action.id}"
+            if ((action.kind == AgentActionKind.TAP || action.kind == AgentActionKind.LONG_PRESS) &&
+                action.parameters["bounds"].isNullOrBlank()) {
+                issues += "action_bounds_missing:${action.id}"
+            }
+            if (action.kind == AgentActionKind.TYPE_TEXT && action.parameters["text"].isNullOrBlank()) {
+                issues += "action_text_missing:${action.id}"
+            }
+        }
+        if (plan.safetyReview.risk.weight >= AgentRisk.HIGH.weight && !plan.confirmationRequired) {
+            issues += "high_risk_without_confirmation"
+        }
+        return AgentPlanValidation(
+            valid = issues.isEmpty(),
+            issues = issues
+        )
     }
 }
 
@@ -868,6 +984,16 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
     private fun encodePlan(plan: AgentPlan): JSONObject = JSONObject()
         .put("goal", plan.goal)
         .put("screen", encodeScreen(plan.screen))
+        .put("plan_id", plan.planId)
+        .put("selected_agent_or_model", plan.selectedAgentOrModel)
+        .put("required_permissions", encodePermissions(plan.requiredPermissions))
+        .put("confirmation_required", plan.confirmationRequired)
+        .put("rollback_strategy", plan.rollbackStrategy)
+        .put("expected_result", plan.expectedResult)
+        .put("timeout_seconds", plan.timeoutSeconds)
+        .put("planner_profile", plan.plannerProfile)
+        .put("context_digest", plan.contextDigest)
+        .put("validation", encodePlanValidation(plan.validation))
         .put("steps", JSONArray().also { array ->
             plan.steps.forEach { array.put(encodeStep(it)) }
         })
@@ -881,8 +1007,59 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         screen = decodeScreen(json.optJSONObject("screen")),
         steps = decodeSteps(json.optJSONArray("steps")),
         actions = decodeActions(json.optJSONArray("actions")),
+        planId = json.optString("plan_id").ifBlank { UUID.randomUUID().toString() },
+        selectedAgentOrModel = json.optString("selected_agent_or_model"),
+        requiredPermissions = decodePermissions(json.optJSONArray("required_permissions")),
+        confirmationRequired = json.optBoolean("confirmation_required", true),
+        rollbackStrategy = json.optString("rollback_strategy", "Stop execution and ask the user before retrying."),
+        expectedResult = json.optString("expected_result"),
+        timeoutSeconds = json.optInt("timeout_seconds", 60),
+        plannerProfile = json.optString("planner_profile", "rule-based-local"),
+        contextDigest = json.optString("context_digest"),
+        validation = decodePlanValidation(json.optJSONObject("validation")),
         safetyReview = decodeSafetyReview(json.optJSONObject("safety_review"))
     )
+
+    private fun encodePermissions(permissions: List<AgentPermissionRequirement>): JSONArray = JSONArray().also { array ->
+        permissions.forEach { permission ->
+            array.put(JSONObject()
+                .put("id", permission.id)
+                .put("title", permission.title)
+                .put("required", permission.required)
+                .put("granted", permission.granted))
+        }
+    }
+
+    private fun decodePermissions(array: JSONArray?): List<AgentPermissionRequirement> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                add(
+                    AgentPermissionRequirement(
+                        id = item.optString("id"),
+                        title = item.optString("title"),
+                        required = item.optBoolean("required", true),
+                        granted = item.optBoolean("granted")
+                    )
+                )
+            }
+        }
+    }
+
+    private fun encodePlanValidation(validation: AgentPlanValidation): JSONObject = JSONObject()
+        .put("valid", validation.valid)
+        .put("issues", JSONArray().also { array ->
+            validation.issues.forEach { array.put(it) }
+        })
+
+    private fun decodePlanValidation(json: JSONObject?): AgentPlanValidation {
+        if (json == null) return AgentPlanValidation()
+        return AgentPlanValidation(
+            valid = json.optBoolean("valid", true),
+            issues = decodeStringList(json.optJSONArray("issues"))
+        )
+    }
 
     private fun encodeStep(step: AgentStep): JSONObject = JSONObject()
         .put("order", step.order)
@@ -913,6 +1090,9 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("status", action.status.name)
         .put("description", action.description)
         .put("parameters", JSONObject(action.parameters))
+        .put("requires_confirmation", action.requiresConfirmation)
+        .put("result", action.result)
+        .put("evidence", action.evidence)
 
     private fun decodeActions(array: JSONArray?): List<AgentAction> {
         if (array == null) return emptyList()
@@ -927,7 +1107,10 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
                         risk = enumOrDefault(item.optString("risk"), AgentRisk.LOW),
                         status = enumOrDefault(item.optString("status"), AgentActionStatus.PENDING_CONFIRMATION),
                         description = item.optString("description"),
-                        parameters = decodeStringMap(item.optJSONObject("parameters"))
+                        parameters = decodeStringMap(item.optJSONObject("parameters")),
+                        requiresConfirmation = item.optBoolean("requires_confirmation", true),
+                        result = item.optString("result"),
+                        evidence = item.optString("evidence")
                     )
                 )
             }
@@ -1104,13 +1287,41 @@ data class AgentPlan(
     val screen: ScreenContext,
     val steps: List<AgentStep>,
     val actions: List<AgentAction>,
+    val planId: String = UUID.randomUUID().toString(),
+    val selectedAgentOrModel: String = actions.firstOrNull()?.target.orEmpty(),
+    val requiredPermissions: List<AgentPermissionRequirement> = emptyList(),
+    val confirmationRequired: Boolean = true,
+    val rollbackStrategy: String = "Stop execution and ask the user before retrying.",
+    val expectedResult: String = actions.firstOrNull()?.description.orEmpty(),
+    val timeoutSeconds: Int = 60,
+    val plannerProfile: String = "rule-based-local",
+    val contextDigest: String = "",
+    val validation: AgentPlanValidation = AgentPlanValidation(),
     val safetyReview: AgentSafetyReview = AgentSafetyReview()
 ) {
-    fun withSafetyReview(review: AgentSafetyReview): AgentPlan = copy(safetyReview = review)
+    fun withSafetyReview(review: AgentSafetyReview): AgentPlan {
+        val next = copy(
+            safetyReview = review,
+            confirmationRequired = review.requiresConfirmation
+        )
+        return next.copy(validation = AgentPlanValidator.validate(next))
+    }
 
-    fun markAction(actionId: String, status: AgentActionStatus): AgentPlan = copy(
+    fun markAction(
+        actionId: String,
+        status: AgentActionStatus,
+        result: AgentActionResult? = null
+    ): AgentPlan = copy(
         actions = actions.map { action ->
-            if (action.id == actionId) action.copy(status = status) else action
+            if (action.id == actionId) {
+                action.copy(
+                    status = status,
+                    result = result?.message ?: action.result,
+                    evidence = result?.let { if (it.success) "executor_success" else "executor_failure" } ?: action.evidence
+                )
+            } else {
+                action
+            }
         },
         steps = steps.map { step ->
             when {
@@ -1145,7 +1356,22 @@ data class AgentAction(
     val risk: AgentRisk,
     val status: AgentActionStatus,
     val description: String,
-    val parameters: Map<String, String> = emptyMap()
+    val parameters: Map<String, String> = emptyMap(),
+    val requiresConfirmation: Boolean = true,
+    val result: String = "",
+    val evidence: String = ""
+)
+
+data class AgentPermissionRequirement(
+    val id: String,
+    val title: String,
+    val required: Boolean = true,
+    val granted: Boolean = false
+)
+
+data class AgentPlanValidation(
+    val valid: Boolean = true,
+    val issues: List<String> = emptyList()
 )
 
 data class AgentSafetyReview(

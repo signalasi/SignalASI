@@ -1431,7 +1431,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentCurrentAppText.text = getString(R.string.agent_current_app_value, state.currentScreen.foregroundApp)
         agentCallableTargetsText.text = when {
             state.lastActionResult != null -> getString(R.string.agent_action_result_value, state.lastActionResult.message)
-            pendingAction != null -> getString(R.string.agent_pending_action_value, pendingAction.description)
+            pendingAction != null -> getString(
+                R.string.agent_pending_plan_value,
+                pendingAction.description,
+                state.plan?.expectedResult.orEmpty().ifBlank { pendingAction.description }
+            )
             screenAccessEnabled -> {
                 getString(
                     R.string.agent_screen_context_value,

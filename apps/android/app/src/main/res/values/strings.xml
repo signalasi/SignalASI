@@ -242,6 +242,7 @@
     <string name="agent_accessibility_status_disabled">Screen access: needs permission</string>
     <string name="agent_running_tasks_targets_value">Running tasks: %1$d / targets: %2$d</string>
     <string name="agent_pending_action_value">Pending action: %1$s</string>
+    <string name="agent_pending_plan_value">Pending: %1$s / expected: %2$s</string>
     <string name="agent_action_result_value">Last result: %1$s</string>
     <string name="agent_action_risk_value">Risk: %1$s / target: %2$s</string>
     <string name="agent_goal_hint">Voice or text input goal</string>
