@@ -1,5 +1,9 @@
 package com.signalasi.chat
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -9,6 +13,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.BatteryManager
+import android.os.Build
 import android.os.Environment
 import android.os.PowerManager
 import android.os.StatFs
@@ -852,6 +857,10 @@ class RuleBasedAgentPlanner : AgentPlanner {
                     status = AgentActionStatus.PENDING_CONFIRMATION,
                     description = "Read current device status"
                 )
+            lower.startsWith("notify me") ||
+                lower.startsWith("create notification") ||
+                lower.startsWith("send notification") ||
+                lower.startsWith("show notification") -> notificationAction(goal)
             (lower.startsWith("type ") || lower.startsWith("input ")) && lower.contains(" into ") ->
                 namedTextInputAction(request)
             lower.startsWith("type ") -> AgentAction(
@@ -1058,6 +1067,28 @@ class RuleBasedAgentPlanner : AgentPlanner {
     private fun String.normalizeAppName(): String =
         lowercase(Locale.US).replace(Regex("[^\\p{L}\\p{N}]+"), "")
 
+    private fun notificationAction(goal: String): AgentAction {
+        val body = goal
+            .removePrefixIgnoreCase("notify me")
+            .removePrefixIgnoreCase("create notification")
+            .removePrefixIgnoreCase("send notification")
+            .removePrefixIgnoreCase("show notification")
+            .trim()
+            .ifBlank { "Agent task needs your attention" }
+        return AgentAction(
+            id = "create-local-notification",
+            kind = AgentActionKind.CREATE_NOTIFICATION,
+            target = "Android Notifications",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = "Create local notification",
+            parameters = mapOf(
+                "title" to "SignalASI Agent",
+                "text" to body
+            )
+        )
+    }
+
     private fun riskFor(goal: String): AgentRisk = when {
         containsBlockedGoal(goal) -> AgentRisk.BLOCKED
         containsHighRiskGoal(goal) -> AgentRisk.HIGH
@@ -1230,6 +1261,11 @@ object AgentPlanFactory {
             AgentActionKind.OPEN_APP,
             AgentActionKind.OPEN_URL,
             AgentActionKind.SET_ALARM -> permissions += intentPermissionFor(action)
+            AgentActionKind.CREATE_NOTIFICATION -> permissions += AgentPermissionRequirement(
+                id = "post_notification",
+                title = "Post local notification",
+                granted = true
+            )
             AgentActionKind.CALL_CONNECTOR,
             AgentActionKind.CONTROL_DEVICE -> {
                 val connectorId = action.parameters["connector_id"]
@@ -1314,6 +1350,7 @@ object AgentPlanFactory {
         AgentActionKind.SAVE_SCREEN_KNOWLEDGE -> "Current screen is saved into Agent knowledge."
         AgentActionKind.DELETE_TEXT -> "Text is cleared from the active input field."
         AgentActionKind.PASTE_TEXT -> "Clipboard text is pasted into the active input field."
+        AgentActionKind.CREATE_NOTIFICATION -> "A local Android notification is created."
         AgentActionKind.CALL_CONNECTOR -> "The task is sent to the paired agent contact."
         AgentActionKind.CONTROL_DEVICE -> "The trusted device connector receives the task."
         else -> action.description
@@ -1328,6 +1365,7 @@ object AgentPlanFactory {
         AgentActionKind.OPEN_URL,
         AgentActionKind.OPEN_APP,
         AgentActionKind.SET_ALARM -> 30
+        AgentActionKind.CREATE_NOTIFICATION -> 10
         else -> 20
     }
 
@@ -1359,6 +1397,7 @@ object AgentPlanFactory {
         AgentActionKind.OPEN_APP,
         AgentActionKind.OPEN_URL,
         AgentActionKind.SET_ALARM -> "Android intent route selected because the task maps to a system app or system handoff."
+        AgentActionKind.CREATE_NOTIFICATION -> "Local notification route selected because the task should alert the user on this phone."
         AgentActionKind.DRAFT_PLAN -> "Local planning route selected because the task needs clarification or a safe plan first."
     }
 }
@@ -1393,6 +1432,7 @@ object AgentRouteResolver {
             AgentActionKind.OPEN_APP,
             AgentActionKind.OPEN_URL,
             AgentActionKind.SET_ALARM,
+            AgentActionKind.CREATE_NOTIFICATION,
             AgentActionKind.COPY_SCREEN_TEXT -> AgentRouteKind.LOCAL_SYSTEM
         }
         return AgentRoute(
@@ -1605,6 +1645,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         AgentActionKind.COPY_SCREEN_TEXT -> copyScreenText(action, screen)
         AgentActionKind.OPEN_URL -> openUrl(action)
         AgentActionKind.SET_ALARM -> setAlarm(action)
+        AgentActionKind.CREATE_NOTIFICATION -> createLocalNotification(action)
         AgentActionKind.CALL_CONNECTOR -> dispatchConnectorTask(action)
         AgentActionKind.CONTROL_DEVICE -> dispatchDeviceTask(action)
     }
@@ -1728,6 +1769,51 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             else -> null
         } ?: return AgentActionResult(action.id, false, "No launch target is available")
         return launchIntent(action.id, intent, "Opened ${action.target}")
+    }
+
+    private fun createLocalNotification(action: AgentAction): AgentActionResult {
+        ensureAgentNotificationChannel()
+        val openIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            action.id.hashCode(),
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val title = action.parameters["title"].orEmpty().ifBlank { "SignalASI Agent" }
+        val text = action.parameters["text"].orEmpty().ifBlank { action.description }
+        val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(context, AGENT_NOTIFICATION_CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(context)
+        }
+            .setSmallIcon(R.drawable.ic_agent_node)
+            .setContentTitle(title)
+            .setContentText(text.take(120))
+            .setStyle(Notification.BigTextStyle().bigText(text))
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setShowWhen(true)
+            .build()
+        context.getSystemService(NotificationManager::class.java)
+            .notify(AGENT_NOTIFICATION_ID_BASE + (System.currentTimeMillis() % 1000).toInt(), notification)
+        return AgentActionResult(action.id, true, "Created local notification")
+    }
+
+    private fun ensureAgentNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val channel = NotificationChannel(
+            AGENT_NOTIFICATION_CHANNEL_ID,
+            "SignalASI Agent",
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "Local Agent task alerts"
+        }
+        manager.createNotificationChannel(channel)
     }
 
     private fun clipboardText(): String {
@@ -1967,6 +2053,11 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         "home-assistant" -> setOf("home-assistant", "home_hub", "home-hub", "living-room-hub")
         "cloud-models" -> setOf("cloud-models", "cloud-model")
         else -> setOf(connectorId)
+    }
+
+    companion object {
+        private const val AGENT_NOTIFICATION_CHANNEL_ID = "signalasi_agent_actions"
+        private const val AGENT_NOTIFICATION_ID_BASE = 42000
     }
 }
 
@@ -2780,16 +2871,17 @@ private fun AgentActionKind.mayChangeScreen(): Boolean = when (this) {
     AgentActionKind.RECENTS,
     AgentActionKind.OPEN_APP,
     AgentActionKind.OPEN_URL,
-        AgentActionKind.SET_ALARM -> true
-        AgentActionKind.READ_SCREEN,
-        AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
-        AgentActionKind.DRAFT_PLAN,
-        AgentActionKind.TYPE_TEXT,
-        AgentActionKind.DELETE_TEXT,
-        AgentActionKind.PASTE_TEXT,
-        AgentActionKind.COPY_SCREEN_TEXT,
-        AgentActionKind.CALL_CONNECTOR,
-        AgentActionKind.CONTROL_DEVICE -> false
+    AgentActionKind.SET_ALARM -> true
+    AgentActionKind.READ_SCREEN,
+    AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
+    AgentActionKind.DRAFT_PLAN,
+    AgentActionKind.TYPE_TEXT,
+    AgentActionKind.DELETE_TEXT,
+    AgentActionKind.PASTE_TEXT,
+    AgentActionKind.COPY_SCREEN_TEXT,
+    AgentActionKind.CREATE_NOTIFICATION,
+    AgentActionKind.CALL_CONNECTOR,
+    AgentActionKind.CONTROL_DEVICE -> false
 }
 
 data class AgentPlan(
@@ -3016,6 +3108,7 @@ enum class AgentActionKind {
     OPEN_APP,
     OPEN_URL,
     SET_ALARM,
+    CREATE_NOTIFICATION,
     COPY_SCREEN_TEXT,
     DELETE_TEXT,
     PASTE_TEXT,
