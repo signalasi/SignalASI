@@ -876,8 +876,18 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
     private fun openApp(action: AgentAction): AgentActionResult {
         val intentAction = action.parameters["intent_action"].orEmpty()
         val packageName = action.parameters["package"].orEmpty()
+        val uri = action.parameters["uri"].orEmpty()
+        val type = action.parameters["type"].orEmpty()
+        val category = action.parameters["category"].orEmpty()
         val intent = when {
-            intentAction.isNotBlank() -> Intent(intentAction)
+            intentAction.isNotBlank() -> Intent(intentAction).apply {
+                when {
+                    uri.isNotBlank() && type.isNotBlank() -> setDataAndType(Uri.parse(uri), type)
+                    uri.isNotBlank() -> data = Uri.parse(uri)
+                    type.isNotBlank() -> setType(type)
+                }
+                if (category.isNotBlank()) addCategory(category)
+            }
             packageName.isNotBlank() -> context.packageManager.getLaunchIntentForPackage(packageName)
             else -> null
         } ?: return AgentActionResult(action.id, false, "No launch target is available")

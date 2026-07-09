@@ -1,5 +1,7 @@
 package com.signalasi.chat
 
+import android.content.Intent
+import android.provider.MediaStore
 import android.provider.Settings
 
 object AgentSystemToolPlanner {
@@ -8,6 +10,7 @@ object AgentSystemToolPlanner {
     fun actionFor(request: AgentRequest): AgentAction? {
         val goal = request.goal.trim()
         val lower = goal.lowercase()
+        commonToolAction(lower)?.let { return it }
         return when {
             lower.contains("open wifi settings") || lower == "wifi settings" -> intentAction(
                 id = "open-wifi-settings",
@@ -96,19 +99,103 @@ object AgentSystemToolPlanner {
         }
     }
 
+    private fun commonToolAction(lower: String): AgentAction? = when {
+        lower.contains("open wechat") -> packageAction(
+            id = "open-wechat",
+            target = "WeChat",
+            description = "Open WeChat",
+            packageName = "com.tencent.mm",
+            risk = AgentRisk.MEDIUM
+        )
+        lower.contains("open camera") || lower.contains("take photo") -> intentAction(
+            id = "open-camera",
+            target = "Camera",
+            description = "Open camera",
+            intentAction = MediaStore.ACTION_IMAGE_CAPTURE,
+            risk = AgentRisk.LOW
+        )
+        lower.contains("open phone") || lower.contains("open dialer") || lower.contains("make phone call") -> intentAction(
+            id = "open-phone",
+            target = "Phone",
+            description = "Open phone dialer",
+            intentAction = Intent.ACTION_DIAL,
+            uri = "tel:",
+            risk = AgentRisk.MEDIUM
+        )
+        lower.contains("open messages") || lower.contains("open sms") || lower.contains("send sms") -> intentAction(
+            id = "open-messages",
+            target = "Messages",
+            description = "Open messages",
+            intentAction = Intent.ACTION_VIEW,
+            uri = "sms:",
+            risk = AgentRisk.MEDIUM
+        )
+        lower.contains("open browser") -> intentAction(
+            id = "open-browser",
+            target = "Browser",
+            description = "Open browser",
+            intentAction = Intent.ACTION_VIEW,
+            uri = "https://www.google.com",
+            risk = AgentRisk.LOW
+        )
+        lower.contains("open contacts") -> intentAction(
+            id = "open-contacts",
+            target = "Contacts",
+            description = "Open contacts",
+            intentAction = Intent.ACTION_VIEW,
+            uri = "content://contacts/people/",
+            risk = AgentRisk.LOW
+        )
+        lower.contains("open files") || lower.contains("open file manager") -> intentAction(
+            id = "open-files",
+            target = "Files",
+            description = "Open file picker",
+            intentAction = Intent.ACTION_OPEN_DOCUMENT,
+            type = "*/*",
+            category = Intent.CATEGORY_OPENABLE,
+            risk = AgentRisk.LOW
+        )
+        else -> null
+    }
+
     private fun intentAction(
         id: String,
         target: String,
         description: String,
-        intentAction: String
+        intentAction: String,
+        uri: String = "",
+        type: String = "",
+        category: String = "",
+        risk: AgentRisk = AgentRisk.LOW
     ): AgentAction = AgentAction(
         id = id,
         kind = AgentActionKind.OPEN_APP,
         target = target,
-        risk = AgentRisk.LOW,
+        risk = risk,
         status = AgentActionStatus.PENDING_CONFIRMATION,
         description = description,
-        parameters = mapOf("intent_action" to intentAction)
+        parameters = buildMap {
+            put("intent_action", intentAction)
+            if (uri.isNotBlank()) put("uri", uri)
+            if (type.isNotBlank()) put("type", type)
+            if (category.isNotBlank()) put("category", category)
+        }
+    )
+
+    private fun packageAction(
+        id: String,
+        target: String,
+        description: String,
+        packageName: String,
+        risk: AgentRisk = AgentRisk.LOW
+    ): AgentAction = AgentAction(
+        id = id,
+        kind = AgentActionKind.OPEN_APP,
+        target = target,
+        risk = risk,
+        status = AgentActionStatus.PENDING_CONFIRMATION,
+        description = description,
+        parameters = mapOf("package" to packageName)
     )
 
     private fun alarmAction(goal: String, lower: String): AgentAction {
@@ -186,6 +273,14 @@ object AgentSystemToolPlanner {
             risk = AgentRisk.MEDIUM,
             capabilities = listOf(AgentCapability.DEVICE_CONTROL, AgentCapability.TASK_EXECUTION),
             examples = listOf("tap first", "swipe up", "long press first")
+        ),
+        AgentSystemTool(
+            id = "phone-tools",
+            title = "Phone Tools",
+            kind = AgentActionKind.OPEN_APP,
+            risk = AgentRisk.MEDIUM,
+            capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.TASK_EXECUTION),
+            examples = listOf("open phone", "open messages", "open camera", "open wechat")
         )
     )
 }
