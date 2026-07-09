@@ -233,10 +233,15 @@ object AgentSystemToolPlanner {
             intentAction = MediaStore.ACTION_IMAGE_CAPTURE,
             risk = AgentRisk.LOW
         )
-        lower.contains("install app") || lower.contains("uninstall app") || lower.contains("delete app") -> blockedSensitiveAction(
+        lower.contains("install app") ||
+            lower.contains("uninstall app") ||
+            lower.contains("delete app") ||
+            lower.contains("factory reset") ||
+            lower.contains("erase phone") ||
+            lower.contains("clear all data") -> blockedSensitiveAction(
             id = "blocked-app-installation",
             target = "Package Manager",
-            description = "App installation or removal requires explicit owner control"
+            description = "App installation, removal, or device wipe requires explicit owner control"
         )
         lower.contains("unlock phone") || lower.contains("disable lock") || lower.contains("change screen lock") -> blockedSensitiveAction(
             id = "blocked-lock-control",
@@ -253,6 +258,27 @@ object AgentSystemToolPlanner {
             target = "Third-party messaging",
             description = "Sending to third parties is protected"
         )
+        lower.contains("pay ") ||
+            lower.contains("make payment") ||
+            lower.contains("transfer money") ||
+            lower.contains("purchase") ||
+            lower.contains("checkout") ||
+            lower.contains("place order") -> blockedSensitiveAction(
+                id = "blocked-payment-order",
+                target = "Payment or Order",
+                description = "Payment, transfer, purchase, and order submission require explicit owner control"
+            )
+        lower.contains("authorize login") ||
+            lower.contains("approve login") ||
+            lower.contains("grant permission") ||
+            lower.contains("share password") ||
+            lower.contains("share private key") ||
+            lower.contains("export private key") ||
+            lower.contains("export api key") -> blockedSensitiveAction(
+                id = "blocked-credential-permission",
+                target = "Credentials and Permissions",
+                description = "Credentials, login approvals, and permission grants are protected"
+            )
         lower.contains("open phone") || lower.contains("open dialer") || lower.contains("make phone call") -> intentAction(
             id = "open-phone",
             target = "Phone",

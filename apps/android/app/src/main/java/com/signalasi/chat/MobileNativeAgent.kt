@@ -932,15 +932,29 @@ class RuleBasedAgentPlanner : AgentPlanner {
     private fun riskFor(goal: String): AgentRisk = when {
         containsBlockedGoal(goal) -> AgentRisk.BLOCKED
         containsHighRiskGoal(goal) -> AgentRisk.HIGH
-        goal.contains("send") -> AgentRisk.MEDIUM
+        goal.containsAny(MEDIUM_RISK_GOAL_TERMS) -> AgentRisk.MEDIUM
         else -> AgentRisk.LOW
     }
 
     private fun containsBlockedGoal(goal: String): Boolean {
-        val blockedTerms = listOf(
+        return goal.containsAny(BLOCKED_GOAL_TERMS)
+    }
+
+    private fun containsHighRiskGoal(goal: String): Boolean {
+        return goal.containsAny(HIGH_RISK_GOAL_TERMS)
+    }
+
+    private fun String.containsAny(terms: List<String>): Boolean =
+        terms.any { contains(it) }
+
+    companion object {
+        private val BLOCKED_GOAL_TERMS = listOf(
             "install app",
             "uninstall app",
             "delete app",
+            "factory reset",
+            "erase phone",
+            "clear all data",
             "unlock phone",
             "disable lock",
             "change screen lock",
@@ -949,29 +963,61 @@ class RuleBasedAgentPlanner : AgentPlanner {
             "record call",
             "send wechat",
             "reply wechat",
-            "send message to"
+            "send message to",
+            "authorize login",
+            "approve login",
+            "grant permission",
+            "share password",
+            "share private key",
+            "export private key",
+            "export api key",
+            "transfer money",
+            "make payment",
+            "place order",
+            "checkout"
         )
-        return blockedTerms.any { goal.contains(it) }
-    }
 
-    private fun containsHighRiskGoal(goal: String): Boolean {
-        val highRiskTerms = listOf(
+        private val HIGH_RISK_GOAL_TERMS = listOf(
             "delete",
             "clear all",
             "send sms",
+            "reply sms",
+            "send email",
+            "reply email",
+            "forward message",
+            "post to",
+            "publish",
+            "upload",
             "make phone call",
+            "dial",
             "pay",
             "payment",
             "purchase",
             "order",
             "authorize",
             "grant permission",
+            "change security",
             "share private",
             "share password",
             "export key",
-            "security setting"
+            "security setting",
+            "location",
+            "camera",
+            "microphone"
         )
-        return highRiskTerms.any { goal.contains(it) }
+
+        private val MEDIUM_RISK_GOAL_TERMS = listOf(
+            "send",
+            "reply",
+            "share",
+            "copy",
+            "paste",
+            "download",
+            "open file",
+            "open app",
+            "change setting",
+            "edit"
+        )
     }
 }
 
@@ -1271,6 +1317,11 @@ class DefaultAgentSafetyPolicy(
         val blocksExecution = mode == PermissionMode.SUGGEST_ONLY &&
             plan.actions.any { it.kind != AgentActionKind.DRAFT_PLAN }
         val blocksHighRisk = highRiskGuardEnabled() && highestRisk == AgentRisk.BLOCKED
+        val blockedActionReason = plan.actions
+            .firstOrNull { it.risk == AgentRisk.BLOCKED }
+            ?.parameters
+            ?.get("blocked_reason")
+            .orEmpty()
         val blocked = deniedPermissions.isNotEmpty() || blocksScreenAction || blocksExecution || blocksHighRisk
         val requiresConfirmation = when (mode) {
             PermissionMode.OBSERVE_ONLY,
@@ -1289,7 +1340,7 @@ class DefaultAgentSafetyPolicy(
             deniedPermissions.isNotEmpty() -> "Missing required permission: ${deniedPermissions.joinToString(", ")}"
             blocksScreenAction -> "Observe-only mode blocks screen actions"
             blocksExecution -> "Suggest-only mode blocks execution"
-            blocksHighRisk -> "High-risk guard blocked this action"
+            blocksHighRisk -> blockedActionReason.ifBlank { "High-risk guard blocked this action" }
             else -> ""
         }
         return AgentSafetyReview(
