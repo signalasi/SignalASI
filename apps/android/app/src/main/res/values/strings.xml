@@ -638,6 +638,8 @@
     <string name="permission_mode_ask_before_action">Ask Before Action</string>
     <string name="permission_mode_auto_low_risk">Auto Low-risk</string>
     <string name="on_device_agent_section_permissions">Permissions</string>
+    <string name="on_device_agent_screen_access">Screen Access</string>
+    <string name="on_device_agent_screen_access_subtitle">Read screen structure and perform confirmed local actions</string>
     <string name="on_device_agent_microphone">Microphone</string>
     <string name="on_device_agent_microphone_subtitle">Voice input and hold-to-talk</string>
     <string name="on_device_agent_camera">Camera</string>
@@ -647,6 +649,7 @@
     <string name="on_device_agent_notifications">Notifications</string>
     <string name="on_device_agent_notifications_subtitle">Background message alerts and security prompts</string>
     <string name="permission_allowed">Allowed</string>
+    <string name="permission_needs_setup">Needs setup</string>
     <string name="permission_while_using">While in use</string>
     <string name="common_confirm">Confirm</string>
     <string name="common_export">Export</string>

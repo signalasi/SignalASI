@@ -5574,10 +5574,27 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             setOnClickListener { toggleAgentMemoryCapture() }
         })
         addSectionTitle(getString(R.string.on_device_agent_section_permissions))
+        val screenAccessAllowed = SignalASIAccessibilityService.isActive()
+        val notificationAccessAllowed = SignalASINotificationListenerService.currentContext().hasAccess
+        featureContent.addView(featureRow(
+            getString(R.string.on_device_agent_screen_access),
+            getString(R.string.on_device_agent_screen_access_subtitle),
+            R.drawable.ic_agent_node,
+            if (screenAccessAllowed) getString(R.string.permission_allowed) else getString(R.string.permission_needs_setup)
+        ).apply {
+            setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        })
         featureContent.addView(featureRow(getString(R.string.on_device_agent_microphone), getString(R.string.on_device_agent_microphone_subtitle), R.drawable.ic_agent_node, getString(R.string.permission_allowed)))
         featureContent.addView(featureRow(getString(R.string.on_device_agent_camera), getString(R.string.on_device_agent_camera_subtitle), R.drawable.ic_scan, getString(R.string.permission_allowed)))
         featureContent.addView(featureRow(getString(R.string.on_device_agent_location), getString(R.string.on_device_agent_location_subtitle), R.drawable.ic_device_node, getString(R.string.permission_while_using)))
-        featureContent.addView(featureRow(getString(R.string.on_device_agent_notifications), getString(R.string.on_device_agent_notifications_subtitle), R.drawable.ic_agent_node, getString(R.string.permission_allowed)))
+        featureContent.addView(featureRow(
+            getString(R.string.on_device_agent_notifications),
+            getString(R.string.on_device_agent_notifications_subtitle),
+            R.drawable.ic_agent_node,
+            if (notificationAccessAllowed) getString(R.string.permission_allowed) else getString(R.string.permission_needs_setup)
+        ).apply {
+            setOnClickListener { startActivity(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")) }
+        })
     }
 
     private fun cycleAgentPermissionMode() {
