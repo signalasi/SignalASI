@@ -156,6 +156,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentQuickSaveScreenButton: TextView
     private lateinit var agentQuickSearchKnowledgeButton: TextView
     private lateinit var agentQuickPermissionsButton: TextView
+    private lateinit var agentPermissionModeButton: TextView
+    private lateinit var agentHighRiskGuardButton: TextView
     private lateinit var agentCurrentAppText: TextView
     private lateinit var agentCallableTargetsText: TextView
     private lateinit var agentRunningTasksText: TextView
@@ -336,6 +338,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentQuickSaveScreenButton = findViewById(R.id.agentQuickSaveScreenButton)
         agentQuickSearchKnowledgeButton = findViewById(R.id.agentQuickSearchKnowledgeButton)
         agentQuickPermissionsButton = findViewById(R.id.agentQuickPermissionsButton)
+        agentPermissionModeButton = findViewById(R.id.agentPermissionModeButton)
+        agentHighRiskGuardButton = findViewById(R.id.agentHighRiskGuardButton)
         agentCurrentAppText = findViewById(R.id.agentCurrentAppText)
         agentCallableTargetsText = findViewById(R.id.agentCallableTargetsText)
         agentRunningTasksText = findViewById(R.id.agentRunningTasksText)
@@ -752,6 +756,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         agentQuickPermissionsButton.setOnClickListener {
             showOnDeviceAgentFeaturePage()
+        }
+        agentPermissionModeButton.setOnClickListener {
+            val next = nextAgentPermissionMode(mobileNativeAgent.safetySettings().permissionMode)
+            renderAgentState(mobileNativeAgent.updatePermissionMode(next))
+            Toast.makeText(this, getString(R.string.on_device_agent_mode_changed, permissionModeLabel(next)), Toast.LENGTH_SHORT).show()
+        }
+        agentHighRiskGuardButton.setOnClickListener {
+            val next = !mobileNativeAgent.safetySettings().highRiskGuard
+            renderAgentState(mobileNativeAgent.updateHighRiskGuard(next))
         }
         agentKnowledgeText.setOnClickListener { openAgentKnowledgeImportPicker() }
         agentSubmitButton.setOnClickListener { handleAgentPrimaryAction() }
@@ -1613,6 +1626,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             state.runtimeContext.knowledgeStats.itemCount,
             state.runtimeContext.knowledgeStats.sourceCount,
             state.runtimeContext.knowledgeItems.size
+        )
+        val safetySettings = mobileNativeAgent.safetySettings()
+        agentPermissionModeButton.text = getString(
+            R.string.agent_safety_permission_mode_value,
+            permissionModeLabel(safetySettings.permissionMode)
+        )
+        agentHighRiskGuardButton.text = getString(
+            R.string.agent_safety_high_risk_guard_value,
+            onOffLabel(safetySettings.highRiskGuard)
+        )
+        agentHighRiskGuardButton.setTextColor(
+            if (safetySettings.highRiskGuard) getColorCompat(R.color.wechat_green) else getColorCompat(R.color.text_secondary)
         )
         agentVoiceButton.text = if (pendingAction != null) getString(R.string.agent_cancel_button) else getString(R.string.agent_voice_button)
         agentSubmitButton.text = if (pendingAction != null) getString(R.string.agent_confirm_button) else "›"
@@ -5317,15 +5342,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun cycleAgentPermissionMode() {
         val current = mobileNativeAgent.safetySettings().permissionMode
-        val next = when (current) {
-            PermissionMode.OBSERVE_ONLY -> PermissionMode.SUGGEST_ONLY
-            PermissionMode.SUGGEST_ONLY -> PermissionMode.ASK_BEFORE_ACTION
-            PermissionMode.ASK_BEFORE_ACTION -> PermissionMode.AUTO_LOW_RISK
-            PermissionMode.AUTO_LOW_RISK -> PermissionMode.OBSERVE_ONLY
-        }
+        val next = nextAgentPermissionMode(current)
         mobileNativeAgent.updatePermissionMode(next)
         Toast.makeText(this, getString(R.string.on_device_agent_mode_changed, permissionModeLabel(next)), Toast.LENGTH_SHORT).show()
         showOnDeviceAgentFeaturePage()
+    }
+
+    private fun nextAgentPermissionMode(current: PermissionMode): PermissionMode = when (current) {
+        PermissionMode.OBSERVE_ONLY -> PermissionMode.SUGGEST_ONLY
+        PermissionMode.SUGGEST_ONLY -> PermissionMode.ASK_BEFORE_ACTION
+        PermissionMode.ASK_BEFORE_ACTION -> PermissionMode.AUTO_LOW_RISK
+        PermissionMode.AUTO_LOW_RISK -> PermissionMode.OBSERVE_ONLY
     }
 
     private fun toggleAgentHighRiskGuard() {
