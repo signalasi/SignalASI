@@ -15,7 +15,7 @@ object ScreenPerceptionState {
             isAccessibilityEnabled = false
         )
         return ScreenContext(
-            foregroundApp = snapshot.packageName.ifBlank { defaultApp },
+            foregroundApp = displayPackageName(snapshot.packageName, defaultApp),
             activityName = snapshot.className,
             pageTitle = snapshot.pageTitle.ifBlank { defaultTitle },
             visibleTextCount = snapshot.visibleTexts.size,
@@ -31,6 +31,15 @@ object ScreenPerceptionState {
             isAccessibilityEnabled = true,
             snapshotAgeMillis = System.currentTimeMillis() - snapshot.timestampMillis
         )
+    }
+
+    private fun displayPackageName(packageName: String, defaultApp: String): String {
+        val resolvedPackage = packageName.ifBlank { defaultApp }
+        return if (resolvedPackage == "com.signalasi.chat" && defaultApp == "SignalASI") {
+            defaultApp
+        } else {
+            resolvedPackage
+        }
     }
 }
 

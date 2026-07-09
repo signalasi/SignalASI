@@ -182,10 +182,15 @@ private object AccessibilityTreeReader {
         private val inputFields = mutableListOf<ScreenElement>()
         private val scrollableRegions = mutableListOf<ScreenElement>()
         private val sensitiveFlags = mutableListOf<String>()
+        private val packageCounts = mutableMapOf<String, Int>()
 
         fun collect(node: AccessibilityNodeInfo?) {
             if (node == null || visitedNodes >= MAX_NODES) return
             visitedNodes += 1
+            val nodePackage = node.packageName?.toString().orEmpty()
+            if (nodePackage.isNotBlank()) {
+                packageCounts[nodePackage] = (packageCounts[nodePackage] ?: 0) + 1
+            }
 
             val label = node.text?.toString()?.trim().orEmpty()
             val description = node.contentDescription?.toString()?.trim().orEmpty()
@@ -212,7 +217,7 @@ private object AccessibilityTreeReader {
         }
 
         fun toSnapshot(): AccessibilityScreenSnapshot = AccessibilityScreenSnapshot(
-            packageName = packageName,
+            packageName = resolvedPackageName(),
             className = className,
             pageTitle = firstTitle,
             visibleTexts = visibleTexts.toList(),
@@ -221,6 +226,12 @@ private object AccessibilityTreeReader {
             scrollableRegions = scrollableRegions.toList(),
             sensitiveFlags = sensitiveFlags.distinct().take(MAX_FLAG_ITEMS)
         )
+
+        private fun resolvedPackageName(): String = packageCounts
+            .maxByOrNull { it.value }
+            ?.key
+            ?.ifBlank { packageName }
+            ?: packageName
 
         private fun maybeFlagSensitive(value: String) {
             val lower = value.lowercase()
