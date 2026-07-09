@@ -183,7 +183,7 @@ class MobileNativeAgent(
         }
         val nextAction = plan.actions.firstOrNull { it.status == AgentActionStatus.PENDING_CONFIRMATION }
             ?: return snapshot()
-        return executePlannedAction(plan, nextAction)
+        return executePlannedAction(plan, nextAction, userConfirmed = true)
     }
 
     private fun executeFirstPendingAction(): AgentUiState {
@@ -191,10 +191,14 @@ class MobileNativeAgent(
         val nextAction = plan.actions.firstOrNull {
             it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
         } ?: return snapshot()
-        return executePlannedAction(plan, nextAction)
+        return executePlannedAction(plan, nextAction, userConfirmed = false)
     }
 
-    private fun executePlannedAction(plan: AgentPlan, nextAction: AgentAction): AgentUiState {
+    private fun executePlannedAction(
+        plan: AgentPlan,
+        nextAction: AgentAction,
+        userConfirmed: Boolean
+    ): AgentUiState {
         phase = AgentPhase.EXECUTING
         currentPlan = plan.markAction(nextAction.id, AgentActionStatus.RUNNING)
         currentScreen = perceptionProvider.capture()
@@ -219,6 +223,7 @@ class MobileNativeAgent(
         phase = when {
             lastActionResult?.success != true -> AgentPhase.FAILED
             hasNextAction && updatedPlan?.safetyReview?.requiresConfirmation == false -> {
+                recordAudit(AgentAuditEvent.INVOCATION_AUDIT, invocationAuditDetail(updatedPlan, nextAction, lastActionResult, userConfirmed))
                 recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${nextAction.kind}:${finalStatus}")
                 saveTaskRecord()
                 return executeFirstPendingAction()
@@ -226,6 +231,7 @@ class MobileNativeAgent(
             hasNextAction -> AgentPhase.WAITING_CONFIRMATION
             else -> AgentPhase.COMPLETED
         }
+        updatedPlan?.let { recordAudit(AgentAuditEvent.INVOCATION_AUDIT, invocationAuditDetail(it, nextAction, lastActionResult, userConfirmed)) }
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${nextAction.kind}:${finalStatus}")
         saveTaskRecord()
         return snapshot()
@@ -515,6 +521,35 @@ class MobileNativeAgent(
             auditTrail.removeAt(0)
         }
         persistSession()
+    }
+
+    private fun invocationAuditDetail(
+        plan: AgentPlan,
+        action: AgentAction,
+        result: AgentActionResult?,
+        userConfirmed: Boolean
+    ): String {
+        val prompt = action.parameters["prompt"].orEmpty()
+        val inputLength = prompt.ifBlank { currentGoal }.length
+        val inputHash = prompt.ifBlank { currentGoal }.hashCode().toString()
+        val permissionScope = plan.requiredPermissions
+            .filter { it.required }
+            .joinToString("|") { "${it.id}:${if (it.granted) "ready" else "missing"}" }
+            .ifBlank { "none" }
+        val response = result?.message.orEmpty().take(96).ifBlank { "-" }
+        val failure = if (result?.success == false) response else "-"
+        return listOf(
+            "target=${plan.route.targetTitle.ifBlank { action.target }}",
+            "route=${plan.route.kind.name}",
+            "action=${action.kind.name}",
+            "input_hash=$inputHash",
+            "input_length=$inputLength",
+            "permissions=$permissionScope",
+            "sensitive_flags=${currentScreen.sensitiveFlagCount}",
+            "confirmed=$userConfirmed",
+            "response=$response",
+            "failure=$failure"
+        ).joinToString("; ")
     }
 
     private fun restoreSession(session: AgentSessionSnapshot?) {
@@ -2546,6 +2581,7 @@ enum class AgentCapability {
 enum class AgentAuditEvent {
     SCREEN_OBSERVED,
     GOAL_RECEIVED,
+    INVOCATION_AUDIT,
     ACTION_EXECUTED,
     ACTION_BLOCKED,
     TASK_CANCELLED,
