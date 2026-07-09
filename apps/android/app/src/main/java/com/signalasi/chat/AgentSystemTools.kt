@@ -3,6 +3,7 @@ package com.signalasi.chat
 import android.content.Intent
 import android.net.Uri
 import android.provider.CalendarContract
+import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.provider.Settings
 
@@ -12,7 +13,7 @@ object AgentSystemToolPlanner {
     fun actionFor(request: AgentRequest): AgentAction? {
         val goal = request.goal.trim()
         val lower = goal.lowercase()
-        commonToolAction(lower)?.let { return it }
+        commonToolAction(goal, lower)?.let { return it }
         return when {
             lower.contains("open wifi settings") || lower == "wifi settings" -> intentAction(
                 id = "open-wifi-settings",
@@ -215,6 +216,10 @@ object AgentSystemToolPlanner {
                 )
             }
             lower.contains("set alarm") || lower.contains("open alarms") || lower.contains("open alarm") -> alarmAction(goal, lower)
+            lower.contains("set timer") ||
+                lower.contains("start timer") ||
+                lower.contains("open timers") ||
+                lower.contains("open timer") -> timerAction(goal, lower)
             lower.contains("long press first") || lower.contains("press and hold first") -> {
                 val firstElement = request.screen.clickableElements.firstOrNull()
                 AgentAction(
@@ -231,7 +236,7 @@ object AgentSystemToolPlanner {
         }
     }
 
-    private fun commonToolAction(lower: String): AgentAction? = when {
+    private fun commonToolAction(goal: String, lower: String): AgentAction? = when {
         lower.contains("open wechat") -> packageAction(
             id = "open-wechat",
             target = "WeChat",
@@ -244,6 +249,23 @@ object AgentSystemToolPlanner {
             target = "Camera",
             description = "Open camera",
             intentAction = MediaStore.ACTION_IMAGE_CAPTURE,
+            risk = AgentRisk.LOW
+        )
+        lower.contains("open gallery") || lower.contains("open photos") -> intentAction(
+            id = "open-gallery",
+            target = "Photos",
+            description = "Open photos",
+            intentAction = Intent.ACTION_VIEW,
+            uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI.toString(),
+            risk = AgentRisk.LOW
+        )
+        lower.contains("pick image") || lower.contains("select image") || lower.contains("choose photo") -> intentAction(
+            id = "pick-image",
+            target = "Image Picker",
+            description = "Select image",
+            intentAction = Intent.ACTION_OPEN_DOCUMENT,
+            type = "image/*",
+            category = Intent.CATEGORY_OPENABLE,
             risk = AgentRisk.LOW
         )
         lower.contains("install apk") || lower.contains("install app") -> intentAction(
@@ -310,12 +332,28 @@ object AgentSystemToolPlanner {
                 target = "Credentials and Permissions",
                 description = "Credentials, login approvals, and permission grants are protected"
             )
+        lower.startsWith("dial ") || lower.startsWith("call ") -> intentAction(
+            id = "dial-number",
+            target = "Phone",
+            description = "Open phone dialer with number",
+            intentAction = Intent.ACTION_DIAL,
+            uri = "tel:${Uri.encode(goal.substringAfter(' ').trim())}",
+            risk = AgentRisk.HIGH
+        )
         lower.contains("open phone") || lower.contains("open dialer") || lower.contains("make phone call") -> intentAction(
             id = "open-phone",
             target = "Phone",
             description = "Open phone dialer",
             intentAction = Intent.ACTION_DIAL,
             uri = "tel:",
+            risk = AgentRisk.HIGH
+        )
+        lower.startsWith("sms ") || lower.startsWith("message ") -> intentAction(
+            id = "open-sms-thread",
+            target = "Messages",
+            description = "Open message composer",
+            intentAction = Intent.ACTION_VIEW,
+            uri = "sms:${Uri.encode(goal.substringAfter(' ').trim())}",
             risk = AgentRisk.HIGH
         )
         lower.contains("open messages") || lower.contains("open sms") || lower.contains("send sms") -> intentAction(
@@ -341,6 +379,15 @@ object AgentSystemToolPlanner {
             intentAction = Intent.ACTION_VIEW,
             uri = "content://contacts/people/",
             risk = AgentRisk.LOW
+        )
+        lower.startsWith("add contact ") || lower.startsWith("create contact ") -> intentAction(
+            id = "add-contact",
+            target = "Contacts",
+            description = "Create contact",
+            intentAction = Intent.ACTION_INSERT,
+            type = ContactsContract.RawContacts.CONTENT_TYPE,
+            risk = AgentRisk.MEDIUM,
+            extras = mapOf("contact_name" to goal.substringAfter(' ').substringAfter(' ').trim())
         )
         lower.contains("open files") || lower.contains("open file manager") -> intentAction(
             id = "open-files",
@@ -450,6 +497,31 @@ object AgentSystemToolPlanner {
         )
     }
 
+    private fun timerAction(goal: String, lower: String): AgentAction {
+        val match = Regex("""(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b""")
+            .find(lower)
+        val amount = match?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val unit = match?.groupValues?.getOrNull(2).orEmpty()
+        val seconds = when {
+            amount == null -> null
+            unit.startsWith("h") -> amount * 3600
+            unit.startsWith("m") -> amount * 60
+            else -> amount
+        }?.coerceIn(1, 24 * 60 * 60)
+        return AgentAction(
+            id = if (seconds == null) "open-timer" else "set-timer",
+            kind = AgentActionKind.SET_ALARM,
+            target = if (seconds == null) "Timer App" else "Android Timer",
+            risk = AgentRisk.MEDIUM,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = if (seconds == null) "Open timer app" else "Set timer for $seconds seconds",
+            parameters = buildMap {
+                put("label", goal)
+                if (seconds != null) put("timer_seconds", seconds.toString())
+            }
+        )
+    }
+
     private fun normalizeUrl(value: String): String {
         if (value.isBlank()) return ""
         return if (value.startsWith("http://") || value.startsWith("https://")) value else "https://$value"
@@ -507,11 +579,11 @@ object AgentSystemToolPlanner {
         ),
         AgentSystemTool(
             id = "alarm",
-            title = "Alarm Handoff",
+            title = "Alarm And Timer Handoff",
             kind = AgentActionKind.SET_ALARM,
             risk = AgentRisk.MEDIUM,
             capabilities = listOf(AgentCapability.SYSTEM_SETTINGS, AgentCapability.TASK_EXECUTION),
-            examples = listOf("set alarm 07:30", "open alarms")
+            examples = listOf("set alarm 07:30", "open alarms", "set timer 5 minutes")
         ),
         AgentSystemTool(
             id = "gesture",
@@ -527,7 +599,7 @@ object AgentSystemToolPlanner {
             kind = AgentActionKind.OPEN_APP,
             risk = AgentRisk.MEDIUM,
             capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.TASK_EXECUTION),
-            examples = listOf("open phone", "open messages", "open camera", "open wechat")
+            examples = listOf("open phone", "dial 10086", "open messages", "open camera", "pick image")
         )
     )
 }

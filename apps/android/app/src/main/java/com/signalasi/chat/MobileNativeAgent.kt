@@ -19,6 +19,7 @@ import android.os.PowerManager
 import android.os.StatFs
 import android.provider.AlarmClock
 import android.provider.CalendarContract
+import android.provider.ContactsContract
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
@@ -1935,6 +1936,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         val extraText = action.parameters["extra_text"].orEmpty()
         val title = action.parameters["title"].orEmpty()
         val calendarTitle = action.parameters["calendar_title"].orEmpty()
+        val contactName = action.parameters["contact_name"].orEmpty()
         val intent = when {
             intentAction.isNotBlank() -> Intent(intentAction).apply {
                 when {
@@ -1946,6 +1948,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 if (extraText.isNotBlank()) putExtra(Intent.EXTRA_TEXT, extraText)
                 if (title.isNotBlank()) putExtra(Intent.EXTRA_TITLE, title)
                 if (calendarTitle.isNotBlank()) putExtra(CalendarContract.Events.TITLE, calendarTitle)
+                if (contactName.isNotBlank()) putExtra(ContactsContract.Intents.Insert.NAME, contactName)
             }
             packageName.isNotBlank() -> context.packageManager.getLaunchIntentForPackage(packageName)
             else -> null
@@ -2044,20 +2047,30 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
     }
 
     private fun setAlarm(action: AgentAction): AgentActionResult {
+        val timerSeconds = action.parameters["timer_seconds"]?.toIntOrNull()
         val hour = action.parameters["hour"]?.toIntOrNull()
         val minute = action.parameters["minute"]?.toIntOrNull()
-        val intent = if (hour != null && minute != null) {
-            Intent(AlarmClock.ACTION_SET_ALARM)
+        val intent = when {
+            timerSeconds != null -> Intent(AlarmClock.ACTION_SET_TIMER)
+                .putExtra(AlarmClock.EXTRA_LENGTH, timerSeconds)
+                .putExtra(AlarmClock.EXTRA_MESSAGE, "SignalASI")
+                .putExtra(AlarmClock.EXTRA_SKIP_UI, false)
+            action.id == "open-timer" -> Intent(AlarmClock.ACTION_SHOW_TIMERS)
+            hour != null && minute != null -> Intent(AlarmClock.ACTION_SET_ALARM)
                 .putExtra(AlarmClock.EXTRA_HOUR, hour)
                 .putExtra(AlarmClock.EXTRA_MINUTES, minute)
                 .putExtra(AlarmClock.EXTRA_MESSAGE, "SignalASI")
-        } else {
-            Intent(AlarmClock.ACTION_SHOW_ALARMS)
+            else -> Intent(AlarmClock.ACTION_SHOW_ALARMS)
         }
         return launchIntent(
             actionId = action.id,
             intent = intent,
-            successMessage = if (hour != null && minute != null) "Alarm handoff started" else "Opened alarm app"
+            successMessage = when {
+                timerSeconds != null -> "Timer handoff started"
+                action.id == "open-timer" -> "Opened timer app"
+                hour != null && minute != null -> "Alarm handoff started"
+                else -> "Opened alarm app"
+            }
         )
     }
 
