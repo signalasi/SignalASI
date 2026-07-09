@@ -651,6 +651,9 @@ class MobileNativeAgent(
             append("\nclipboard_hash=").append(screen.clipboard.textHash)
             append("\nclipboard_length=").append(screen.clipboard.textLength)
         }
+        if (screen.selectedText.isNotBlank()) {
+            append("\nselected_text_length=").append(screen.selectedText.length)
+        }
         if (screen.notifications.items.isNotEmpty()) {
             append("\nnotification_count=").append(screen.notifications.items.size)
             append("\nnotification_packages=")
@@ -1829,6 +1832,9 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             append("Visible text count: ").append(screen.visibleTextCount).append('\n')
             append("Clickable action count: ").append(screen.clickableNodeCount).append('\n')
             append("Input field count: ").append(screen.inputFieldCount).append('\n')
+            if (screen.selectedText.isNotBlank()) {
+                append("Selected text: ").append(screen.selectedText.take(500)).append('\n')
+            }
             if (screen.clipboard.hasText) {
                 append("Clipboard: ").append(screen.clipboard.textLength)
                     .append(" chars / hash ").append(screen.clipboard.textHash).append('\n')
@@ -2456,6 +2462,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("input_field_count", screen.inputFieldCount)
         .put("scrollable_region_count", screen.scrollableRegionCount)
         .put("sensitive_flag_count", screen.sensitiveFlagCount)
+        .put("selected_text", screen.selectedText)
         .put("visible_texts", JSONArray().also { array ->
             screen.visibleTexts.forEach { array.put(it) }
         })
@@ -2483,6 +2490,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
             inputFieldCount = json.optInt("input_field_count"),
             scrollableRegionCount = json.optInt("scrollable_region_count"),
             sensitiveFlagCount = json.optInt("sensitive_flag_count"),
+            selectedText = json.optString("selected_text"),
             visibleTexts = decodeStringList(json.optJSONArray("visible_texts")),
             clickableElements = decodeElements(json.optJSONArray("clickable_elements")),
             inputFields = decodeElements(json.optJSONArray("input_fields")),
@@ -3006,6 +3014,7 @@ data class ScreenContext(
     val scrollableRegionCount: Int = 0,
     val sensitiveFlagCount: Int = 0,
     val visibleTexts: List<String> = emptyList(),
+    val selectedText: String = "",
     val clickableElements: List<ScreenElement> = emptyList(),
     val inputFields: List<ScreenElement> = emptyList(),
     val scrollableRegions: List<ScreenElement> = emptyList(),

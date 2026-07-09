@@ -228,6 +228,7 @@ private object AccessibilityTreeReader {
         private val scrollableRegions = mutableListOf<ScreenElement>()
         private val sensitiveFlags = mutableListOf<String>()
         private val packageCounts = mutableMapOf<String, Int>()
+        private var selectedText = ""
 
         fun collect(node: AccessibilityNodeInfo?) {
             if (node == null || visitedNodes >= MAX_NODES) return
@@ -245,6 +246,7 @@ private object AccessibilityTreeReader {
                 addLimited(visibleTexts, displayLabel, MAX_TEXT_ITEMS)
                 maybeFlagSensitive(displayLabel)
             }
+            captureSelectedText(node, label)
 
             val element = ScreenElement(
                 label = displayLabel.ifBlank { node.className?.toString().orEmpty() },
@@ -266,6 +268,7 @@ private object AccessibilityTreeReader {
             className = className,
             pageTitle = firstTitle,
             visibleTexts = visibleTexts.toList(),
+            selectedText = selectedText,
             clickableElements = clickableElements.toList(),
             inputFields = inputFields.toList(),
             scrollableRegions = scrollableRegions.toList(),
@@ -283,6 +286,15 @@ private object AccessibilityTreeReader {
             sensitiveKeywords.firstOrNull { keyword -> lower.contains(keyword) }?.let { keyword ->
                 addLimited(sensitiveFlags, keyword, MAX_FLAG_ITEMS)
             }
+        }
+
+        private fun captureSelectedText(node: AccessibilityNodeInfo, label: String) {
+            if (selectedText.isNotBlank() || label.isBlank()) return
+            val start = node.textSelectionStart
+            val end = node.textSelectionEnd
+            if (start < 0 || end <= start || start >= label.length) return
+            selectedText = label.substring(start, end.coerceAtMost(label.length)).trim().take(240)
+            if (selectedText.isNotBlank()) maybeFlagSensitive(selectedText)
         }
 
         private fun <T> addLimited(target: MutableList<T>, item: T, limit: Int) {

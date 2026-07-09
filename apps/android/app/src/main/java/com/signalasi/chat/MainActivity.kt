@@ -2377,6 +2377,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val visibleTexts = screen.visibleTexts
             .filter { matchesScreenQuery(it, normalizedQuery) }
             .take(5)
+        val selectedTextMatches = screen.selectedText.isNotBlank() &&
+            matchesScreenQuery(screen.selectedText, normalizedQuery)
         val actions = screen.clickableElements
             .filter { matchesScreenQuery(it.label, normalizedQuery) || matchesScreenQuery(it.viewId, normalizedQuery) }
             .take(5)
@@ -2410,11 +2412,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             .take(if (normalizedQuery.isBlank()) 4 else 8)
 
-        val hasAny = clipboardMatches || notificationsMatch || deviceStatusMatches || launchableApps.isNotEmpty() || visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty()
+        val hasAny = selectedTextMatches || clipboardMatches || notificationsMatch || deviceStatusMatches || launchableApps.isNotEmpty() || visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty()
         agentScreenDetailList.addView(agentScreenSummaryRow(screen))
         if (!hasAny) {
             agentScreenDetailList.addView(agentScreenEmptyRow(getString(R.string.agent_screen_empty)))
             return
+        }
+        if (selectedTextMatches) {
+            addScreenTextSection(getString(R.string.agent_screen_selected_text), listOf(screen.selectedText))
         }
         if (clipboardMatches) {
             addScreenClipboardSection(screen.clipboard)
