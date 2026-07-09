@@ -24,6 +24,7 @@ class MobileNativeAgent(
     private val safetyPolicy: AgentSafetyPolicy = DefaultAgentSafetyPolicy(),
     private val actionExecutor: AgentActionExecutor = AndroidAgentActionExecutor(context),
     private val memoryStore: AgentMemoryStore = SharedPreferencesAgentMemoryStore(context),
+    private val knowledgeStore: AgentKnowledgeStore = SharedPreferencesAgentKnowledgeStore(context),
     private val connectorRegistry: AgentConnectorRegistry = StaticAgentConnectorRegistry(),
     private val sessionStore: AgentSessionStore = SharedPreferencesAgentSessionStore(context)
 ) {
@@ -45,7 +46,9 @@ class MobileNativeAgent(
             goal = currentGoal,
             screen = currentScreen,
             targets = targets,
-            memories = emptyList()
+            memories = emptyList(),
+            knowledgeItems = knowledgeStore.search(currentGoal),
+            knowledgeStats = knowledgeStore.stats()
         )
         return AgentUiState(
             phase = phase,
@@ -102,11 +105,14 @@ class MobileNativeAgent(
         currentScreen = perceptionProvider.capture()
         val targets = connectorRegistry.availableTargets()
         val memories = memoryStore.recall(currentGoal)
+        val knowledgeItems = knowledgeStore.search(currentGoal)
         val context = buildRuntimeContext(
             goal = currentGoal,
             screen = currentScreen,
             targets = targets,
-            memories = memories
+            memories = memories,
+            knowledgeItems = knowledgeItems,
+            knowledgeStats = knowledgeStore.stats()
         )
         val draftPlan = planner.plan(
             request = AgentRequest(
@@ -126,6 +132,15 @@ class MobileNativeAgent(
         }
         lastActionResult = null
         memoryStore.remember(AgentMemoryItem(kind = AgentMemoryKind.TASK, value = currentGoal))
+        knowledgeStore.upsert(
+            AgentKnowledgeItem(
+                kind = AgentKnowledgeKind.TASK,
+                title = currentGoal.take(80),
+                content = buildKnowledgeContent(currentGoal, currentScreen, context),
+                source = "agent_runtime",
+                tags = listOf("task", currentScreen.foregroundApp)
+            )
+        )
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, "goal:${currentGoal.take(48)}")
         if (safetyReview.blocked) {
             recordAudit(AgentAuditEvent.ACTION_BLOCKED, safetyReview.reason.ifBlank { "blocked" })
@@ -211,7 +226,9 @@ class MobileNativeAgent(
         goal: String,
         screen: ScreenContext,
         targets: List<AgentCallableTarget>,
-        memories: List<AgentMemoryItem>
+        memories: List<AgentMemoryItem>,
+        knowledgeItems: List<AgentKnowledgeItem> = emptyList(),
+        knowledgeStats: AgentKnowledgeStats = AgentKnowledgeStats()
     ): AgentRuntimeContext = AgentRuntimeContextBuilder.build(
         sessionId = sessionId,
         goal = goal,
@@ -219,8 +236,27 @@ class MobileNativeAgent(
         permissionMode = safetyPolicy.permissionMode(),
         highRiskGuard = safetyPolicy.highRiskGuardEnabled(),
         callableTargets = targets,
-        memories = memories
+        memories = memories,
+        knowledgeItems = knowledgeItems,
+        knowledgeStats = knowledgeStats
     )
+
+    private fun buildKnowledgeContent(
+        goal: String,
+        screen: ScreenContext,
+        context: AgentRuntimeContext
+    ): String = buildString {
+        append("goal=").append(goal)
+        append("\napp=").append(screen.foregroundApp)
+        append("\npage=").append(screen.pageTitle)
+        append("\ntexts=").append(screen.visibleTextCount)
+        append("\nactions=").append(screen.clickableNodeCount)
+        append("\nmode=").append(context.permissionMode.name)
+        if (context.knowledgeItems.isNotEmpty()) {
+            append("\nrelated_knowledge=")
+            append(context.knowledgeItems.joinToString("; ") { it.title.take(60) })
+        }
+    }
 
     private fun recordAudit(event: AgentAuditEvent, detail: String) {
         auditTrail.add(AgentAuditEntry(event = event, detail = detail, timestampMillis = System.currentTimeMillis()))

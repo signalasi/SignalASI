@@ -9,6 +9,8 @@ data class AgentRuntimeContext(
     val systemTools: List<AgentSystemTool>,
     val callableTargets: List<AgentCallableTarget>,
     val memories: List<AgentMemoryItem>,
+    val knowledgeItems: List<AgentKnowledgeItem>,
+    val knowledgeStats: AgentKnowledgeStats,
     val createdAtMillis: Long = System.currentTimeMillis()
 ) {
     val callableCount: Int
@@ -22,6 +24,8 @@ data class AgentRuntimeContext(
         append("; tools=").append(systemTools.size)
         append("; targets=").append(callableTargets.size)
         append("; memories=").append(memories.size)
+        append("; knowledge=").append(knowledgeStats.itemCount)
+        append("; knowledge_hits=").append(knowledgeItems.size)
         append("; mode=").append(permissionMode.name)
     }
 }
@@ -43,7 +47,9 @@ object AgentRuntimeContextBuilder {
         permissionMode: PermissionMode,
         highRiskGuard: Boolean,
         callableTargets: List<AgentCallableTarget>,
-        memories: List<AgentMemoryItem>
+        memories: List<AgentMemoryItem>,
+        knowledgeItems: List<AgentKnowledgeItem> = emptyList(),
+        knowledgeStats: AgentKnowledgeStats = AgentKnowledgeStats()
     ): AgentRuntimeContext = AgentRuntimeContext(
         sessionId = sessionId,
         goal = goal,
@@ -52,6 +58,8 @@ object AgentRuntimeContextBuilder {
         highRiskGuard = highRiskGuard,
         systemTools = AgentSystemToolPlanner.availableTools(),
         callableTargets = callableTargets,
-        memories = memories
+        memories = memories,
+        knowledgeItems = knowledgeItems,
+        knowledgeStats = knowledgeStats
     )
 }
