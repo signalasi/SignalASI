@@ -158,6 +158,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentQuickPermissionsButton: TextView
     private lateinit var agentPermissionModeButton: TextView
     private lateinit var agentHighRiskGuardButton: TextView
+    private lateinit var agentToolboxList: LinearLayout
     private lateinit var agentCurrentAppText: TextView
     private lateinit var agentCallableTargetsText: TextView
     private lateinit var agentRunningTasksText: TextView
@@ -340,6 +341,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentQuickPermissionsButton = findViewById(R.id.agentQuickPermissionsButton)
         agentPermissionModeButton = findViewById(R.id.agentPermissionModeButton)
         agentHighRiskGuardButton = findViewById(R.id.agentHighRiskGuardButton)
+        agentToolboxList = findViewById(R.id.agentToolboxList)
         agentCurrentAppText = findViewById(R.id.agentCurrentAppText)
         agentCallableTargetsText = findViewById(R.id.agentCallableTargetsText)
         agentRunningTasksText = findViewById(R.id.agentRunningTasksText)
@@ -1673,6 +1675,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
             )
         }
+        renderAgentToolbox(state)
         renderAgentActionQueue(state)
         renderAgentRequirements(state)
         renderAgentPlanContext(state)
@@ -1681,6 +1684,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         renderAgentAuditTrail(state)
         latestAgentScreenContext = state.currentScreen
         renderAgentScreenDetails(state.currentScreen)
+    }
+
+    private fun renderAgentToolbox(state: AgentUiState) {
+        agentToolboxList.removeAllViews()
+        val tools = state.runtimeContext.systemTools.take(6)
+        if (tools.isEmpty()) {
+            agentToolboxList.addView(agentToolboxEmptyRow())
+            return
+        }
+        tools.forEachIndexed { index, tool ->
+            agentToolboxList.addView(agentToolboxRow(tool, index))
+        }
     }
 
     private fun renderAgentRecentTasks(state: AgentUiState) {
@@ -1763,6 +1778,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         events.forEachIndexed { index, entry ->
             agentAuditTrailList.addView(agentAuditRow(entry, index))
+        }
+    }
+
+    private fun agentToolboxEmptyRow(): View {
+        return TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48)
+            )
+            setBackgroundResource(R.drawable.agent_step_background)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), 0, dp(14), 0)
+            setTextColor(getColorCompat(R.color.text_secondary))
+            textSize = 13f
+            text = getString(R.string.agent_toolbox_empty)
         }
     }
 
@@ -1853,6 +1883,71 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             setTextColor(getColorCompat(R.color.text_secondary))
             textSize = 13f
             text = getString(R.string.agent_audit_empty)
+        }
+    }
+
+    private fun agentToolboxRow(tool: AgentSystemTool, index: Int): View {
+        val statusColor = when (tool.risk) {
+            AgentRisk.LOW -> getColorCompat(R.color.wechat_green)
+            AgentRisk.MEDIUM -> getColorCompat(R.color.signalasi_green)
+            AgentRisk.HIGH,
+            AgentRisk.BLOCKED -> getColorCompat(R.color.unread_red)
+        }
+        val example = tool.examples.firstOrNull().orEmpty()
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundResource(R.drawable.agent_step_background)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                if (index > 0) topMargin = dp(8)
+            }
+            if (example.isNotBlank()) {
+                setOnClickListener { prefillAgentGoal(example) }
+            }
+
+            addView(TextView(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(9), dp(9)).apply {
+                    marginEnd = dp(12)
+                }
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(statusColor)
+                }
+            })
+
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                addView(TextView(this@MainActivity).apply {
+                    setTextColor(getColorCompat(R.color.text_primary))
+                    textSize = 13f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    text = tool.title
+                })
+                addView(TextView(this@MainActivity).apply {
+                    setTextColor(getColorCompat(R.color.text_secondary))
+                    textSize = 11f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    text = example.ifBlank { tool.kind.name.lowercase(Locale.US).replace('_', ' ') }
+                })
+            })
+
+            addView(TextView(this@MainActivity).apply {
+                setTextColor(statusColor)
+                textSize = 12f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                text = getString(
+                    R.string.agent_toolbox_meta,
+                    tool.kind.name.lowercase(Locale.US).replace('_', ' '),
+                    tool.risk.name.lowercase(Locale.US)
+                )
+            })
         }
     }
 

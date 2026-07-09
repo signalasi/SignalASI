@@ -243,6 +243,9 @@
     <string name="agent_quick_permissions">Permissions</string>
     <string name="agent_safety_permission_mode_value">Mode: %1$s</string>
     <string name="agent_safety_high_risk_guard_value">High-risk Guard: %1$s</string>
+    <string name="agent_section_toolbox">Toolbox</string>
+    <string name="agent_toolbox_empty">No local tools are available</string>
+    <string name="agent_toolbox_meta">%1$s / %2$s risk</string>
     <string name="agent_section_process">Process</string>
     <string name="agent_section_recent_tasks">Recent Tasks</string>
     <string name="agent_recent_empty">No recent Agent tasks yet</string>
