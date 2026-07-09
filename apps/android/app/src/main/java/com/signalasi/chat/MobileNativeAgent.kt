@@ -1438,6 +1438,7 @@ object AgentPlanFactory {
         val id = when {
             action.id.contains("notification-listener") -> "notification_listener_settings"
             action.id.contains("accessibility") -> "accessibility_settings"
+            action.id.contains("current-app-settings") -> "current_app_details_settings"
             action.id == "open-installed-app" -> "launch_installed_app"
             action.id.contains("camera") -> "camera_app_handoff"
             action.id.contains("phone") -> "phone_dialer_handoff"
@@ -1449,6 +1450,7 @@ object AgentPlanFactory {
         val title = when (id) {
             "notification_listener_settings" -> "Notification access settings"
             "accessibility_settings" -> "Accessibility settings"
+            "current_app_details_settings" -> "Current app details settings"
             "launch_installed_app" -> "Launch installed app"
             "camera_app_handoff" -> "Camera app handoff"
             "phone_dialer_handoff" -> "Phone dialer handoff"

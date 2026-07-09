@@ -47,6 +47,19 @@ object AgentSystemToolPlanner {
                 description = "Open notification settings",
                 intentAction = "android.settings.NOTIFICATION_SETTINGS"
             )
+            lower.contains("open current app settings") ||
+                lower.contains("open current app info") ||
+                lower.contains("open current app permissions") -> {
+                    val packageName = request.screen.foregroundApp.takeIf { "." in it }.orEmpty()
+                    intentAction(
+                        id = "open-current-app-settings",
+                        target = "Current App Settings",
+                        description = "Open current app details settings",
+                        intentAction = Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        uri = if (packageName.isNotBlank()) "package:$packageName" else "",
+                        risk = AgentRisk.MEDIUM
+                    )
+                }
             lower.contains("open battery settings") || lower == "battery settings" -> intentAction(
                 id = "open-battery-settings",
                 target = "Battery Settings",
@@ -453,6 +466,7 @@ object AgentSystemToolPlanner {
             examples = listOf(
                 "open settings",
                 "open wifi settings",
+                "open current app settings",
                 "open notification listener settings",
                 "open battery settings"
             )
