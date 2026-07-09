@@ -141,6 +141,9 @@ class MobileNativeAgent(
         memoryCommandValue(currentGoal)?.let { memoryValue ->
             return saveMemoryCommand(memoryValue)
         }
+        forgetMemoryCommandValue(currentGoal)?.let { query ->
+            return forgetMemoryCommand(query)
+        }
         knowledgeSearchCommandValue(currentGoal)?.let { query ->
             return searchKnowledgeCommand(query)
         }
@@ -368,6 +371,12 @@ class MobileNativeAgent(
         return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
     }
 
+    private fun forgetMemoryCommandValue(goal: String): String? {
+        val prefixes = listOf("forget memory ", "delete memory ", "remove memory ", "forget note ")
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
     private fun knowledgeSearchCommandValue(goal: String): String? {
         val prefixes = listOf("search knowledge ", "find knowledge ", "search memory ", "find memory ")
         val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
@@ -478,6 +487,55 @@ class MobileNativeAgent(
         phase = AgentPhase.COMPLETED
         lastActionResult = AgentActionResult(action.id, true, result)
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        saveTaskRecord(result = result)
+        return snapshot()
+    }
+
+    private fun forgetMemoryCommand(query: String): AgentUiState {
+        val deletedCount = memoryStore.delete(query)
+        val result = if (deletedCount == 0) {
+            "No matching memory for \"$query\""
+        } else {
+            "Deleted $deletedCount matching memory items"
+        }
+        val action = AgentAction(
+            id = "forget-memory",
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Memory",
+            risk = AgentRisk.MEDIUM,
+            status = AgentActionStatus.COMPLETED,
+            description = "Delete matching Agent memory",
+            parameters = mapOf("query" to query),
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Memory",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "agent-memory",
+                kind = AgentRouteKind.KNOWLEDGE,
+                targetId = "agent-memory",
+                targetTitle = "Agent Memory",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.KNOWLEDGE_SEARCH)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.MEDIUM,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.MEMORY_FORGOTTEN, "query:$query deleted:$deletedCount")
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
         saveTaskRecord(result = result)
         return snapshot()
@@ -2070,6 +2128,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
 interface AgentMemoryStore {
     fun remember(item: AgentMemoryItem)
     fun recall(query: String): List<AgentMemoryItem>
+    fun delete(query: String): Int
 }
 
 class InMemoryAgentMemoryStore : AgentMemoryStore {
@@ -2082,6 +2141,12 @@ class InMemoryAgentMemoryStore : AgentMemoryStore {
     override fun recall(query: String): List<AgentMemoryItem> = items
         .filter { it.value.contains(query, ignoreCase = true) || query.contains(it.value, ignoreCase = true) }
         .takeLast(5)
+
+    override fun delete(query: String): Int {
+        val before = items.size
+        items.removeAll { it.value.contains(query, ignoreCase = true) || query.contains(it.value, ignoreCase = true) }
+        return before - items.size
+    }
 }
 
 class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
@@ -2108,6 +2173,15 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
             .sortedWith(compareByDescending<Pair<AgentMemoryItem, Int>> { it.second }.thenByDescending { it.first.timestampMillis })
             .map { it.first }
             .take(MAX_RECALL_ITEMS)
+    }
+
+    override fun delete(query: String): Int {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) return 0
+        val items = loadItems()
+        val kept = items.filter { item -> score(item, cleanQuery) <= 0 }
+        if (kept.size != items.size) saveItems(kept)
+        return items.size - kept.size
     }
 
     private fun score(item: AgentMemoryItem, query: String): Int {
@@ -3193,6 +3267,7 @@ enum class AgentAuditEvent {
     GOAL_RECEIVED,
     INVOCATION_AUDIT,
     MEMORY_SKIPPED,
+    MEMORY_FORGOTTEN,
     ACTION_EXECUTED,
     ACTION_BLOCKED,
     TASK_CANCELLED,
