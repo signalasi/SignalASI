@@ -14,7 +14,7 @@ Product scope is defined in `docs/product/PRODUCT_REQUIREMENTS.md`.
 | Android friend flow | `npm run smoke:android:friends` | New-friend approval, deleted-contact blocking, re-add flow, contact detail routing, and contact deletion evidence work on Android. |
 | Android contact rename | `npm run smoke:android:contact-rename` | Agent contact display names can be renamed, persist with user-renamed evidence, and render on the contact detail page. |
 | Android cloud models | `npm run smoke:android:cloud-models` | Direct mobile cloud provider contacts keep provider-only names, preserve multiple model configs, and persist selected chat-header models. |
-| Android background delivery | `npm run smoke:android:background` | Offline or background message persistence, notification history, unread handling, stable MQTT client identity, and QoS 1 delivery evidence are present. |
+| Android background delivery | `npm run smoke:android:background` | Offline or background message persistence, notification history, unread badge, list timestamp, bubble timestamp, stable MQTT client identity, and QoS 1 delivery evidence are present. |
 | Android agent replies | `npm run smoke:android:agent-replies` | Hermes and Codex chat replies preserve full text and delivery trace evidence after contact switching and UI refresh. |
 | Android voice reply panel | `npm run smoke:android:voice-reply` | Long Agent replies remain visible on the Voice page response panel and are persisted in the Hermes chat history with delivery trace evidence. |
 | Android voice settings | `npm run smoke:android:voice-settings` | Wake engine, wake words, ASR provider, ASR language, TTS provider, Xiaoxiao voice, welcome text, speak-reply toggle, and default target settings persist and render. |

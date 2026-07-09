@@ -1619,6 +1619,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val openProtocolQuality = intent?.getBooleanExtra("signalasi_debug_open_protocol_quality", false) == true
         val openSignalLinkProtocol = intent?.getBooleanExtra("signalasi_debug_open_signal_link_protocol", false) == true
         val openAdvancedOptions = intent?.getBooleanExtra("signalasi_debug_open_advanced_options", false) == true
+        val openMessages = intent?.getBooleanExtra("signalasi_debug_open_messages", false) == true
         val openContactId = intent?.getStringExtra("signalasi_debug_open_contact")?.trim().orEmpty()
         val openContactDetailId = intent?.getStringExtra("signalasi_debug_open_contact_detail")?.trim().orEmpty()
         val openNewFriends = intent?.getBooleanExtra("signalasi_debug_open_new_friends", false) == true
@@ -1750,10 +1751,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             intent?.removeExtra("signalasi_debug_rename_contact")
             intent?.removeExtra("signalasi_debug_rename_name")
             intent?.removeExtra("signalasi_debug_rename_name_b64")
+            intent?.removeExtra("signalasi_debug_open_messages")
             val seededCloudContact = if (seedCloudProvider.isNotBlank() || openCloudSwitchProvider.isNotBlank()) {
                 debugSeedCloudProvider(seedCloudProvider.ifBlank { openCloudSwitchProvider })
             } else {
                 null
+            }
+            if (openMessages) {
+                reloadChatHistoryIfChanged(force = true)
+                showMainTab(PAGE_MESSAGES)
             }
             if (openContactId.isNotBlank()) {
                 reloadChatHistoryIfChanged(force = true)
@@ -1852,6 +1858,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         intent?.removeExtra("signalasi_debug_rename_contact")
         intent?.removeExtra("signalasi_debug_rename_name")
         intent?.removeExtra("signalasi_debug_rename_name_b64")
+        intent?.removeExtra("signalasi_debug_open_messages")
         intent?.removeExtra("signalasi_debug_incoming")
         intent?.removeExtra("signalasi_debug_incoming_b64")
         Log.i("SignalASIDebug", "Processing debug incoming payload")
@@ -2637,7 +2644,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             if (list.isNotEmpty()) {
                 messages[contactId] = list
                 list.lastOrNull { !it.isSystem }?.let { last ->
-                    summaries[contactId] = ContactSummary(last.content, last.timestamp, 0)
+                    val unread = list.count { message ->
+                        !message.isMine && !message.isSystem && !hasTraceStage(message, "read")
+                    }
+                    summaries[contactId] = ContactSummary(last.content, last.timestamp, unread)
                 }
             }
         }

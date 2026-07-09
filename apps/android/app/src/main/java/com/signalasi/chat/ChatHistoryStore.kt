@@ -29,6 +29,9 @@ object ChatHistoryStore {
         migrateHistoryPrefs(appContext)
         val parsed = parseIncoming(appContext, payload)
         if (parsed.content.isBlank()) return null
+        if (parsed.contactId == CONTACT_HERMES) {
+            AppStore.markHermesVerified(appContext)
+        }
         val incomingEnvelope = runCatching { JSONObject(payload) }.getOrNull()
         val deliveryTrace = parseDeliveryTrace(incomingEnvelope)
         appendTrace(deliveryTrace, "received", "background_service")

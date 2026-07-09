@@ -11,6 +11,7 @@ const activityName = `${packageName}/.MainActivity`;
 const serviceName = `${packageName}/.MessageService`;
 const outDir = path.join(root, "ui-smoke");
 const windowDump = path.join(outDir, "android-background-message.xml");
+const listDump = path.join(outDir, "android-background-list.xml");
 const foregroundHistoryDump = path.join(outDir, "android-background-history.xml");
 const historyPrefs = "shared_prefs/signalasi_chat_history.xml";
 const appStorePrefs = "shared_prefs/signalasi_app_store.xml";
@@ -47,13 +48,28 @@ function restoreAppFile(file, snapshot) {
   adb(["shell", "run-as", packageName, "tee", file], { input: snapshot, stdio: ["pipe", "ignore", "pipe"] });
 }
 
+function dumpWindow(remoteName, targetPath) {
+  adb(["shell", "uiautomator", "dump", `/sdcard/${remoteName}`]);
+  adb(["pull", `/sdcard/${remoteName}`, targetPath]);
+  return fs.readFileSync(targetPath, "utf8");
+}
+
+function minuteText(offsetMinutes = 0) {
+  const now = new Date(Date.now() + offsetMinutes * 60 * 1000);
+  return `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+}
+
+function includesAny(value, items) {
+  return items.some((item) => value.includes(item));
+}
+
 async function main() {
   if (!fs.existsSync(apkPath)) {
     fail(`Android debug APK missing. Build it first: ${apkPath}`);
   }
   fs.mkdirSync(outDir, { recursive: true });
   const token = `BG_SERVICE_${Date.now()}`;
-  const payload = token;
+  const payload = JSON.stringify({ sender: "hermes", contact_id: "hermes", content: token });
 
   log("installing debug APK");
   adb(["install", "-r", apkPath], { stdio: "inherit" });
@@ -63,6 +79,11 @@ async function main() {
   const originalHistory = readAppFile(historyPrefs);
   const originalAppStore = readAppFile(appStorePrefs);
   const originalTrust = readAppFile(trustPrefs);
+  log("resetting app state for isolated background delivery flow");
+  restoreAppFile(historyPrefs, "");
+  restoreAppFile(appStorePrefs, "");
+  restoreAppFile(trustPrefs, "");
+  adb(["shell", "am", "force-stop", packageName]);
   adb(["shell", "am", "start", "-n", activityName, "--ez", "signalasi_debug_pairing", "true"]);
   await sleep(2500);
 
@@ -81,8 +102,8 @@ async function main() {
       "-n",
       serviceName,
       "--es",
-      "signalasi_debug_service_payload",
-      payload
+      "signalasi_debug_service_payload_b64",
+      Buffer.from(payload, "utf8").toString("base64")
     ]);
     await sleep(2500);
 
@@ -98,16 +119,32 @@ async function main() {
     }
     log("background service persisted incoming message");
 
-    log("returning to foreground and verifying visible refresh");
+    log("returning to messages list and verifying unread badge plus list timestamp");
+    const expectedTimes = [minuteText(), minuteText(-1)];
+    adb(["shell", "am", "start", "-n", activityName, "--ez", "signalasi_debug_open_messages", "true"]);
+    await sleep(3500);
+    const listXml = dumpWindow("signalasi-bg-list.xml", listDump);
+    if (!listXml.includes(token)) {
+      fail(`Messages list did not show background token preview ${token}. Dump saved at ${listDump}`);
+    }
+    if (!listXml.includes('text="1"')) {
+      fail(`Messages list did not show unread badge 1. Dump saved at ${listDump}`);
+    }
+    if (!includesAny(listXml, expectedTimes)) {
+      fail(`Messages list did not show current list timestamp ${expectedTimes.join(" or ")}. Dump saved at ${listDump}`);
+    }
+
+    log("opening chat and verifying message timestamp plus read trace");
     adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_open_contact", "hermes"]);
     await sleep(3500);
-    adb(["shell", "uiautomator", "dump", "/sdcard/signalasi-bg-window.xml"]);
-    adb(["pull", "/sdcard/signalasi-bg-window.xml", windowDump]);
+    const xml = dumpWindow("signalasi-bg-window.xml", windowDump);
     const historyAfterForeground = readAppFile(historyPrefs);
     fs.writeFileSync(foregroundHistoryDump, historyAfterForeground);
-    const xml = fs.readFileSync(windowDump, "utf8");
     if (!xml.includes(token)) {
       fail(`Foreground UI did not show background token ${token}. historyHasToken=${historyAfterForeground.includes(token)} historyHasRead=${historyAfterForeground.includes("read")}. Dumps saved at ${windowDump} and ${foregroundHistoryDump}`);
+    }
+    if (!includesAny(xml, expectedTimes)) {
+      fail(`Foreground chat did not show bubble or divider timestamp ${expectedTimes.join(" or ")}. Dump saved at ${windowDump}`);
     }
     let foregroundHistory = "";
     for (let i = 0; i < 5; i += 1) {

@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Base64
 
 class MessageService : Service(), SignalASIMqttClient.Listener {
     companion object {
@@ -102,7 +103,14 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
 
     private fun handleDebugIncoming(intent: Intent?) {
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
-        val payload = intent?.getStringExtra("signalasi_debug_service_payload")?.trim().orEmpty()
+        val encodedPayload = intent?.getStringExtra("signalasi_debug_service_payload_b64")?.trim().orEmpty()
+        val payload = if (encodedPayload.isNotBlank()) {
+            runCatching {
+                String(Base64.decode(encodedPayload, Base64.DEFAULT), Charsets.UTF_8).trim()
+            }.getOrDefault("")
+        } else {
+            intent?.getStringExtra("signalasi_debug_service_payload")?.trim().orEmpty()
+        }
         if (payload.isBlank()) return
         ChatHistoryStore.appendIncoming(this, payload)?.let {
             showIncomingNotification(it)

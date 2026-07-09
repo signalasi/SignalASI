@@ -923,12 +923,17 @@ object AppStore {
             val isLegacyHermes = id == "hermes" ||
                 hermesId == "hermes" ||
                 contact.optString("type") == "hermes"
+            val shouldRemoveHermes = isLegacyHermes && (
+                contact.optBoolean("deleted", false) ||
+                    contact.optString("trust_state") == "deleted" ||
+                    contact.optString("trust_state").isBlank()
+                )
             val isPcConnector = contact.optString("delivery_mode") == "pc_connector" ||
                 contact.optString("parent_contact") == "hermes"
             val isFlatDesktopContact = id.startsWith("desktop_") &&
                 id.contains(":") &&
                 contact.optString("desktop_id").isNotBlank()
-            if (isLegacyHermes || (isPcConnector && !isFlatDesktopContact)) {
+            if (shouldRemoveHermes || (isPcConnector && !isFlatDesktopContact)) {
                 changed = true
                 continue
             }
