@@ -63,7 +63,11 @@ class MobileNativeAgent(
             lastEvent = if (currentGoal.isBlank()) AgentEvent.WAITING_FOR_GOAL else AgentEvent.GOAL_RECEIVED,
             sessionId = sessionId,
             plan = currentPlan,
-            pendingAction = currentPlan?.actions?.firstOrNull { it.status == AgentActionStatus.PENDING_CONFIRMATION },
+            pendingAction = if (phase == AgentPhase.BLOCKED) {
+                null
+            } else {
+                currentPlan?.actions?.firstOrNull { it.status == AgentActionStatus.PENDING_CONFIRMATION }
+            },
             auditTrail = auditTrail.toList(),
             lastActionResult = lastActionResult
         )
@@ -115,19 +119,32 @@ class MobileNativeAgent(
         )
         val safetyReview = safetyPolicy.review(draftPlan)
         currentPlan = draftPlan.withSafetyReview(safetyReview)
-        phase = if (safetyReview.requiresConfirmation) {
-            AgentPhase.WAITING_CONFIRMATION
-        } else {
-            AgentPhase.PLANNING
+        phase = when {
+            safetyReview.blocked -> AgentPhase.BLOCKED
+            safetyReview.requiresConfirmation -> AgentPhase.WAITING_CONFIRMATION
+            else -> AgentPhase.PLANNING
         }
         lastActionResult = null
         memoryStore.remember(AgentMemoryItem(kind = AgentMemoryKind.TASK, value = currentGoal))
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, "goal:${currentGoal.take(48)}")
+        if (safetyReview.blocked) {
+            recordAudit(AgentAuditEvent.ACTION_BLOCKED, safetyReview.reason.ifBlank { "blocked" })
+        }
         return snapshot()
     }
 
     fun approveNextAction(): AgentUiState {
         val plan = currentPlan ?: return snapshot()
+        if (plan.safetyReview.blocked) {
+            phase = AgentPhase.BLOCKED
+            lastActionResult = AgentActionResult(
+                actionId = "safety-policy",
+                success = false,
+                message = plan.safetyReview.reason.ifBlank { "Action blocked by safety policy" }
+            )
+            recordAudit(AgentAuditEvent.ACTION_BLOCKED, plan.safetyReview.reason.ifBlank { "blocked" })
+            return snapshot()
+        }
         val nextAction = plan.actions.firstOrNull { it.status == AgentActionStatus.PENDING_CONFIRMATION }
             ?: return snapshot()
         phase = AgentPhase.EXECUTING
@@ -439,11 +456,17 @@ object AgentPlanFactory {
                 granted = true
             )
             AgentActionKind.CALL_CONNECTOR,
-            AgentActionKind.CONTROL_DEVICE -> permissions += AgentPermissionRequirement(
-                id = "paired_contact",
-                title = "Verified SignalASI contact",
-                granted = false
-            )
+            AgentActionKind.CONTROL_DEVICE -> {
+                val connectorId = action.parameters["connector_id"]
+                val target = request.targets.firstOrNull { target ->
+                    target.id == connectorId || target.title == action.target
+                }
+                permissions += AgentPermissionRequirement(
+                    id = "paired_contact",
+                    title = "Verified SignalASI contact",
+                    granted = target?.status == AgentConnectorStatus.AVAILABLE
+                )
+            }
             AgentActionKind.DRAFT_PLAN -> Unit
         }
         if (action.kind == AgentActionKind.COPY_SCREEN_TEXT) {
@@ -523,11 +546,44 @@ class DefaultAgentSafetyPolicy : AgentSafetyPolicy {
     override fun highRiskGuardEnabled(): Boolean = true
 
     override fun review(plan: AgentPlan): AgentSafetyReview {
+        val mode = permissionMode()
         val highestRisk = plan.actions.maxByOrNull { it.risk.weight }?.risk ?: AgentRisk.LOW
+        val deniedPermissions = plan.requiredPermissions
+            .filter { it.required && !it.granted }
+            .map { it.id }
+        val blocksScreenAction = mode == PermissionMode.OBSERVE_ONLY &&
+            plan.actions.any { it.kind != AgentActionKind.READ_SCREEN && it.kind != AgentActionKind.DRAFT_PLAN }
+        val blocksExecution = mode == PermissionMode.SUGGEST_ONLY &&
+            plan.actions.any { it.kind != AgentActionKind.DRAFT_PLAN }
+        val blocksHighRisk = highRiskGuardEnabled() && highestRisk == AgentRisk.BLOCKED
+        val blocked = deniedPermissions.isNotEmpty() || blocksScreenAction || blocksExecution || blocksHighRisk
+        val requiresConfirmation = when (mode) {
+            PermissionMode.OBSERVE_ONLY,
+            PermissionMode.SUGGEST_ONLY,
+            PermissionMode.ASK_BEFORE_ACTION -> true
+            PermissionMode.AUTO_LOW_RISK -> highestRisk.weight >= AgentRisk.MEDIUM.weight
+        }
+        val warnings = buildList {
+            if (highestRisk.weight >= AgentRisk.HIGH.weight) add("high_risk_action")
+            if (deniedPermissions.isNotEmpty()) add("missing_required_permission")
+            if (blocksScreenAction) add("observe_only_mode")
+            if (blocksExecution) add("suggest_only_mode")
+        }
+        val reason = when {
+            deniedPermissions.isNotEmpty() -> "Missing required permission: ${deniedPermissions.joinToString(", ")}"
+            blocksScreenAction -> "Observe-only mode blocks screen actions"
+            blocksExecution -> "Suggest-only mode blocks execution"
+            blocksHighRisk -> "High-risk guard blocked this action"
+            else -> ""
+        }
         return AgentSafetyReview(
             risk = highestRisk,
-            requiresConfirmation = highestRisk.weight >= AgentRisk.LOW.weight,
-            blocked = highestRisk == AgentRisk.BLOCKED
+            requiresConfirmation = requiresConfirmation || blocked,
+            blocked = blocked,
+            mode = mode,
+            deniedPermissions = deniedPermissions,
+            warnings = warnings,
+            reason = reason
         )
     }
 }
@@ -1188,13 +1244,25 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("risk", review.risk.name)
         .put("requires_confirmation", review.requiresConfirmation)
         .put("blocked", review.blocked)
+        .put("mode", review.mode.name)
+        .put("denied_permissions", JSONArray().also { array ->
+            review.deniedPermissions.forEach { array.put(it) }
+        })
+        .put("warnings", JSONArray().also { array ->
+            review.warnings.forEach { array.put(it) }
+        })
+        .put("reason", review.reason)
 
     private fun decodeSafetyReview(json: JSONObject?): AgentSafetyReview {
         if (json == null) return AgentSafetyReview()
         return AgentSafetyReview(
             risk = enumOrDefault(json.optString("risk"), AgentRisk.LOW),
             requiresConfirmation = json.optBoolean("requires_confirmation", true),
-            blocked = json.optBoolean("blocked")
+            blocked = json.optBoolean("blocked"),
+            mode = enumOrDefault(json.optString("mode"), PermissionMode.ASK_BEFORE_ACTION),
+            deniedPermissions = decodeStringList(json.optJSONArray("denied_permissions")),
+            warnings = decodeStringList(json.optJSONArray("warnings")),
+            reason = json.optString("reason")
         )
     }
 
@@ -1393,7 +1461,19 @@ data class AgentPlan(
     val safetyReview: AgentSafetyReview = AgentSafetyReview()
 ) {
     fun withSafetyReview(review: AgentSafetyReview): AgentPlan {
+        val reviewedActions = if (review.blocked) {
+            actions.map { action ->
+                if (action.status == AgentActionStatus.PENDING_CONFIRMATION) {
+                    action.copy(status = AgentActionStatus.BLOCKED, result = review.reason)
+                } else {
+                    action
+                }
+            }
+        } else {
+            actions
+        }
         val next = copy(
+            actions = reviewedActions,
             safetyReview = review,
             confirmationRequired = review.requiresConfirmation
         )
@@ -1476,7 +1556,11 @@ data class AgentPlanValidation(
 data class AgentSafetyReview(
     val risk: AgentRisk = AgentRisk.LOW,
     val requiresConfirmation: Boolean = true,
-    val blocked: Boolean = false
+    val blocked: Boolean = false,
+    val mode: PermissionMode = PermissionMode.ASK_BEFORE_ACTION,
+    val deniedPermissions: List<String> = emptyList(),
+    val warnings: List<String> = emptyList(),
+    val reason: String = ""
 )
 
 data class AgentActionResult(
@@ -1532,6 +1616,7 @@ enum class AgentPhase {
     WAITING_CONFIRMATION,
     EXECUTING,
     VERIFYING,
+    BLOCKED,
     COMPLETED,
     FAILED
 }
@@ -1627,6 +1712,7 @@ enum class AgentAuditEvent {
     SCREEN_OBSERVED,
     GOAL_RECEIVED,
     ACTION_EXECUTED,
+    ACTION_BLOCKED,
     TASK_CANCELLED
 }
 

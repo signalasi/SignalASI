@@ -217,6 +217,8 @@
     <string name="agent_status_accessibility_needed_subtitle">Tap here to open Accessibility settings</string>
     <string name="agent_status_waiting_confirmation">Confirm action</string>
     <string name="agent_status_executing">Executing action</string>
+    <string name="agent_status_blocked">Action blocked</string>
+    <string name="agent_status_blocked_subtitle">Safety policy stopped this task</string>
     <string name="agent_status_completed">Action completed</string>
     <string name="agent_status_failed">Action failed</string>
     <string name="agent_status_default_subtitle">SignalASI - ask before action - high-risk guard on</string>
@@ -224,6 +226,7 @@
     <string name="agent_status_confirm_subtitle">%1$s</string>
     <string name="agent_status_result_subtitle">%1$s</string>
     <string name="agent_badge_safe">Safe</string>
+    <string name="agent_badge_blocked">Blocked</string>
     <string name="agent_section_process">Process</string>
     <string name="agent_section_info">Info</string>
     <string name="agent_step_observe">Read current screen structure</string>
@@ -245,6 +248,8 @@
     <string name="agent_pending_plan_value">Pending: %1$s / expected: %2$s</string>
     <string name="agent_action_result_value">Last result: %1$s</string>
     <string name="agent_action_risk_value">Risk: %1$s / target: %2$s</string>
+    <string name="agent_blocked_detail_value">Blocked: %1$s / missing: %2$s</string>
+    <string name="agent_safety_policy_value">Policy: %1$s / risk: %2$s</string>
     <string name="agent_goal_hint">Voice or text input goal</string>
     <string name="agent_voice_button">Talk</string>
     <string name="agent_confirm_button">✓</string>

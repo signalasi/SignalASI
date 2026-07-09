@@ -1413,6 +1413,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val pendingAction = state.pendingAction
         agentStatusTitle.text = when {
             !screenAccessEnabled && !isPlanning -> getString(R.string.agent_status_accessibility_needed)
+            state.phase == AgentPhase.BLOCKED -> getString(R.string.agent_status_blocked)
             state.phase == AgentPhase.WAITING_CONFIRMATION -> getString(R.string.agent_status_waiting_confirmation)
             state.phase == AgentPhase.EXECUTING -> getString(R.string.agent_status_executing)
             state.phase == AgentPhase.COMPLETED -> getString(R.string.agent_status_completed)
@@ -1422,14 +1423,26 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         agentStatusSubtitle.text = when {
             !screenAccessEnabled && !isPlanning -> getString(R.string.agent_status_accessibility_needed_subtitle)
+            state.phase == AgentPhase.BLOCKED -> state.plan?.safetyReview?.reason
+                ?.ifBlank { getString(R.string.agent_status_blocked_subtitle) }
+                ?: getString(R.string.agent_status_blocked_subtitle)
             pendingAction != null -> getString(R.string.agent_status_confirm_subtitle, pendingAction.description)
             state.lastActionResult != null -> getString(R.string.agent_status_result_subtitle, state.lastActionResult.message)
             isPlanning -> getString(R.string.agent_status_goal_subtitle)
             else -> getString(R.string.agent_status_default_subtitle)
         }
-        agentSafetyBadge.text = getString(R.string.agent_badge_safe)
+        agentSafetyBadge.text = if (state.phase == AgentPhase.BLOCKED) {
+            getString(R.string.agent_badge_blocked)
+        } else {
+            getString(R.string.agent_badge_safe)
+        }
         agentCurrentAppText.text = getString(R.string.agent_current_app_value, state.currentScreen.foregroundApp)
         agentCallableTargetsText.text = when {
+            state.phase == AgentPhase.BLOCKED -> getString(
+                R.string.agent_blocked_detail_value,
+                state.plan?.safetyReview?.reason.orEmpty().ifBlank { getString(R.string.agent_status_blocked_subtitle) },
+                state.plan?.safetyReview?.deniedPermissions?.joinToString(", ").orEmpty().ifBlank { "-" }
+            )
             state.lastActionResult != null -> getString(R.string.agent_action_result_value, state.lastActionResult.message)
             pendingAction != null -> getString(
                 R.string.agent_pending_plan_value,
@@ -1439,14 +1452,20 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             screenAccessEnabled -> {
                 getString(
                     R.string.agent_screen_context_value,
-                    state.currentScreen.visibleTextCount,
-                    state.currentScreen.clickableNodeCount,
-                    state.currentScreen.inputFieldCount
-                )
+                state.currentScreen.visibleTextCount,
+                state.currentScreen.clickableNodeCount,
+                state.currentScreen.inputFieldCount
+            )
             }
             else -> getString(R.string.agent_accessibility_status_disabled)
         }
-        agentRunningTasksText.text = if (pendingAction != null) {
+        agentRunningTasksText.text = if (state.phase == AgentPhase.BLOCKED) {
+            getString(
+                R.string.agent_safety_policy_value,
+                state.plan?.safetyReview?.mode?.name.orEmpty().ifBlank { state.permissionMode.name },
+                state.plan?.safetyReview?.risk?.name?.lowercase(Locale.US).orEmpty().ifBlank { "low" }
+            )
+        } else if (pendingAction != null) {
             getString(
                 R.string.agent_action_risk_value,
                 pendingAction.risk.name.lowercase(Locale.US),

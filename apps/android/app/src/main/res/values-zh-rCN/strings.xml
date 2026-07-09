@@ -214,6 +214,7 @@
     <string name="agent_status_default_subtitle">SignalASI · 执行前确认 · 高危保护开启</string>
     <string name="agent_status_goal_subtitle">已收到目标 · 正在生成安全本机计划</string>
     <string name="agent_badge_safe">安全</string>
+    <string name="agent_badge_blocked">已阻断</string>
     <string name="agent_section_process">执行过程</string>
     <string name="agent_section_info">信息</string>
     <string name="agent_step_observe">读取当前屏幕结构</string>
@@ -619,6 +620,8 @@
     <string name="agent_running_tasks_targets_value">运行任务：%1$d / 可调用对象：%2$d</string>
     <string name="agent_status_waiting_confirmation">确认动作</string>
     <string name="agent_status_executing">正在执行动作</string>
+    <string name="agent_status_blocked">动作已阻断</string>
+    <string name="agent_status_blocked_subtitle">安全策略已停止此任务</string>
     <string name="agent_status_completed">动作已完成</string>
     <string name="agent_status_failed">动作失败</string>
     <string name="agent_status_confirm_subtitle">%1$s</string>
@@ -627,6 +630,8 @@
     <string name="agent_pending_plan_value">待确认：%1$s / 预期：%2$s</string>
     <string name="agent_action_result_value">上次结果：%1$s</string>
     <string name="agent_action_risk_value">风险：%1$s / 目标：%2$s</string>
+    <string name="agent_blocked_detail_value">已阻断：%1$s / 缺失：%2$s</string>
+    <string name="agent_safety_policy_value">策略：%1$s / 风险：%2$s</string>
     <string name="agent_confirm_button">✓</string>
     <string name="agent_cancel_button">×</string>
 </resources>
