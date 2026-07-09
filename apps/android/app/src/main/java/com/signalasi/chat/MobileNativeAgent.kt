@@ -108,6 +108,9 @@ class MobileNativeAgent(
         }
 
         currentScreen = perceptionProvider.capture()
+        memoryCommandValue(currentGoal)?.let { memoryValue ->
+            return saveMemoryCommand(memoryValue)
+        }
         val targets = connectorRegistry.availableTargets()
         val memories = memoryStore.recall(currentGoal)
         val knowledgeItems = knowledgeStore.search(currentGoal)
@@ -253,11 +256,75 @@ class MobileNativeAgent(
         return snapshot()
     }
 
+    private fun memoryCommandValue(goal: String): String? {
+        val prefixes = listOf("remember ", "save note ", "save memory ", "memorize ")
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
+    private fun saveMemoryCommand(value: String): AgentUiState {
+        val action = AgentAction(
+            id = "save-memory",
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Memory",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.COMPLETED,
+            description = "Save personal memory",
+            result = "Saved memory"
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Memory",
+            confirmationRequired = false,
+            expectedResult = "Saved personal memory",
+            route = AgentRoute(
+                routeId = "agent-memory",
+                kind = AgentRouteKind.KNOWLEDGE,
+                targetId = "agent-memory",
+                targetTitle = "Agent Memory",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.KNOWLEDGE_SEARCH)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, "Saved personal memory")
+        memoryStore.remember(AgentMemoryItem(kind = AgentMemoryKind.KNOWLEDGE, value = value, source = "agent_memory_command"))
+        knowledgeStore.upsert(
+            AgentKnowledgeItem(
+                kind = AgentKnowledgeKind.NOTE,
+                title = value.take(80),
+                content = value,
+                source = "agent_memory_command",
+                tags = listOf("memory", "note")
+            )
+        )
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, "goal:${currentGoal.take(48)}")
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        saveTaskRecord(result = "Saved personal memory")
+        return snapshot()
+    }
+
     private fun defaultSteps(): List<AgentStep> = listOf(
         AgentStep(1, AgentStepKind.OBSERVE_SCREEN, AgentStepStatus.CURRENT),
         AgentStep(2, AgentStepKind.ANALYZE_GOAL, AgentStepStatus.WAITING),
         AgentStep(3, AgentStepKind.BUILD_PLAN, AgentStepStatus.WAITING),
         AgentStep(4, AgentStepKind.CONFIRM_AND_ACT, AgentStepStatus.SAFE)
+    )
+
+    private fun completedSteps(): List<AgentStep> = listOf(
+        AgentStep(1, AgentStepKind.OBSERVE_SCREEN, AgentStepStatus.DONE),
+        AgentStep(2, AgentStepKind.ANALYZE_GOAL, AgentStepStatus.DONE),
+        AgentStep(3, AgentStepKind.BUILD_PLAN, AgentStepStatus.DONE),
+        AgentStep(4, AgentStepKind.CONFIRM_AND_ACT, AgentStepStatus.DONE)
     )
 
     private fun buildRuntimeContext(
