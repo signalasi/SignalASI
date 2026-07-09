@@ -148,6 +148,9 @@ class MobileNativeAgent(
         if (securityStatusCommand(currentGoal)) {
             return showSecurityStatusCommand()
         }
+        if (auditTrailCommand(currentGoal)) {
+            return showAuditTrailCommand()
+        }
         if (recentTasksCommand(currentGoal)) {
             return showRecentTasksCommand()
         }
@@ -446,6 +449,16 @@ class MobileNativeAgent(
             normalized == "agent permission status" ||
             normalized == "safety status" ||
             normalized == "privacy status"
+    }
+
+    private fun auditTrailCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "audit trail" ||
+            normalized == "show audit trail" ||
+            normalized == "audit log" ||
+            normalized == "show audit log" ||
+            normalized == "execution log" ||
+            normalized == "show execution log"
     }
 
     private fun recentTasksCommand(goal: String): Boolean {
@@ -793,6 +806,53 @@ class MobileNativeAgent(
                 kind = AgentRouteKind.LOCAL_SYSTEM,
                 targetId = "agent-security",
                 targetTitle = "Agent Security",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.TASK_EXECUTION)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        return snapshot()
+    }
+
+    private fun showAuditTrailCommand(): AgentUiState {
+        val result = if (auditTrail.isEmpty()) {
+            "No Agent audit events"
+        } else {
+            auditTrail.takeLast(8).joinToString(" | ") { entry ->
+                "${entry.event.name.lowercase(Locale.US)}:${entry.detail.take(80)}"
+            }
+        }
+        val action = AgentAction(
+            id = "show-audit-trail",
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Audit Trail",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.COMPLETED,
+            description = "Show Agent audit trail",
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Audit Trail",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "agent-audit-trail",
+                kind = AgentRouteKind.LOCAL_SYSTEM,
+                targetId = "agent-audit-trail",
+                targetTitle = "Agent Audit Trail",
                 status = AgentConnectorStatus.AVAILABLE,
                 deliveryMode = "local",
                 capabilities = listOf(AgentCapability.TASK_EXECUTION)
