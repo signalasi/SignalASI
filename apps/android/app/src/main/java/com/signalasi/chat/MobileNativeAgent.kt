@@ -145,6 +145,12 @@ class MobileNativeAgent(
         callableSearchCommandValue(currentGoal)?.let { query ->
             return searchCallableInventoryCommand(query)
         }
+        permissionModeCommandValue(currentGoal)?.let { mode ->
+            return setPermissionModeCommand(mode)
+        }
+        highRiskGuardCommandValue(currentGoal)?.let { enabled ->
+            return setHighRiskGuardCommand(enabled)
+        }
         if (securityStatusCommand(currentGoal)) {
             return showSecurityStatusCommand()
         }
@@ -452,6 +458,42 @@ class MobileNativeAgent(
             normalized == "agent permission status" ||
             normalized == "safety status" ||
             normalized == "privacy status"
+    }
+
+    private fun permissionModeCommandValue(goal: String): PermissionMode? {
+        val normalized = goal.trim().lowercase(Locale.US)
+        val value = listOf(
+            "set permission mode ",
+            "permission mode ",
+            "set agent mode ",
+            "agent mode "
+        ).firstOrNull { normalized.startsWith(it) }
+            ?.let { normalized.removePrefix(it).trim() }
+            ?: return null
+        return when (value.replace('-', ' ').replace('_', ' ')) {
+            "observe", "observe only", "read only" -> PermissionMode.OBSERVE_ONLY
+            "suggest", "suggest only", "assist", "assisted" -> PermissionMode.SUGGEST_ONLY
+            "confirm", "ask", "ask first", "ask before action" -> PermissionMode.ASK_BEFORE_ACTION
+            "auto", "automatic", "auto low risk", "low risk auto" -> PermissionMode.AUTO_LOW_RISK
+            else -> null
+        }
+    }
+
+    private fun highRiskGuardCommandValue(goal: String): Boolean? {
+        val normalized = goal.trim().lowercase(Locale.US)
+        val value = listOf(
+            "set high risk guard ",
+            "high risk guard ",
+            "set high-risk guard ",
+            "high-risk guard "
+        ).firstOrNull { normalized.startsWith(it) }
+            ?.let { normalized.removePrefix(it).trim() }
+            ?: return null
+        return when (value) {
+            "on", "enable", "enabled" -> true
+            "off", "disable", "disabled" -> false
+            else -> null
+        }
     }
 
     private fun auditTrailCommand(goal: String): Boolean {
@@ -830,6 +872,75 @@ class MobileNativeAgent(
         phase = AgentPhase.COMPLETED
         lastActionResult = AgentActionResult(action.id, true, result)
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        return snapshot()
+    }
+
+    private fun setPermissionModeCommand(mode: PermissionMode): AgentUiState {
+        safetySettingsStore.save(safetySettingsStore.load().copy(permissionMode = mode))
+        val result = "Agent permission mode set to ${mode.name.lowercase(Locale.US)}"
+        return completeSafetySettingCommand(
+            actionId = "set-permission-mode",
+            description = "Set Agent permission mode",
+            result = result,
+            parameters = mapOf("permission_mode" to mode.name)
+        )
+    }
+
+    private fun setHighRiskGuardCommand(enabled: Boolean): AgentUiState {
+        safetySettingsStore.save(safetySettingsStore.load().copy(highRiskGuard = enabled))
+        val result = "Agent high-risk guard ${if (enabled) "enabled" else "disabled"}"
+        return completeSafetySettingCommand(
+            actionId = "set-high-risk-guard",
+            description = "Set Agent high-risk action guard",
+            result = result,
+            parameters = mapOf("high_risk_guard" to enabled.toString())
+        )
+    }
+
+    private fun completeSafetySettingCommand(
+        actionId: String,
+        description: String,
+        result: String,
+        parameters: Map<String, String>
+    ): AgentUiState {
+        val action = AgentAction(
+            id = actionId,
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Security",
+            risk = AgentRisk.MEDIUM,
+            status = AgentActionStatus.COMPLETED,
+            description = description,
+            parameters = parameters,
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Security",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "agent-security",
+                kind = AgentRouteKind.LOCAL_SYSTEM,
+                targetId = "agent-security",
+                targetTitle = "Agent Security",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.TASK_EXECUTION)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.MEDIUM,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, parameters.entries.joinToString { "${it.key}:${it.value}" })
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
         return snapshot()
     }
