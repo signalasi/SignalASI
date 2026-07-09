@@ -2334,6 +2334,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             maxLines = 2
             ellipsize = android.text.TextUtils.TruncateAt.END
             text = value
+            setOnClickListener {
+                prefillAgentGoal("save note $value")
+            }
         }
     }
 
