@@ -2386,8 +2386,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 matchesScreenQuery(screen.clipboard.textHash, normalizedQuery) ||
                 screen.clipboard.sensitiveFlags.any { matchesScreenQuery(it, normalizedQuery) }
             )
+        val notificationItems = screen.notifications.items
+            .filter { item ->
+                matchesScreenQuery(item.packageName, normalizedQuery) ||
+                    matchesScreenQuery(item.title, normalizedQuery) ||
+                    matchesScreenQuery(item.textPreview, normalizedQuery) ||
+                    item.sensitiveFlags.any { matchesScreenQuery(it, normalizedQuery) }
+            }
+            .take(3)
+        val showNotificationAccessRow = !screen.notifications.hasAccess && normalizedQuery.isBlank()
+        val notificationsMatch = notificationItems.isNotEmpty() || showNotificationAccessRow
 
-        val hasAny = clipboardMatches || visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty()
+        val hasAny = clipboardMatches || notificationsMatch || visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty()
         agentScreenDetailList.addView(agentScreenSummaryRow(screen))
         if (!hasAny) {
             agentScreenDetailList.addView(agentScreenEmptyRow(getString(R.string.agent_screen_empty)))
@@ -2395,6 +2405,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         if (clipboardMatches) {
             addScreenClipboardSection(screen.clipboard)
+        }
+        if (notificationsMatch) {
+            addScreenNotificationSection(notificationItems, showNotificationAccessRow)
         }
         addScreenTextSection(getString(R.string.agent_screen_texts), visibleTexts)
         addScreenElementSection(getString(R.string.agent_screen_actions), actions, AgentScreenCommandKind.TAP)
@@ -2415,6 +2428,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun addScreenClipboardSection(clipboard: ClipboardContext) {
         agentScreenDetailList.addView(agentScreenSectionTitle(getString(R.string.agent_screen_clipboard)))
         agentScreenDetailList.addView(agentClipboardRow(clipboard))
+    }
+
+    private fun addScreenNotificationSection(items: List<AgentNotificationItem>, showAccessRow: Boolean) {
+        agentScreenDetailList.addView(agentScreenSectionTitle(getString(R.string.agent_screen_notifications)))
+        if (showAccessRow) {
+            agentScreenDetailList.addView(agentScreenEmptyRow(getString(R.string.agent_screen_notifications_locked)))
+        }
+        items.forEach { item ->
+            agentScreenDetailList.addView(agentNotificationRow(item))
+        }
     }
 
     private fun addScreenElementSection(
@@ -2452,6 +2475,44 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ellipsize = android.text.TextUtils.TruncateAt.END
             text = summary
             setOnClickListener { prefillAgentGoal("paste clipboard") }
+        }
+    }
+
+    private fun agentNotificationRow(item: AgentNotificationItem): View {
+        val title = item.title.ifBlank { item.packageName.ifBlank { "-" } }
+        val detail = if (item.sensitiveFlags.isNotEmpty()) {
+            getString(R.string.agent_screen_notification_sensitive, item.packageName.ifBlank { "-" })
+        } else {
+            getString(
+                R.string.agent_screen_notification_summary,
+                item.packageName.ifBlank { "-" },
+                item.textPreview.ifBlank { title }
+            )
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundResource(R.drawable.agent_step_background)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(6) }
+            setOnClickListener { prefillAgentGoal("read notifications") }
+
+            addView(TextView(this@MainActivity).apply {
+                setTextColor(getColorCompat(R.color.text_primary))
+                textSize = 13f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                text = title
+            })
+            addView(TextView(this@MainActivity).apply {
+                setTextColor(getColorCompat(R.color.text_secondary))
+                textSize = 11f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                text = detail
+            })
         }
     }
 

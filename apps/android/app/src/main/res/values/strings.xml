@@ -315,6 +315,10 @@
     <string name="agent_screen_clipboard">Clipboard</string>
     <string name="agent_screen_clipboard_summary">Clipboard: %1$d chars / %2$s</string>
     <string name="agent_screen_clipboard_sensitive">Clipboard: sensitive / %1$d chars</string>
+    <string name="agent_screen_notifications">Notifications</string>
+    <string name="agent_screen_notifications_locked">Notification access is not enabled</string>
+    <string name="agent_screen_notification_summary">%1$s / %2$s</string>
+    <string name="agent_screen_notification_sensitive">%1$s / sensitive notification</string>
     <string name="agent_screen_actions">Actions</string>
     <string name="agent_screen_fields">Input Fields</string>
     <string name="agent_screen_empty">No matching screen items</string>

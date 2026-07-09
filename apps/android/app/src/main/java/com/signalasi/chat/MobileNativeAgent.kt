@@ -513,6 +513,11 @@ class MobileNativeAgent(
             append("\nclipboard_hash=").append(screen.clipboard.textHash)
             append("\nclipboard_length=").append(screen.clipboard.textLength)
         }
+        if (screen.notifications.items.isNotEmpty()) {
+            append("\nnotification_count=").append(screen.notifications.items.size)
+            append("\nnotification_packages=")
+            append(screen.notifications.items.map { it.packageName }.distinct().take(6).joinToString("|"))
+        }
         append("\nmode=").append(context.permissionMode.name)
         if (context.knowledgeItems.isNotEmpty()) {
             append("\nrelated_knowledge=")
@@ -533,6 +538,10 @@ class MobileNativeAgent(
         if (screen.clipboard.sensitiveFlags.isNotEmpty()) {
             val flags = screen.clipboard.sensitiveFlags.joinToString("|").take(80)
             return "Memory skipped for sensitive clipboard context: $flags"
+        }
+        if (screen.notifications.sensitiveFlags.isNotEmpty()) {
+            val flags = screen.notifications.sensitiveFlags.joinToString("|").take(80)
+            return "Memory skipped for sensitive notification context: $flags"
         }
         val lower = value.lowercase(Locale.US)
         val matchedTerm = SENSITIVE_MEMORY_TERMS.firstOrNull { lower.contains(it) }
@@ -667,7 +676,10 @@ class AndroidScreenPerceptionProvider(private val context: Context) : ScreenPerc
     }
 
     private fun ScreenContext.withClipboardContext(): ScreenContext =
-        copy(clipboard = clipboardContext())
+        copy(
+            clipboard = clipboardContext(),
+            notifications = SignalASINotificationListenerService.currentContext()
+        )
 
     private fun clipboardContext(): ClipboardContext {
         val text = runCatching {
@@ -1394,6 +1406,9 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         if (screen.clipboard.sensitiveFlags.isNotEmpty()) {
             return AgentActionResult(action.id, false, "Clipboard contains sensitive content; knowledge save skipped")
         }
+        if (screen.notifications.sensitiveFlags.isNotEmpty()) {
+            return AgentActionResult(action.id, false, "Notifications contain sensitive content; knowledge save skipped")
+        }
         val title = screen.pageTitle.ifBlank { screen.foregroundApp }.ifBlank { "Screen snapshot" }
         val content = buildString {
             append("App: ").append(screen.foregroundApp).append('\n')
@@ -1405,6 +1420,13 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             if (screen.clipboard.hasText) {
                 append("Clipboard: ").append(screen.clipboard.textLength)
                     .append(" chars / hash ").append(screen.clipboard.textHash).append('\n')
+            }
+            if (screen.notifications.items.isNotEmpty()) {
+                append("Notifications: ").append(screen.notifications.items.size).append('\n')
+                screen.notifications.items.take(6).forEach { item ->
+                    append("- ").append(item.packageName)
+                        .append(" / ").append(item.title.ifBlank { "-" }).append('\n')
+                }
             }
             if (screen.visibleTexts.isNotEmpty()) {
                 append("\nVisible text:\n")
@@ -1926,6 +1948,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
             screen.sensitiveFlags.forEach { array.put(it) }
         })
         .put("clipboard_context", encodeClipboardContext(screen.clipboard))
+        .put("notification_context", encodeNotificationContext(screen.notifications))
         .put("is_accessibility_enabled", screen.isAccessibilityEnabled)
         .put("snapshot_age_millis", screen.snapshotAgeMillis)
 
@@ -1946,6 +1969,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
             scrollableRegions = decodeElements(json.optJSONArray("scrollable_regions")),
             sensitiveFlags = decodeStringList(json.optJSONArray("sensitive_flags")),
             clipboard = decodeClipboardContext(json.optJSONObject("clipboard_context")),
+            notifications = decodeNotificationContext(json.optJSONObject("notification_context")),
             isAccessibilityEnabled = json.optBoolean("is_accessibility_enabled"),
             snapshotAgeMillis = json.optLong("snapshot_age_millis")
         )
@@ -1969,6 +1993,53 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
             preview = json.optString("preview"),
             sensitiveFlags = decodeStringList(json.optJSONArray("sensitive_flags"))
         )
+    }
+
+    private fun encodeNotificationContext(context: AgentNotificationContext): JSONObject = JSONObject()
+        .put("has_access", context.hasAccess)
+        .put("items", JSONArray().also { array ->
+            context.items.forEach { item ->
+                array.put(JSONObject()
+                    .put("key", item.key)
+                    .put("package_name", item.packageName)
+                    .put("title", item.title)
+                    .put("text_preview", item.textPreview)
+                    .put("posted_at_millis", item.postedAtMillis)
+                    .put("sensitive_flags", JSONArray().also { flags ->
+                        item.sensitiveFlags.forEach { flags.put(it) }
+                    }))
+            }
+        })
+        .put("sensitive_flags", JSONArray().also { array ->
+            context.sensitiveFlags.forEach { array.put(it) }
+        })
+
+    private fun decodeNotificationContext(json: JSONObject?): AgentNotificationContext {
+        if (json == null) return AgentNotificationContext()
+        return AgentNotificationContext(
+            hasAccess = json.optBoolean("has_access"),
+            items = decodeNotificationItems(json.optJSONArray("items")),
+            sensitiveFlags = decodeStringList(json.optJSONArray("sensitive_flags"))
+        )
+    }
+
+    private fun decodeNotificationItems(array: JSONArray?): List<AgentNotificationItem> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                add(
+                    AgentNotificationItem(
+                        key = item.optString("key"),
+                        packageName = item.optString("package_name"),
+                        title = item.optString("title"),
+                        textPreview = item.optString("text_preview"),
+                        postedAtMillis = item.optLong("posted_at_millis"),
+                        sensitiveFlags = decodeStringList(item.optJSONArray("sensitive_flags"))
+                    )
+                )
+            }
+        }
     }
 
     private fun encodePlan(plan: AgentPlan): JSONObject = JSONObject()
@@ -2374,6 +2445,7 @@ data class ScreenContext(
     val scrollableRegions: List<ScreenElement> = emptyList(),
     val sensitiveFlags: List<String> = emptyList(),
     val clipboard: ClipboardContext = ClipboardContext(),
+    val notifications: AgentNotificationContext = AgentNotificationContext(),
     val isAccessibilityEnabled: Boolean = false,
     val snapshotAgeMillis: Long = 0L
 )
