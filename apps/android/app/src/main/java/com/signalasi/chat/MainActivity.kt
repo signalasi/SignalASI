@@ -2400,8 +2400,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             matchesScreenQuery(screen.deviceStatus.network, normalizedQuery) ||
             matchesScreenQuery(screen.deviceStatus.batteryPercent.toString(), normalizedQuery) ||
             matchesScreenQuery(screen.deviceStatus.freeStorageMb.toString(), normalizedQuery)
+        val launchableApps = screen.installedApps
+            .filter { app ->
+                matchesScreenQuery(app.label, normalizedQuery) ||
+                    matchesScreenQuery(app.packageName, normalizedQuery)
+            }
+            .take(if (normalizedQuery.isBlank()) 4 else 8)
 
-        val hasAny = clipboardMatches || notificationsMatch || deviceStatusMatches || visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty()
+        val hasAny = clipboardMatches || notificationsMatch || deviceStatusMatches || launchableApps.isNotEmpty() || visibleTexts.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty()
         agentScreenDetailList.addView(agentScreenSummaryRow(screen))
         if (!hasAny) {
             agentScreenDetailList.addView(agentScreenEmptyRow(getString(R.string.agent_screen_empty)))
@@ -2416,6 +2422,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (deviceStatusMatches) {
             addScreenDeviceStatusSection(screen.deviceStatus)
         }
+        addScreenInstalledAppsSection(launchableApps)
         addScreenTextSection(getString(R.string.agent_screen_texts), visibleTexts)
         addScreenElementSection(getString(R.string.agent_screen_actions), actions, AgentScreenCommandKind.TAP)
         addScreenElementSection(getString(R.string.agent_screen_fields), fields, AgentScreenCommandKind.TYPE)
@@ -2450,6 +2457,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun addScreenDeviceStatusSection(status: AgentDeviceStatusContext) {
         agentScreenDetailList.addView(agentScreenSectionTitle(getString(R.string.agent_screen_device_status)))
         agentScreenDetailList.addView(agentDeviceStatusRow(status))
+    }
+
+    private fun addScreenInstalledAppsSection(apps: List<InstalledAppInfo>) {
+        if (apps.isEmpty()) return
+        agentScreenDetailList.addView(agentScreenSectionTitle(getString(R.string.agent_screen_launchable_apps)))
+        apps.forEach { app ->
+            agentScreenDetailList.addView(agentInstalledAppRow(app))
+        }
     }
 
     private fun addScreenElementSection(
@@ -2549,6 +2564,34 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 status.freeStorageMb
             )
             setOnClickListener { prefillAgentGoal("device status") }
+        }
+    }
+
+    private fun agentInstalledAppRow(app: InstalledAppInfo): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundResource(R.drawable.agent_step_background)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(6) }
+            setOnClickListener { prefillAgentGoal("open ${app.label}") }
+
+            addView(TextView(this@MainActivity).apply {
+                setTextColor(getColorCompat(R.color.text_primary))
+                textSize = 13f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                text = app.label
+            })
+            addView(TextView(this@MainActivity).apply {
+                setTextColor(getColorCompat(R.color.text_secondary))
+                textSize = 11f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                text = getString(R.string.agent_screen_launchable_app_summary, app.packageName, "open")
+            })
         }
     }
 
