@@ -1452,7 +1452,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             getString(
                 R.string.agent_running_tasks_targets_value,
                 state.runningTaskCount,
-                state.callableTargets.size
+                state.runtimeContext.callableCount
             )
         }
         agentVoiceButton.text = if (pendingAction != null) getString(R.string.agent_cancel_button) else getString(R.string.agent_voice_button)

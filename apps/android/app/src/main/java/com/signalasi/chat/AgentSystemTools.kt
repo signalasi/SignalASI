@@ -3,6 +3,8 @@ package com.signalasi.chat
 import android.provider.Settings
 
 object AgentSystemToolPlanner {
+    fun availableTools(): List<AgentSystemTool> = SYSTEM_TOOLS
+
     fun actionFor(request: AgentRequest): AgentAction? {
         val goal = request.goal.trim()
         val lower = goal.lowercase()
@@ -110,7 +112,7 @@ object AgentSystemToolPlanner {
     )
 
     private fun alarmAction(goal: String, lower: String): AgentAction {
-        val match = Regex("(\\d{1,2})[:：](\\d{2})").find(lower)
+        val match = Regex("(\\d{1,2}):(\\d{2})").find(lower)
         val hour = match?.groupValues?.getOrNull(1)?.toIntOrNull()
         val minute = match?.groupValues?.getOrNull(2)?.toIntOrNull()
         val parameters = buildMap {
@@ -135,4 +137,55 @@ object AgentSystemToolPlanner {
         if (value.isBlank()) return ""
         return if (value.startsWith("http://") || value.startsWith("https://")) value else "https://$value"
     }
+
+    private val SYSTEM_TOOLS = listOf(
+        AgentSystemTool(
+            id = "screen-copy",
+            title = "Copy Screen Text",
+            kind = AgentActionKind.COPY_SCREEN_TEXT,
+            risk = AgentRisk.LOW,
+            capabilities = listOf(AgentCapability.SCREEN_READING, AgentCapability.CLIPBOARD),
+            examples = listOf("copy screen text", "copy current screen")
+        ),
+        AgentSystemTool(
+            id = "system-settings",
+            title = "System Settings",
+            kind = AgentActionKind.OPEN_APP,
+            risk = AgentRisk.LOW,
+            capabilities = listOf(AgentCapability.SYSTEM_SETTINGS, AgentCapability.APP_NAVIGATION),
+            examples = listOf("open settings", "open wifi settings", "open bluetooth settings")
+        ),
+        AgentSystemTool(
+            id = "navigation",
+            title = "System Navigation",
+            kind = AgentActionKind.HOME,
+            risk = AgentRisk.LOW,
+            capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.DEVICE_CONTROL),
+            examples = listOf("go home", "show recents", "go back")
+        ),
+        AgentSystemTool(
+            id = "open-url",
+            title = "Open URL",
+            kind = AgentActionKind.OPEN_URL,
+            risk = AgentRisk.MEDIUM,
+            capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.TASK_EXECUTION),
+            examples = listOf("open url https://example.com")
+        ),
+        AgentSystemTool(
+            id = "alarm",
+            title = "Alarm Handoff",
+            kind = AgentActionKind.SET_ALARM,
+            risk = AgentRisk.MEDIUM,
+            capabilities = listOf(AgentCapability.SYSTEM_SETTINGS, AgentCapability.TASK_EXECUTION),
+            examples = listOf("set alarm 07:30", "open alarms")
+        ),
+        AgentSystemTool(
+            id = "gesture",
+            title = "Screen Gesture",
+            kind = AgentActionKind.TAP,
+            risk = AgentRisk.MEDIUM,
+            capabilities = listOf(AgentCapability.DEVICE_CONTROL, AgentCapability.TASK_EXECUTION),
+            examples = listOf("tap first", "swipe up", "long press first")
+        )
+    )
 }

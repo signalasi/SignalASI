@@ -39,22 +39,32 @@ class MobileNativeAgent(
         restoreSession(sessionStore.load())
     }
 
-    fun snapshot(): AgentUiState = AgentUiState(
-        phase = phase,
-        currentGoal = currentGoal,
-        currentScreen = currentScreen,
-        permissionMode = safetyPolicy.permissionMode(),
-        highRiskGuard = safetyPolicy.highRiskGuardEnabled(),
-        callableTargets = connectorRegistry.availableTargets(),
-        runningTaskCount = if (phase == AgentPhase.PLANNING || phase == AgentPhase.WAITING_CONFIRMATION || phase == AgentPhase.EXECUTING) 1 else 0,
-        steps = currentPlan?.steps ?: defaultSteps(),
-        lastEvent = if (currentGoal.isBlank()) AgentEvent.WAITING_FOR_GOAL else AgentEvent.GOAL_RECEIVED,
-        sessionId = sessionId,
-        plan = currentPlan,
-        pendingAction = currentPlan?.actions?.firstOrNull { it.status == AgentActionStatus.PENDING_CONFIRMATION },
-        auditTrail = auditTrail.toList(),
-        lastActionResult = lastActionResult
-    )
+    fun snapshot(): AgentUiState {
+        val targets = connectorRegistry.availableTargets()
+        val context = buildRuntimeContext(
+            goal = currentGoal,
+            screen = currentScreen,
+            targets = targets,
+            memories = emptyList()
+        )
+        return AgentUiState(
+            phase = phase,
+            currentGoal = currentGoal,
+            currentScreen = currentScreen,
+            permissionMode = context.permissionMode,
+            highRiskGuard = context.highRiskGuard,
+            callableTargets = targets,
+            runtimeContext = context,
+            runningTaskCount = if (phase == AgentPhase.PLANNING || phase == AgentPhase.WAITING_CONFIRMATION || phase == AgentPhase.EXECUTING) 1 else 0,
+            steps = currentPlan?.steps ?: defaultSteps(),
+            lastEvent = if (currentGoal.isBlank()) AgentEvent.WAITING_FOR_GOAL else AgentEvent.GOAL_RECEIVED,
+            sessionId = sessionId,
+            plan = currentPlan,
+            pendingAction = currentPlan?.actions?.firstOrNull { it.status == AgentActionStatus.PENDING_CONFIRMATION },
+            auditTrail = auditTrail.toList(),
+            lastActionResult = lastActionResult
+        )
+    }
 
     fun observeCurrentScreen(): AgentUiState {
         currentScreen = perceptionProvider.capture()
@@ -83,12 +93,21 @@ class MobileNativeAgent(
         }
 
         currentScreen = perceptionProvider.capture()
+        val targets = connectorRegistry.availableTargets()
+        val memories = memoryStore.recall(currentGoal)
+        val context = buildRuntimeContext(
+            goal = currentGoal,
+            screen = currentScreen,
+            targets = targets,
+            memories = memories
+        )
         val draftPlan = planner.plan(
             request = AgentRequest(
                 goal = currentGoal,
                 screen = currentScreen,
-                targets = connectorRegistry.availableTargets(),
-                memories = memoryStore.recall(currentGoal)
+                targets = targets,
+                memories = memories,
+                runtimeContext = context
             )
         )
         val safetyReview = safetyPolicy.review(draftPlan)
@@ -137,6 +156,21 @@ class MobileNativeAgent(
         AgentStep(2, AgentStepKind.ANALYZE_GOAL, AgentStepStatus.WAITING),
         AgentStep(3, AgentStepKind.BUILD_PLAN, AgentStepStatus.WAITING),
         AgentStep(4, AgentStepKind.CONFIRM_AND_ACT, AgentStepStatus.SAFE)
+    )
+
+    private fun buildRuntimeContext(
+        goal: String,
+        screen: ScreenContext,
+        targets: List<AgentCallableTarget>,
+        memories: List<AgentMemoryItem>
+    ): AgentRuntimeContext = AgentRuntimeContextBuilder.build(
+        sessionId = sessionId,
+        goal = goal,
+        screen = screen,
+        permissionMode = safetyPolicy.permissionMode(),
+        highRiskGuard = safetyPolicy.highRiskGuardEnabled(),
+        callableTargets = targets,
+        memories = memories
     )
 
     private fun recordAudit(event: AgentAuditEvent, detail: String) {
@@ -1009,6 +1043,7 @@ data class AgentUiState(
     val permissionMode: PermissionMode,
     val highRiskGuard: Boolean,
     val callableTargets: List<AgentCallableTarget>,
+    val runtimeContext: AgentRuntimeContext,
     val runningTaskCount: Int,
     val steps: List<AgentStep>,
     val lastEvent: AgentEvent,
@@ -1034,7 +1069,8 @@ data class AgentRequest(
     val goal: String,
     val screen: ScreenContext,
     val targets: List<AgentCallableTarget>,
-    val memories: List<AgentMemoryItem>
+    val memories: List<AgentMemoryItem>,
+    val runtimeContext: AgentRuntimeContext
 )
 
 data class AgentCallableTarget(
@@ -1226,7 +1262,12 @@ enum class AgentCapability {
     TASK_EXECUTION,
     SMART_HOME,
     DEVICE_CONTROL,
-    KNOWLEDGE_SEARCH
+    KNOWLEDGE_SEARCH,
+    SCREEN_READING,
+    CLIPBOARD,
+    SYSTEM_SETTINGS,
+    APP_NAVIGATION,
+    ALARM
 }
 
 enum class AgentAuditEvent {
