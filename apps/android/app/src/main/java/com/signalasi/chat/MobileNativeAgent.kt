@@ -473,6 +473,60 @@ class MobileNativeAgent(
         return snapshot()
     }
 
+    fun recordKnowledgeImport(result: AgentKnowledgeImportResult): AgentUiState {
+        currentGoal = "Import knowledge document ${result.title}"
+        currentScreen = perceptionProvider.capture()
+        val status = if (result.success) AgentActionStatus.COMPLETED else AgentActionStatus.FAILED
+        val action = AgentAction(
+            id = "import-knowledge-document",
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Knowledge",
+            risk = AgentRisk.LOW,
+            status = status,
+            description = "Import document into Agent knowledge",
+            parameters = mapOf(
+                "mime_type" to result.mimeType,
+                "byte_count" to result.byteCount.toString(),
+                "character_count" to result.characterCount.toString(),
+                "chunk_count" to result.chunkCount.toString(),
+                "truncated" to result.truncated.toString()
+            ),
+            result = result.message
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Knowledge",
+            confirmationRequired = false,
+            expectedResult = result.message,
+            route = AgentRoute(
+                routeId = "agent-knowledge-import",
+                kind = AgentRouteKind.KNOWLEDGE,
+                targetId = "agent-knowledge-import",
+                targetTitle = "Agent Knowledge",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.KNOWLEDGE_SEARCH)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode(),
+                warnings = result.sensitiveFlags.map { "sensitive_import:$it" }
+            )
+        )
+        phase = if (result.success) AgentPhase.COMPLETED else AgentPhase.FAILED
+        lastActionResult = AgentActionResult(action.id, result.success, result.message)
+        recordAudit(
+            AgentAuditEvent.KNOWLEDGE_IMPORTED,
+            "success=${result.success}; title_hash=${result.title.hashCode()}; chunks=${result.chunkCount}; sensitive=${result.sensitiveFlags.joinToString("|").ifBlank { "none" }}"
+        )
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:$status")
+        return snapshot()
+    }
+
     private fun memoryCommandValue(goal: String): String? {
         val prefixes = listOf("remember ", "save note ", "save memory ", "memorize ")
         val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
@@ -5102,6 +5156,7 @@ enum class AgentAuditEvent {
     INVOCATION_AUDIT,
     MEMORY_SKIPPED,
     MEMORY_FORGOTTEN,
+    KNOWLEDGE_IMPORTED,
     ACTION_EXECUTED,
     ACTION_BLOCKED,
     TASK_CANCELLED,

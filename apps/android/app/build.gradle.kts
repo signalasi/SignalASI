@@ -53,6 +53,7 @@ dependencies {
     implementation("org.signal:libsignal-android:0.86.5")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
     implementation("xyz.rementia:openwakeword:0.1.3") {
         exclude(group = "com.microsoft.onnxruntime", module = "onnxruntime-android")
         exclude(group = "org.apache.commons", module = "commons-math3")
