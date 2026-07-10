@@ -168,6 +168,18 @@ class MobileNativeAgent(
         screenSearchCommandValue(currentGoal)?.let { query ->
             return searchCurrentScreenCommand(query)
         }
+        if (homeAssistantStatusCommand(currentGoal)) {
+            return showHomeAssistantStatusCommand()
+        }
+        if (homeAssistantEntitiesCommand(currentGoal)) {
+            return showHomeAssistantEntitiesCommand()
+        }
+        homeAssistantEntitySearchCommandValue(currentGoal)?.let { query ->
+            return searchHomeAssistantEntitiesCommand(query)
+        }
+        homeAssistantEntityReadCommandValue(currentGoal)?.let { entityId ->
+            return readHomeAssistantEntityCommand(entityId)
+        }
         if (notificationInboxCommand(currentGoal)) {
             return showNotificationInboxCommand()
         }
@@ -602,6 +614,45 @@ class MobileNativeAgent(
             normalized == "show notifications" ||
             normalized == "notification inbox" ||
             normalized == "show notification inbox"
+    }
+
+    private fun homeAssistantStatusCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "home assistant status" ||
+            normalized == "check home assistant" ||
+            normalized == "test home assistant" ||
+            normalized == "test home assistant connection"
+    }
+
+    private fun homeAssistantEntitiesCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "home assistant entities" ||
+            normalized == "list home assistant entities" ||
+            normalized == "show home assistant entities" ||
+            normalized == "list smart devices" ||
+            normalized == "show smart devices"
+    }
+
+    private fun homeAssistantEntitySearchCommandValue(goal: String): String? {
+        val prefixes = listOf(
+            "search home assistant entities ",
+            "find home assistant entity ",
+            "search smart devices ",
+            "find smart device "
+        )
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
+    private fun homeAssistantEntityReadCommandValue(goal: String): String? {
+        val prefixes = listOf(
+            "read home assistant entity ",
+            "get home assistant entity ",
+            "read sensor ",
+            "get sensor "
+        )
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
     }
 
     private fun screenOverviewCommand(goal: String): Boolean {
@@ -1386,6 +1437,128 @@ class MobileNativeAgent(
                 status = if (success) AgentConnectorStatus.AVAILABLE else AgentConnectorStatus.NEEDS_SETUP,
                 deliveryMode = "local",
                 capabilities = listOf(AgentCapability.SCREEN_READING, AgentCapability.APP_NAVIGATION)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = if (success) AgentPhase.COMPLETED else AgentPhase.FAILED
+        lastActionResult = AgentActionResult(action.id, success, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:$status")
+        return snapshot()
+    }
+
+    private fun showHomeAssistantStatusCommand(): AgentUiState {
+        val settings = HomeAssistantSettingsStore.load(appContext)
+        val response = HomeAssistantDeviceClient.connectionStatus(appContext)
+        val result = buildString {
+            append(response.message)
+            append("\nEnabled: ").append(settings.enabled)
+            append("\nURL configured: ").append(settings.baseUrl.isNotBlank())
+            append("\nToken configured: ").append(settings.accessToken.isNotBlank())
+            append("\nDefault entity: ").append(settings.defaultEntityId.ifBlank { "none" })
+        }
+        return completeHomeAssistantQueryCommand(
+            actionId = "home-assistant-status",
+            description = "Check Home Assistant connection status",
+            result = result,
+            success = response.success,
+            parameters = mapOf("configured" to settings.configured.toString())
+        )
+    }
+
+    private fun showHomeAssistantEntitiesCommand(): AgentUiState {
+        val response = HomeAssistantDeviceClient.listEntities(appContext)
+        return completeHomeAssistantEntityResult(
+            actionId = "list-home-assistant-entities",
+            description = "List Home Assistant entities",
+            response = response,
+            parameters = mapOf("entity_count" to response.entities.size.toString())
+        )
+    }
+
+    private fun searchHomeAssistantEntitiesCommand(query: String): AgentUiState {
+        val response = HomeAssistantDeviceClient.listEntities(appContext, query = query)
+        return completeHomeAssistantEntityResult(
+            actionId = "search-home-assistant-entities",
+            description = "Search Home Assistant entities",
+            response = response,
+            parameters = mapOf("query" to query, "entity_count" to response.entities.size.toString())
+        )
+    }
+
+    private fun readHomeAssistantEntityCommand(entityId: String): AgentUiState {
+        val response = HomeAssistantDeviceClient.readEntity(appContext, entityId)
+        return completeHomeAssistantEntityResult(
+            actionId = "read-home-assistant-entity",
+            description = "Read Home Assistant entity state",
+            response = response,
+            parameters = mapOf("entity_id" to entityId)
+        )
+    }
+
+    private fun completeHomeAssistantEntityResult(
+        actionId: String,
+        description: String,
+        response: HomeAssistantEntityResult,
+        parameters: Map<String, String>
+    ): AgentUiState {
+        val result = buildString {
+            append(response.message)
+            response.entities.take(40).forEach { entity ->
+                append("\n").append(entity.friendlyName)
+                append(" | ").append(entity.entityId)
+                append(" | ").append(entity.state)
+                if (entity.protected) append(" [protected]")
+            }
+        }
+        return completeHomeAssistantQueryCommand(
+            actionId = actionId,
+            description = description,
+            result = result,
+            success = response.success,
+            parameters = parameters
+        )
+    }
+
+    private fun completeHomeAssistantQueryCommand(
+        actionId: String,
+        description: String,
+        result: String,
+        success: Boolean,
+        parameters: Map<String, String>
+    ): AgentUiState {
+        val status = if (success) AgentActionStatus.COMPLETED else AgentActionStatus.FAILED
+        val action = AgentAction(
+            id = actionId,
+            kind = AgentActionKind.READ_SCREEN,
+            target = "Home Assistant",
+            risk = AgentRisk.LOW,
+            status = status,
+            description = description,
+            parameters = parameters,
+            result = result
+        )
+        val configured = HomeAssistantSettingsStore.load(appContext).configured
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Home Assistant",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "home-assistant",
+                kind = AgentRouteKind.DEVICE_CONNECTOR,
+                targetId = "home-assistant",
+                targetTitle = "Home Assistant",
+                status = if (configured) AgentConnectorStatus.AVAILABLE else AgentConnectorStatus.NEEDS_SETUP,
+                deliveryMode = "local-rest",
+                capabilities = listOf(AgentCapability.SMART_HOME, AgentCapability.DEVICE_CONTROL)
             ),
             safetyReview = AgentSafetyReview(
                 risk = AgentRisk.LOW,
