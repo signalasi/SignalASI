@@ -2119,7 +2119,15 @@ class MobileNativeAgent(
         val result = if (hits.isEmpty()) {
             "No knowledge hits for \"$query\""
         } else {
-            hits.joinToString(" | ") { it.title.take(64) }
+            buildString {
+                append("Knowledge hits: ").append(hits.size)
+                hits.forEachIndexed { index, item ->
+                    append("\n[").append(index + 1).append("] ")
+                    append(item.title.replace(Regex("\\s+"), " ").take(100))
+                    append("\nSource: ").append(knowledgeSourceLabel(item.source))
+                    append("\nExcerpt: ").append(knowledgeExcerpt(item.content, query))
+                }
+            }
         }
         val action = AgentAction(
             id = "search-knowledge",
@@ -2160,6 +2168,31 @@ class MobileNativeAgent(
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
         saveTaskRecord(result = result)
         return snapshot()
+    }
+
+    private fun knowledgeSourceLabel(source: String): String = when {
+        source.isBlank() -> "local"
+        source.startsWith("http://", ignoreCase = true) || source.startsWith("https://", ignoreCase = true) ->
+            source.take(180)
+        source.startsWith("content://", ignoreCase = true) -> "imported document (${source.hashCode()})"
+        else -> source.replace(Regex("\\s+"), " ").take(140)
+    }
+
+    private fun knowledgeExcerpt(content: String, query: String): String {
+        val normalized = content.replace(Regex("\\s+"), " ").trim()
+        if (normalized.isBlank()) return "No excerpt"
+        val tokens = query.lowercase(Locale.US)
+            .split(Regex("\\s+"))
+            .filter { it.length >= 2 }
+        val lower = normalized.lowercase(Locale.US)
+        val matchIndex = tokens.map { lower.indexOf(it) }.filter { it >= 0 }.minOrNull() ?: 0
+        val start = (matchIndex - 100).coerceAtLeast(0)
+        val end = (matchIndex + 260).coerceAtMost(normalized.length)
+        return buildString {
+            if (start > 0) append("...")
+            append(normalized.substring(start, end))
+            if (end < normalized.length) append("...")
+        }
     }
 
     private fun forgetMemoryCommand(query: String): AgentUiState {
