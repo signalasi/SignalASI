@@ -686,6 +686,38 @@ object AgentSystemToolPlanner {
             risk = AgentRisk.MEDIUM,
             capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.TASK_EXECUTION),
             examples = listOf("open phone", "dial 10086", "open messages", "open camera", "pick image")
+        ),
+        AgentSystemTool(
+            id = "wechat-adapter",
+            title = "WeChat Grounded Adapter",
+            kind = AgentActionKind.TAP,
+            risk = AgentRisk.HIGH,
+            capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.TASK_EXECUTION),
+            examples = listOf("send wechat to Alice :: hello", "reply wechat thanks")
+        ),
+        AgentSystemTool(
+            id = "sms-adapter",
+            title = "SMS Composer Adapter",
+            kind = AgentActionKind.OPEN_APP,
+            risk = AgentRisk.HIGH,
+            capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.TASK_EXECUTION),
+            examples = listOf("send sms to 10086 :: hello")
+        ),
+        AgentSystemTool(
+            id = "browser-adapter",
+            title = "Browser Adapter",
+            kind = AgentActionKind.OPEN_URL,
+            risk = AgentRisk.MEDIUM,
+            capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.SCREEN_READING),
+            examples = listOf("search web SignalASI", "open website example.com")
+        ),
+        AgentSystemTool(
+            id = "file-adapter",
+            title = "Document Access Adapter",
+            kind = AgentActionKind.OPEN_APP,
+            risk = AgentRisk.LOW,
+            capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.TASK_EXECUTION),
+            examples = listOf("pick file", "select pdf", "choose photo")
         )
     )
 }

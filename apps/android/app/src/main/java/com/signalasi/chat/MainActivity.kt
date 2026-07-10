@@ -6796,6 +6796,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         ).apply {
             setOnClickListener { startAgentScreenUnderstanding() }
         })
+        featureContent.addView(featureValueRow(
+            getString(R.string.agent_app_adapters_title),
+            getString(R.string.agent_app_adapters_subtitle),
+            R.drawable.ic_protocol_link,
+            getString(R.string.agent_app_adapters_count, 5)
+        ).apply {
+            setOnClickListener { showAgentAppAdaptersPage() }
+        })
         featureContent.addView(featureSwitchRow(
             getString(R.string.on_device_agent_allow_screen_observation),
             getString(R.string.on_device_agent_allow_screen_observation_subtitle),
@@ -6966,6 +6974,59 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 ))
             }
         }
+    }
+
+    private fun showAgentAppAdaptersPage() {
+        showFeaturePage(getString(R.string.agent_app_adapters_title))
+        val screen = mobileNativeAgent.snapshot().currentScreen
+        val wechatInstalled = screen.installedApps.any { it.packageName == "com.tencent.mm" }
+        val accessibilityReady = SignalASIAccessibilityService.isActive()
+        val notificationReady = SignalASINotificationListenerService.currentContext().hasAccess
+        featureContent.addView(featureHeroCard(
+            getString(R.string.agent_app_adapters_hero_title),
+            getString(R.string.agent_app_adapters_hero_subtitle),
+            R.drawable.ic_protocol_link,
+            "#16A085",
+            getString(R.string.agent_app_adapters_count, 5)
+        ))
+        addSectionTitle(getString(R.string.agent_app_adapters_section))
+        featureContent.addView(featureRow(
+            getString(R.string.agent_adapter_wechat),
+            getString(
+                R.string.agent_adapter_wechat_subtitle,
+                onOffLabel(accessibilityReady),
+                onOffLabel(notificationReady)
+            ),
+            R.drawable.ic_tab_messages_outline,
+            getString(
+                if (wechatInstalled && accessibilityReady) R.string.permission_allowed
+                else R.string.permission_needs_setup
+            )
+        ))
+        featureContent.addView(featureRow(
+            getString(R.string.agent_adapter_sms),
+            getString(R.string.agent_adapter_sms_subtitle),
+            R.drawable.ic_tab_messages_outline,
+            getString(R.string.permission_allowed)
+        ))
+        featureContent.addView(featureRow(
+            getString(R.string.agent_adapter_phone),
+            getString(R.string.agent_adapter_phone_subtitle),
+            R.drawable.ic_device_node,
+            getString(R.string.permission_allowed)
+        ))
+        featureContent.addView(featureRow(
+            getString(R.string.agent_adapter_browser),
+            getString(R.string.agent_adapter_browser_subtitle),
+            R.drawable.ic_discover_outline,
+            getString(R.string.permission_allowed)
+        ))
+        featureContent.addView(featureRow(
+            getString(R.string.agent_adapter_files),
+            getString(R.string.agent_adapter_files_subtitle),
+            R.drawable.ic_protocol_link,
+            getString(R.string.permission_allowed)
+        ))
     }
 
     private fun showAgentMemoryConflictDialog(conflict: AgentMemoryConflict) {

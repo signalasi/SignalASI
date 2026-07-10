@@ -15,6 +15,7 @@ class GuardedModelAgentPlanner(
     override fun plan(request: AgentRequest): AgentPlan {
         val settings = settingsStore.load()
         val fallbackPlan = fallback.plan(request)
+        if (fallbackPlan.plannerProfile.startsWith("specialized-adapter:")) return fallbackPlan
         if (!settings.enabled || !safetySettingsStore.load().connectorCallsAllowed) {
             return fallbackPlan.copy(plannerProfile = "rule-based-local")
         }

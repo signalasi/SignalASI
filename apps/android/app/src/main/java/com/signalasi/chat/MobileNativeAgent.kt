@@ -564,8 +564,11 @@ class MobileNativeAgent(
             it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
         } == true
         val preservesToolGraph = updatedPlan?.hasOutputHandoffFrom(hardenedAction.id) == true
+        val specializedContinuation = updatedPlan?.plannerProfile?.startsWith("specialized-adapter:") == true &&
+            hardenedAction.requiresSpecializedContinuation()
         val replanReason = when {
             lastActionResult?.success != true -> "action_failed:${hardenedAction.kind.name}"
+            specializedContinuation -> "specialized_step_completed:${hardenedAction.id}"
             hasPendingBeforeReplan && hardenedAction.kind.mayChangeScreen() && !preservesToolGraph ->
                 "screen_updated_after:${hardenedAction.kind.name}"
             else -> ""
@@ -1074,8 +1077,10 @@ class MobileNativeAgent(
         force: Boolean = false
     ): AgentPlan? {
         val settings = AgentModelPlannerSettingsStore(appContext).load()
-        if (!settings.enabled || (!settings.dynamicReplanning && !force)) return null
-        if (plan.replanCount >= settings.maxReplans) {
+        val specializedAdapter = plan.plannerProfile.startsWith("specialized-adapter:")
+        if (!specializedAdapter && (!settings.enabled || (!settings.dynamicReplanning && !force))) return null
+        val maxReplans = if (specializedAdapter) MAX_SPECIALIZED_ADAPTER_REPLANS else settings.maxReplans
+        if (plan.replanCount >= maxReplans) {
             recordAudit(
                 AgentAuditEvent.PLAN_REPLAN_LIMIT_REACHED,
                 "revision=${plan.revision}; replans=${plan.replanCount}"
@@ -1105,7 +1110,8 @@ class MobileNativeAgent(
                 replanReason = reason
             )
         )
-        if (!proposal.plannerProfile.startsWith("guarded-model:")) return null
+        if (!proposal.plannerProfile.startsWith("guarded-model:") &&
+            !proposal.plannerProfile.startsWith("specialized-adapter:")) return null
         val revision = plan.revision + 1
         val actionIdMap = proposal.actions.mapIndexed { index, action ->
             action.id to "r$revision-${index + 1}-${action.id}"
@@ -4380,6 +4386,7 @@ class MobileNativeAgent(
         private const val MAX_AUDIT_ITEMS = 20
         private const val MAX_CONNECTOR_RESPONSE_CHARACTERS = 24_000
         private const val MAX_TASK_RESULT_CHARACTERS = 4_000
+        private const val MAX_SPECIALIZED_ADAPTER_REPLANS = 8
         private val ACTIVE_EXECUTION_PHASES = setOf(
             AgentPhase.PLANNING,
             AgentPhase.WAITING_CONFIRMATION,
@@ -4525,6 +4532,12 @@ interface AgentPlanner {
 
 class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner {
     override fun plan(request: AgentRequest): AgentPlan {
+        AgentSpecializedAppPlanner.plan(request)?.let { specialized ->
+            return AgentPlanFactory.actions(request, specialized.actions).copy(
+                plannerProfile = "specialized-adapter:${specialized.profile}",
+                routeRationale = "A deterministic app adapter selected the next grounded step."
+            )
+        }
         val actions = actionsFor(request)
         return AgentPlanFactory.actions(request, actions)
     }
@@ -5803,6 +5816,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         val title = action.parameters["title"].orEmpty()
         val calendarTitle = action.parameters["calendar_title"].orEmpty()
         val contactName = action.parameters["contact_name"].orEmpty()
+        val smsBody = action.parameters["sms_body"].orEmpty()
         val intent = when {
             intentAction.isNotBlank() -> Intent(intentAction).apply {
                 when {
@@ -5815,6 +5829,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 if (title.isNotBlank()) putExtra(Intent.EXTRA_TITLE, title)
                 if (calendarTitle.isNotBlank()) putExtra(CalendarContract.Events.TITLE, calendarTitle)
                 if (contactName.isNotBlank()) putExtra(ContactsContract.Intents.Insert.NAME, contactName)
+                if (smsBody.isNotBlank()) putExtra("sms_body", smsBody)
             }
             packageName.isNotBlank() -> context.packageManager.getLaunchIntentForPackage(packageName)
             else -> null
@@ -7764,6 +7779,13 @@ data class ClipboardContext(
     val preview: String = "",
     val sensitiveFlags: List<String> = emptyList()
 )
+
+private fun AgentAction.requiresSpecializedContinuation(): Boolean {
+    if (!id.contains("special-wechat-")) return false
+    return !id.contains("-send") &&
+        !id.contains("-notification-reply") &&
+        !id.contains("-missing")
+}
 
 private fun AgentActionKind.mayChangeScreen(): Boolean = when (this) {
     AgentActionKind.TAP,
