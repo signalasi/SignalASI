@@ -52,8 +52,7 @@ object AgentConnectorResponseStore {
 
     @Synchronized
     fun pending(context: Context): List<AgentConnectorResponse> {
-        val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val raw = prefs.getString(KEY_RESPONSES, "[]") ?: "[]"
+        val raw = AgentEncryptedPreferences(context, PREFS).readString(KEY_RESPONSES, "[]")
         return runCatching {
             val array = JSONArray(raw)
             val cutoff = System.currentTimeMillis() - MAX_RESPONSE_AGE_MILLIS
@@ -90,10 +89,7 @@ object AgentConnectorResponseStore {
 
     @Synchronized
     fun clear(context: Context) {
-        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .clear()
-            .commit()
+        AgentEncryptedPreferences(context, PREFS).clear()
     }
 
     private fun save(context: Context, responses: List<AgentConnectorResponse>) {
@@ -108,10 +104,7 @@ object AgentConnectorResponseStore {
                     .put("received_at", response.receivedAtMillis)
             )
         }
-        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY_RESPONSES, array.toString())
-            .apply()
+        AgentEncryptedPreferences(context, PREFS).writeString(KEY_RESPONSES, array.toString())
     }
 
     private const val MAX_RESPONSE_AGE_MILLIS = 24L * 60L * 60L * 1000L

@@ -27,7 +27,7 @@ interface AgentTaskStore {
 }
 
 class SharedPreferencesAgentTaskStore(context: Context) : AgentTaskStore {
-    private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val prefs = AgentEncryptedPreferences(context, PREFS)
 
     override fun upsert(record: AgentTaskRecord) {
         if (record.taskId.isBlank() || record.goal.isBlank()) return
@@ -55,7 +55,7 @@ class SharedPreferencesAgentTaskStore(context: Context) : AgentTaskStore {
     }
 
     override fun clear() {
-        prefs.edit().clear().apply()
+        prefs.clear()
     }
 
     private fun score(item: AgentTaskRecord, query: String, tokens: List<String>): Int {
@@ -79,7 +79,7 @@ class SharedPreferencesAgentTaskStore(context: Context) : AgentTaskStore {
     }
 
     private fun loadItems(): List<AgentTaskRecord> {
-        val raw = prefs.getString(KEY_ITEMS, "[]") ?: "[]"
+        val raw = prefs.readString(KEY_ITEMS, "[]")
         return runCatching {
             val array = JSONArray(raw)
             buildList {
@@ -93,7 +93,7 @@ class SharedPreferencesAgentTaskStore(context: Context) : AgentTaskStore {
     private fun saveItems(items: List<AgentTaskRecord>) {
         val array = JSONArray()
         items.forEach { array.put(encodeItem(it)) }
-        prefs.edit().putString(KEY_ITEMS, array.toString()).apply()
+        prefs.writeString(KEY_ITEMS, array.toString())
     }
 
     private fun encodeItem(item: AgentTaskRecord): JSONObject = JSONObject()

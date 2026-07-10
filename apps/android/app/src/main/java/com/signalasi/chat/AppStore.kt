@@ -865,6 +865,7 @@ object AppStore {
         context.getSharedPreferences("signalasi_agent_safety", Context.MODE_PRIVATE).edit().clear().commit()
         AgentConnectorResponseStore.clear(context)
         HomeAssistantSettingsStore.clear(context)
+        runCatching { AgentStorageCipher.deleteMasterKey() }
         SignalASICrypto.resetLocalIdentity(context)
         context.cacheDir.deleteRecursively()
         context.filesDir.resolve("backups").deleteRecursively()

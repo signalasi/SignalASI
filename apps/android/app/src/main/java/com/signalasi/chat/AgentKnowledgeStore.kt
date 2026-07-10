@@ -38,7 +38,7 @@ interface AgentKnowledgeStore {
 }
 
 class SharedPreferencesAgentKnowledgeStore(context: Context) : AgentKnowledgeStore {
-    private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val prefs = AgentEncryptedPreferences(context, PREFS)
 
     override fun upsert(item: AgentKnowledgeItem) {
         val cleanTitle = item.title.trim()
@@ -113,7 +113,7 @@ class SharedPreferencesAgentKnowledgeStore(context: Context) : AgentKnowledgeSto
     }
 
     private fun loadItems(): List<AgentKnowledgeItem> {
-        val raw = prefs.getString(KEY_ITEMS, "[]") ?: "[]"
+        val raw = prefs.readString(KEY_ITEMS, "[]")
         return runCatching {
             val array = JSONArray(raw)
             buildList {
@@ -127,7 +127,7 @@ class SharedPreferencesAgentKnowledgeStore(context: Context) : AgentKnowledgeSto
     private fun saveItems(items: List<AgentKnowledgeItem>) {
         val array = JSONArray()
         items.forEach { array.put(encodeItem(it)) }
-        prefs.edit().putString(KEY_ITEMS, array.toString()).apply()
+        prefs.writeString(KEY_ITEMS, array.toString())
     }
 
     private fun encodeItem(item: AgentKnowledgeItem): JSONObject = JSONObject()

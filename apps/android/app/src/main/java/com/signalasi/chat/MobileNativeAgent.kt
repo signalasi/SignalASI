@@ -4240,7 +4240,7 @@ class InMemoryAgentMemoryStore : AgentMemoryStore {
 }
 
 class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
-    private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val prefs = AgentEncryptedPreferences(context, PREFS)
 
     override fun remember(item: AgentMemoryItem) {
         val cleanValue = item.value.trim()
@@ -4296,7 +4296,7 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
     }
 
     private fun loadItems(): List<AgentMemoryItem> {
-        val raw = prefs.getString(KEY_ITEMS, "[]") ?: "[]"
+        val raw = prefs.readString(KEY_ITEMS, "[]")
         return runCatching {
             val array = JSONArray(raw)
             buildList {
@@ -4310,7 +4310,7 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
     private fun saveItems(items: List<AgentMemoryItem>) {
         val array = JSONArray()
         items.forEach { array.put(encodeMemoryItem(it)) }
-        prefs.edit().putString(KEY_ITEMS, array.toString()).apply()
+        prefs.writeString(KEY_ITEMS, array.toString())
     }
 
     private fun encodeMemoryItem(item: AgentMemoryItem): JSONObject = JSONObject()
@@ -4462,21 +4462,21 @@ interface AgentSessionStore {
 }
 
 class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
-    private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val prefs = AgentEncryptedPreferences(context, PREFS)
 
     override fun load(): AgentSessionSnapshot? {
-        val raw = prefs.getString(KEY_SESSION, null) ?: return null
+        val raw = prefs.readString(KEY_SESSION, "").takeIf { it.isNotBlank() } ?: return null
         return runCatching {
             decodeSession(JSONObject(raw))
         }.getOrNull()
     }
 
     override fun save(snapshot: AgentSessionSnapshot) {
-        prefs.edit().putString(KEY_SESSION, encodeSession(snapshot).toString()).apply()
+        prefs.writeString(KEY_SESSION, encodeSession(snapshot).toString())
     }
 
     override fun clear() {
-        prefs.edit().clear().apply()
+        prefs.clear()
     }
 
     private fun encodeSession(snapshot: AgentSessionSnapshot): JSONObject = JSONObject()
