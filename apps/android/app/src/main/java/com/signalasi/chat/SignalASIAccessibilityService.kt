@@ -10,6 +10,8 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
 class SignalASIAccessibilityService : AccessibilityService() {
+    private var lastVisualCaptureRequestAt = 0L
+
     override fun onCreate() {
         super.onCreate()
         activeService = this
@@ -26,6 +28,14 @@ class SignalASIAccessibilityService : AccessibilityService() {
                 className = className
             )
         )
+        val now = System.currentTimeMillis()
+        if (packageName != applicationContext.packageName &&
+            AgentScreenCaptureService.isActive() &&
+            now - lastVisualCaptureRequestAt >= VISUAL_CAPTURE_THROTTLE_MILLIS
+        ) {
+            lastVisualCaptureRequestAt = now
+            AgentScreenCaptureService.requestCapture(applicationContext)
+        }
     }
 
     override fun onServiceConnected() {
@@ -150,6 +160,7 @@ class SignalASIAccessibilityService : AccessibilityService() {
     companion object {
         @Volatile
         private var activeService: SignalASIAccessibilityService? = null
+        private const val VISUAL_CAPTURE_THROTTLE_MILLIS = 2_500L
 
         fun isActive(): Boolean = activeService != null
 
@@ -182,6 +193,7 @@ class SignalASIAccessibilityService : AccessibilityService() {
 
         fun performClearText(bounds: String): Boolean = activeService?.clearField(bounds) == true
     }
+
 }
 
 private object AccessibilityTreeReader {

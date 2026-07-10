@@ -94,6 +94,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_EXPORT_BACKUP = 2004
         private const val REQUEST_PICK_AVATAR = 2005
         private const val REQUEST_IMPORT_KNOWLEDGE = 2006
+        private const val REQUEST_AGENT_SCREEN_CAPTURE = 2007
         private const val HISTORY_PREFS = "signalasi_chat_history"
         private const val OLD_HISTORY_PREFS = "hermes_chat_history"
         private const val HISTORY_KEY = "messages"
@@ -242,6 +243,22 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var mobileNativeAgent: MobileNativeAgent
     private val agentConnectorResponseListener = AgentConnectorResponseListener { response ->
         runOnUiThread { consumeAgentConnectorResponse(response) }
+    }
+    private val agentVisualScreenListener = AgentVisualScreenListener { result ->
+        runOnUiThread {
+            if (result.success) {
+                if (activeMainTab == PAGE_AGENT) {
+                    renderAgentState(mobileNativeAgent.observeCurrentScreen())
+                }
+                Toast.makeText(
+                    this,
+                    getString(R.string.agent_screen_ocr_ready, result.textLines.size),
+                    Toast.LENGTH_SHORT
+                ).show()
+            } else if (result.error.isNotBlank()) {
+                Toast.makeText(this, result.error, Toast.LENGTH_SHORT).show()
+            }
+        }
     }
     private val messages = mutableMapOf<String, MutableList<ChatMessage>>()
     private val summaries = mutableMapOf<String, ContactSummary>()
@@ -480,6 +497,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         stopRecording(send = false)
         saveChatHistory(sync = true)
         SignalASIMqttClient.removeListener(this)
+        ScreenPerceptionState.removeVisualListener(agentVisualScreenListener)
         historyExecutor.shutdown()
         super.onDestroy()
     }
@@ -488,7 +506,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         super.onResume()
         AppForegroundTracker.onActivityResumed()
         AgentConnectorResponseBus.addListener(agentConnectorResponseListener)
-        val restoredAgentState = mobileNativeAgent.reloadSession()
+        ScreenPerceptionState.addVisualListener(agentVisualScreenListener)
+        val reloadedAgentState = mobileNativeAgent.reloadSession()
+        val restoredAgentState = if (
+            reloadedAgentState.runningTaskCount == 0 && ScreenPerceptionState.hasRecentVisualCapture()
+        ) {
+            mobileNativeAgent.observeCurrentScreen()
+        } else {
+            reloadedAgentState
+        }
         if (activeMainTab == PAGE_AGENT) renderAgentState(restoredAgentState)
         consumePendingAgentConnectorResponses()
         reloadChatHistoryIfChanged()
@@ -496,6 +522,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     override fun onPause() {
         AgentConnectorResponseBus.removeListener(agentConnectorResponseListener)
+        ScreenPerceptionState.removeVisualListener(agentVisualScreenListener)
         saveChatHistory(sync = true)
         AppForegroundTracker.onActivityPaused()
         super.onPause()
@@ -606,6 +633,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_AGENT_SCREEN_CAPTURE) {
+            if (resultCode == RESULT_OK && data != null) {
+                AgentScreenCaptureService.start(this, resultCode, data)
+                Toast.makeText(this, getString(R.string.agent_screen_capture_started), Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, getString(R.string.agent_screen_capture_permission_denied), Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
         val scanResult = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
         if (scanResult != null) {
             handleSecurityScan(scanResult.contents)
@@ -789,14 +825,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         renderAgentState(restoredOrFreshAgentState())
         agentStatusCard.setOnClickListener {
             val state = mobileNativeAgent.snapshot()
-            if (state.currentScreen.isAccessibilityEnabled) {
+            if (state.currentScreen.isAccessibilityEnabled || ScreenPerceptionState.hasRecentVisualCapture()) {
                 renderAgentState(mobileNativeAgent.observeCurrentScreen())
             } else {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             }
         }
         agentQuickUnderstandButton.setOnClickListener {
-            renderAgentState(mobileNativeAgent.observeCurrentScreen())
+            startAgentScreenUnderstanding()
         }
         agentQuickSaveScreenButton.setOnClickListener {
             prefillAgentGoal("save screen")
@@ -847,6 +883,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 startAgentVoiceInput()
             }
         }
+    }
+
+    private fun startAgentScreenUnderstanding() {
+        if (AgentScreenCaptureService.requestCapture(this)) {
+            Toast.makeText(this, getString(R.string.agent_screen_capture_running), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val manager = getSystemService(android.media.projection.MediaProjectionManager::class.java)
+        startActivityForResult(manager.createScreenCaptureIntent(), REQUEST_AGENT_SCREEN_CAPTURE)
     }
 
     private fun restoredOrFreshAgentState(): AgentUiState {
@@ -1636,10 +1681,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun renderAgentState(state: AgentUiState) {
         val isPlanning = state.phase != AgentPhase.OBSERVING
-        val screenAccessEnabled = state.currentScreen.isAccessibilityEnabled
+        val visualScreenReady = ScreenPerceptionState.hasRecentVisualCapture()
+        val screenAccessEnabled = state.currentScreen.isAccessibilityEnabled || visualScreenReady
         val pendingAction = state.pendingAction
         agentStatusTitle.text = when {
             !screenAccessEnabled && !isPlanning -> getString(R.string.agent_status_accessibility_needed)
+            visualScreenReady && !state.currentScreen.isAccessibilityEnabled && !isPlanning ->
+                getString(R.string.agent_status_visual_ready)
             state.phase == AgentPhase.BLOCKED -> getString(R.string.agent_status_blocked)
             state.phase == AgentPhase.WAITING_CONFIRMATION -> getString(R.string.agent_status_waiting_confirmation)
             state.phase == AgentPhase.EXECUTING -> getString(R.string.agent_status_executing)
@@ -1653,6 +1701,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         agentStatusSubtitle.text = when {
             !screenAccessEnabled && !isPlanning -> getString(R.string.agent_status_accessibility_needed_subtitle)
+            visualScreenReady && !state.currentScreen.isAccessibilityEnabled && !isPlanning ->
+                getString(R.string.agent_status_visual_ready_subtitle)
             state.phase == AgentPhase.BLOCKED -> state.plan?.safetyReview?.reason
                 ?.ifBlank { getString(R.string.agent_status_blocked_subtitle) }
                 ?: getString(R.string.agent_status_blocked_subtitle)
@@ -2445,7 +2495,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun renderAgentScreenDetails(screen: ScreenContext) {
         agentScreenDetailList.removeAllViews()
-        if (!screen.isAccessibilityEnabled) {
+        if (!screen.isAccessibilityEnabled && !ScreenPerceptionState.hasRecentVisualCapture()) {
             agentScreenDetailList.addView(agentScreenEmptyRow(getString(R.string.agent_screen_disabled)))
             return
         }
@@ -5950,6 +6000,22 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             if (screenAccessAllowed) getString(R.string.permission_allowed) else getString(R.string.permission_needs_setup)
         ).apply {
             setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.on_device_agent_visual_capture),
+            getString(R.string.on_device_agent_visual_capture_subtitle),
+            R.drawable.ic_scan,
+            if (AgentScreenCaptureService.isActive()) getString(R.string.permission_allowed)
+            else getString(R.string.permission_needs_setup)
+        ).apply {
+            setOnClickListener {
+                if (AgentScreenCaptureService.isActive()) {
+                    AgentScreenCaptureService.stop(this@MainActivity)
+                    showOnDeviceAgentFeaturePage()
+                } else {
+                    startAgentScreenUnderstanding()
+                }
+            }
         })
         featureContent.addView(featureRow(getString(R.string.on_device_agent_microphone), getString(R.string.on_device_agent_microphone_subtitle), R.drawable.ic_agent_node, getString(R.string.permission_allowed)))
         featureContent.addView(featureRow(getString(R.string.on_device_agent_camera), getString(R.string.on_device_agent_camera_subtitle), R.drawable.ic_scan, getString(R.string.permission_allowed)))

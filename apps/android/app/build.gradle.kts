@@ -61,4 +61,5 @@ dependencies {
     implementation(files("libs/onnxruntime-android-1.18.0.aar"))
     implementation(files("libs/commons-math3-3.6.1.jar"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
 }
