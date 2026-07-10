@@ -5372,8 +5372,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun showDeviceFeaturePage() {
         val homeAssistant = HomeAssistantSettingsStore.load(this)
+        val customDevices = CustomDeviceConnectorStore(this).list()
         showFeaturePage(getString(R.string.device_management_title))
-        featureContent.addView(featureHeroCard(getString(R.string.device_management_title), getString(R.string.device_management_subtitle), R.drawable.ic_device_node, "#5B6CFF", getString(R.string.count_devices, 3)))
+        featureContent.addView(featureHeroCard(getString(R.string.device_management_title), getString(R.string.device_management_subtitle), R.drawable.ic_device_node, "#5B6CFF", getString(R.string.count_devices, customDevices.size + 3)))
         addSectionTitle(getString(R.string.section_my_devices))
         featureContent.addView(featureRow("Phone Agent", getString(R.string.device_phone_agent_subtitle), R.drawable.ic_device_node, getString(R.string.status_online)))
         featureContent.addView(featureRow("PC Agent", getString(R.string.device_pc_agent_subtitle), R.drawable.ic_device_node, getString(R.string.status_online)))
@@ -5383,6 +5384,32 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             R.drawable.ic_device_node,
             getString(if (homeAssistant.configured) R.string.device_home_assistant_configured else R.string.device_home_assistant_not_configured)
         ))
+        customDevices.forEach { connector ->
+            featureContent.addView(featureRow(
+                connector.name,
+                connector.transport.name.replace('_', ' '),
+                R.drawable.ic_device_node,
+                getString(if (connector.configured) R.string.status_enabled else R.string.common_needs_setup)
+            ).apply {
+                setOnClickListener { showCustomDeviceConnectorEditor(connector) }
+            })
+        }
+        featureContent.addView(featureRow(
+            getString(R.string.device_custom_add),
+            getString(R.string.device_custom_add_subtitle),
+            R.drawable.ic_device_node,
+            "+"
+        ).apply {
+            setOnClickListener {
+                showCustomDeviceConnectorEditor(
+                    CustomDeviceConnector(
+                        name = getString(R.string.device_custom_default_name),
+                        transport = CustomDeviceTransport.HTTP_REST,
+                        endpoint = ""
+                    )
+                )
+            }
+        })
         addSectionTitle(getString(R.string.device_home_assistant))
         featureContent.addView(featureRow(getString(R.string.device_home_assistant), getString(R.string.device_home_assistant_subtitle), R.drawable.ic_security_shield, onOffLabel(homeAssistant.enabled)).apply {
             setOnClickListener {
@@ -5417,6 +5444,137 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         addSectionTitle(getString(R.string.section_device_capabilities))
         featureContent.addView(featureRow(getString(R.string.device_file_sync), getString(R.string.device_file_sync_subtitle), R.drawable.ic_import, getString(R.string.status_enabled)))
         featureContent.addView(featureRow(getString(R.string.device_remote_control), getString(R.string.device_remote_control_subtitle), R.drawable.ic_security_shield, getString(R.string.status_protected)))
+    }
+
+    private fun showCustomDeviceConnectorEditor(connector: CustomDeviceConnector) {
+        showFeaturePage(getString(R.string.device_custom_editor_title))
+        featureContent.addView(featureHeroCard(
+            connector.name,
+            getString(R.string.device_custom_editor_subtitle),
+            R.drawable.ic_device_node,
+            "#14C66A",
+            connector.transport.name.replace('_', ' ')
+        ))
+        addSectionTitle(getString(R.string.device_custom_section_connection))
+        featureContent.addView(featureRow(getString(R.string.device_custom_name), connector.name, R.drawable.ic_device_node, getString(R.string.common_edit)).apply {
+            setOnClickListener {
+                showTextSettingDialog(getString(R.string.device_custom_name), connector.name) {
+                    showCustomDeviceConnectorEditor(connector.copy(name = it))
+                }
+            }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.device_custom_transport),
+            getString(R.string.device_custom_transport_subtitle),
+            R.drawable.ic_protocol_link,
+            connector.transport.name.replace('_', ' ')
+        ).apply {
+            setOnClickListener {
+                val options = CustomDeviceTransport.entries.map { it.name.replace('_', ' ') }
+                showChoiceDialog(getString(R.string.device_custom_transport), options, connector.transport.name.replace('_', ' ')) { selected ->
+                    showCustomDeviceConnectorEditor(connector.copy(transport = CustomDeviceTransport.valueOf(selected.replace(' ', '_'))))
+                }
+            }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.device_custom_endpoint),
+            connector.endpoint.ifBlank { getString(R.string.device_custom_endpoint_subtitle) },
+            R.drawable.ic_protocol_link,
+            getString(R.string.common_edit)
+        ).apply {
+            setOnClickListener {
+                showTextSettingDialog(getString(R.string.device_custom_endpoint), connector.endpoint) {
+                    showCustomDeviceConnectorEditor(connector.copy(endpoint = it))
+                }
+            }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.device_custom_target),
+            connector.commandTarget.ifBlank { getString(R.string.device_custom_target_subtitle) },
+            R.drawable.ic_device_node,
+            getString(R.string.common_edit)
+        ).apply {
+            setOnClickListener {
+                showTextSettingDialog(getString(R.string.device_custom_target), connector.commandTarget) {
+                    showCustomDeviceConnectorEditor(connector.copy(commandTarget = it))
+                }
+            }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.device_custom_username),
+            connector.username.ifBlank { getString(R.string.common_empty) },
+            R.drawable.ic_agent_node,
+            getString(R.string.common_edit)
+        ).apply {
+            setOnClickListener {
+                showTextSettingDialog(getString(R.string.device_custom_username), connector.username) {
+                    showCustomDeviceConnectorEditor(connector.copy(username = it))
+                }
+            }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.device_custom_token),
+            maskedSecret(connector.authToken).ifBlank { getString(R.string.common_empty) },
+            R.drawable.ic_security_shield,
+            getString(R.string.common_edit)
+        ).apply {
+            setOnClickListener {
+                showTextSettingDialog(getString(R.string.device_custom_token), connector.authToken) {
+                    showCustomDeviceConnectorEditor(connector.copy(authToken = it))
+                }
+            }
+        })
+        addSectionTitle(getString(R.string.device_custom_section_safety))
+        featureContent.addView(featureRow(
+            getString(R.string.device_custom_risk),
+            getString(R.string.device_custom_risk_subtitle),
+            R.drawable.ic_security_shield,
+            connector.risk.name
+        ).apply {
+            setOnClickListener {
+                val options = listOf(AgentRisk.LOW, AgentRisk.MEDIUM, AgentRisk.HIGH).map { it.name }
+                showChoiceDialog(getString(R.string.device_custom_risk), options, connector.risk.name) { selected ->
+                    showCustomDeviceConnectorEditor(connector.copy(risk = AgentRisk.valueOf(selected)))
+                }
+            }
+        })
+        featureContent.addView(featureSwitchRow(
+            getString(R.string.device_custom_enabled),
+            getString(R.string.device_custom_enabled_subtitle),
+            R.drawable.ic_device_node,
+            connector.enabled
+        ).apply {
+            setOnClickListener { showCustomDeviceConnectorEditor(connector.copy(enabled = !connector.enabled)) }
+        })
+        addSectionTitle(getString(R.string.section_actions))
+        featureContent.addView(featureRow(
+            getString(R.string.common_save),
+            getString(R.string.device_custom_save_subtitle),
+            R.drawable.ic_import,
+            getString(R.string.common_save)
+        ).apply {
+            setOnClickListener {
+                if (connector.name.isBlank() || connector.endpoint.isBlank()) {
+                    Toast.makeText(this@MainActivity, getString(R.string.device_custom_required), Toast.LENGTH_SHORT).show()
+                } else {
+                    CustomDeviceConnectorStore(this@MainActivity).upsert(connector)
+                    showDeviceFeaturePage()
+                }
+            }
+        })
+        if (CustomDeviceConnectorStore(this).find(connector.id) != null) {
+            featureContent.addView(featureRow(
+                getString(R.string.common_delete),
+                getString(R.string.device_custom_delete_subtitle),
+                R.drawable.ic_security_shield,
+                getString(R.string.common_delete)
+            ).apply {
+                setOnClickListener {
+                    CustomDeviceConnectorStore(this@MainActivity).delete(connector.id)
+                    showDeviceFeaturePage()
+                }
+            })
+        }
     }
 
     private fun maskedSecret(value: String): String = when {

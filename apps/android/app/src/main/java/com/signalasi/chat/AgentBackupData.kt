@@ -17,8 +17,9 @@ object AgentBackupData {
     fun export(context: Context): JSONObject {
         val safety = SharedPreferencesAgentSafetySettingsStore(context).load()
         val homeAssistant = HomeAssistantSettingsStore.load(context)
+        val customDevices = CustomDeviceConnectorStore(context).exportJson()
         return JSONObject()
-            .put("version", 2)
+            .put("version", 3)
             .put("memory", readArray(context, MEMORY_PREFS, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS))
             .put("knowledge", readArray(context, KNOWLEDGE_PREFS, MAX_KNOWLEDGE_ITEMS, MAX_KNOWLEDGE_ITEM_CHARACTERS))
             .put("tasks", readArray(context, TASK_PREFS, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS))
@@ -46,6 +47,7 @@ object AgentBackupData {
                     .put("device_control_allowed", safety.deviceControlAllowed)
                     .put("execution_paused", safety.executionPaused)
             )
+            .put("custom_device_connectors", customDevices)
             .put(
                 "home_assistant",
                 JSONObject()
@@ -117,6 +119,9 @@ object AgentBackupData {
                     defaultEntityId = json.optString("default_entity_id").take(MAX_ENTITY_ID_CHARACTERS)
                 )
             )
+        }
+        payload.optJSONArray("custom_device_connectors")?.let { array ->
+            CustomDeviceConnectorStore(context).restoreJson(array)
         }
     }
 

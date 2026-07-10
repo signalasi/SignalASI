@@ -876,6 +876,7 @@ object AppStore {
         context.getSharedPreferences("signalasi_agent_workflow_execution_history", Context.MODE_PRIVATE).edit().clear().commit()
         AgentConnectorResponseStore.clear(context)
         HomeAssistantSettingsStore.clear(context)
+        CustomDeviceConnectorStore(context).clear()
         runCatching { AgentStorageCipher.deleteMasterKey() }
         SignalASICrypto.resetLocalIdentity(context)
         context.cacheDir.deleteRecursively()

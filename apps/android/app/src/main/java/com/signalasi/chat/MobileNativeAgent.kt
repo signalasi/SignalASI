@@ -4024,7 +4024,12 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             lower.contains("codex") -> connectorAction(request, "codex", "Send task to Codex")
             lower.contains("claude") -> connectorAction(request, "claude-code", "Send task to Claude Code")
             lower.contains("hermes") -> connectorAction(request, "hermes", "Send task to Hermes")
-            lower.contains("home assistant") || lower.contains("smart home") || lower.contains("device") -> deviceAction(request)
+            lower.contains("home assistant") ||
+                lower.contains("smart home") ||
+                lower.contains("device") ||
+                request.targets.any {
+                    it.kind == AgentConnectorKind.DEVICE && request.goal.contains(it.title, ignoreCase = true)
+                } -> deviceAction(request)
             else -> AgentAction(
                 id = "draft-plan",
                 kind = AgentActionKind.DRAFT_PLAN,
@@ -4192,13 +4197,30 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
     }
 
     private fun deviceAction(request: AgentRequest): AgentAction {
-        val target = request.targets.firstOrNull { it.kind == AgentConnectorKind.DEVICE }
+        val customTarget = request.targets
+            .filter { it.kind == AgentConnectorKind.DEVICE && it.id.startsWith(CUSTOM_DEVICE_TARGET_PREFIX) }
+            .firstOrNull { request.goal.contains(it.title, ignoreCase = true) }
+        val target = customTarget ?: request.targets.firstOrNull {
+            it.kind == AgentConnectorKind.DEVICE &&
+                it.id == "home-assistant" &&
+                it.status == AgentConnectorStatus.AVAILABLE
+        } ?: request.targets.firstOrNull {
+            it.kind == AgentConnectorKind.DEVICE &&
+                it.id.startsWith(CUSTOM_DEVICE_TARGET_PREFIX) &&
+                it.status == AgentConnectorStatus.AVAILABLE
+        } ?: request.targets.firstOrNull { it.kind == AgentConnectorKind.DEVICE }
         val entityId = context?.let { HomeAssistantDeviceClient.entityIdForPrompt(it, request.goal) }
             ?: HomeAssistantDeviceClient.entityIdForPrompt(request.goal)
-        val risk = context?.let { HomeAssistantDeviceClient.riskForPrompt(it, request.goal) }
+        val customConnector = if (target?.id?.startsWith(CUSTOM_DEVICE_TARGET_PREFIX) == true && context != null) {
+            CustomDeviceConnectorStore(context).find(target.id.removePrefix(CUSTOM_DEVICE_TARGET_PREFIX))
+        } else {
+            null
+        }
+        val risk = customConnector?.risk ?: context?.let { HomeAssistantDeviceClient.riskForPrompt(it, request.goal) }
             ?: HomeAssistantDeviceClient.riskForPrompt(request.goal)
         val lower = request.goal.lowercase(Locale.US)
         val description = when {
+            customConnector != null -> "Send command to ${customConnector.name}"
             lower.contains("automation") -> "Trigger a Home Assistant automation"
             lower.contains("script") -> "Run a Home Assistant script"
             lower.contains("scene") -> "Activate a Home Assistant scene"
@@ -4207,7 +4229,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         return AgentAction(
             id = "device-control",
             kind = AgentActionKind.CONTROL_DEVICE,
-            target = entityId.ifBlank { target?.title ?: "Home Assistant" },
+            target = customConnector?.name ?: entityId.ifBlank { target?.title ?: "Home Assistant" },
             risk = risk,
             status = AgentActionStatus.PENDING_CONFIRMATION,
             description = description,
@@ -4215,7 +4237,8 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 "connector_id" to (target?.id ?: "home-assistant"),
                 "prompt" to request.goal,
                 "entity_id" to entityId,
-                "device_risk" to risk.name
+                "device_risk" to risk.name,
+                "custom_device_id" to customConnector?.id.orEmpty()
             )
         )
     }
@@ -4305,6 +4328,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
 
     companion object {
         private const val MAX_NOTIFICATION_REPLY_CHARACTERS = 2_000
+        private const val CUSTOM_DEVICE_TARGET_PREFIX = "custom-device:"
         private val BLOCKED_GOAL_TERMS = listOf(
             "install app",
             "uninstall app",
@@ -5316,6 +5340,26 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
 
     private fun dispatchDeviceTask(action: AgentAction): AgentActionResult {
         val prompt = action.parameters["prompt"].orEmpty().ifBlank { action.description }
+        val customDeviceId = action.parameters["custom_device_id"].orEmpty().ifBlank {
+            action.parameters["connector_id"].orEmpty().removePrefix("custom-device:")
+                .takeIf { action.parameters["connector_id"].orEmpty().startsWith("custom-device:") }
+                .orEmpty()
+        }
+        if (customDeviceId.isNotBlank()) {
+            val connector = CustomDeviceConnectorStore(context).find(customDeviceId)
+                ?: return AgentActionResult(action.id, false, "Custom device connector is missing")
+            if (connector.transport == CustomDeviceTransport.SIGNALASI_AGENT) {
+                val contactId = connector.commandTarget.ifBlank { connector.endpoint }
+                return dispatchContactTask(action, contactId, prompt)
+            }
+            val response = CustomDeviceConnectorClient.execute(context, connector, prompt)
+            return AgentActionResult(
+                actionId = action.id,
+                success = response.success,
+                message = response.message,
+                metadata = response.metadata
+            )
+        }
         val localHomeAssistant = HomeAssistantDeviceClient.control(context, prompt)
         if (localHomeAssistant.handled) {
             return AgentActionResult(action.id, localHomeAssistant.success, localHomeAssistant.message)
@@ -5689,8 +5733,18 @@ class AppStoreAgentConnectorRegistry(
 ) : AgentConnectorRegistry {
     private val appContext = context.applicationContext
 
-    override fun availableTargets(): List<AgentCallableTarget> = fallback.availableTargets().map { target ->
-        target.copy(status = statusFor(target))
+    override fun availableTargets(): List<AgentCallableTarget> {
+        val builtIn = fallback.availableTargets().map { target -> target.copy(status = statusFor(target)) }
+        val customDevices = CustomDeviceConnectorStore(appContext).list().filter { it.enabled }.map { connector ->
+            AgentCallableTarget(
+                id = "custom-device:${connector.id}",
+                title = connector.name,
+                kind = AgentConnectorKind.DEVICE,
+                status = if (connector.configured) AgentConnectorStatus.AVAILABLE else AgentConnectorStatus.NEEDS_SETUP,
+                capabilities = listOf(AgentCapability.DEVICE_CONTROL)
+            )
+        }
+        return builtIn + customDevices
     }
 
     private fun statusFor(target: AgentCallableTarget): AgentConnectorStatus = when (target.id) {
