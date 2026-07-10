@@ -80,7 +80,7 @@ class MobileNativeAgent(
     private var sessionId: String = UUID.randomUUID().toString()
     private var phase: AgentPhase = AgentPhase.OBSERVING
     private var currentGoal: String = ""
-    private var currentScreen: ScreenContext = perceptionProvider.capture()
+    private var currentScreen: ScreenContext = captureScreen()
     private var currentPlan: AgentPlan? = null
     private var lastActionResult: AgentActionResult? = null
     private var activeWorkflowExecutionId: String? = null
@@ -88,6 +88,21 @@ class MobileNativeAgent(
 
     init {
         restoreSession(sessionStore.load())
+    }
+
+    private fun captureScreen(foregroundApp: String? = null, pageTitle: String? = null): ScreenContext {
+        if (!safetySettingsStore.load().screenObservationAllowed) {
+            return ScreenContext(
+                foregroundApp = foregroundApp.orEmpty(),
+                pageTitle = pageTitle.orEmpty(),
+                isAccessibilityEnabled = false
+            )
+        }
+        return if (foregroundApp != null && pageTitle != null) {
+            perceptionProvider.capture(foregroundApp, pageTitle)
+        } else {
+            perceptionProvider.capture()
+        }
     }
 
     fun snapshot(): AgentUiState {
@@ -144,7 +159,7 @@ class MobileNativeAgent(
     }
 
     fun observeCurrentScreen(): AgentUiState {
-        currentScreen = perceptionProvider.capture()
+        currentScreen = captureScreen()
         phase = AgentPhase.OBSERVING
         currentGoal = ""
         currentPlan = null
@@ -154,7 +169,7 @@ class MobileNativeAgent(
     }
 
     fun observeCurrentScreen(foregroundApp: String, pageTitle: String): AgentUiState {
-        currentScreen = perceptionProvider.capture(foregroundApp, pageTitle)
+        currentScreen = captureScreen(foregroundApp, pageTitle)
         phase = AgentPhase.OBSERVING
         currentGoal = ""
         currentPlan = null
@@ -177,7 +192,7 @@ class MobileNativeAgent(
             return observeCurrentScreen()
         }
 
-        currentScreen = perceptionProvider.capture()
+        currentScreen = captureScreen()
         callableInventoryCommand(currentGoal)?.let { filter ->
             return showCallableInventoryCommand(filter)
         }
@@ -433,9 +448,19 @@ class MobileNativeAgent(
         nextAction: AgentAction,
         userConfirmed: Boolean
     ): AgentUiState {
+        val reviewedPlan = plan.withSafetyReview(safetyPolicy.review(plan))
+        currentPlan = reviewedPlan
+        if (reviewedPlan.safetyReview.blocked) {
+            phase = if (safetySettingsStore.load().executionPaused) AgentPhase.PAUSED else AgentPhase.BLOCKED
+            val reason = reviewedPlan.safetyReview.reason.ifBlank { "Action blocked by current capability settings" }
+            lastActionResult = AgentActionResult(nextAction.id, false, reason)
+            recordAudit(AgentAuditEvent.ACTION_BLOCKED, "execution_recheck:${nextAction.id}:$reason")
+            saveTaskRecord()
+            return snapshot()
+        }
         phase = AgentPhase.EXECUTING
-        currentPlan = plan.markAction(nextAction.id, AgentActionStatus.RUNNING)
-        currentScreen = perceptionProvider.capture()
+        currentPlan = reviewedPlan.markAction(nextAction.id, AgentActionStatus.RUNNING)
+        currentScreen = captureScreen()
         val executionScreen = currentScreen
         lastActionResult = actionExecutor.execute(nextAction, currentScreen)
         phase = AgentPhase.VERIFYING
@@ -461,6 +486,7 @@ class MobileNativeAgent(
         recordAudit(AgentAuditEvent.SCREEN_VERIFIED, recovery.observation.evidence)
         val hasNextAction = updatedPlan?.actions?.any { it.status == AgentActionStatus.PENDING_CONFIRMATION } == true
         phase = when {
+            safetySettingsStore.load().executionPaused -> AgentPhase.PAUSED
             lastActionResult?.success != true -> AgentPhase.FAILED
             awaitingResponse -> AgentPhase.WAITING_RESPONSE
             hasNextAction && updatedPlan?.safetyReview?.requiresConfirmation == false -> {
@@ -505,7 +531,9 @@ class MobileNativeAgent(
         val responseStatus = if (success) AgentActionStatus.COMPLETED else AgentActionStatus.FAILED
         currentPlan = plan.markAction(actionId, responseStatus, completedResult)
         lastActionResult = completedResult
-        phase = if (!success) {
+        phase = if (safetySettingsStore.load().executionPaused) {
+            AgentPhase.PAUSED
+        } else if (!success) {
             AgentPhase.FAILED
         } else if (currentPlan?.actions?.any { it.status == AgentActionStatus.PENDING_CONFIRMATION } == true) {
             AgentPhase.WAITING_CONFIRMATION
@@ -528,7 +556,7 @@ class MobileNativeAgent(
         beforeAction = beforeAction,
         actionSucceeded = actionResult?.success == true,
         changeExpected = action.kind.mayChangeScreen(),
-        capture = { perceptionProvider.capture() }
+        capture = { captureScreen() }
     )
 
     private fun applyObservationResult(
@@ -636,6 +664,15 @@ class MobileNativeAgent(
 
     fun resumeCurrentTask(): AgentUiState {
         if (phase != AgentPhase.PAUSED) return snapshot()
+        if (safetySettingsStore.load().executionPaused) {
+            lastActionResult = AgentActionResult(
+                actionId = "agent-resume-blocked",
+                success = false,
+                message = "Disable Pause All Execution before resuming"
+            )
+            recordAudit(AgentAuditEvent.ACTION_BLOCKED, "resume:execution_paused")
+            return snapshot()
+        }
         val plan = currentPlan ?: return observeCurrentScreen()
         phase = when {
             plan.actions.any { it.status == AgentActionStatus.WAITING_RESPONSE } -> AgentPhase.WAITING_RESPONSE
@@ -696,9 +733,49 @@ class MobileNativeAgent(
         return snapshot()
     }
 
+    fun updateScreenObservationAllowed(enabled: Boolean): AgentUiState {
+        safetySettingsStore.save(safetySettingsStore.load().copy(screenObservationAllowed = enabled))
+        currentScreen = captureScreen()
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "screen_observation_allowed:$enabled")
+        return snapshot()
+    }
+
+    fun updateLocalActionsAllowed(enabled: Boolean): AgentUiState {
+        safetySettingsStore.save(safetySettingsStore.load().copy(localActionsAllowed = enabled))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "local_actions_allowed:$enabled")
+        return snapshot()
+    }
+
+    fun updateConnectorCallsAllowed(enabled: Boolean): AgentUiState {
+        safetySettingsStore.save(safetySettingsStore.load().copy(connectorCallsAllowed = enabled))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "connector_calls_allowed:$enabled")
+        return snapshot()
+    }
+
+    fun updateDeviceControlAllowed(enabled: Boolean): AgentUiState {
+        safetySettingsStore.save(safetySettingsStore.load().copy(deviceControlAllowed = enabled))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "device_control_allowed:$enabled")
+        return snapshot()
+    }
+
+    fun updateExecutionPaused(enabled: Boolean): AgentUiState {
+        safetySettingsStore.save(safetySettingsStore.load().copy(executionPaused = enabled))
+        if (enabled && currentPlan != null && phase in ACTIVE_EXECUTION_PHASES) {
+            phase = AgentPhase.PAUSED
+            lastActionResult = AgentActionResult(
+                actionId = "agent-emergency-pause",
+                success = true,
+                message = "All Agent execution paused"
+            )
+        }
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "execution_paused:$enabled")
+        persistSession()
+        return snapshot()
+    }
+
     fun recordKnowledgeImport(result: AgentKnowledgeImportResult): AgentUiState {
         currentGoal = "Import knowledge document ${result.title}"
-        currentScreen = perceptionProvider.capture()
+        currentScreen = captureScreen()
         val status = if (result.success) AgentActionStatus.COMPLETED else AgentActionStatus.FAILED
         val action = AgentAction(
             id = "import-knowledge-document",
@@ -3595,6 +3672,9 @@ class MobileNativeAgent(
         phase = session.phase
         currentGoal = session.currentGoal
         currentScreen = session.currentScreen
+        if (!safetySettingsStore.load().screenObservationAllowed) {
+            currentScreen = captureScreen()
+        }
         currentPlan = session.currentPlan
         lastActionResult = session.lastActionResult
         activeWorkflowExecutionId = session.activeWorkflowExecutionId.takeIf { it.isNotBlank() }
@@ -3622,6 +3702,13 @@ class MobileNativeAgent(
         private const val MAX_AUDIT_ITEMS = 20
         private const val MAX_CONNECTOR_RESPONSE_CHARACTERS = 24_000
         private const val MAX_TASK_RESULT_CHARACTERS = 4_000
+        private val ACTIVE_EXECUTION_PHASES = setOf(
+            AgentPhase.PLANNING,
+            AgentPhase.WAITING_CONFIRMATION,
+            AgentPhase.EXECUTING,
+            AgentPhase.VERIFYING,
+            AgentPhase.WAITING_RESPONSE
+        )
     }
 }
 
@@ -4596,11 +4683,36 @@ class DefaultAgentSafetyPolicy(
         settingsStore?.load()?.highRiskGuard ?: true
 
     override fun review(plan: AgentPlan): AgentSafetyReview {
+        val settings = settingsStore?.load() ?: AgentSafetySettings()
         val mode = permissionMode()
         val highestRisk = plan.actions.maxByOrNull { it.risk.weight }?.risk ?: AgentRisk.LOW
-        val deniedPermissions = plan.requiredPermissions
+        val deniedSystemPermissions = plan.requiredPermissions
             .filter { it.required && !it.granted }
             .map { it.id }
+        val deniedCapabilities = buildList {
+            if (settings.executionPaused && plan.actions.any {
+                    it.kind != AgentActionKind.DRAFT_PLAN && it.kind != AgentActionKind.READ_SCREEN
+                }
+            ) {
+                add("execution_paused")
+            }
+            if (!settings.screenObservationAllowed && plan.actions.any { it.kind.requiresScreenObservation() }) {
+                add("screen_observation")
+            }
+            if (!settings.localActionsAllowed && plan.actions.any { it.kind.isLocalExecutionAction() }) {
+                add("local_actions")
+            }
+            if (!settings.memoryCapture && plan.actions.any { it.kind.writesAgentKnowledge() }) {
+                add("memory_capture")
+            }
+            if (!settings.connectorCallsAllowed && plan.actions.any { it.kind == AgentActionKind.CALL_CONNECTOR }) {
+                add("connector_calls")
+            }
+            if (!settings.deviceControlAllowed && plan.actions.any { it.kind == AgentActionKind.CONTROL_DEVICE }) {
+                add("device_control")
+            }
+        }
+        val deniedPermissions = (deniedSystemPermissions + deniedCapabilities).distinct()
         val blocksScreenAction = mode == PermissionMode.OBSERVE_ONLY &&
             plan.actions.any { it.kind != AgentActionKind.READ_SCREEN && it.kind != AgentActionKind.DRAFT_PLAN }
         val blocksExecution = mode == PermissionMode.SUGGEST_ONLY &&
@@ -4626,6 +4738,7 @@ class DefaultAgentSafetyPolicy(
             if (blocksExecution) add("suggest_only_mode")
         }
         val reason = when {
+            "execution_paused" in deniedCapabilities -> "All Agent execution is paused"
             deniedPermissions.isNotEmpty() -> "Missing required permission: ${deniedPermissions.joinToString(", ")}"
             blocksScreenAction -> "Observe-only mode blocks screen actions"
             blocksExecution -> "Suggest-only mode blocks execution"
@@ -6276,6 +6389,59 @@ private fun AgentActionKind.mayChangeScreen(): Boolean = when (this) {
     AgentActionKind.CALL_CONNECTOR,
     AgentActionKind.CONTROL_DEVICE -> false
 }
+
+private fun AgentActionKind.requiresScreenObservation(): Boolean = when (this) {
+    AgentActionKind.READ_SCREEN,
+    AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
+    AgentActionKind.TAP,
+    AgentActionKind.TYPE_TEXT,
+    AgentActionKind.SWIPE,
+    AgentActionKind.LONG_PRESS,
+    AgentActionKind.BACK,
+    AgentActionKind.HOME,
+    AgentActionKind.RECENTS,
+    AgentActionKind.LOCK_SCREEN,
+    AgentActionKind.OPEN_APP,
+    AgentActionKind.OPEN_URL,
+    AgentActionKind.SET_ALARM,
+    AgentActionKind.COPY_SCREEN_TEXT,
+    AgentActionKind.DELETE_TEXT,
+    AgentActionKind.PASTE_TEXT -> true
+    AgentActionKind.DRAFT_PLAN,
+    AgentActionKind.CREATE_NOTIFICATION,
+    AgentActionKind.REPLY_NOTIFICATION,
+    AgentActionKind.IMPORT_WEB_KNOWLEDGE,
+    AgentActionKind.CALL_CONNECTOR,
+    AgentActionKind.CONTROL_DEVICE -> false
+}
+
+private fun AgentActionKind.isLocalExecutionAction(): Boolean = when (this) {
+    AgentActionKind.TAP,
+    AgentActionKind.TYPE_TEXT,
+    AgentActionKind.SWIPE,
+    AgentActionKind.LONG_PRESS,
+    AgentActionKind.BACK,
+    AgentActionKind.HOME,
+    AgentActionKind.RECENTS,
+    AgentActionKind.LOCK_SCREEN,
+    AgentActionKind.OPEN_APP,
+    AgentActionKind.OPEN_URL,
+    AgentActionKind.SET_ALARM,
+    AgentActionKind.CREATE_NOTIFICATION,
+    AgentActionKind.REPLY_NOTIFICATION,
+    AgentActionKind.COPY_SCREEN_TEXT,
+    AgentActionKind.DELETE_TEXT,
+    AgentActionKind.PASTE_TEXT -> true
+    AgentActionKind.READ_SCREEN,
+    AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
+    AgentActionKind.DRAFT_PLAN,
+    AgentActionKind.IMPORT_WEB_KNOWLEDGE,
+    AgentActionKind.CALL_CONNECTOR,
+    AgentActionKind.CONTROL_DEVICE -> false
+}
+
+private fun AgentActionKind.writesAgentKnowledge(): Boolean =
+    this == AgentActionKind.SAVE_SCREEN_KNOWLEDGE || this == AgentActionKind.IMPORT_WEB_KNOWLEDGE
 
 data class AgentPlan(
     val goal: String,

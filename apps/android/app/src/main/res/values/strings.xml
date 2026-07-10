@@ -713,6 +713,7 @@
     <string name="on_device_agent_hero_title">On-device Agent</string>
     <string name="on_device_agent_hero_subtitle">Manage perception, voice, and automation permissions</string>
     <string name="on_device_agent_status_running">Running</string>
+    <string name="on_device_agent_status_paused">Paused</string>
     <string name="on_device_agent_section_execution">Execution</string>
     <string name="on_device_agent_permission_mode">Execution Mode</string>
     <string name="on_device_agent_permission_mode_subtitle">Tap to switch observation, suggestion, confirmation, or low-risk automation</string>
@@ -720,6 +721,17 @@
     <string name="on_device_agent_high_risk_guard_subtitle">Always protect payments, deletion, privacy sharing, installation, and security changes</string>
     <string name="on_device_agent_memory_capture">Memory Capture</string>
     <string name="on_device_agent_memory_capture_subtitle">Allow Agent tasks and explicit notes to update long-term memory and knowledge</string>
+    <string name="on_device_agent_execution_pause">Pause All Execution</string>
+    <string name="on_device_agent_execution_pause_subtitle">Immediately stop automatic execution while keeping observation available</string>
+    <string name="on_device_agent_section_capabilities">Capability Access</string>
+    <string name="on_device_agent_allow_screen_observation">Screen Understanding</string>
+    <string name="on_device_agent_allow_screen_observation_subtitle">Allow the Agent runtime to capture structured screen context</string>
+    <string name="on_device_agent_allow_local_actions">On-device Actions</string>
+    <string name="on_device_agent_allow_local_actions_subtitle">Allow confirmed taps, text input, navigation, intents, and system actions</string>
+    <string name="on_device_agent_allow_connectors">Agents and Models</string>
+    <string name="on_device_agent_allow_connectors_subtitle">Allow tasks to be routed to trusted local, desktop, and cloud connectors</string>
+    <string name="on_device_agent_allow_devices">Smart Devices</string>
+    <string name="on_device_agent_allow_devices_subtitle">Allow confirmed Home Assistant and trusted device control</string>
     <string name="on_device_agent_mode_changed">Mode: %1$s</string>
     <string name="permission_mode_observe_only">Observe Only</string>
     <string name="permission_mode_suggest_only">Suggest Only</string>

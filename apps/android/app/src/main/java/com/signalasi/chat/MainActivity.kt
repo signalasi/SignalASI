@@ -6026,7 +6026,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             getString(R.string.on_device_agent_hero_subtitle),
             R.drawable.ic_agent_node,
             "#5B6CFF",
-            getString(R.string.on_device_agent_status_running)
+            getString(
+                if (safetySettings.executionPaused) R.string.on_device_agent_status_paused
+                else R.string.on_device_agent_status_running
+            )
         ))
         addSectionTitle(getString(R.string.on_device_agent_section_execution))
         featureContent.addView(featureValueRow(
@@ -6052,6 +6055,47 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             safetySettings.memoryCapture
         ).apply {
             setOnClickListener { toggleAgentMemoryCapture() }
+        })
+        featureContent.addView(featureSwitchRow(
+            getString(R.string.on_device_agent_execution_pause),
+            getString(R.string.on_device_agent_execution_pause_subtitle),
+            R.drawable.ic_security_shield,
+            safetySettings.executionPaused
+        ).apply {
+            setOnClickListener { toggleAgentExecutionPaused() }
+        })
+        addSectionTitle(getString(R.string.on_device_agent_section_capabilities))
+        featureContent.addView(featureSwitchRow(
+            getString(R.string.on_device_agent_allow_screen_observation),
+            getString(R.string.on_device_agent_allow_screen_observation_subtitle),
+            R.drawable.ic_scan,
+            safetySettings.screenObservationAllowed
+        ).apply {
+            setOnClickListener { toggleAgentScreenObservation() }
+        })
+        featureContent.addView(featureSwitchRow(
+            getString(R.string.on_device_agent_allow_local_actions),
+            getString(R.string.on_device_agent_allow_local_actions_subtitle),
+            R.drawable.ic_agent_node,
+            safetySettings.localActionsAllowed
+        ).apply {
+            setOnClickListener { toggleAgentLocalActions() }
+        })
+        featureContent.addView(featureSwitchRow(
+            getString(R.string.on_device_agent_allow_connectors),
+            getString(R.string.on_device_agent_allow_connectors_subtitle),
+            R.drawable.ic_protocol_link,
+            safetySettings.connectorCallsAllowed
+        ).apply {
+            setOnClickListener { toggleAgentConnectorCalls() }
+        })
+        featureContent.addView(featureSwitchRow(
+            getString(R.string.on_device_agent_allow_devices),
+            getString(R.string.on_device_agent_allow_devices_subtitle),
+            R.drawable.ic_device_node,
+            safetySettings.deviceControlAllowed
+        ).apply {
+            setOnClickListener { toggleAgentDeviceControl() }
         })
         addSectionTitle(getString(R.string.on_device_agent_section_permissions))
         val screenAccessAllowed = SignalASIAccessibilityService.isActive()
@@ -6117,6 +6161,36 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun toggleAgentMemoryCapture() {
         val next = !mobileNativeAgent.safetySettings().memoryCapture
         mobileNativeAgent.updateMemoryCapture(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun toggleAgentExecutionPaused() {
+        val next = !mobileNativeAgent.safetySettings().executionPaused
+        mobileNativeAgent.updateExecutionPaused(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun toggleAgentScreenObservation() {
+        val next = !mobileNativeAgent.safetySettings().screenObservationAllowed
+        mobileNativeAgent.updateScreenObservationAllowed(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun toggleAgentLocalActions() {
+        val next = !mobileNativeAgent.safetySettings().localActionsAllowed
+        mobileNativeAgent.updateLocalActionsAllowed(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun toggleAgentConnectorCalls() {
+        val next = !mobileNativeAgent.safetySettings().connectorCallsAllowed
+        mobileNativeAgent.updateConnectorCallsAllowed(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun toggleAgentDeviceControl() {
+        val next = !mobileNativeAgent.safetySettings().deviceControlAllowed
+        mobileNativeAgent.updateDeviceControlAllowed(next)
         showOnDeviceAgentFeaturePage()
     }
 

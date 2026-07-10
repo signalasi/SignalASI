@@ -6,7 +6,12 @@ import org.json.JSONObject
 data class AgentSafetySettings(
     val permissionMode: PermissionMode = PermissionMode.ASK_BEFORE_ACTION,
     val highRiskGuard: Boolean = true,
-    val memoryCapture: Boolean = true
+    val memoryCapture: Boolean = true,
+    val screenObservationAllowed: Boolean = true,
+    val localActionsAllowed: Boolean = true,
+    val connectorCallsAllowed: Boolean = true,
+    val deviceControlAllowed: Boolean = true,
+    val executionPaused: Boolean = false
 )
 
 interface AgentSafetySettingsStore {
@@ -27,7 +32,12 @@ class SharedPreferencesAgentSafetySettingsStore(context: Context) : AgentSafetyS
                 PermissionMode.ASK_BEFORE_ACTION
             ),
             highRiskGuard = json.optBoolean("high_risk_guard", true),
-            memoryCapture = json.optBoolean("memory_capture", true)
+            memoryCapture = json.optBoolean("memory_capture", true),
+            screenObservationAllowed = json.optBoolean("screen_observation_allowed", true),
+            localActionsAllowed = json.optBoolean("local_actions_allowed", true),
+            connectorCallsAllowed = json.optBoolean("connector_calls_allowed", true),
+            deviceControlAllowed = json.optBoolean("device_control_allowed", true),
+            executionPaused = json.optBoolean("execution_paused", false)
         )
     }
 
@@ -35,10 +45,15 @@ class SharedPreferencesAgentSafetySettingsStore(context: Context) : AgentSafetyS
         prefs.writeString(
             KEY_SETTINGS,
             JSONObject()
-                .put("version", 1)
+                .put("version", 2)
                 .put("permission_mode", settings.permissionMode.name)
                 .put("high_risk_guard", settings.highRiskGuard)
                 .put("memory_capture", settings.memoryCapture)
+                .put("screen_observation_allowed", settings.screenObservationAllowed)
+                .put("local_actions_allowed", settings.localActionsAllowed)
+                .put("connector_calls_allowed", settings.connectorCallsAllowed)
+                .put("device_control_allowed", settings.deviceControlAllowed)
+                .put("execution_paused", settings.executionPaused)
                 .toString()
         )
     }

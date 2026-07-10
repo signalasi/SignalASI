@@ -18,7 +18,7 @@ object AgentBackupData {
         val safety = SharedPreferencesAgentSafetySettingsStore(context).load()
         val homeAssistant = HomeAssistantSettingsStore.load(context)
         return JSONObject()
-            .put("version", 1)
+            .put("version", 2)
             .put("memory", readArray(context, MEMORY_PREFS, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS))
             .put("knowledge", readArray(context, KNOWLEDGE_PREFS, MAX_KNOWLEDGE_ITEMS, MAX_KNOWLEDGE_ITEM_CHARACTERS))
             .put("tasks", readArray(context, TASK_PREFS, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS))
@@ -40,6 +40,11 @@ object AgentBackupData {
                     .put("permission_mode", safety.permissionMode.name)
                     .put("high_risk_guard", safety.highRiskGuard)
                     .put("memory_capture", safety.memoryCapture)
+                    .put("screen_observation_allowed", safety.screenObservationAllowed)
+                    .put("local_actions_allowed", safety.localActionsAllowed)
+                    .put("connector_calls_allowed", safety.connectorCallsAllowed)
+                    .put("device_control_allowed", safety.deviceControlAllowed)
+                    .put("execution_paused", safety.executionPaused)
             )
             .put(
                 "home_assistant",
@@ -93,7 +98,12 @@ object AgentBackupData {
                         PermissionMode.ASK_BEFORE_ACTION
                     ),
                     highRiskGuard = json.optBoolean("high_risk_guard", true),
-                    memoryCapture = json.optBoolean("memory_capture", true)
+                    memoryCapture = json.optBoolean("memory_capture", true),
+                    screenObservationAllowed = json.optBoolean("screen_observation_allowed", true),
+                    localActionsAllowed = json.optBoolean("local_actions_allowed", true),
+                    connectorCallsAllowed = json.optBoolean("connector_calls_allowed", true),
+                    deviceControlAllowed = json.optBoolean("device_control_allowed", true),
+                    executionPaused = json.optBoolean("execution_paused", false)
                 )
             )
         }
