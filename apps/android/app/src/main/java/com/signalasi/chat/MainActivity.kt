@@ -911,12 +911,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         } else if (state.phase == AgentPhase.WAITING_RESPONSE) {
             return
         } else if (state.pendingAction != null) {
-            if (state.pendingAction.kind == AgentActionKind.IMPORT_WEB_KNOWLEDGE) {
-                runAgentOperationAsync { mobileNativeAgent.approveNextAction() }
-            } else {
-                renderAgentState(mobileNativeAgent.approveNextAction())
-                consumePendingAgentConnectorResponses()
-            }
+            runAgentOperationAsync { mobileNativeAgent.approveNextAction() }
         } else {
             submitAgentGoal()
         }
@@ -932,6 +927,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 agentOperationInFlight = false
                 agentSubmitButton.isEnabled = true
                 renderAgentState(outcome.getOrElse { mobileNativeAgent.snapshot() })
+                consumePendingAgentConnectorResponses()
                 outcome.exceptionOrNull()?.let { error ->
                     Toast.makeText(this, error.message ?: "Agent operation failed", Toast.LENGTH_LONG).show()
                 }
@@ -945,9 +941,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             Toast.makeText(this, getString(R.string.agent_empty_goal), Toast.LENGTH_SHORT).show()
             return
         }
-        renderAgentState(mobileNativeAgent.submitGoal(goal))
         agentGoalInput.setText("")
         hideKeyboard()
+        runAgentOperationAsync { mobileNativeAgent.submitGoal(goal) }
     }
 
     private fun startAgentVoiceInput() {
@@ -1691,6 +1687,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             state.phase == AgentPhase.BLOCKED -> getString(R.string.agent_status_blocked)
             state.phase == AgentPhase.WAITING_CONFIRMATION -> getString(R.string.agent_status_waiting_confirmation)
             state.phase == AgentPhase.EXECUTING -> getString(R.string.agent_status_executing)
+            state.phase == AgentPhase.VERIFYING -> getString(R.string.agent_status_verifying)
             state.phase == AgentPhase.WAITING_RESPONSE -> getString(R.string.agent_status_waiting_response)
             state.phase == AgentPhase.PAUSED -> getString(R.string.agent_status_paused)
             state.phase == AgentPhase.COMPLETED -> getString(R.string.agent_status_completed)
@@ -2194,6 +2191,19 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     )
                 })
 
+                addView(TextView(this@MainActivity).apply {
+                    setTextColor(getColorCompat(R.color.text_secondary))
+                    textSize = 11f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    text = getString(
+                        R.string.agent_verification_observation,
+                        observationDecisionLabel(result.observationDecision),
+                        result.observationSampleCount,
+                        result.observationDurationMillis
+                    )
+                })
+
                 if (result.evidence.isNotBlank()) {
                     addView(TextView(this@MainActivity).apply {
                         setTextColor(getColorCompat(R.color.text_secondary))
@@ -2224,6 +2234,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             })
         }
     }
+
+    private fun observationDecisionLabel(decision: AgentObservationDecision): String = getString(
+        when (decision) {
+            AgentObservationDecision.ACTION_FAILED -> R.string.agent_observation_action_failed
+            AgentObservationDecision.NO_CHANGE_REQUIRED -> R.string.agent_observation_no_change_required
+            AgentObservationDecision.CHANGED_AND_STABLE -> R.string.agent_observation_changed_stable
+            AgentObservationDecision.CHANGED_BUT_UNSTABLE -> R.string.agent_observation_changed_unstable
+            AgentObservationDecision.TIMED_OUT -> R.string.agent_observation_timed_out
+        }
+    )
 
     private fun agentRecentTaskRow(task: AgentTaskRecord, index: Int): View {
         val statusText = agentTaskStatusText(task)

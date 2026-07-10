@@ -272,6 +272,7 @@
     <string name="agent_status_visual_ready_subtitle">OCR text is available; enable Accessibility for actions</string>
     <string name="agent_status_waiting_confirmation">Confirm action</string>
     <string name="agent_status_executing">Executing action</string>
+    <string name="agent_status_verifying">Verifying result</string>
     <string name="agent_status_waiting_response">Waiting for response</string>
     <string name="agent_schedule_notification_title">Scheduled Agent · %1$s</string>
     <string name="agent_schedule_workflow_missing">The scheduled workflow no longer exists.</string>
@@ -360,6 +361,12 @@
     <string name="agent_verification_meta">%1$s / %2$d text / %3$d actions</string>
     <string name="agent_verification_success">Verified</string>
     <string name="agent_verification_failed">Check</string>
+    <string name="agent_verification_observation">%1$s / %2$d samples / %3$dms</string>
+    <string name="agent_observation_action_failed">Action failed</string>
+    <string name="agent_observation_no_change_required">No change required</string>
+    <string name="agent_observation_changed_stable">Changed and stable</string>
+    <string name="agent_observation_changed_unstable">Changed, still moving</string>
+    <string name="agent_observation_timed_out">No change observed</string>
     <string name="agent_current_app_value">Current app: %1$s</string>
     <string name="agent_callable_targets_value">Callable targets: %1$d</string>
     <string name="agent_running_tasks_value">Running tasks: %1$d</string>

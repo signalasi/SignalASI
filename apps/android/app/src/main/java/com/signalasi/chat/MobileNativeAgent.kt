@@ -64,6 +64,7 @@ class MobileNativeAgent(
     private val safetySettingsStore: AgentSafetySettingsStore = SharedPreferencesAgentSafetySettingsStore(context),
     private val safetyPolicy: AgentSafetyPolicy = DefaultAgentSafetyPolicy(safetySettingsStore),
     private val actionExecutor: AgentActionExecutor = AndroidAgentActionExecutor(context),
+    private val observationController: AgentContinuousObservationController = AgentContinuousObservationController(),
     private val memoryStore: AgentMemoryStore = SharedPreferencesAgentMemoryStore(context),
     private val knowledgeStore: AgentKnowledgeStore = SharedPreferencesAgentKnowledgeStore(context),
     private val taskStore: AgentTaskStore = SharedPreferencesAgentTaskStore(context),
@@ -437,12 +438,13 @@ class MobileNativeAgent(
         val executionScreen = currentScreen
         lastActionResult = actionExecutor.execute(nextAction, currentScreen)
         phase = AgentPhase.VERIFYING
-        val verificationScreen = captureVerificationScreen(
+        val observation = captureVerificationScreen(
             action = nextAction,
             beforeAction = executionScreen,
             actionResult = lastActionResult
         )
-        currentScreen = verificationScreen
+        currentScreen = observation.screen
+        lastActionResult = applyObservationResult(nextAction, lastActionResult, observation)
         val awaitingResponse = lastActionResult?.metadata?.get("awaiting_response") == "true"
         val finalStatus = when {
             lastActionResult?.success != true -> AgentActionStatus.FAILED
@@ -450,8 +452,9 @@ class MobileNativeAgent(
             else -> AgentActionStatus.COMPLETED
         }
         val updatedPlan = currentPlan?.markAction(nextAction.id, finalStatus, lastActionResult)
-            ?.addVerification(AgentVerificationResult.from(nextAction.id, lastActionResult, verificationScreen))
+            ?.addVerification(AgentVerificationResult.from(nextAction.id, lastActionResult, observation))
         currentPlan = updatedPlan
+        recordAudit(AgentAuditEvent.SCREEN_VERIFIED, observation.evidence)
         val hasNextAction = updatedPlan?.actions?.any { it.status == AgentActionStatus.PENDING_CONFIRMATION } == true
         phase = when {
             lastActionResult?.success != true -> AgentPhase.FAILED
@@ -517,20 +520,38 @@ class MobileNativeAgent(
         action: AgentAction,
         beforeAction: ScreenContext,
         actionResult: AgentActionResult?
-    ): ScreenContext {
-        var latest = perceptionProvider.capture()
-        if (actionResult?.success != true || !action.kind.mayChangeScreen()) {
-            return latest
-        }
+    ): AgentObservationOutcome = observationController.observe(
+        beforeAction = beforeAction,
+        actionSucceeded = actionResult?.success == true,
+        changeExpected = action.kind.mayChangeScreen(),
+        capture = { perceptionProvider.capture() }
+    )
 
-        repeat(8) {
-            if (latest.isDifferentFrom(beforeAction)) {
-                return latest
-            }
-            runCatching { Thread.sleep(250) }
-            latest = perceptionProvider.capture()
+    private fun applyObservationResult(
+        action: AgentAction,
+        result: AgentActionResult?,
+        observation: AgentObservationOutcome
+    ): AgentActionResult? {
+        result ?: return null
+        val metadata = result.metadata + mapOf(
+            "observation_decision" to observation.decision.name,
+            "observation_samples" to observation.sampleCount.toString(),
+            "observation_duration_ms" to observation.durationMillis.toString(),
+            "screen_changed" to observation.screenChanged.toString(),
+            "screen_stable" to observation.screenStable.toString()
+        )
+        return if (result.success &&
+            action.kind.mayChangeScreen() &&
+            observation.decision == AgentObservationDecision.TIMED_OUT
+        ) {
+            result.copy(
+                success = false,
+                message = "${result.message}; no screen change was observed",
+                metadata = metadata
+            )
+        } else {
+            result.copy(metadata = metadata)
         }
-        return latest
     }
 
     fun cancelCurrentTask(): AgentUiState {
@@ -5856,6 +5877,11 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("visible_text_count", result.visibleTextCount)
         .put("clickable_node_count", result.clickableNodeCount)
         .put("evidence", result.evidence)
+        .put("observation_decision", result.observationDecision.name)
+        .put("observation_sample_count", result.observationSampleCount)
+        .put("observation_duration_millis", result.observationDurationMillis)
+        .put("screen_changed", result.screenChanged)
+        .put("screen_stable", result.screenStable)
         .put("timestamp_millis", result.timestampMillis)
 
     private fun decodeVerificationResults(array: JSONArray?): List<AgentVerificationResult> {
@@ -5872,6 +5898,14 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
                         visibleTextCount = item.optInt("visible_text_count"),
                         clickableNodeCount = item.optInt("clickable_node_count"),
                         evidence = item.optString("evidence"),
+                        observationDecision = enumOrDefault(
+                            item.optString("observation_decision"),
+                            AgentObservationDecision.NO_CHANGE_REQUIRED
+                        ),
+                        observationSampleCount = item.optInt("observation_sample_count", 1),
+                        observationDurationMillis = item.optLong("observation_duration_millis"),
+                        screenChanged = item.optBoolean("screen_changed"),
+                        screenStable = item.optBoolean("screen_stable", true),
                         timestampMillis = item.optLong("timestamp_millis")
                     )
                 )
@@ -6167,13 +6201,6 @@ data class ClipboardContext(
     val sensitiveFlags: List<String> = emptyList()
 )
 
-private fun ScreenContext.isDifferentFrom(other: ScreenContext): Boolean =
-    foregroundApp != other.foregroundApp ||
-        pageTitle != other.pageTitle ||
-        visibleTextCount != other.visibleTextCount ||
-        clickableNodeCount != other.clickableNodeCount ||
-        inputFieldCount != other.inputFieldCount
-
 private fun AgentActionKind.mayChangeScreen(): Boolean = when (this) {
     AgentActionKind.TAP,
     AgentActionKind.SWIPE,
@@ -6184,13 +6211,13 @@ private fun AgentActionKind.mayChangeScreen(): Boolean = when (this) {
     AgentActionKind.LOCK_SCREEN,
     AgentActionKind.OPEN_APP,
     AgentActionKind.OPEN_URL,
-    AgentActionKind.SET_ALARM -> true
+    AgentActionKind.SET_ALARM,
+    AgentActionKind.TYPE_TEXT,
+    AgentActionKind.DELETE_TEXT,
+    AgentActionKind.PASTE_TEXT -> true
     AgentActionKind.READ_SCREEN,
     AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
     AgentActionKind.DRAFT_PLAN,
-    AgentActionKind.TYPE_TEXT,
-    AgentActionKind.DELETE_TEXT,
-    AgentActionKind.PASTE_TEXT,
     AgentActionKind.COPY_SCREEN_TEXT,
     AgentActionKind.CREATE_NOTIFICATION,
     AgentActionKind.REPLY_NOTIFICATION,
@@ -6376,21 +6403,31 @@ data class AgentVerificationResult(
     val visibleTextCount: Int,
     val clickableNodeCount: Int,
     val evidence: String,
+    val observationDecision: AgentObservationDecision = AgentObservationDecision.NO_CHANGE_REQUIRED,
+    val observationSampleCount: Int = 1,
+    val observationDurationMillis: Long = 0L,
+    val screenChanged: Boolean = false,
+    val screenStable: Boolean = true,
     val timestampMillis: Long = System.currentTimeMillis()
 ) {
     companion object {
         fun from(
             actionId: String,
             actionResult: AgentActionResult?,
-            screen: ScreenContext
+            observation: AgentObservationOutcome
         ): AgentVerificationResult = AgentVerificationResult(
             actionId = actionId,
             success = actionResult?.success == true,
-            observedApp = screen.foregroundApp,
-            observedTitle = screen.pageTitle,
-            visibleTextCount = screen.visibleTextCount,
-            clickableNodeCount = screen.clickableNodeCount,
-            evidence = actionResult?.message.orEmpty()
+            observedApp = observation.screen.foregroundApp,
+            observedTitle = observation.screen.pageTitle,
+            visibleTextCount = observation.screen.visibleTextCount,
+            clickableNodeCount = observation.screen.clickableNodeCount,
+            evidence = actionResult?.message.orEmpty(),
+            observationDecision = observation.decision,
+            observationSampleCount = observation.sampleCount,
+            observationDurationMillis = observation.durationMillis,
+            screenChanged = observation.screenChanged,
+            screenStable = observation.screenStable
         )
     }
 }
@@ -6564,6 +6601,7 @@ enum class AgentCapability {
 
 enum class AgentAuditEvent {
     SCREEN_OBSERVED,
+    SCREEN_VERIFIED,
     GOAL_RECEIVED,
     INVOCATION_AUDIT,
     CONNECTOR_RESPONSE_RECEIVED,
