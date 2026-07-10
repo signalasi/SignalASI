@@ -1,11 +1,19 @@
 package com.signalasi.chat
 
 import android.app.Notification
+import android.app.RemoteInput
+import android.content.Intent
+import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import java.util.Locale
 
 class SignalASINotificationListenerService : NotificationListenerService() {
+    override fun onCreate() {
+        super.onCreate()
+        activeService = this
+    }
+
     override fun onListenerConnected() {
         connected = true
         updateActiveNotifications(activeNotifications?.toList().orEmpty())
@@ -13,6 +21,20 @@ class SignalASINotificationListenerService : NotificationListenerService() {
 
     override fun onListenerDisconnected() {
         connected = false
+        synchronized(lock) {
+            latestItems = emptyList()
+            latestNotifications = emptyMap()
+        }
+    }
+
+    override fun onDestroy() {
+        if (activeService === this) activeService = null
+        connected = false
+        synchronized(lock) {
+            latestItems = emptyList()
+            latestNotifications = emptyMap()
+        }
+        super.onDestroy()
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
@@ -23,6 +45,11 @@ class SignalASINotificationListenerService : NotificationListenerService() {
                 .plus(latestItems.filterNot { it.key == sbn.key })
                 .take(MAX_ITEMS)
             latestItems = next
+            latestNotifications = mapOf(sbn.key to sbn)
+                .plus(latestNotifications.filterKeys { it != sbn.key })
+                .entries
+                .take(MAX_ITEMS)
+                .associate { it.toPair() }
         }
         if (sbn.packageName != packageName) {
             AgentWorkflowTriggerEngine.onNotification(applicationContext, item)
@@ -33,15 +60,17 @@ class SignalASINotificationListenerService : NotificationListenerService() {
         sbn ?: return
         synchronized(lock) {
             latestItems = latestItems.filterNot { it.key == sbn.key }
+            latestNotifications = latestNotifications.filterKeys { it != sbn.key }
         }
     }
 
     private fun updateActiveNotifications(items: List<StatusBarNotification>) {
         synchronized(lock) {
-            latestItems = items
+            val recent = items
                 .sortedByDescending { it.postTime }
                 .take(MAX_ITEMS)
-                .map { notificationItem(it) }
+            latestItems = recent.map { notificationItem(it) }
+            latestNotifications = recent.associateBy { it.key }
         }
     }
 
@@ -59,12 +88,52 @@ class SignalASINotificationListenerService : NotificationListenerService() {
             textPreview = content.take(120),
             category = notificationCategory(sbn.packageName, combined),
             postedAtMillis = sbn.postTime,
+            canReply = replyAction(sbn.notification) != null,
             sensitiveFlags = notificationSensitiveFlags(combined)
         )
     }
 
+    private fun reply(notificationKey: String, text: String): AgentNotificationReplyResult {
+        val cleanText = text.trim().take(MAX_REPLY_CHARACTERS)
+        if (notificationKey.isBlank() || cleanText.isBlank()) {
+            return AgentNotificationReplyResult(false, "Notification reply target or text is missing")
+        }
+        val notification = synchronized(lock) { latestNotifications[notificationKey] }
+            ?: return AgentNotificationReplyResult(false, "The notification is no longer available")
+        val item = notificationItem(notification)
+        if (item.sensitiveFlags.isNotEmpty() || item.category == "system" || item.category == "call") {
+            return AgentNotificationReplyResult(false, "Replies to sensitive or system notifications are blocked")
+        }
+        val action = replyAction(notification.notification)
+            ?: return AgentNotificationReplyResult(false, "This notification does not support direct reply")
+        val remoteInputs = action.remoteInputs
+            ?.filter { it.allowFreeFormInput }
+            ?.toTypedArray()
+            .orEmpty()
+        if (remoteInputs.isEmpty()) {
+            return AgentNotificationReplyResult(false, "This notification has no text reply field")
+        }
+        return runCatching {
+            val resultIntent = Intent()
+            val results = Bundle().apply {
+                remoteInputs.forEach { input -> putCharSequence(input.resultKey, cleanText) }
+            }
+            RemoteInput.addResultsToIntent(remoteInputs, resultIntent, results)
+            action.actionIntent.send(this, 0, resultIntent)
+            AgentNotificationReplyResult(true, "Reply sent to ${item.title.ifBlank { item.packageName }}")
+        }.getOrElse { error ->
+            AgentNotificationReplyResult(false, error.message ?: "Notification reply failed")
+        }
+    }
+
+    private fun replyAction(notification: Notification): Notification.Action? =
+        notification.actions?.firstOrNull { action ->
+            action.remoteInputs?.any { it.allowFreeFormInput } == true
+        }
+
     companion object {
         private const val MAX_ITEMS = 12
+        private const val MAX_REPLY_CHARACTERS = 2_000
         private val lock = Any()
 
         @Volatile
@@ -73,6 +142,12 @@ class SignalASINotificationListenerService : NotificationListenerService() {
         @Volatile
         private var latestItems: List<AgentNotificationItem> = emptyList()
 
+        @Volatile
+        private var latestNotifications: Map<String, StatusBarNotification> = emptyMap()
+
+        @Volatile
+        private var activeService: SignalASINotificationListenerService? = null
+
         fun currentContext(): AgentNotificationContext = synchronized(lock) {
             AgentNotificationContext(
                 hasAccess = connected,
@@ -80,8 +155,17 @@ class SignalASINotificationListenerService : NotificationListenerService() {
                 sensitiveFlags = latestItems.flatMap { it.sensitiveFlags }.distinct().take(6)
             )
         }
+
+        fun reply(notificationKey: String, text: String): AgentNotificationReplyResult =
+            activeService?.reply(notificationKey, text)
+                ?: AgentNotificationReplyResult(false, "Notification access service is not connected")
     }
 }
+
+data class AgentNotificationReplyResult(
+    val success: Boolean,
+    val message: String
+)
 
 data class AgentNotificationContext(
     val hasAccess: Boolean = false,
@@ -96,6 +180,7 @@ data class AgentNotificationItem(
     val textPreview: String = "",
     val category: String = "app",
     val postedAtMillis: Long = 0L,
+    val canReply: Boolean = false,
     val sensitiveFlags: List<String> = emptyList()
 )
 
@@ -123,7 +208,12 @@ private fun notificationSensitiveFlags(value: String): List<String> {
         "payment",
         "private key",
         "access token",
-        "api key"
+        "api key",
+        "\u5bc6\u7801",
+        "\u9a8c\u8bc1\u7801",
+        "\u94f6\u884c\u5361",
+        "\u79c1\u94a5",
+        "\u652f\u4ed8"
     ).forEach { term ->
         if (lower.contains(term)) flags += term
     }

@@ -668,6 +668,7 @@
     <string name="agent_screen_capture_notification_title">SignalASI 正在理解屏幕</string>
     <string name="agent_screen_capture_notification_text">屏幕内容仅在本机内存中处理</string>
     <string name="agent_screen_capture_action">读取当前屏幕</string>
+    <string name="agent_screen_notification_reply_available">支持快捷回复 · 点击填写</string>
     <string name="agent_screen_capture_started">屏幕理解已授权</string>
     <string name="agent_screen_capture_running">正在读取当前屏幕</string>
     <string name="agent_screen_capture_permission_denied">未授予屏幕捕获权限</string>

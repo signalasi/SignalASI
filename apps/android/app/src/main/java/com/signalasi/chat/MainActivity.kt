@@ -2138,7 +2138,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 setTextColor(getColorCompat(R.color.text_primary))
                 textSize = 13f
-                maxLines = 2
+                maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 text = value
             })
@@ -2655,7 +2655,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun agentNotificationRow(item: AgentNotificationItem): View {
         val title = item.title.ifBlank { item.packageName.ifBlank { "-" } }
-        val detail = if (item.sensitiveFlags.isNotEmpty()) {
+        val baseDetail = if (item.sensitiveFlags.isNotEmpty()) {
             getString(R.string.agent_screen_notification_sensitive, item.packageName.ifBlank { "-" })
         } else {
             getString(
@@ -2663,6 +2663,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 item.category.ifBlank { item.packageName.ifBlank { "-" } },
                 item.textPreview.ifBlank { title }
             )
+        }
+        val replyAvailable = item.canReply && item.sensitiveFlags.isEmpty()
+        val detail = if (replyAvailable) {
+            "$baseDetail\n${getString(R.string.agent_screen_notification_reply_available)}"
+        } else {
+            baseDetail
         }
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2672,19 +2678,25 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(6) }
-            setOnClickListener { prefillAgentGoal("read notifications") }
+            setOnClickListener {
+                if (replyAvailable) {
+                    prefillAgentGoal("reply notification ${item.packageName} :: ")
+                } else {
+                    prefillAgentGoal("read notifications")
+                }
+            }
 
             addView(TextView(this@MainActivity).apply {
                 setTextColor(getColorCompat(R.color.text_primary))
                 textSize = 13f
-                maxLines = 1
+                maxLines = 2
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 text = title
             })
             addView(TextView(this@MainActivity).apply {
                 setTextColor(getColorCompat(R.color.text_secondary))
                 textSize = 11f
-                maxLines = 1
+                maxLines = 2
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 text = detail
             })

@@ -42,7 +42,12 @@ private val SENSITIVE_MEMORY_TERMS = listOf(
     "secret key",
     "access token",
     "api key",
-    "seed phrase"
+    "seed phrase",
+    "\u5bc6\u7801",
+    "\u9a8c\u8bc1\u7801",
+    "\u94f6\u884c\u5361",
+    "\u79c1\u94a5",
+    "\u652f\u4ed8"
 )
 
 /**
@@ -364,7 +369,11 @@ class MobileNativeAgent(
             else -> AgentPhase.PLANNING
         }
         lastActionResult = null
-        val memoryBlockReason = memoryBlockReason(currentGoal, currentScreen)
+        val memoryBlockReason = if (isPrivateCommunicationGoal(currentGoal)) {
+            "Private communication is excluded from long-term memory"
+        } else {
+            memoryBlockReason(currentGoal, currentScreen)
+        }
         if (memoryBlockReason == null) {
             memoryStore.remember(AgentMemoryItem(kind = AgentMemoryKind.TASK, value = currentGoal))
             knowledgeStore.upsert(
@@ -2125,6 +2134,7 @@ class MobileNativeAgent(
                     ?.label
                     ?: item.packageName
                 append("\n").append(appLabel).append(" [").append(item.category).append("] ")
+                if (item.canReply) append("[reply available] ")
                 if (item.sensitiveFlags.isNotEmpty()) {
                     append("[sensitive content hidden]")
                 } else {
@@ -3422,6 +3432,14 @@ class MobileNativeAgent(
         return sensitiveMemoryReason(value, screen)
     }
 
+    private fun isPrivateCommunicationGoal(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized.startsWith("reply notification ") ||
+            normalized.startsWith("reply to notification ") ||
+            normalized.startsWith("\u56de\u590d\u901a\u77e5") ||
+            normalized.startsWith("\u56de\u590d\u6700\u65b0\u901a\u77e5")
+    }
+
     private fun sensitiveMemoryReason(value: String, screen: ScreenContext): String? {
         if (screen.sensitiveFlagCount > 0) {
             val flags = screen.sensitiveFlags.joinToString("|").take(80).ifBlank { "screen" }
@@ -3692,6 +3710,7 @@ class RuleBasedAgentPlanner : AgentPlanner {
     private fun actionFor(request: AgentRequest): AgentAction {
         val goal = request.goal.trim()
         val lower = goal.lowercase()
+        notificationReplyAction(request)?.let { return it }
         AgentSystemToolPlanner.actionFor(request)?.let { return it }
         installedAppOpenAction(request)?.let { return it }
         return when {
@@ -3818,6 +3837,68 @@ class RuleBasedAgentPlanner : AgentPlanner {
                 description = "Create a safe local task plan"
             )
         }
+    }
+
+    private fun notificationReplyAction(request: AgentRequest): AgentAction? {
+        val englishMatch = Regex(
+            "^(?:reply(?: to)? notification)\\s+(.+?)\\s*::\\s*(.+)$",
+            RegexOption.IGNORE_CASE
+        ).matchEntire(request.goal.trim())
+        val chineseMatch = Regex(
+            "^\\u56de\\u590d\\u901a\\u77e5\\s+(.+?)\\s*::\\s*(.+)$"
+        ).matchEntire(request.goal.trim())
+        val chineseLatestMatch = Regex(
+            "^\\u56de\\u590d\\u6700\\u65b0\\u901a\\u77e5\\s*::\\s*(.+)$"
+        ).matchEntire(request.goal.trim())
+        val query = when {
+            englishMatch != null -> englishMatch.groupValues[1].trim()
+            chineseMatch != null -> chineseMatch.groupValues[1].trim()
+            chineseLatestMatch != null -> "latest"
+            else -> return null
+        }
+        val replyText = when {
+            englishMatch != null -> englishMatch.groupValues[2]
+            chineseMatch != null -> chineseMatch.groupValues[2]
+            else -> chineseLatestMatch!!.groupValues[1]
+        }.trim().take(MAX_NOTIFICATION_REPLY_CHARACTERS)
+        val replyable = request.screen.notifications.items.filter { it.canReply }
+        val item = when {
+            query.equals("latest", ignoreCase = true) -> replyable.firstOrNull()
+            else -> replyable.firstOrNull { it.key == query } ?:
+                replyable.firstOrNull { it.packageName.equals(query, ignoreCase = true) } ?:
+                replyable.firstOrNull { it.title.equals(query, ignoreCase = true) } ?:
+                replyable.firstOrNull {
+                    it.packageName.contains(query, ignoreCase = true) ||
+                        it.title.contains(query, ignoreCase = true)
+                }
+        }
+        val sensitive = sensitiveFlagsForText(replyText).isNotEmpty() ||
+            item?.sensitiveFlags?.isNotEmpty() == true
+        val blockedReason = when {
+            item == null -> "No matching reply-capable notification is available"
+            replyText.isBlank() -> "Notification reply text is missing"
+            sensitive -> "Sensitive notification replies are blocked"
+            else -> ""
+        }
+        val risk = if (blockedReason.isNotBlank()) AgentRisk.BLOCKED else AgentRisk.HIGH
+        return AgentAction(
+            id = "reply-notification",
+            kind = AgentActionKind.REPLY_NOTIFICATION,
+            target = item?.title?.ifBlank { item.packageName } ?: query,
+            risk = risk,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = if (item == null) {
+                "Reply-capable notification '$query' was not found"
+            } else {
+                "Reply to ${item.title.ifBlank { item.packageName }}"
+            },
+            parameters = mapOf(
+                "notification_key" to item?.key.orEmpty(),
+                "notification_package" to item?.packageName.orEmpty(),
+                "reply_text" to replyText,
+                "blocked_reason" to blockedReason
+            )
+        )
     }
 
     private fun namedTapAction(request: AgentRequest): AgentAction {
@@ -4013,6 +4094,7 @@ class RuleBasedAgentPlanner : AgentPlanner {
         terms.any { contains(it) }
 
     companion object {
+        private const val MAX_NOTIFICATION_REPLY_CHARACTERS = 2_000
         private val BLOCKED_GOAL_TERMS = listOf(
             "install app",
             "uninstall app",
@@ -4173,6 +4255,14 @@ object AgentPlanFactory {
                 title = "Post local notification",
                 granted = true
             )
+            AgentActionKind.REPLY_NOTIFICATION -> permissions += AgentPermissionRequirement(
+                id = "notification_direct_reply",
+                title = "Notification direct reply",
+                granted = request.screen.notifications.hasAccess &&
+                    request.screen.notifications.items.any {
+                        it.key == action.parameters["notification_key"] && it.canReply
+                    }
+            )
             AgentActionKind.CALL_CONNECTOR,
             AgentActionKind.CONTROL_DEVICE -> {
                 val connectorId = action.parameters["connector_id"]
@@ -4249,6 +4339,7 @@ object AgentPlanFactory {
         AgentActionKind.LONG_PRESS,
         AgentActionKind.SWIPE -> "Observe the result and go back if the page changed unexpectedly."
         AgentActionKind.LOCK_SCREEN -> "Wake and unlock the phone manually to continue."
+        AgentActionKind.REPLY_NOTIFICATION -> "The sent reply cannot be recalled; report delivery failure immediately."
         AgentActionKind.CALL_CONNECTOR,
         AgentActionKind.CONTROL_DEVICE -> "Keep the task in chat history and report delivery failure."
         AgentActionKind.IMPORT_WEB_KNOWLEDGE -> "Remove the imported source if extraction or indexing is incorrect."
@@ -4268,6 +4359,7 @@ object AgentPlanFactory {
         AgentActionKind.DELETE_TEXT -> "Text is cleared from the active input field."
         AgentActionKind.PASTE_TEXT -> "Clipboard text is pasted into the active input field."
         AgentActionKind.CREATE_NOTIFICATION -> "A local Android notification is created."
+        AgentActionKind.REPLY_NOTIFICATION -> "The selected app receives the confirmed notification reply."
         AgentActionKind.CALL_CONNECTOR -> "The task is sent to the paired agent contact."
         AgentActionKind.CONTROL_DEVICE -> "The trusted device connector receives the task."
         AgentActionKind.IMPORT_WEB_KNOWLEDGE -> "The web page is extracted and indexed in Agent knowledge."
@@ -4285,6 +4377,7 @@ object AgentPlanFactory {
         AgentActionKind.OPEN_APP,
         AgentActionKind.SET_ALARM -> 30
         AgentActionKind.CREATE_NOTIFICATION -> 10
+        AgentActionKind.REPLY_NOTIFICATION -> 30
         else -> 20
     }
 
@@ -4318,6 +4411,7 @@ object AgentPlanFactory {
         AgentActionKind.OPEN_URL,
         AgentActionKind.SET_ALARM -> "Android intent route selected because the task maps to a system app or system handoff."
         AgentActionKind.CREATE_NOTIFICATION -> "Local notification route selected because the task should alert the user on this phone."
+        AgentActionKind.REPLY_NOTIFICATION -> "Notification reply route selected because the target app exposes Android direct reply."
         AgentActionKind.LOCK_SCREEN -> "Mobile executor route selected for an owner-confirmed screen lock."
         AgentActionKind.DRAFT_PLAN -> "Local planning route selected because the task needs clarification or a safe plan first."
     }
@@ -4356,6 +4450,7 @@ object AgentRouteResolver {
             AgentActionKind.OPEN_URL,
             AgentActionKind.SET_ALARM,
             AgentActionKind.CREATE_NOTIFICATION,
+            AgentActionKind.REPLY_NOTIFICATION,
             AgentActionKind.COPY_SCREEN_TEXT -> AgentRouteKind.LOCAL_SYSTEM
         }
         return AgentRoute(
@@ -4396,6 +4491,14 @@ object AgentPlanValidator {
             }
             if (action.kind == AgentActionKind.IMPORT_WEB_KNOWLEDGE && action.parameters["url"].isNullOrBlank()) {
                 issues += "action_url_missing:${action.id}"
+            }
+            if (action.kind == AgentActionKind.REPLY_NOTIFICATION) {
+                if (action.parameters["notification_key"].isNullOrBlank()) {
+                    issues += "notification_reply_target_missing:${action.id}"
+                }
+                if (action.parameters["reply_text"].isNullOrBlank()) {
+                    issues += "notification_reply_text_missing:${action.id}"
+                }
             }
         }
         if (plan.safetyReview.risk.weight >= AgentRisk.HIGH.weight && !plan.confirmationRequired) {
@@ -4575,6 +4678,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         AgentActionKind.OPEN_URL -> openUrl(action)
         AgentActionKind.SET_ALARM -> setAlarm(action)
         AgentActionKind.CREATE_NOTIFICATION -> createLocalNotification(action)
+        AgentActionKind.REPLY_NOTIFICATION -> replyToNotification(action)
         AgentActionKind.CALL_CONNECTOR -> dispatchConnectorTask(action)
         AgentActionKind.CONTROL_DEVICE -> dispatchDeviceTask(action)
         AgentActionKind.IMPORT_WEB_KNOWLEDGE -> importWebKnowledge(action)
@@ -4794,6 +4898,25 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         context.getSystemService(NotificationManager::class.java)
             .notify(AGENT_NOTIFICATION_ID_BASE + (System.currentTimeMillis() % 1000).toInt(), notification)
         return AgentActionResult(action.id, true, "Created local notification")
+    }
+
+    private fun replyToNotification(action: AgentAction): AgentActionResult {
+        val notificationKey = action.parameters["notification_key"].orEmpty()
+        val replyText = action.parameters["reply_text"].orEmpty()
+        if (notificationKey.isBlank() || replyText.isBlank()) {
+            return AgentActionResult(action.id, false, "Notification reply target or text is missing")
+        }
+        val result = SignalASINotificationListenerService.reply(notificationKey, replyText)
+        return AgentActionResult(
+            actionId = action.id,
+            success = result.success,
+            message = result.message,
+            metadata = mapOf(
+                "notification_key_hash" to notificationKey.hashCode().toString(),
+                "notification_package" to action.parameters["notification_package"].orEmpty(),
+                "reply_length" to replyText.length.toString()
+            )
+        )
     }
 
     private fun ensureAgentNotificationChannel() {
@@ -5522,6 +5645,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
                     .put("text_preview", item.textPreview)
                     .put("category", item.category)
                     .put("posted_at_millis", item.postedAtMillis)
+                    .put("can_reply", item.canReply)
                     .put("sensitive_flags", JSONArray().also { flags ->
                         item.sensitiveFlags.forEach { flags.put(it) }
                     }))
@@ -5553,6 +5677,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
                         textPreview = item.optString("text_preview"),
                         category = item.optString("category", "app"),
                         postedAtMillis = item.optLong("posted_at_millis"),
+                        canReply = item.optBoolean("can_reply"),
                         sensitiveFlags = decodeStringList(item.optJSONArray("sensitive_flags"))
                     )
                 )
@@ -6068,6 +6193,7 @@ private fun AgentActionKind.mayChangeScreen(): Boolean = when (this) {
     AgentActionKind.PASTE_TEXT,
     AgentActionKind.COPY_SCREEN_TEXT,
     AgentActionKind.CREATE_NOTIFICATION,
+    AgentActionKind.REPLY_NOTIFICATION,
     AgentActionKind.IMPORT_WEB_KNOWLEDGE,
     AgentActionKind.CALL_CONNECTOR,
     AgentActionKind.CONTROL_DEVICE -> false
@@ -6327,6 +6453,7 @@ enum class AgentActionKind {
     OPEN_URL,
     SET_ALARM,
     CREATE_NOTIFICATION,
+    REPLY_NOTIFICATION,
     IMPORT_WEB_KNOWLEDGE,
     COPY_SCREEN_TEXT,
     DELETE_TEXT,
