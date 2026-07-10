@@ -138,6 +138,7 @@ class MobileNativeAgent(
     fun submitGoal(goal: String): AgentUiState {
         val requestedGoal = goal.trim()
         when {
+            retryTaskCommand(requestedGoal) -> return retryFailedAction()
             approveTaskCommand(requestedGoal) -> return approveNextAction()
             pauseTaskCommand(requestedGoal) -> return pauseCurrentTask()
             resumeTaskCommand(requestedGoal) -> return resumeCurrentTask()
@@ -416,6 +417,30 @@ class MobileNativeAgent(
         return snapshot()
     }
 
+    fun retryFailedAction(): AgentUiState {
+        val plan = currentPlan ?: return snapshot()
+        val failedAction = plan.actions.lastOrNull { it.status == AgentActionStatus.FAILED } ?: return snapshot()
+        val resetPlan = plan.resetActionForRetry(failedAction.id)
+        val reviewedPlan = resetPlan.withSafetyReview(safetyPolicy.review(resetPlan))
+        currentPlan = reviewedPlan
+        if (reviewedPlan.safetyReview.blocked) {
+            phase = AgentPhase.BLOCKED
+            val reason = reviewedPlan.safetyReview.reason.ifBlank { "Retry blocked by safety policy" }
+            lastActionResult = AgentActionResult(
+                actionId = failedAction.id,
+                success = false,
+                message = reason
+            )
+            recordAudit(AgentAuditEvent.ACTION_BLOCKED, "retry:${failedAction.id}:$reason")
+            saveTaskRecord()
+            return snapshot()
+        }
+        val retryAction = reviewedPlan.actions.first { it.id == failedAction.id }
+        lastActionResult = null
+        recordAudit(AgentAuditEvent.TASK_RESUMED, "retry:${retryAction.id}")
+        return executePlannedAction(reviewedPlan, retryAction, userConfirmed = true)
+    }
+
     fun safetySettings(): AgentSafetySettings = safetySettingsStore.load()
 
     fun updatePermissionMode(mode: PermissionMode): AgentUiState {
@@ -515,6 +540,15 @@ class MobileNativeAgent(
             normalized == "confirm next" ||
             normalized == "run next" ||
             normalized == "execute next"
+    }
+
+    private fun retryTaskCommand(goal: String): Boolean {
+        val normalized = goal.lowercase(Locale.US)
+        return normalized == "retry" ||
+            normalized == "retry task" ||
+            normalized == "retry action" ||
+            normalized == "retry failed action" ||
+            normalized == "try again"
     }
 
     private fun pauseTaskCommand(goal: String): Boolean {
@@ -4631,6 +4665,28 @@ data class AgentPlan(
             }
         )
     }
+
+    fun resetActionForRetry(actionId: String): AgentPlan = copy(
+        actions = actions.map { action ->
+            if (action.id == actionId) {
+                action.copy(
+                    status = AgentActionStatus.PENDING_CONFIRMATION,
+                    result = "",
+                    evidence = ""
+                )
+            } else {
+                action
+            }
+        },
+        verificationResults = verificationResults.filterNot { it.actionId == actionId },
+        steps = steps.map { step ->
+            if (step.kind == AgentStepKind.CONFIRM_AND_ACT) {
+                step.copy(status = AgentStepStatus.CURRENT)
+            } else {
+                step
+            }
+        }
+    )
 
     fun addVerification(result: AgentVerificationResult): AgentPlan = copy(
         verificationResults = verificationResults
