@@ -161,6 +161,12 @@ class MobileNativeAgent(
         installedAppSearchCommandValue(currentGoal)?.let { query ->
             return searchInstalledAppsCommand(query)
         }
+        if (screenOverviewCommand(currentGoal)) {
+            return showScreenOverviewCommand()
+        }
+        screenSearchCommandValue(currentGoal)?.let { query ->
+            return searchCurrentScreenCommand(query)
+        }
         if (notificationInboxCommand(currentGoal)) {
             return showNotificationInboxCommand()
         }
@@ -562,6 +568,27 @@ class MobileNativeAgent(
             normalized == "show notifications" ||
             normalized == "notification inbox" ||
             normalized == "show notification inbox"
+    }
+
+    private fun screenOverviewCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "screen status" ||
+            normalized == "inspect screen" ||
+            normalized == "screen elements" ||
+            normalized == "show screen elements" ||
+            normalized == "screen structure" ||
+            normalized == "show screen structure"
+    }
+
+    private fun screenSearchCommandValue(goal: String): String? {
+        val prefixes = listOf(
+            "search screen elements ",
+            "find screen element ",
+            "search screen ",
+            "find on screen "
+        )
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
     }
 
     private fun notificationSearchCommandValue(goal: String): String? {
@@ -1197,6 +1224,145 @@ class MobileNativeAgent(
         lastActionResult = AgentActionResult(action.id, true, result)
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        return snapshot()
+    }
+
+    private fun showScreenOverviewCommand(): AgentUiState {
+        val screen = currentScreen
+        val sensitive = screen.sensitiveFlagCount > 0 || screen.sensitiveFlags.isNotEmpty()
+        val result = when {
+            !screen.isAccessibilityEnabled -> "Screen Agent permission is disabled"
+            sensitive -> buildString {
+                append("Screen: ").append(screen.pageTitle.ifBlank { screen.foregroundApp })
+                append("; app=").append(screen.foregroundApp)
+                append("; text=").append(screen.visibleTextCount)
+                append("; actions=").append(screen.clickableNodeCount)
+                append("; fields=").append(screen.inputFieldCount)
+                append("; scroll_regions=").append(screen.scrollableRegionCount)
+                append("\nSensitive values hidden: ").append(screen.sensitiveFlags.joinToString(", "))
+            }
+            else -> buildString {
+                append("Screen: ").append(screen.pageTitle.ifBlank { screen.foregroundApp })
+                append("\nApp: ").append(screen.foregroundApp)
+                if (screen.activityName.isNotBlank()) append("\nActivity: ").append(screen.activityName)
+                append("\nElements: text=").append(screen.visibleTextCount)
+                append(", actions=").append(screen.clickableNodeCount)
+                append(", fields=").append(screen.inputFieldCount)
+                append(", scroll_regions=").append(screen.scrollableRegionCount)
+                if (screen.selectedText.isNotBlank()) {
+                    append("\nSelected: ").append(screen.selectedText.replace(Regex("\\s+"), " ").take(160))
+                }
+                screen.visibleTexts.distinct().take(12).forEach { text ->
+                    append("\ntext: ").append(text.replace(Regex("\\s+"), " ").take(140))
+                }
+                screen.clickableElements.take(12).forEach { element ->
+                    append("\naction: ").append(screenElementTitle(element)).append(" @ ").append(element.bounds)
+                }
+                screen.inputFields.take(8).forEach { element ->
+                    append("\nfield: ").append(screenElementTitle(element)).append(" @ ").append(element.bounds)
+                }
+                screen.scrollableRegions.take(6).forEach { element ->
+                    append("\nscroll: ").append(screenElementTitle(element)).append(" @ ").append(element.bounds)
+                }
+            }
+        }
+        return completeScreenInspectionCommand(
+            actionId = "show-screen-overview",
+            description = "Show current screen structure",
+            result = result,
+            parameters = mapOf(
+                "text_count" to screen.visibleTextCount.toString(),
+                "action_count" to screen.clickableNodeCount.toString(),
+                "field_count" to screen.inputFieldCount.toString(),
+                "scroll_region_count" to screen.scrollableRegionCount.toString()
+            )
+        )
+    }
+
+    private fun searchCurrentScreenCommand(query: String): AgentUiState {
+        val screen = currentScreen
+        val cleanQuery = query.trim().lowercase(Locale.US)
+        val sensitive = screen.sensitiveFlagCount > 0 || screen.sensitiveFlags.isNotEmpty()
+        val matches = if (sensitive || cleanQuery.isBlank()) {
+            emptyList()
+        } else {
+            buildList {
+                screen.visibleTexts.forEach { value -> add("text" to value) }
+                screen.clickableElements.forEach { element -> add("action" to screenElementTitle(element)) }
+                screen.inputFields.forEach { element -> add("field" to screenElementTitle(element)) }
+                screen.scrollableRegions.forEach { element -> add("scroll" to screenElementTitle(element)) }
+            }.filter { (_, value) -> value.lowercase(Locale.US).contains(cleanQuery) }
+                .distinct()
+                .take(20)
+        }
+        val result = when {
+            !screen.isAccessibilityEnabled -> "Screen Agent permission is disabled"
+            sensitive -> "Screen contains sensitive content; element values are hidden"
+            matches.isEmpty() -> "No current screen elements match '$query'"
+            else -> buildString {
+                append("Screen matches: ").append(matches.size)
+                matches.forEach { (kind, value) ->
+                    append("\n").append(kind).append(": ")
+                    append(value.replace(Regex("\\s+"), " ").take(160))
+                }
+            }
+        }
+        return completeScreenInspectionCommand(
+            actionId = "search-current-screen",
+            description = "Search current screen elements",
+            result = result,
+            parameters = mapOf("query" to query, "match_count" to matches.size.toString())
+        )
+    }
+
+    private fun screenElementTitle(element: ScreenElement): String =
+        element.label.ifBlank { element.viewId.ifBlank { element.className.ifBlank { "Unnamed element" } } }
+
+    private fun completeScreenInspectionCommand(
+        actionId: String,
+        description: String,
+        result: String,
+        parameters: Map<String, String>
+    ): AgentUiState {
+        val success = currentScreen.isAccessibilityEnabled
+        val status = if (success) AgentActionStatus.COMPLETED else AgentActionStatus.FAILED
+        val action = AgentAction(
+            id = actionId,
+            kind = AgentActionKind.READ_SCREEN,
+            target = currentScreen.pageTitle.ifBlank { currentScreen.foregroundApp },
+            risk = AgentRisk.LOW,
+            status = status,
+            description = description,
+            parameters = parameters,
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Screen Perception",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "screen-perception",
+                kind = AgentRouteKind.LOCAL_SYSTEM,
+                targetId = "screen-perception",
+                targetTitle = "Screen Perception",
+                status = if (success) AgentConnectorStatus.AVAILABLE else AgentConnectorStatus.NEEDS_SETUP,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.SCREEN_READING, AgentCapability.APP_NAVIGATION)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = if (success) AgentPhase.COMPLETED else AgentPhase.FAILED
+        lastActionResult = AgentActionResult(action.id, success, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:$status")
         return snapshot()
     }
 
