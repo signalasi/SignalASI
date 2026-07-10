@@ -1,5 +1,6 @@
 package com.signalasi.chat
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,6 +10,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -61,6 +63,7 @@ class MobileNativeAgent(
     private val connectorRegistry: AgentConnectorRegistry = StaticAgentConnectorRegistry(),
     private val sessionStore: AgentSessionStore = SharedPreferencesAgentSessionStore(context)
 ) {
+    private val appContext = context.applicationContext
     private var sessionId: String = UUID.randomUUID().toString()
     private var phase: AgentPhase = AgentPhase.OBSERVING
     private var currentGoal: String = ""
@@ -133,7 +136,14 @@ class MobileNativeAgent(
     }
 
     fun submitGoal(goal: String): AgentUiState {
-        currentGoal = goal.trim()
+        val requestedGoal = goal.trim()
+        when {
+            approveTaskCommand(requestedGoal) -> return approveNextAction()
+            pauseTaskCommand(requestedGoal) -> return pauseCurrentTask()
+            resumeTaskCommand(requestedGoal) -> return resumeCurrentTask()
+            cancelTaskCommand(requestedGoal) -> return cancelCurrentTask()
+        }
+        currentGoal = requestedGoal
         if (currentGoal.isBlank()) {
             return observeCurrentScreen()
         }
@@ -162,6 +172,9 @@ class MobileNativeAgent(
         }
         highRiskGuardCommandValue(currentGoal)?.let { enabled ->
             return setHighRiskGuardCommand(enabled)
+        }
+        if (permissionChecklistCommand(currentGoal)) {
+            return showPermissionChecklistCommand()
         }
         if (securityStatusCommand(currentGoal)) {
             return showSecurityStatusCommand()
@@ -476,6 +489,47 @@ class MobileNativeAgent(
             normalized == "agent permission status" ||
             normalized == "safety status" ||
             normalized == "privacy status"
+    }
+
+    private fun permissionChecklistCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "permission checklist" ||
+            normalized == "show permission checklist" ||
+            normalized == "check permissions" ||
+            normalized == "agent permissions" ||
+            normalized == "show agent permissions" ||
+            normalized == "missing permissions"
+    }
+
+    private fun approveTaskCommand(goal: String): Boolean {
+        val normalized = goal.lowercase(Locale.US)
+        return normalized == "approve" ||
+            normalized == "confirm" ||
+            normalized == "approve next" ||
+            normalized == "confirm next" ||
+            normalized == "run next" ||
+            normalized == "execute next"
+    }
+
+    private fun pauseTaskCommand(goal: String): Boolean {
+        val normalized = goal.lowercase(Locale.US)
+        return normalized == "pause" || normalized == "pause task" || normalized == "pause execution"
+    }
+
+    private fun resumeTaskCommand(goal: String): Boolean {
+        val normalized = goal.lowercase(Locale.US)
+        return normalized == "resume" ||
+            normalized == "resume task" ||
+            normalized == "resume execution" ||
+            normalized == "continue task"
+    }
+
+    private fun cancelTaskCommand(goal: String): Boolean {
+        val normalized = goal.lowercase(Locale.US)
+        return normalized == "cancel" ||
+            normalized == "cancel task" ||
+            normalized == "stop task" ||
+            normalized == "abort task"
     }
 
     private fun installedAppsCommand(goal: String): Boolean {
@@ -943,6 +997,103 @@ class MobileNativeAgent(
                 status = AgentConnectorStatus.AVAILABLE,
                 deliveryMode = "local",
                 capabilities = listOf(AgentCapability.TASK_EXECUTION)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = AgentRisk.LOW,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        return snapshot()
+    }
+
+    private fun showPermissionChecklistCommand(): AgentUiState {
+        val microphoneGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            appContext.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val postNotificationsGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            appContext.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        val batteryUnrestricted = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            runCatching {
+                appContext.getSystemService(PowerManager::class.java)
+                    ?.isIgnoringBatteryOptimizations(appContext.packageName) == true
+            }.getOrDefault(false)
+        val items = listOf(
+            AgentPermissionChecklistItem(
+                title = "Screen Agent",
+                ready = currentScreen.isAccessibilityEnabled,
+                required = true,
+                fixCommand = "open accessibility settings"
+            ),
+            AgentPermissionChecklistItem(
+                title = "Notification access",
+                ready = currentScreen.notifications.hasAccess,
+                required = false,
+                fixCommand = "open notification access settings"
+            ),
+            AgentPermissionChecklistItem(
+                title = "Microphone",
+                ready = microphoneGranted,
+                required = false,
+                fixCommand = "start a voice action to request access"
+            ),
+            AgentPermissionChecklistItem(
+                title = "Post notifications",
+                ready = postNotificationsGranted,
+                required = false,
+                fixCommand = "open SignalASI app permissions"
+            ),
+            AgentPermissionChecklistItem(
+                title = "Background battery access",
+                ready = batteryUnrestricted,
+                required = false,
+                fixCommand = "open battery settings"
+            )
+        )
+        val readyCount = items.count { it.ready }
+        val requiredMissing = items.count { it.required && !it.ready }
+        val result = buildString {
+            append("Agent permissions: ").append(readyCount).append("/").append(items.size).append(" ready")
+            items.forEach { item ->
+                append("\n").append(if (item.ready) "ready" else "missing")
+                append(": ").append(item.title)
+                if (!item.ready) append(" -> ").append(item.fixCommand)
+                if (item.required) append(" [required]")
+            }
+        }
+        val action = AgentAction(
+            id = "show-permission-checklist",
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Permissions",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.COMPLETED,
+            description = "Show Agent permission readiness checklist",
+            parameters = mapOf(
+                "ready_count" to readyCount.toString(),
+                "permission_count" to items.size.toString(),
+                "required_missing" to requiredMissing.toString()
+            ),
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Permissions",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "agent-permissions",
+                kind = AgentRouteKind.LOCAL_SYSTEM,
+                targetId = "agent-permissions",
+                targetTitle = "Agent Permissions",
+                status = if (requiredMissing == 0) AgentConnectorStatus.AVAILABLE else AgentConnectorStatus.NEEDS_SETUP,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.SYSTEM_SETTINGS, AgentCapability.TASK_EXECUTION)
             ),
             safetyReview = AgentSafetyReview(
                 risk = AgentRisk.LOW,
@@ -4509,6 +4660,13 @@ private enum class CallableInventoryFilter {
     MODELS,
     DEVICES
 }
+
+private data class AgentPermissionChecklistItem(
+    val title: String,
+    val ready: Boolean,
+    val required: Boolean,
+    val fixCommand: String
+)
 
 enum class AgentConnectorStatus {
     AVAILABLE,
