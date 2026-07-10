@@ -878,6 +878,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             val next = !mobileNativeAgent.safetySettings().memoryCapture
             renderAgentState(mobileNativeAgent.updateMemoryCapture(next))
         }
+        agentMemoryText.setOnClickListener { showAgentMemoryPage() }
         agentKnowledgeText.setOnClickListener { openAgentKnowledgeImportPicker() }
         agentSubmitButton.setOnClickListener { handleAgentPrimaryAction() }
         agentGoalInput.setOnEditorActionListener { _, _, _ ->
@@ -1977,9 +1978,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 state.runtimeContext.callableCount
             )
         }
+        val memorySnapshot = mobileNativeAgent.memorySnapshot()
         agentMemoryText.text = getString(
             R.string.agent_memory_value,
-            state.runtimeContext.memories.size
+            memorySnapshot.activeCount,
+            memorySnapshot.conflicts.size
         )
         agentKnowledgeText.text = getString(
             R.string.agent_knowledge_value,
@@ -6630,6 +6633,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         ).apply {
             setOnClickListener { toggleAgentMemoryCapture() }
         })
+        val memorySnapshot = mobileNativeAgent.memorySnapshot()
+        featureContent.addView(featureValueRow(
+            getString(R.string.agent_memory_title),
+            getString(R.string.agent_memory_management_subtitle),
+            R.drawable.ic_agent_node,
+            getString(R.string.agent_memory_value, memorySnapshot.activeCount, memorySnapshot.conflicts.size)
+        ).apply {
+            setOnClickListener { showAgentMemoryPage() }
+        })
         featureContent.addView(featureSwitchRow(
             getString(R.string.on_device_agent_execution_pause),
             getString(R.string.on_device_agent_execution_pause_subtitle),
@@ -6799,6 +6811,217 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         Toast.makeText(this, getString(R.string.on_device_agent_mode_changed, permissionModeLabel(next)), Toast.LENGTH_SHORT).show()
         showOnDeviceAgentFeaturePage()
     }
+
+    private fun showAgentMemoryPage() {
+        showFeaturePage(getString(R.string.agent_memory_title))
+        val snapshot = mobileNativeAgent.memorySnapshot()
+        featureContent.addView(featureHeroCard(
+            getString(R.string.agent_memory_hero_title),
+            getString(
+                R.string.agent_memory_hero_subtitle,
+                snapshot.activeCount,
+                snapshot.conflicts.size,
+                snapshot.historyCount
+            ),
+            R.drawable.ic_agent_node,
+            "#5B6CFF",
+            getString(
+                if (mobileNativeAgent.safetySettings().memoryCapture) R.string.common_on
+                else R.string.common_off
+            )
+        ))
+
+        addSectionTitle(getString(R.string.agent_memory_section_conflicts))
+        if (snapshot.conflicts.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.agent_memory_no_conflicts),
+                getString(R.string.agent_memory_no_conflicts_subtitle),
+                R.drawable.ic_security_shield,
+                ""
+            ))
+        } else {
+            snapshot.conflicts.forEach { conflict ->
+                featureContent.addView(featureRow(
+                    conflict.key.ifBlank { memoryKindLabel(conflict.kind) },
+                    getString(
+                        R.string.agent_memory_conflict_subtitle,
+                        memoryKindLabel(conflict.kind),
+                        conflict.candidates.size
+                    ),
+                    R.drawable.ic_security_shield,
+                    getString(R.string.agent_memory_review)
+                ).apply {
+                    setOnClickListener { showAgentMemoryConflictDialog(conflict) }
+                })
+            }
+        }
+
+        addSectionTitle(getString(R.string.agent_memory_section_saved))
+        if (snapshot.activeItems.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.agent_memory_empty),
+                getString(R.string.agent_memory_empty_subtitle),
+                R.drawable.ic_agent_node,
+                ""
+            ))
+        } else {
+            snapshot.activeItems.forEach { item ->
+                val key = item.key.ifBlank { getString(R.string.agent_memory_key_none) }
+                val action = getString(
+                    if (item.important) R.string.agent_memory_pinned else R.string.common_edit
+                )
+                featureContent.addView(featureRow(
+                    item.value.replace(Regex("\\s+"), " ").take(80),
+                    getString(
+                        R.string.agent_memory_item_subtitle,
+                        memoryKindLabel(item.kind),
+                        item.version,
+                        key
+                    ),
+                    R.drawable.ic_agent_node,
+                    action
+                ).apply {
+                    setOnClickListener { showAgentMemoryItemActions(item) }
+                })
+            }
+        }
+
+        if (snapshot.historyItems.isNotEmpty()) {
+            addSectionTitle(getString(R.string.agent_memory_section_history))
+            snapshot.historyItems.take(20).forEach { item ->
+                featureContent.addView(featureRow(
+                    item.value.replace(Regex("\\s+"), " ").take(80),
+                    getString(
+                        R.string.agent_memory_history_subtitle,
+                        memoryKindLabel(item.kind),
+                        item.version,
+                        memorySourceLabel(item.source)
+                    ),
+                    R.drawable.ic_protocol_link,
+                    ""
+                ))
+            }
+        }
+    }
+
+    private fun showAgentMemoryConflictDialog(conflict: AgentMemoryConflict) {
+        val candidates = conflict.candidates.sortedBy { it.version }
+        val options = candidates.map { item ->
+            getString(
+                R.string.agent_memory_use_candidate,
+                item.version,
+                item.value.replace(Regex("\\s+"), " ").take(90)
+            )
+        } + getString(R.string.agent_memory_merge_values)
+        android.app.AlertDialog.Builder(this)
+            .setTitle(conflict.key.ifBlank { getString(R.string.agent_memory_conflict_title) })
+            .setItems(options.toTypedArray()) { _, which ->
+                if (which < candidates.size) {
+                    resolveAgentMemoryConflict(conflict, candidates[which], null)
+                } else {
+                    val initial = candidates.joinToString("\n") { it.value }
+                    showTextSettingDialog(getString(R.string.agent_memory_merge_title), initial) { merged ->
+                        resolveAgentMemoryConflict(conflict, candidates.last(), merged)
+                    }
+                }
+            }
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .show()
+    }
+
+    private fun resolveAgentMemoryConflict(
+        conflict: AgentMemoryConflict,
+        selected: AgentMemoryItem,
+        mergedValue: String?
+    ) {
+        val resolved = mobileNativeAgent.resolveMemoryConflict(conflict.groupId, selected.id, mergedValue)
+        Toast.makeText(
+            this,
+            getString(
+                if (resolved != null) R.string.agent_memory_merge_saved
+                else R.string.agent_memory_conflict_resolution_failed
+            ),
+            Toast.LENGTH_SHORT
+        ).show()
+        showAgentMemoryPage()
+    }
+
+    private fun showAgentMemoryItemActions(item: AgentMemoryItem) {
+        val options = listOf(
+            getString(R.string.common_edit),
+            getString(
+                if (item.important) R.string.agent_memory_remove_important
+                else R.string.agent_memory_mark_important
+            ),
+            getString(R.string.common_delete)
+        )
+        android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.agent_memory_item_actions_title))
+            .setItems(options.toTypedArray()) { _, which ->
+                when (which) {
+                    0 -> showTextSettingDialog(
+                        getString(R.string.agent_memory_edit_title),
+                        item.value
+                    ) { value ->
+                        val result = mobileNativeAgent.updateMemoryItem(item.id, value, item.key)
+                        Toast.makeText(
+                            this,
+                            getString(
+                                when {
+                                    result?.conflict != null -> R.string.agent_memory_conflict_created
+                                    result != null -> R.string.agent_memory_updated
+                                    else -> R.string.agent_memory_conflict_resolution_failed
+                                }
+                            ),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        showAgentMemoryPage()
+                    }
+                    1 -> {
+                        mobileNativeAgent.setMemoryItemImportant(item.id, !item.important)
+                        showAgentMemoryPage()
+                    }
+                    2 -> confirmAgentMemoryDeletion(item)
+                }
+            }
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .show()
+    }
+
+    private fun confirmAgentMemoryDeletion(item: AgentMemoryItem) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.agent_memory_delete_title))
+            .setMessage(getString(R.string.agent_memory_delete_message, item.value.take(120)))
+            .setPositiveButton(getString(R.string.common_delete)) { _, _ ->
+                if (mobileNativeAgent.deleteMemoryItem(item.id)) {
+                    Toast.makeText(this, getString(R.string.agent_memory_deleted), Toast.LENGTH_SHORT).show()
+                }
+                showAgentMemoryPage()
+            }
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .show()
+    }
+
+    private fun memoryKindLabel(kind: AgentMemoryKind): String = getString(
+        when (kind) {
+            AgentMemoryKind.IDENTITY -> R.string.agent_memory_kind_identity
+            AgentMemoryKind.CONTACT -> R.string.agent_memory_kind_contact
+            AgentMemoryKind.TASK -> R.string.agent_memory_kind_task
+            AgentMemoryKind.PREFERENCE -> R.string.agent_memory_kind_preference
+            AgentMemoryKind.WORKFLOW -> R.string.agent_memory_kind_workflow
+            AgentMemoryKind.KNOWLEDGE -> R.string.agent_memory_kind_knowledge
+            AgentMemoryKind.SAFETY -> R.string.agent_memory_kind_safety
+        }
+    )
+
+    private fun memorySourceLabel(source: String): String = getString(
+        when {
+            source == "agent_memory_command" -> R.string.agent_memory_source_explicit
+            source == "memory_edit" -> R.string.agent_memory_source_edit
+            source.startsWith("memory_conflict_") -> R.string.agent_memory_source_resolution
+            else -> R.string.agent_memory_source_agent
+        }
+    )
 
     private fun nextAgentPermissionMode(current: PermissionMode): PermissionMode = when (current) {
         PermissionMode.OBSERVE_ONLY -> PermissionMode.SUGGEST_ONLY

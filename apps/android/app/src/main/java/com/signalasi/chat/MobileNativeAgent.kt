@@ -400,19 +400,13 @@ class MobileNativeAgent(
         } else {
             memoryBlockReason(currentGoal, currentScreen)
         }
-        if (memoryBlockReason == null) {
-            memoryStore.remember(AgentMemoryItem(kind = AgentMemoryKind.TASK, value = currentGoal))
-            knowledgeStore.upsert(
-                AgentKnowledgeItem(
-                    kind = AgentKnowledgeKind.TASK,
-                    title = currentGoal.take(80),
-                    content = buildKnowledgeContent(currentGoal, currentScreen, context),
-                    source = "agent_runtime",
-                    tags = listOf("task", currentScreen.foregroundApp)
-                )
-            )
-        } else {
+        if (memoryBlockReason != null) {
             recordAudit(AgentAuditEvent.MEMORY_SKIPPED, memoryBlockReason)
+        } else {
+            recordAudit(
+                AgentAuditEvent.MEMORY_SKIPPED,
+                "Task context remains session-scoped until the user explicitly saves it"
+            )
         }
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
         if (safetyReview.blocked) {
@@ -1235,6 +1229,60 @@ class MobileNativeAgent(
         return snapshot()
     }
 
+    fun memorySnapshot(): AgentMemorySnapshot = memoryStore.snapshot()
+
+    fun updateMemoryItem(itemId: String, value: String, key: String = ""): AgentMemoryWriteResult? {
+        val reason = sensitiveMemoryReason(value, currentScreen)
+        if (reason != null) {
+            recordAudit(AgentAuditEvent.MEMORY_SKIPPED, reason)
+            return null
+        }
+        val result = memoryStore.update(itemId, value, key)
+        if (result?.conflict != null) {
+            recordAudit(
+                AgentAuditEvent.MEMORY_CONFLICT_DETECTED,
+                "group:${result.conflict.groupId}; candidates:${result.conflict.candidates.size}"
+            )
+        } else if (result?.item != null) {
+            recordAudit(AgentAuditEvent.MEMORY_UPDATED, "item:${result.item.id}; version:${result.item.version}")
+        }
+        return result
+    }
+
+    fun deleteMemoryItem(itemId: String): Boolean {
+        val deleted = memoryStore.deleteById(itemId)
+        if (deleted) recordAudit(AgentAuditEvent.MEMORY_FORGOTTEN, "item:$itemId")
+        return deleted
+    }
+
+    fun setMemoryItemImportant(itemId: String, important: Boolean): Boolean {
+        val updated = memoryStore.setImportant(itemId, important)
+        if (updated) recordAudit(AgentAuditEvent.MEMORY_UPDATED, "item:$itemId; important:$important")
+        return updated
+    }
+
+    fun resolveMemoryConflict(
+        groupId: String,
+        selectedItemId: String,
+        mergedValue: String? = null
+    ): AgentMemoryItem? {
+        if (!mergedValue.isNullOrBlank()) {
+            val reason = sensitiveMemoryReason(mergedValue, currentScreen)
+            if (reason != null) {
+                recordAudit(AgentAuditEvent.MEMORY_SKIPPED, reason)
+                return null
+            }
+        }
+        val resolved = memoryStore.resolveConflict(groupId, selectedItemId, mergedValue)
+        if (resolved != null) {
+            recordAudit(
+                AgentAuditEvent.MEMORY_CONFLICT_RESOLVED,
+                "group:$groupId; item:${resolved.id}; version:${resolved.version}"
+            )
+        }
+        return resolved
+    }
+
     fun updateMemoryCapture(enabled: Boolean): AgentUiState {
         safetySettingsStore.save(safetySettingsStore.load().copy(memoryCapture = enabled))
         recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "memory_capture:$enabled")
@@ -1336,7 +1384,15 @@ class MobileNativeAgent(
     }
 
     private fun memoryCommandValue(goal: String): String? {
-        val prefixes = listOf("remember ", "save note ", "save memory ", "memorize ")
+        val prefixes = listOf(
+            "remember ",
+            "save note ",
+            "save memory ",
+            "memorize ",
+            "\u8bb0\u4f4f",
+            "\u4fdd\u5b58\u8bb0\u5fc6",
+            "\u4fdd\u5b58\u7b14\u8bb0"
+        )
         val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
         return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
     }
@@ -2004,11 +2060,8 @@ class MobileNativeAgent(
 
     private fun saveMemoryCommand(value: String): AgentUiState {
         val blockReason = memoryBlockReason(value, currentScreen)
-        val resultMessage = if (blockReason == null) {
-            "Saved personal memory"
-        } else {
-            blockReason
-        }
+        var writeResult: AgentMemoryWriteResult? = null
+        val resultMessage = if (blockReason == null) "Saved personal memory" else blockReason
         val action = AgentAction(
             id = "save-memory",
             kind = AgentActionKind.DRAFT_PLAN,
@@ -2042,25 +2095,72 @@ class MobileNativeAgent(
             )
         )
         phase = AgentPhase.COMPLETED
-        lastActionResult = AgentActionResult(action.id, true, resultMessage)
         if (blockReason == null) {
-            memoryStore.remember(AgentMemoryItem(kind = AgentMemoryKind.KNOWLEDGE, value = value, source = "agent_memory_command"))
-            knowledgeStore.upsert(
-                AgentKnowledgeItem(
-                    kind = AgentKnowledgeKind.NOTE,
-                    title = value.take(80),
-                    content = value,
-                    source = "agent_memory_command",
-                    tags = listOf("memory", "note")
+            writeResult = memoryStore.remember(memoryItemFromCommand(value))
+            writeResult?.conflict?.let { conflict ->
+                recordAudit(
+                    AgentAuditEvent.MEMORY_CONFLICT_DETECTED,
+                    "group:${conflict.groupId}; candidates:${conflict.candidates.size}"
                 )
-            )
+            }
         } else {
             recordAudit(AgentAuditEvent.MEMORY_SKIPPED, blockReason)
         }
+        val finalMessage = if (writeResult?.conflict != null) {
+            "Memory conflict needs review"
+        } else {
+            resultMessage
+        }
+        currentPlan = currentPlan?.copy(
+            actions = listOf(action.copy(result = finalMessage)),
+            expectedResult = finalMessage
+        )
+        lastActionResult = AgentActionResult(action.id, blockReason == null, finalMessage)
+        if (writeResult?.item != null && writeResult?.conflict == null) {
+            recordAudit(
+                AgentAuditEvent.MEMORY_UPDATED,
+                "item:${writeResult?.item?.id}; version:${writeResult?.item?.version}; duplicate:${writeResult?.duplicate}"
+            )
+        }
         recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
-        saveTaskRecord(result = resultMessage)
+        saveTaskRecord(result = finalMessage)
         return snapshot()
+    }
+
+    private fun memoryItemFromCommand(rawValue: String): AgentMemoryItem {
+        val cleanValue = rawValue.trim()
+        val typedPrefixes = listOf(
+            "profile" to AgentMemoryKind.IDENTITY,
+            "identity" to AgentMemoryKind.IDENTITY,
+            "contact" to AgentMemoryKind.CONTACT,
+            "preference" to AgentMemoryKind.PREFERENCE,
+            "workflow" to AgentMemoryKind.WORKFLOW,
+            "security" to AgentMemoryKind.SAFETY,
+            "safety" to AgentMemoryKind.SAFETY,
+            "knowledge" to AgentMemoryKind.KNOWLEDGE,
+            "\u8eab\u4efd" to AgentMemoryKind.IDENTITY,
+            "\u8054\u7cfb\u4eba" to AgentMemoryKind.CONTACT,
+            "\u504f\u597d" to AgentMemoryKind.PREFERENCE,
+            "\u5de5\u4f5c\u6d41" to AgentMemoryKind.WORKFLOW,
+            "\u5b89\u5168" to AgentMemoryKind.SAFETY,
+            "\u77e5\u8bc6" to AgentMemoryKind.KNOWLEDGE
+        )
+        val typed = typedPrefixes.firstOrNull { (prefix, _) ->
+            cleanValue.startsWith("$prefix:", ignoreCase = true)
+        }
+        val content = typed?.first?.let { prefix -> cleanValue.drop(prefix.length + 1).trim() }
+            ?.takeIf { it.isNotBlank() }
+            ?: cleanValue
+        val keySeparator = listOf(content.indexOf('='), content.indexOf(':'))
+            .filter { it in 1..64 }
+            .minOrNull()
+        return AgentMemoryItem(
+            kind = typed?.second ?: AgentMemoryKind.KNOWLEDGE,
+            value = content,
+            source = "agent_memory_command",
+            key = keySeparator?.let { content.substring(0, it).trim() }.orEmpty()
+        )
     }
 
     private fun showRecentTasksCommand(): AgentUiState {
@@ -3686,10 +3786,12 @@ class MobileNativeAgent(
 
     private fun showMemoryOverviewCommand(): AgentUiState {
         val recent = memoryStore.recent(limit = 10)
-        val count = memoryStore.count()
+        val memorySnapshot = memoryStore.snapshot()
+        val count = memorySnapshot.activeCount
         val captureEnabled = safetySettingsStore.load().memoryCapture
         val result = buildString {
             append("Personal memory: ").append(count)
+            append("; conflicts=").append(memorySnapshot.conflicts.size)
             append("; capture=").append(if (captureEnabled) "on" else "paused")
             if (recent.isEmpty()) {
                 append("\nNo saved memories")
@@ -3705,7 +3807,11 @@ class MobileNativeAgent(
             target = "Agent Memory",
             description = "Show personal memory status and recent items",
             result = result,
-            parameters = mapOf("memory_count" to count.toString(), "capture_enabled" to captureEnabled.toString())
+            parameters = mapOf(
+                "memory_count" to count.toString(),
+                "memory_conflicts" to memorySnapshot.conflicts.size.toString(),
+                "capture_enabled" to captureEnabled.toString()
+            )
         )
     }
 
@@ -6113,67 +6219,289 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
 }
 
 interface AgentMemoryStore {
-    fun remember(item: AgentMemoryItem)
+    fun remember(item: AgentMemoryItem): AgentMemoryWriteResult
     fun recall(query: String): List<AgentMemoryItem>
     fun recent(limit: Int = 10): List<AgentMemoryItem>
     fun count(): Int
     fun delete(query: String): Int
+    fun snapshot(): AgentMemorySnapshot
+    fun update(itemId: String, value: String, key: String = ""): AgentMemoryWriteResult?
+    fun deleteById(itemId: String): Boolean
+    fun setImportant(itemId: String, important: Boolean): Boolean
+    fun resolveConflict(groupId: String, selectedItemId: String, mergedValue: String? = null): AgentMemoryItem?
 }
 
 class InMemoryAgentMemoryStore : AgentMemoryStore {
     private val items = mutableListOf<AgentMemoryItem>()
 
-    override fun remember(item: AgentMemoryItem) {
-        items.add(item)
+    override fun remember(item: AgentMemoryItem): AgentMemoryWriteResult {
+        val clean = item.copy(
+            value = item.value.trim(),
+            key = item.key.trim().lowercase(Locale.US),
+            status = AgentMemoryStatus.ACTIVE,
+            conflictGroupId = ""
+        )
+        if (clean.value.isBlank()) return AgentMemoryWriteResult(null)
+        val duplicate = items.firstOrNull {
+            it.status != AgentMemoryStatus.SUPERSEDED &&
+                it.kind == clean.kind &&
+                it.key == clean.key &&
+                it.value.equals(clean.value, ignoreCase = true)
+        }
+        if (duplicate != null) return AgentMemoryWriteResult(duplicate, duplicate = true)
+        val competing = if (clean.key.isBlank()) emptyList() else items.filter {
+            it.status != AgentMemoryStatus.SUPERSEDED && it.kind == clean.kind && it.key == clean.key
+        }
+        if (competing.isNotEmpty()) {
+            val groupId = competing.firstNotNullOfOrNull { candidate ->
+                candidate.conflictGroupId.takeIf { it.isNotBlank() }
+            }
+                ?: UUID.randomUUID().toString()
+            competing.forEach { existing ->
+                val index = items.indexOfFirst { it.id == existing.id }
+                items[index] = existing.copy(status = AgentMemoryStatus.CONFLICTED, conflictGroupId = groupId)
+            }
+            val conflicted = clean.copy(
+                version = (competing.maxOfOrNull { it.version } ?: 0) + 1,
+                status = AgentMemoryStatus.CONFLICTED,
+                conflictGroupId = groupId
+            )
+            items.add(conflicted)
+            return AgentMemoryWriteResult(
+                conflicted,
+                AgentMemoryConflict(groupId, clean.kind, clean.key, (competing + conflicted).sortedBy { it.version })
+            )
+        }
+        items.add(clean)
+        return AgentMemoryWriteResult(clean)
     }
 
     override fun recall(query: String): List<AgentMemoryItem> = items
+        .filter { it.status == AgentMemoryStatus.ACTIVE }
         .filter { it.value.contains(query, ignoreCase = true) || query.contains(it.value, ignoreCase = true) }
         .takeLast(5)
 
-    override fun recent(limit: Int): List<AgentMemoryItem> = items.takeLast(limit.coerceAtLeast(0)).asReversed()
+    override fun recent(limit: Int): List<AgentMemoryItem> = items
+        .filter { it.status == AgentMemoryStatus.ACTIVE }
+        .takeLast(limit.coerceAtLeast(0))
+        .asReversed()
 
-    override fun count(): Int = items.size
+    override fun count(): Int = items.count { it.status == AgentMemoryStatus.ACTIVE }
 
     override fun delete(query: String): Int {
         val before = items.size
         items.removeAll { it.value.contains(query, ignoreCase = true) || query.contains(it.value, ignoreCase = true) }
         return before - items.size
     }
+
+    override fun snapshot(): AgentMemorySnapshot {
+        val conflicts = items
+            .filter { it.status == AgentMemoryStatus.CONFLICTED && it.conflictGroupId.isNotBlank() }
+            .groupBy { it.conflictGroupId }
+            .values
+            .filter { it.size > 1 }
+            .map { candidates ->
+                AgentMemoryConflict(
+                    candidates.first().conflictGroupId,
+                    candidates.first().kind,
+                    candidates.first().key,
+                    candidates.sortedBy { it.version }
+                )
+            }
+        return AgentMemorySnapshot(
+            activeItems = items.filter { it.status == AgentMemoryStatus.ACTIVE }.sortedByDescending { it.timestampMillis },
+            conflicts = conflicts,
+            historyItems = items
+                .filter { it.status == AgentMemoryStatus.SUPERSEDED }
+                .sortedByDescending { it.timestampMillis }
+        )
+    }
+
+    override fun update(itemId: String, value: String, key: String): AgentMemoryWriteResult? {
+        val index = items.indexOfFirst { it.id == itemId }
+        if (index < 0 || value.isBlank()) return null
+        val previous = items[index]
+        items[index] = previous.copy(status = AgentMemoryStatus.SUPERSEDED)
+        return remember(previous.copy(
+            id = UUID.randomUUID().toString(),
+            value = value.trim(),
+            key = key.trim().ifBlank { previous.key },
+            version = previous.version + 1,
+            supersedesId = previous.id,
+            source = "memory_edit",
+            timestampMillis = System.currentTimeMillis()
+        ))
+    }
+
+    override fun deleteById(itemId: String): Boolean {
+        val target = items.firstOrNull { it.id == itemId } ?: return false
+        val relatedIds = memoryLineageIds(items, target)
+        items.removeAll { candidate ->
+            candidate.id in relatedIds ||
+                (target.key.isNotBlank() && candidate.kind == target.kind && candidate.key == target.key)
+        }
+        if (target.conflictGroupId.isNotBlank()) {
+            val remaining = items.filter {
+                it.conflictGroupId == target.conflictGroupId && it.status == AgentMemoryStatus.CONFLICTED
+            }
+            if (remaining.size == 1) {
+                val index = items.indexOfFirst { it.id == remaining.first().id }
+                items[index] = remaining.first().copy(status = AgentMemoryStatus.ACTIVE, conflictGroupId = "")
+            }
+        }
+        return true
+    }
+
+    private fun memoryLineageIds(allItems: List<AgentMemoryItem>, target: AgentMemoryItem): Set<String> {
+        val relatedIds = mutableSetOf(target.id)
+        var changed: Boolean
+        do {
+            changed = false
+            allItems.forEach { item ->
+                if (item.id in relatedIds && item.supersedesId.isNotBlank()) {
+                    changed = relatedIds.add(item.supersedesId) || changed
+                }
+                if (item.supersedesId in relatedIds) {
+                    changed = relatedIds.add(item.id) || changed
+                }
+            }
+        } while (changed)
+        return relatedIds
+    }
+
+    override fun setImportant(itemId: String, important: Boolean): Boolean {
+        val index = items.indexOfFirst { it.id == itemId }
+        if (index < 0) return false
+        items[index] = items[index].copy(important = important)
+        return true
+    }
+
+    override fun resolveConflict(
+        groupId: String,
+        selectedItemId: String,
+        mergedValue: String?
+    ): AgentMemoryItem? {
+        val candidates = items.filter {
+            it.conflictGroupId == groupId && it.status == AgentMemoryStatus.CONFLICTED
+        }
+        val selected = candidates.firstOrNull { it.id == selectedItemId } ?: return null
+        if (candidates.size < 2) return null
+        candidates.forEach { candidate ->
+            val index = items.indexOfFirst { it.id == candidate.id }
+            items[index] = candidate.copy(status = AgentMemoryStatus.SUPERSEDED)
+        }
+        val resolved = selected.copy(
+            id = UUID.randomUUID().toString(),
+            value = mergedValue?.trim().orEmpty().ifBlank { selected.value },
+            version = candidates.maxOf { it.version } + 1,
+            supersedesId = selected.id,
+            source = if (mergedValue.isNullOrBlank()) "memory_conflict_selection" else "memory_conflict_merge",
+            status = AgentMemoryStatus.ACTIVE,
+            conflictGroupId = "",
+            timestampMillis = System.currentTimeMillis()
+        )
+        items.add(resolved)
+        return resolved
+    }
 }
 
 class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
     private val prefs = AgentEncryptedPreferences(context, PREFS)
 
-    override fun remember(item: AgentMemoryItem) {
+    @Synchronized
+    override fun remember(item: AgentMemoryItem): AgentMemoryWriteResult {
         val cleanValue = item.value.trim()
-        if (cleanValue.isBlank()) return
-        val nextItem = item.copy(value = cleanValue)
-        val items = loadItems()
-            .filterNot { it.kind == nextItem.kind && it.value.equals(nextItem.value, ignoreCase = true) }
-            .plus(nextItem)
-            .sortedBy { it.timestampMillis }
-            .takeLast(MAX_ITEMS)
-        saveItems(items)
+        if (cleanValue.isBlank()) return AgentMemoryWriteResult(null)
+        val normalizedKey = normalizeKey(item.key.ifBlank { inferKey(cleanValue) })
+        val nextItem = item.copy(
+            value = cleanValue,
+            key = normalizedKey,
+            status = AgentMemoryStatus.ACTIVE,
+            conflictGroupId = ""
+        )
+        val items = loadItems().toMutableList()
+        val sameValue = items.firstOrNull { existing ->
+            existing.status != AgentMemoryStatus.SUPERSEDED &&
+                existing.kind == nextItem.kind &&
+                existing.key == nextItem.key &&
+                existing.value.equals(nextItem.value, ignoreCase = true)
+        }
+        if (sameValue != null) {
+            return AgentMemoryWriteResult(sameValue, duplicate = true)
+        }
+        if (normalizedKey.isBlank()) {
+            items.add(nextItem)
+            saveItems(trimHistory(items))
+            return AgentMemoryWriteResult(nextItem)
+        }
+
+        val competing = items.filter { existing ->
+            existing.kind == nextItem.kind &&
+                existing.key == normalizedKey &&
+                existing.status != AgentMemoryStatus.SUPERSEDED
+        }
+        if (competing.isEmpty()) {
+            items.add(nextItem)
+            saveItems(trimHistory(items))
+            return AgentMemoryWriteResult(nextItem)
+        }
+
+        val groupId = competing.firstNotNullOfOrNull { candidate ->
+            candidate.conflictGroupId.takeIf { it.isNotBlank() }
+        }
+            ?: UUID.randomUUID().toString()
+        val latest = competing.maxByOrNull { it.version }
+        val maxVersion = competing.maxOfOrNull { it.version } ?: 0
+        competing.forEach { existing ->
+            val index = items.indexOfFirst { it.id == existing.id }
+            if (index >= 0) {
+                items[index] = existing.copy(
+                    status = AgentMemoryStatus.CONFLICTED,
+                    conflictGroupId = groupId
+                )
+            }
+        }
+        val conflictedItem = nextItem.copy(
+            version = maxVersion + 1,
+            supersedesId = latest?.id.orEmpty(),
+            status = AgentMemoryStatus.CONFLICTED,
+            conflictGroupId = groupId
+        )
+        items.add(conflictedItem)
+        saveItems(trimHistory(items))
+        return AgentMemoryWriteResult(
+            item = conflictedItem,
+            conflict = buildConflict(groupId, items)
+        )
     }
 
+    @Synchronized
     override fun recall(query: String): List<AgentMemoryItem> {
         val cleanQuery = query.trim()
         if (cleanQuery.isBlank()) return emptyList()
         return loadItems()
+            .filter { it.status == AgentMemoryStatus.ACTIVE }
             .map { item -> item to score(item, cleanQuery) }
             .filter { (_, score) -> score > 0 }
-            .sortedWith(compareByDescending<Pair<AgentMemoryItem, Int>> { it.second }.thenByDescending { it.first.timestampMillis })
+            .sortedWith(
+                compareByDescending<Pair<AgentMemoryItem, Int>> { it.second }
+                    .thenByDescending { it.first.important }
+                    .thenByDescending { it.first.timestampMillis }
+            )
             .map { it.first }
             .take(MAX_RECALL_ITEMS)
     }
 
+    @Synchronized
     override fun recent(limit: Int): List<AgentMemoryItem> = loadItems()
-        .takeLast(limit.coerceAtLeast(0))
-        .asReversed()
+        .filter { it.status == AgentMemoryStatus.ACTIVE }
+        .sortedWith(compareByDescending<AgentMemoryItem> { it.important }.thenByDescending { it.timestampMillis })
+        .take(limit.coerceAtLeast(0))
 
-    override fun count(): Int = loadItems().size
+    @Synchronized
+    override fun count(): Int = loadItems().count { it.status == AgentMemoryStatus.ACTIVE }
 
+    @Synchronized
     override fun delete(query: String): Int {
         val cleanQuery = query.trim()
         if (cleanQuery.isBlank()) return 0
@@ -6181,6 +6509,143 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
         val kept = items.filter { item -> score(item, cleanQuery) <= 0 }
         if (kept.size != items.size) saveItems(kept)
         return items.size - kept.size
+    }
+
+    @Synchronized
+    override fun snapshot(): AgentMemorySnapshot {
+        val items = loadItems()
+        return AgentMemorySnapshot(
+            activeItems = items
+                .filter { it.status == AgentMemoryStatus.ACTIVE }
+                .sortedWith(compareByDescending<AgentMemoryItem> { it.important }.thenByDescending { it.timestampMillis }),
+            conflicts = items
+                .filter { it.status == AgentMemoryStatus.CONFLICTED && it.conflictGroupId.isNotBlank() }
+                .groupBy { it.conflictGroupId }
+                .values
+                .filter { it.size > 1 }
+                .map { candidates ->
+                    AgentMemoryConflict(
+                        groupId = candidates.first().conflictGroupId,
+                        kind = candidates.first().kind,
+                        key = candidates.first().key,
+                        candidates = candidates.sortedBy { it.version }
+                    )
+                }
+                .sortedByDescending { conflict -> conflict.candidates.maxOf { it.timestampMillis } },
+            historyItems = items
+                .filter { it.status == AgentMemoryStatus.SUPERSEDED }
+                .sortedByDescending { it.timestampMillis }
+        )
+    }
+
+    @Synchronized
+    override fun update(itemId: String, value: String, key: String): AgentMemoryWriteResult? {
+        val cleanValue = value.trim()
+        if (cleanValue.isBlank()) return null
+        val items = loadItems().toMutableList()
+        val index = items.indexOfFirst { it.id == itemId && it.status == AgentMemoryStatus.ACTIVE }
+        if (index < 0) return null
+        val previous = items[index]
+        items[index] = previous.copy(status = AgentMemoryStatus.SUPERSEDED)
+        saveItems(trimHistory(items))
+        return remember(
+            previous.copy(
+                id = UUID.randomUUID().toString(),
+                value = cleanValue,
+                key = key.trim().ifBlank { previous.key },
+                timestampMillis = System.currentTimeMillis(),
+                version = previous.version + 1,
+                supersedesId = previous.id,
+                source = "memory_edit",
+                status = AgentMemoryStatus.ACTIVE,
+                conflictGroupId = ""
+            )
+        )
+    }
+
+    @Synchronized
+    override fun deleteById(itemId: String): Boolean {
+        val items = loadItems().toMutableList()
+        val target = items.firstOrNull { it.id == itemId } ?: return false
+        val relatedIds = memoryLineageIds(items, target)
+        items.removeAll { candidate ->
+            candidate.id in relatedIds ||
+                (target.key.isNotBlank() && candidate.kind == target.kind && candidate.key == target.key)
+        }
+        if (target.conflictGroupId.isNotBlank()) {
+            val remaining = items.filter {
+                it.conflictGroupId == target.conflictGroupId && it.status == AgentMemoryStatus.CONFLICTED
+            }
+            if (remaining.size == 1) {
+                val remainingIndex = items.indexOfFirst { it.id == remaining.first().id }
+                items[remainingIndex] = remaining.first().copy(
+                    status = AgentMemoryStatus.ACTIVE,
+                    conflictGroupId = ""
+                )
+            }
+        }
+        saveItems(trimHistory(items))
+        return true
+    }
+
+    private fun memoryLineageIds(allItems: List<AgentMemoryItem>, target: AgentMemoryItem): Set<String> {
+        val relatedIds = mutableSetOf(target.id)
+        var changed: Boolean
+        do {
+            changed = false
+            allItems.forEach { item ->
+                if (item.id in relatedIds && item.supersedesId.isNotBlank()) {
+                    changed = relatedIds.add(item.supersedesId) || changed
+                }
+                if (item.supersedesId in relatedIds) {
+                    changed = relatedIds.add(item.id) || changed
+                }
+            }
+        } while (changed)
+        return relatedIds
+    }
+
+    @Synchronized
+    override fun setImportant(itemId: String, important: Boolean): Boolean {
+        val items = loadItems().toMutableList()
+        val index = items.indexOfFirst { it.id == itemId && it.status == AgentMemoryStatus.ACTIVE }
+        if (index < 0) return false
+        items[index] = items[index].copy(important = important)
+        saveItems(items)
+        return true
+    }
+
+    @Synchronized
+    override fun resolveConflict(
+        groupId: String,
+        selectedItemId: String,
+        mergedValue: String?
+    ): AgentMemoryItem? {
+        val items = loadItems().toMutableList()
+        val candidates = items.filter {
+            it.conflictGroupId == groupId && it.status == AgentMemoryStatus.CONFLICTED
+        }
+        if (candidates.size < 2) return null
+        val selected = candidates.firstOrNull { it.id == selectedItemId } ?: return null
+        val cleanMergedValue = mergedValue?.trim().orEmpty()
+        val resolvedValue = cleanMergedValue.ifBlank { selected.value }
+        candidates.forEach { candidate ->
+            val index = items.indexOfFirst { it.id == candidate.id }
+            if (index >= 0) items[index] = candidate.copy(status = AgentMemoryStatus.SUPERSEDED)
+        }
+        val resolved = selected.copy(
+            id = UUID.randomUUID().toString(),
+            value = resolvedValue,
+            timestampMillis = System.currentTimeMillis(),
+            version = candidates.maxOf { it.version } + 1,
+            supersedesId = selected.id,
+            source = if (cleanMergedValue.isBlank()) "memory_conflict_selection" else "memory_conflict_merge",
+            status = AgentMemoryStatus.ACTIVE,
+            conflictGroupId = ""
+        )
+        items.add(resolved)
+        saveItems(trimHistory(items))
+        return resolved
     }
 
     private fun score(item: AgentMemoryItem, query: String): Int {
@@ -6220,8 +6685,14 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
         .put("id", item.id)
         .put("kind", item.kind.name)
         .put("value", item.value)
+        .put("key", item.key)
         .put("source", item.source)
         .put("timestamp_millis", item.timestampMillis)
+        .put("version", item.version)
+        .put("supersedes_id", item.supersedesId)
+        .put("important", item.important)
+        .put("status", item.status.name)
+        .put("conflict_group_id", item.conflictGroupId)
 
     private fun decodeMemoryItem(json: JSONObject): AgentMemoryItem? {
         val value = json.optString("value").trim()
@@ -6231,8 +6702,57 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
             value = value,
             timestampMillis = json.optLong("timestamp_millis", System.currentTimeMillis()),
             id = json.optString("id").ifBlank { UUID.randomUUID().toString() },
-            source = json.optString("source", "agent")
+            source = json.optString("source", "agent"),
+            key = normalizeKey(json.optString("key")),
+            version = json.optInt("version", 1).coerceAtLeast(1),
+            supersedesId = json.optString("supersedes_id"),
+            important = json.optBoolean("important", false),
+            status = enumOrDefault(json.optString("status"), AgentMemoryStatus.ACTIVE),
+            conflictGroupId = json.optString("conflict_group_id")
         )
+    }
+
+    private fun buildConflict(groupId: String, items: List<AgentMemoryItem>): AgentMemoryConflict? {
+        val candidates = items
+            .filter { it.conflictGroupId == groupId && it.status == AgentMemoryStatus.CONFLICTED }
+            .sortedBy { it.version }
+        if (candidates.size < 2) return null
+        return AgentMemoryConflict(
+            groupId = groupId,
+            kind = candidates.first().kind,
+            key = candidates.first().key,
+            candidates = candidates
+        )
+    }
+
+    private fun inferKey(value: String): String {
+        val separatorIndex = listOf(value.indexOf('='), value.indexOf(':'))
+            .filter { it in 1..MAX_KEY_PREFIX_LENGTH }
+            .minOrNull()
+        if (separatorIndex != null) return value.substring(0, separatorIndex)
+        val patterns = listOf(
+            Regex("^my\\s+([a-z0-9 _-]{2,40})\\s+is\\s+", RegexOption.IGNORE_CASE),
+            Regex("^preferred\\s+([a-z0-9 _-]{2,40})\\s+is\\s+", RegexOption.IGNORE_CASE),
+            Regex("^default\\s+([a-z0-9 _-]{2,40})\\s+is\\s+", RegexOption.IGNORE_CASE)
+        )
+        return patterns.firstNotNullOfOrNull { pattern -> pattern.find(value)?.groupValues?.getOrNull(1) }.orEmpty()
+    }
+
+    private fun normalizeKey(value: String): String = value
+        .trim()
+        .lowercase(Locale.US)
+        .replace(Regex("[^\\p{L}\\p{N} _.-]"), "")
+        .replace(Regex("\\s+"), " ")
+        .take(MAX_KEY_LENGTH)
+
+    private fun trimHistory(items: List<AgentMemoryItem>): List<AgentMemoryItem> {
+        val unresolved = items.filter { it.status != AgentMemoryStatus.SUPERSEDED }
+        val historySlots = (MAX_ITEMS - unresolved.size).coerceAtLeast(0)
+        val history = items
+            .filter { it.status == AgentMemoryStatus.SUPERSEDED }
+            .sortedByDescending { it.timestampMillis }
+            .take(historySlots)
+        return (unresolved + history).sortedBy { it.timestampMillis }
     }
 
     companion object {
@@ -6241,6 +6761,8 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
         private const val MAX_ITEMS = 200
         private const val MAX_RECALL_ITEMS = 8
         private const val MIN_TOKEN_LENGTH = 3
+        private const val MAX_KEY_PREFIX_LENGTH = 64
+        private const val MAX_KEY_LENGTH = 80
     }
 }
 
@@ -7438,8 +7960,36 @@ data class AgentMemoryItem(
     val value: String,
     val timestampMillis: Long = System.currentTimeMillis(),
     val id: String = UUID.randomUUID().toString(),
-    val source: String = "agent"
+    val source: String = "agent",
+    val key: String = "",
+    val version: Int = 1,
+    val supersedesId: String = "",
+    val important: Boolean = false,
+    val status: AgentMemoryStatus = AgentMemoryStatus.ACTIVE,
+    val conflictGroupId: String = ""
 )
+
+data class AgentMemoryWriteResult(
+    val item: AgentMemoryItem?,
+    val conflict: AgentMemoryConflict? = null,
+    val duplicate: Boolean = false
+)
+
+data class AgentMemoryConflict(
+    val groupId: String,
+    val kind: AgentMemoryKind,
+    val key: String,
+    val candidates: List<AgentMemoryItem>
+)
+
+data class AgentMemorySnapshot(
+    val activeItems: List<AgentMemoryItem> = emptyList(),
+    val conflicts: List<AgentMemoryConflict> = emptyList(),
+    val historyItems: List<AgentMemoryItem> = emptyList()
+) {
+    val activeCount: Int get() = activeItems.size
+    val historyCount: Int get() = historyItems.size
+}
 
 data class AgentAuditEntry(
     val event: AgentAuditEvent,
@@ -7523,8 +8073,15 @@ enum class AgentMemoryKind {
     CONTACT,
     TASK,
     PREFERENCE,
+    WORKFLOW,
     KNOWLEDGE,
     SAFETY
+}
+
+enum class AgentMemoryStatus {
+    ACTIVE,
+    CONFLICTED,
+    SUPERSEDED
 }
 
 enum class AgentConnectorKind {
@@ -7622,6 +8179,9 @@ enum class AgentAuditEvent {
     CONNECTOR_RESPONSE_RECEIVED,
     MEMORY_SKIPPED,
     MEMORY_FORGOTTEN,
+    MEMORY_UPDATED,
+    MEMORY_CONFLICT_DETECTED,
+    MEMORY_CONFLICT_RESOLVED,
     KNOWLEDGE_IMPORTED,
     WORKFLOW_UPDATED,
     WORKFLOW_RUN,
