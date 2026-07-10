@@ -28,13 +28,15 @@ class AgentEncryptedPreferences(context: Context, private val preferencesName: S
     @Synchronized
     fun writeString(key: String, value: String) {
         val encrypted = AgentStorageCipher.encrypt(value, associatedData(key))
-        preferences.edit().putString(key, encrypted).apply()
+        check(preferences.edit().putString(key, encrypted).commit()) { "Agent encrypted storage write failed" }
     }
 
     @Synchronized
     fun remove(key: String) {
         preferences.edit().remove(key).apply()
     }
+
+    fun contains(key: String): Boolean = preferences.contains(key)
 
     @Synchronized
     fun clear() {

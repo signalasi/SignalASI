@@ -24,29 +24,35 @@ data class HomeAssistantSettings(
 
 object HomeAssistantSettingsStore {
     private const val PREFS = "signalasi_home_assistant"
+    private const val KEY_SETTINGS = "settings"
     private const val KEY_ENABLED = "enabled"
     private const val KEY_BASE_URL = "base_url"
     private const val KEY_ACCESS_TOKEN = "access_token"
     private const val KEY_DEFAULT_ENTITY_ID = "default_entity_id"
 
     fun load(context: Context): HomeAssistantSettings {
-        val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        migrateLegacySettings(context)
+        val raw = AgentEncryptedPreferences(context, PREFS).readString(KEY_SETTINGS, "{}")
+        val json = runCatching { JSONObject(raw) }.getOrDefault(JSONObject())
         return HomeAssistantSettings(
-            enabled = prefs.getBoolean(KEY_ENABLED, false),
-            baseUrl = prefs.getString(KEY_BASE_URL, "") ?: "",
-            accessToken = prefs.getString(KEY_ACCESS_TOKEN, "") ?: "",
-            defaultEntityId = prefs.getString(KEY_DEFAULT_ENTITY_ID, "") ?: ""
+            enabled = json.optBoolean("enabled"),
+            baseUrl = json.optString("base_url"),
+            accessToken = json.optString("access_token"),
+            defaultEntityId = json.optString("default_entity_id")
         )
     }
 
     fun save(context: Context, settings: HomeAssistantSettings) {
-        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(KEY_ENABLED, settings.enabled)
-            .putString(KEY_BASE_URL, settings.baseUrl.trim().trimEnd('/'))
-            .putString(KEY_ACCESS_TOKEN, settings.accessToken.trim())
-            .putString(KEY_DEFAULT_ENTITY_ID, settings.defaultEntityId.trim())
-            .apply()
+        AgentEncryptedPreferences(context, PREFS).writeString(
+            KEY_SETTINGS,
+            JSONObject()
+                .put("version", 1)
+                .put("enabled", settings.enabled)
+                .put("base_url", settings.baseUrl.trim().trimEnd('/'))
+                .put("access_token", settings.accessToken.trim())
+                .put("default_entity_id", settings.defaultEntityId.trim())
+                .toString()
+        )
     }
 
     fun setEnabled(context: Context, enabled: Boolean) {
@@ -66,9 +72,32 @@ object HomeAssistantSettingsStore {
     }
 
     fun clear(context: Context) {
-        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .clear()
+        AgentEncryptedPreferences(context, PREFS).clear()
+    }
+
+    private fun migrateLegacySettings(context: Context) {
+        val encrypted = AgentEncryptedPreferences(context, PREFS)
+        if (encrypted.contains(KEY_SETTINGS)) return
+        val legacy = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (!legacy.contains(KEY_ENABLED) &&
+            !legacy.contains(KEY_BASE_URL) &&
+            !legacy.contains(KEY_ACCESS_TOKEN) &&
+            !legacy.contains(KEY_DEFAULT_ENTITY_ID)
+        ) return
+        save(
+            context,
+            HomeAssistantSettings(
+                enabled = legacy.getBoolean(KEY_ENABLED, false),
+                baseUrl = legacy.getString(KEY_BASE_URL, "") ?: "",
+                accessToken = legacy.getString(KEY_ACCESS_TOKEN, "") ?: "",
+                defaultEntityId = legacy.getString(KEY_DEFAULT_ENTITY_ID, "") ?: ""
+            )
+        )
+        legacy.edit()
+            .remove(KEY_ENABLED)
+            .remove(KEY_BASE_URL)
+            .remove(KEY_ACCESS_TOKEN)
+            .remove(KEY_DEFAULT_ENTITY_ID)
             .apply()
     }
 }
