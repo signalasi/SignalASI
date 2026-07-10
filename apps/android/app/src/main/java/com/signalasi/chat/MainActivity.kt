@@ -6997,7 +6997,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 onOffLabel(accessibilityReady),
                 onOffLabel(notificationReady)
             ),
-            R.drawable.ic_tab_messages_outline,
+            R.drawable.ic_tab_chat,
             getString(
                 if (wechatInstalled && accessibilityReady) R.string.permission_allowed
                 else R.string.permission_needs_setup
@@ -7006,7 +7006,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         featureContent.addView(featureRow(
             getString(R.string.agent_adapter_sms),
             getString(R.string.agent_adapter_sms_subtitle),
-            R.drawable.ic_tab_messages_outline,
+            R.drawable.ic_tab_chat,
             getString(R.string.permission_allowed)
         ))
         featureContent.addView(featureRow(
@@ -7018,7 +7018,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         featureContent.addView(featureRow(
             getString(R.string.agent_adapter_browser),
             getString(R.string.agent_adapter_browser_subtitle),
-            R.drawable.ic_discover_outline,
+            R.drawable.ic_tab_discover,
             getString(R.string.permission_allowed)
         ))
         featureContent.addView(featureRow(

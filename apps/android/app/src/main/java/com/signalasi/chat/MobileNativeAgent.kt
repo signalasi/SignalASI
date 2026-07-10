@@ -2539,11 +2539,11 @@ class MobileNativeAgent(
     }
 
     private fun searchInstalledAppsCommand(query: String): AgentUiState {
-        val normalizedQuery = query.normalizeAppName()
+        val normalizedQuery = normalizeInstalledAppName(query)
         val matches = currentScreen.installedApps.filter { app ->
             normalizedQuery.isNotBlank() &&
-                (app.label.normalizeAppName().contains(normalizedQuery) ||
-                    app.packageName.normalizeAppName().contains(normalizedQuery))
+                (normalizeInstalledAppName(app.label).contains(normalizedQuery) ||
+                    normalizeInstalledAppName(app.packageName).contains(normalizedQuery))
         }
         val result = if (matches.isEmpty()) {
             "No launchable apps match '$query'"
@@ -2562,6 +2562,10 @@ class MobileNativeAgent(
             parameters = mapOf("query" to query, "match_count" to matches.size.toString())
         )
     }
+
+    private fun normalizeInstalledAppName(value: String): String = value
+        .lowercase(Locale.US)
+        .replace(Regex("[^\\p{L}\\p{N}]+"), "")
 
     private fun completeInstalledAppsCommand(
         actionId: String,
