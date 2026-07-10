@@ -1946,6 +1946,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 plan.toolGraphDepth(),
                 plan.actionHistory.size
             ),
+            R.string.agent_plan_context_tool_budget to getString(
+                R.string.agent_plan_context_tool_budget_value,
+                AgentAutonomyGuard.completedToolCalls(plan),
+                mobileNativeAgent.modelPlannerSettings().maxToolCalls
+            ),
             R.string.agent_plan_context_timeout to getString(R.string.agent_plan_context_timeout_value, plan.timeoutSeconds)
         )
         rows.forEachIndexed { index, row ->
@@ -6342,6 +6347,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             setOnClickListener { cycleMaxAgentHops() }
         })
         featureContent.addView(featureValueRow(
+            getString(R.string.on_device_agent_max_tool_calls),
+            getString(R.string.on_device_agent_max_tool_calls_subtitle),
+            R.drawable.ic_security_shield,
+            modelPlannerSettings.maxToolCalls.toString()
+        ).apply {
+            setOnClickListener { cycleMaxToolCalls() }
+        })
+        featureContent.addView(featureValueRow(
             getString(R.string.on_device_agent_model_max_actions),
             getString(R.string.on_device_agent_model_max_actions_subtitle),
             R.drawable.ic_agent_node,
@@ -6560,6 +6573,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             else -> 2
         }
         mobileNativeAgent.updateMaxAgentHops(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun cycleMaxToolCalls() {
+        val current = mobileNativeAgent.modelPlannerSettings().maxToolCalls
+        val next = when {
+            current < 16 -> 16
+            current < 32 -> 32
+            else -> 8
+        }
+        mobileNativeAgent.updateMaxToolCalls(next)
         showOnDeviceAgentFeaturePage()
     }
 

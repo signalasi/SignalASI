@@ -496,6 +496,19 @@ class MobileNativeAgent(
             saveTaskRecord()
             return snapshot()
         }
+        val autonomySettings = AgentModelPlannerSettingsStore(appContext).load()
+        val autonomyDecision = AgentAutonomyGuard.review(reviewedPlan, nextAction, autonomySettings)
+        if (!autonomyDecision.allowed) {
+            phase = AgentPhase.BLOCKED
+            lastActionResult = AgentActionResult(nextAction.id, false, autonomyDecision.reason)
+            currentPlan = reviewedPlan.markAction(nextAction.id, AgentActionStatus.BLOCKED, lastActionResult)
+            recordAudit(
+                AgentAuditEvent.AUTONOMY_GUARD_BLOCKED,
+                "action=${nextAction.id}; calls=${autonomyDecision.completedToolCalls}; repeated=${autonomyDecision.repeatedCalls}"
+            )
+            saveTaskRecord()
+            return snapshot()
+        }
         phase = AgentPhase.EXECUTING
         currentPlan = reviewedPlan.markAction(nextAction.id, AgentActionStatus.RUNNING)
         currentScreen = captureScreen()
@@ -1094,6 +1107,14 @@ class MobileNativeAgent(
         val normalized = maxAgentHops.coerceIn(1, 8)
         store.save(store.load().copy(maxAgentHops = normalized))
         recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "max_agent_hops:$normalized")
+        return snapshot()
+    }
+
+    fun updateMaxToolCalls(maxToolCalls: Int): AgentUiState {
+        val store = AgentModelPlannerSettingsStore(appContext)
+        val normalized = maxToolCalls.coerceIn(4, 32)
+        store.save(store.load().copy(maxToolCalls = normalized))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "max_tool_calls:$normalized")
         return snapshot()
     }
 
@@ -7485,6 +7506,7 @@ enum class AgentAuditEvent {
     PLAN_REPLAN_LIMIT_REACHED,
     TOOL_OUTPUT_HANDOFF,
     TOOL_GRAPH_BLOCKED,
+    AUTONOMY_GUARD_BLOCKED,
     ACTION_RECOVERY_STARTED,
     ACTION_RECOVERY_COMPLETED,
     ACTION_RECOVERY_MANUAL_REQUIRED,

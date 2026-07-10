@@ -384,6 +384,8 @@
     <string name="agent_plan_context_checkpoints">Active Checkpoints</string>
     <string name="agent_plan_context_tool_graph">Tool Graph</string>
     <string name="agent_plan_context_tool_graph_value">Depth %1$d / %2$d completed nodes</string>
+    <string name="agent_plan_context_tool_budget">Tool Budget</string>
+    <string name="agent_plan_context_tool_budget_value">%1$d / %2$d calls used</string>
     <string name="agent_plan_context_timeout">Timeout</string>
     <string name="agent_plan_context_timeout_value">%1$ds</string>
     <string name="agent_section_verification">Verification</string>
@@ -774,6 +776,8 @@
     <string name="on_device_agent_share_agent_outputs_subtitle">Send redacted Agent results to the selected planning model for the next decision</string>
     <string name="on_device_agent_max_agent_hops">Maximum Agent Hops</string>
     <string name="on_device_agent_max_agent_hops_subtitle">Limit each task graph to 2, 4, or 8 dependency levels</string>
+    <string name="on_device_agent_max_tool_calls">Maximum Tool Calls</string>
+    <string name="on_device_agent_max_tool_calls_subtitle">Stop repeated or runaway autonomous execution after 8, 16, or 32 calls</string>
     <string name="on_device_agent_model_max_actions">Maximum Planned Actions</string>
     <string name="on_device_agent_model_max_actions_subtitle">Limit each model-generated plan to 4, 8, or 12 validated actions</string>
     <string name="on_device_agent_section_capabilities">Capability Access</string>

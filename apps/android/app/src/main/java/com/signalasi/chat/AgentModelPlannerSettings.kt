@@ -12,7 +12,8 @@ data class AgentModelPlannerSettings(
     val maxReplans: Int = 3,
     val multiAgentCoordination: Boolean = true,
     val shareAgentOutputsWithPlanner: Boolean = false,
-    val maxAgentHops: Int = 4
+    val maxAgentHops: Int = 4,
+    val maxToolCalls: Int = 16
 )
 
 class AgentModelPlannerSettingsStore(context: Context) {
@@ -30,7 +31,8 @@ class AgentModelPlannerSettingsStore(context: Context) {
             maxReplans = json.optInt("max_replans", DEFAULT_MAX_REPLANS).coerceIn(1, MAX_REPLANS),
             multiAgentCoordination = json.optBoolean("multi_agent_coordination", true),
             shareAgentOutputsWithPlanner = json.optBoolean("share_agent_outputs_with_planner", false),
-            maxAgentHops = json.optInt("max_agent_hops", DEFAULT_MAX_AGENT_HOPS).coerceIn(1, MAX_AGENT_HOPS)
+            maxAgentHops = json.optInt("max_agent_hops", DEFAULT_MAX_AGENT_HOPS).coerceIn(1, MAX_AGENT_HOPS),
+            maxToolCalls = json.optInt("max_tool_calls", DEFAULT_MAX_TOOL_CALLS).coerceIn(MIN_TOOL_CALLS, MAX_TOOL_CALLS)
         )
     }
 
@@ -38,7 +40,7 @@ class AgentModelPlannerSettingsStore(context: Context) {
         preferences.writeString(
             KEY_SETTINGS,
             JSONObject()
-                .put("version", 3)
+                .put("version", 4)
                 .put("enabled", settings.enabled)
                 .put("share_screen_text", settings.shareScreenText)
                 .put("max_actions", settings.maxActions.coerceIn(1, MAX_ACTIONS))
@@ -48,6 +50,7 @@ class AgentModelPlannerSettingsStore(context: Context) {
                 .put("multi_agent_coordination", settings.multiAgentCoordination)
                 .put("share_agent_outputs_with_planner", settings.shareAgentOutputsWithPlanner)
                 .put("max_agent_hops", settings.maxAgentHops.coerceIn(1, MAX_AGENT_HOPS))
+                .put("max_tool_calls", settings.maxToolCalls.coerceIn(MIN_TOOL_CALLS, MAX_TOOL_CALLS))
                 .toString()
         )
     }
@@ -63,5 +66,8 @@ class AgentModelPlannerSettingsStore(context: Context) {
         const val MAX_REPLANS = 5
         const val DEFAULT_MAX_AGENT_HOPS = 4
         const val MAX_AGENT_HOPS = 8
+        const val DEFAULT_MAX_TOOL_CALLS = 16
+        const val MIN_TOOL_CALLS = 4
+        const val MAX_TOOL_CALLS = 32
     }
 }

@@ -607,6 +607,8 @@
     <string name="agent_action_queue_dependencies">%1$d 个依赖 / %2$d 个结果传递</string>
     <string name="agent_plan_context_tool_graph">工具任务图</string>
     <string name="agent_plan_context_tool_graph_value">深度 %1$d / 已完成 %2$d 个节点</string>
+    <string name="agent_plan_context_tool_budget">工具调用预算</string>
+    <string name="agent_plan_context_tool_budget_value">已使用 %1$d / %2$d 次</string>
     <string name="on_device_agent_dynamic_replanning">动态重规划</string>
     <string name="on_device_agent_dynamic_replanning_subtitle">每个动作后重新观察，屏幕变化或执行失败时重建后续步骤</string>
     <string name="on_device_agent_max_replans">最大重规划次数</string>
@@ -617,6 +619,8 @@
     <string name="on_device_agent_share_agent_outputs_subtitle">将脱敏后的 Agent 结果发送给所选规划模型，用于决定下一步</string>
     <string name="on_device_agent_max_agent_hops">最大 Agent 跳数</string>
     <string name="on_device_agent_max_agent_hops_subtitle">将每个任务图限制为 2、4 或 8 层依赖</string>
+    <string name="on_device_agent_max_tool_calls">最大工具调用数</string>
+    <string name="on_device_agent_max_tool_calls_subtitle">执行达到 8、16 或 32 次后阻止重复或失控的自主调用</string>
     <string name="on_device_agent_model_max_actions">最大规划动作数</string>
     <string name="on_device_agent_model_max_actions_subtitle">每个模型计划最多包含 4、8 或 12 个经验证动作</string>
     <string name="on_device_agent_section_capabilities">能力授权</string>
