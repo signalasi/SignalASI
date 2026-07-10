@@ -14,7 +14,8 @@ data class VoiceAssistantConfig(
     val microsoftVoice: String,
     val welcomeText: String,
     val targetContactId: String,
-    val speakReplies: Boolean
+    val speakReplies: Boolean,
+    val routingMode: String
 )
 
 object VoiceAssistantSettings {
@@ -31,6 +32,7 @@ object VoiceAssistantSettings {
     private const val KEY_WELCOME_TEXT = "welcome_text"
     private const val KEY_TARGET_CONTACT = "target_contact"
     private const val KEY_SPEAK_REPLIES = "speak_replies"
+    private const val KEY_ROUTING_MODE = "routing_mode"
 
     const val PROVIDER_MICROSOFT_EDGE = "microsoft_edge"
     const val PROVIDER_ANDROID = "android"
@@ -38,6 +40,8 @@ object VoiceAssistantSettings {
     const val WAKE_PROVIDER_ANDROID_ASR = "android_asr"
     const val ASR_PROVIDER_ANDROID = "android_asr"
     const val ASR_PROVIDER_PC_STT = "pc_stt"
+    const val ROUTING_MODE_NATIVE_AGENT = "native_agent"
+    const val ROUTING_MODE_CONTACT = "contact"
     const val DEFAULT_WAKE_MODEL = "hello_world.onnx"
     val SUPPORTED_WAKE_MODELS = listOf(DEFAULT_WAKE_MODEL)
 
@@ -68,7 +72,10 @@ object VoiceAssistantSettings {
             welcomeText = prefs.getString(KEY_WELCOME_TEXT, defaultWelcomeText).orEmpty()
                 .ifBlank { defaultWelcomeText },
             targetContactId = prefs.getString(KEY_TARGET_CONTACT, "hermes").orEmpty().ifBlank { "hermes" },
-            speakReplies = prefs.getBoolean(KEY_SPEAK_REPLIES, true)
+            speakReplies = prefs.getBoolean(KEY_SPEAK_REPLIES, true),
+            routingMode = prefs.getString(KEY_ROUTING_MODE, ROUTING_MODE_NATIVE_AGENT).orEmpty()
+                .takeIf { it in setOf(ROUTING_MODE_NATIVE_AGENT, ROUTING_MODE_CONTACT) }
+                ?: ROUTING_MODE_NATIVE_AGENT
         )
     }
 
@@ -119,5 +126,15 @@ object VoiceAssistantSettings {
 
     fun setSpeakReplies(context: Context, value: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_SPEAK_REPLIES, value).apply()
+    }
+
+    fun setRoutingMode(context: Context, value: String) {
+        val mode = value.takeIf { it in setOf(ROUTING_MODE_NATIVE_AGENT, ROUTING_MODE_CONTACT) }
+            ?: ROUTING_MODE_NATIVE_AGENT
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_ROUTING_MODE, mode).apply()
+    }
+
+    fun clear(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().commit()
     }
 }

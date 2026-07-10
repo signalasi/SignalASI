@@ -17,10 +17,11 @@ object AgentBackupData {
     fun export(context: Context): JSONObject {
         val safety = SharedPreferencesAgentSafetySettingsStore(context).load()
         val modelPlanner = AgentModelPlannerSettingsStore(context).load()
+        val voiceAssistant = VoiceAssistantSettings.get(context)
         val homeAssistant = HomeAssistantSettingsStore.load(context)
         val customDevices = CustomDeviceConnectorStore(context).exportJson()
         return JSONObject()
-            .put("version", 6)
+            .put("version", 7)
             .put("memory", readArray(context, MEMORY_PREFS, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS))
             .put("knowledge", readArray(context, KNOWLEDGE_PREFS, MAX_KNOWLEDGE_ITEMS, MAX_KNOWLEDGE_ITEM_CHARACTERS))
             .put("tasks", readArray(context, TASK_PREFS, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS))
@@ -62,6 +63,23 @@ object AgentBackupData {
                     .put("share_agent_outputs_with_planner", modelPlanner.shareAgentOutputsWithPlanner)
                     .put("max_agent_hops", modelPlanner.maxAgentHops)
                     .put("max_tool_calls", modelPlanner.maxToolCalls)
+            )
+            .put(
+                "voice_assistant",
+                JSONObject()
+                    .put("enabled", voiceAssistant.enabled)
+                    .put("wake_words", JSONArray(voiceAssistant.wakeWords))
+                    .put("wake_provider", voiceAssistant.wakeProvider)
+                    .put("wake_model", voiceAssistant.wakeModel)
+                    .put("wake_threshold", voiceAssistant.wakeThreshold.toDouble())
+                    .put("asr_provider", voiceAssistant.asrProvider)
+                    .put("asr_language", voiceAssistant.asrLanguage)
+                    .put("tts_provider", voiceAssistant.ttsProvider)
+                    .put("microsoft_voice", voiceAssistant.microsoftVoice)
+                    .put("welcome_text", voiceAssistant.welcomeText)
+                    .put("target_contact_id", voiceAssistant.targetContactId)
+                    .put("speak_replies", voiceAssistant.speakReplies)
+                    .put("routing_mode", voiceAssistant.routingMode)
             )
             .put(
                 "home_assistant",
@@ -153,6 +171,33 @@ object AgentBackupData {
                     maxToolCalls = json.optInt("max_tool_calls", 16).coerceIn(4, 32)
                 )
             )
+        }
+        payload.optJSONObject("voice_assistant")?.let { json ->
+            VoiceAssistantSettings.setEnabled(context, json.optBoolean("enabled", true))
+            VoiceAssistantSettings.setWakeWords(
+                context,
+                decodeStringList(json.optJSONArray("wake_words")).joinToString(",")
+            )
+            VoiceAssistantSettings.setWakeProvider(context, json.optString("wake_provider"))
+            VoiceAssistantSettings.setWakeModel(context, json.optString("wake_model"))
+            VoiceAssistantSettings.setWakeThreshold(context, json.optDouble("wake_threshold", 0.5).toFloat())
+            VoiceAssistantSettings.setAsrProvider(context, json.optString("asr_provider"))
+            VoiceAssistantSettings.setAsrLanguage(context, json.optString("asr_language"))
+            VoiceAssistantSettings.setTtsProvider(context, json.optString("tts_provider"))
+            VoiceAssistantSettings.setMicrosoftVoice(context, json.optString("microsoft_voice"))
+            VoiceAssistantSettings.setWelcomeText(context, json.optString("welcome_text"))
+            VoiceAssistantSettings.setTargetContact(context, json.optString("target_contact_id"))
+            VoiceAssistantSettings.setSpeakReplies(context, json.optBoolean("speak_replies", true))
+            VoiceAssistantSettings.setRoutingMode(context, json.optString("routing_mode"))
+        }
+    }
+
+    private fun decodeStringList(array: JSONArray?): List<String> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                array.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+            }
         }
     }
 

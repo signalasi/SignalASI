@@ -878,6 +878,8 @@ object AppStore {
         HomeAssistantSettingsStore.clear(context)
         CustomDeviceConnectorStore(context).clear()
         AgentModelPlannerSettingsStore(context).clear()
+        VoiceAssistantSettings.clear(context)
+        VoiceAgentTranscriptStore(context).clear()
         runCatching { AgentStorageCipher.deleteMasterKey() }
         SignalASICrypto.resetLocalIdentity(context)
         context.cacheDir.deleteRecursively()

@@ -216,6 +216,18 @@ def clean_audio_reply(reply: str) -> str:
     return "\n\n".join(parts).strip()
 
 
+def _publish_phone_payload(mqttc, wire_payload: dict, reply_payload: dict) -> None:
+    if wire_payload.get("scheme") == "signal":
+        encrypted_reply = encrypt_signal_payload(reply_payload, remote_name=wire_payload.get("from", "android"))
+        info = mqttc.publish(TOPIC_RECV, json.dumps(encrypted_reply, ensure_ascii=False), qos=MQTT_QOS)
+        track_delivery_ack(info.mid, reply_payload, "desktop_reply_broker_ack", TOPIC_RECV)
+        log.info(f"MQTT encrypted reply published mid={info.mid} rc={info.rc}")
+    else:
+        info = mqttc.publish(TOPIC_RECV, json.dumps(reply_payload, ensure_ascii=False), qos=MQTT_QOS)
+        track_delivery_ack(info.mid, reply_payload, "desktop_reply_broker_ack", TOPIC_RECV)
+        log.info(f"MQTT plain reply published mid={info.mid} rc={info.rc}")
+
+
 def on_message(mqttc, userdata, msg):
     try:
         wire_payload = json.loads(msg.payload.decode("utf-8"))
@@ -243,6 +255,7 @@ def on_message(mqttc, userdata, msg):
         file_id = payload.get("file_id", "")
         name = payload.get("name") or file_id or "Voice message"
         caption = payload.get("caption", "")
+        audio_mode = str(payload.get("audio_mode") or "agent_reply")
 
         log.info(f"MQTT received: [{msg_type}] {content[:50]}")
 
@@ -250,6 +263,31 @@ def on_message(mqttc, userdata, msg):
             content = _content_from_audio(file_id, caption, str(payload.get("audio_data_b64") or ""))
         elif not str(content).strip() and msg_type in {"image", "file_notify"}:
             content = caption or f"Received file: {name}"
+
+        if msg_type in {"audio", "voice"} and audio_mode == "transcribe_only":
+            transcript = str(content or "").strip()
+            transcription_success = not transcript.startswith("Reply exactly:")
+            if not transcription_success:
+                transcript = transcript.removeprefix("Reply exactly:").strip()
+            trace.append(_trace_event("voice_transcribed", f"success={transcription_success} chars={len(transcript)}"))
+            reply_payload = {
+                "type": "voice_transcript",
+                "content": transcript,
+                "transcription_success": transcription_success,
+                "contact_id": contact_id,
+                "agent_id": agent_id,
+                "desktop_id": desktop_id(),
+                "desktop_name": desktop_name(),
+                "source_message_id": payload.get("client_message_id") or payload.get("message_id") or "",
+                "delivery_trace": _delivery_trace(
+                    {"delivery_trace": trace},
+                    _trace_event("desktop_transcript_publish_queued", TOPIC_RECV),
+                ),
+                "sender": "other",
+                "time": time.time(),
+            }
+            _publish_phone_payload(mqttc, wire_payload, reply_payload)
+            return
 
         if contact_id not in {"system", "me"} and content.strip():
             log.info(f"MQTT preparing Agent reply contact_id={contact_id} agent_id={agent_id}")
@@ -274,15 +312,7 @@ def on_message(mqttc, userdata, msg):
                 "sender": "other",
                 "time": time.time(),
             }
-            if wire_payload.get("scheme") == "signal":
-                encrypted_reply = encrypt_signal_payload(reply_payload, remote_name=wire_payload.get("from", "android"))
-                info = mqttc.publish(TOPIC_RECV, json.dumps(encrypted_reply, ensure_ascii=False), qos=MQTT_QOS)
-                track_delivery_ack(info.mid, reply_payload, "desktop_reply_broker_ack", TOPIC_RECV)
-                log.info(f"MQTT encrypted reply published mid={info.mid} rc={info.rc}")
-            else:
-                info = mqttc.publish(TOPIC_RECV, json.dumps(reply_payload, ensure_ascii=False), qos=MQTT_QOS)
-                track_delivery_ack(info.mid, reply_payload, "desktop_reply_broker_ack", TOPIC_RECV)
-                log.info(f"MQTT plain reply published mid={info.mid} rc={info.rc}")
+            _publish_phone_payload(mqttc, wire_payload, reply_payload)
     except Exception as e:
         log.error(f"MQTT message handling error: {e}")
 

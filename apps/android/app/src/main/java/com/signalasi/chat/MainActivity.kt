@@ -291,6 +291,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var voiceCommandSpeechDetected = false
     private var voiceCommandLastVoiceAt = 0L
     private var voiceAssistantRestartPending = false
+    private var pendingVoiceAgentTranscriptId = 0L
     private var wakeReplyPinnedUntilMs = 0L
     private var lastVoiceRecognitionStartAt = 0L
     private val voiceAssistantScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -547,14 +548,23 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (agentOperationInFlight) return
         if (!mobileNativeAgent.canAcceptConnectorResponse(response.sourceMessageId, response.contactId)) return
         AgentConnectorResponseStore.remove(this, response)
-        runAgentOperationAsync {
-            mobileNativeAgent.acceptConnectorResponse(
-                sourceMessageId = response.sourceMessageId,
-                contactId = response.contactId,
-                content = response.content,
-                success = response.success
-            ) ?: mobileNativeAgent.snapshot()
-        }
+        runAgentOperationAsync(
+            operation = {
+                mobileNativeAgent.acceptConnectorResponse(
+                    sourceMessageId = response.sourceMessageId,
+                    contactId = response.contactId,
+                    content = response.content,
+                    success = response.success
+                ) ?: mobileNativeAgent.snapshot()
+            },
+            onComplete = { state ->
+                if (VoiceAssistantSettings.get(this).routingMode == VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT &&
+                    voiceAssistantAwake
+                ) {
+                    presentVoiceAgentState(state)
+                }
+            }
+        )
     }
 
     private fun consumePendingAgentConnectorResponses() {
@@ -619,14 +629,23 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     override fun onMessage(payload: String) {
         runOnUiThread {
             val envelope = runCatching { JSONObject(payload) }.getOrNull()
+            if (handleVoiceAgentTranscript(envelope)) return@runOnUiThread
             val msg = parseIncomingMessage(payload)
             if (msg.content.isBlank()) return@runOnUiThread
             msg.deliveryTrace.add(newTraceEvent("received", "MQTT inbound"))
             msg.deliveryTrace.add(newTraceEvent("decrypted", "SignalASI Link"))
             addMessage(msg, fromIncoming = true)
+            val sourceMessageId = envelope?.optString("source_message_id")?.toLongOrNull()
+                ?: envelope?.optLong("source_message_id", 0L)
+                ?: 0L
+            val nativeAgentResponse = VoiceAssistantSettings.get(this).routingMode ==
+                VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT &&
+                mobileNativeAgent.canAcceptConnectorResponse(sourceMessageId, msg.contact.id)
             publishAgentConnectorResponse(envelope, msg)
-            showVoiceAssistantReply(msg)
-            maybeSpeakIncomingReply(msg)
+            if (!nativeAgentResponse) {
+                showVoiceAssistantReply(msg)
+                maybeSpeakIncomingReply(msg)
+            }
         }
     }
 
@@ -942,7 +961,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .show()
     }
 
-    private fun runAgentOperationAsync(operation: () -> AgentUiState) {
+    private fun runAgentOperationAsync(
+        onComplete: (AgentUiState) -> Unit = {},
+        operation: () -> AgentUiState
+    ) {
         if (agentOperationInFlight) return
         agentOperationInFlight = true
         agentSubmitButton.isEnabled = false
@@ -951,7 +973,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             runOnUiThread {
                 agentOperationInFlight = false
                 agentSubmitButton.isEnabled = true
-                renderAgentState(outcome.getOrElse { mobileNativeAgent.snapshot() })
+                val state = outcome.getOrElse { mobileNativeAgent.snapshot() }
+                renderAgentState(state)
+                onComplete(state)
                 consumePendingAgentConnectorResponses()
                 outcome.exceptionOrNull()?.let { error ->
                     Toast.makeText(this, error.message ?: "Agent operation failed", Toast.LENGTH_LONG).show()
@@ -1099,6 +1123,23 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             updateWakeVoiceUi(getString(R.string.voice_status_disabled), getString(R.string.voice_status_disabled_detail))
             return
         }
+        if (config.routingMode == VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT) {
+            val transcriptStore = VoiceAgentTranscriptStore(this)
+            transcriptStore.consume()?.let { transcript ->
+                voiceAssistantAwake = true
+                processVoiceAgentTranscript(transcript.success, transcript.content)
+                return
+            }
+            pendingVoiceAgentTranscriptId = transcriptStore.pendingRequestId()
+            if (pendingVoiceAgentTranscriptId > 0L) {
+                voiceAssistantAwake = true
+                updateWakeVoiceUi(
+                    getString(R.string.voice_status_transcribing),
+                    getString(R.string.voice_status_waiting_transcript, voiceAssistantTargetContact(config).name)
+                )
+                return
+            }
+        }
         if (!ensureRecordPermission()) {
             updateWakeVoiceUi(getString(R.string.voice_status_permission_required), getString(R.string.voice_status_permission_detail))
             return
@@ -1124,6 +1165,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         voiceAssistantListening = false
         voiceAssistantAwake = false
         voiceAssistantSpeaking = false
+        pendingVoiceAgentTranscriptId = 0L
         if (voiceAssistantRecordingCommand) stopVoiceCommandRecording(send = false)
         voiceCommandSpeechDetected = false
         voiceCommandLastVoiceAt = 0L
@@ -1365,22 +1407,40 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             return
         }
         selectedContact = contact
-        val sent = sendVoiceRecordingThroughPipeline(
-            sourceFile = file,
-            contact = contact,
-            seconds = seconds,
-            label = getString(R.string.voice_command_label, seconds),
-            source = "voice_wakeup"
-        )
+        val nativeAgentRoute = config.routingMode == VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT
+        val sent = if (nativeAgentRoute) {
+            requestVoiceAgentTranscription(file, contact)
+        } else {
+            sendVoiceRecordingThroughPipeline(
+                sourceFile = file,
+                contact = contact,
+                seconds = seconds,
+                label = getString(R.string.voice_command_label, seconds),
+                source = "voice_wakeup"
+            )
+        }
         Log.i("SignalASIVoice", "Voice command recording stopped duration=${seconds}s sent=$sent target=${contact.id}")
-        updateWakeVoiceUi(getString(R.string.voice_status_command_sent), getString(R.string.voice_status_waiting_reply, contact.name))
+        updateWakeVoiceUi(
+            when {
+                !sent -> getString(R.string.voice_status_transcription_failed)
+                nativeAgentRoute -> getString(R.string.voice_status_transcribing)
+                else -> getString(R.string.voice_status_command_sent)
+            },
+            when {
+                !sent -> getString(R.string.voice_status_retry_later)
+                nativeAgentRoute -> getString(R.string.voice_status_waiting_transcript, contact.name)
+                else -> getString(R.string.voice_status_waiting_reply, contact.name)
+            }
+        )
         voiceCommandSpeechDetected = false
         voiceCommandLastVoiceAt = 0L
-        handler.postDelayed({
-            if (activeMainTab == PAGE_VOICE && wakePage.visibility == View.VISIBLE && !voiceAssistantSpeaking && !voiceAssistantRecordingCommand) {
-                startWakeListening()
-            }
-        }, 800L)
+        if (!nativeAgentRoute || !sent) {
+            handler.postDelayed({
+                if (activeMainTab == PAGE_VOICE && wakePage.visibility == View.VISIBLE && !voiceAssistantSpeaking && !voiceAssistantRecordingCommand) {
+                    startWakeListening()
+                }
+            }, 800L)
+        }
     }
 
     private fun startVoiceRecognition() {
@@ -1467,14 +1527,149 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun onVoiceCommand(text: String) {
         val config = VoiceAssistantSettings.get(this)
+        if (config.routingMode == VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT) {
+            submitVoiceAgentGoal(text)
+            return
+        }
         val contact = voiceAssistantTargetContact(config)
         updateWakeVoiceUi(getString(R.string.voice_status_sent_to, contact.name), text)
         sendOutgoingText(contact, text)
         scheduleVoiceRestart(1200L)
     }
 
+    private fun submitVoiceAgentGoal(text: String) {
+        val goal = text.trim()
+        if (goal.isBlank()) {
+            scheduleVoiceRestart(500L)
+            return
+        }
+        if (agentOperationInFlight) {
+            updateWakeVoiceUi(getString(R.string.voice_agent_busy), goal)
+            scheduleVoiceRestart(1000L)
+            return
+        }
+        updateWakeVoiceUi(getString(R.string.voice_agent_planning), goal)
+        runAgentOperationAsync(
+            operation = { mobileNativeAgent.submitGoal(goal) },
+            onComplete = ::presentVoiceAgentState
+        )
+    }
+
+    private fun presentVoiceAgentState(state: AgentUiState) {
+        if (activeMainTab != PAGE_VOICE || wakePage.visibility != View.VISIBLE) return
+        val pending = state.pendingAction
+        val detail = when (state.phase) {
+            AgentPhase.WAITING_CONFIRMATION -> getString(
+                R.string.voice_agent_confirmation_required,
+                pending?.description ?: state.plan?.expectedResult.orEmpty()
+            )
+            AgentPhase.WAITING_RESPONSE -> state.lastActionResult?.message
+                ?.ifBlank { getString(R.string.voice_agent_waiting_response) }
+                ?: getString(R.string.voice_agent_waiting_response)
+            AgentPhase.BLOCKED,
+            AgentPhase.FAILED -> state.lastActionResult?.message
+                ?.ifBlank { getString(R.string.voice_agent_failed) }
+                ?: getString(R.string.voice_agent_failed)
+            AgentPhase.PAUSED -> getString(R.string.voice_agent_paused)
+            AgentPhase.COMPLETED -> state.lastActionResult?.message
+                ?.ifBlank { state.plan?.expectedResult.orEmpty() }
+                ?.ifBlank { getString(R.string.voice_agent_completed) }
+                ?: getString(R.string.voice_agent_completed)
+            else -> state.lastActionResult?.message
+                ?.ifBlank { state.plan?.expectedResult.orEmpty() }
+                ?.ifBlank { getString(R.string.voice_agent_running) }
+                ?: getString(R.string.voice_agent_running)
+        }.take(4_000)
+        val status = when (state.phase) {
+            AgentPhase.WAITING_CONFIRMATION -> getString(R.string.voice_agent_needs_confirmation)
+            AgentPhase.WAITING_RESPONSE -> getString(R.string.voice_agent_waiting)
+            AgentPhase.COMPLETED -> getString(R.string.voice_agent_completed)
+            AgentPhase.BLOCKED,
+            AgentPhase.FAILED -> getString(R.string.voice_agent_failed)
+            AgentPhase.PAUSED -> getString(R.string.voice_agent_paused)
+            else -> getString(R.string.voice_agent_running)
+        }
+        wakeReplyPinnedUntilMs = System.currentTimeMillis() + 60_000L
+        updateWakeVoiceUi(status, detail)
+        val config = VoiceAssistantSettings.get(this)
+        val waitingForRemoteAgent = state.phase == AgentPhase.WAITING_RESPONSE
+        if (config.speakReplies && detail.isNotBlank()) {
+            speakWithConfiguredTts(detail.take(1_200)) {
+                if (!waitingForRemoteAgent && voiceAssistantAwake && activeMainTab == PAGE_VOICE) {
+                    startCommandListening()
+                }
+            }
+        } else if (!waitingForRemoteAgent) {
+            scheduleVoiceRestart(900L)
+        }
+    }
+
+    private fun handleVoiceAgentTranscript(envelope: JSONObject?): Boolean {
+        val payload = envelope ?: return false
+        if (payload.optString("type") != "voice_transcript") return false
+        val sourceMessageId = payload.optString("source_message_id").toLongOrNull()
+            ?: payload.optLong("source_message_id", 0L)
+        val transcriptStore = VoiceAgentTranscriptStore(this)
+        val storedRequestId = transcriptStore.pendingRequestId()
+        if (sourceMessageId <= 0L ||
+            (sourceMessageId != pendingVoiceAgentTranscriptId && sourceMessageId != storedRequestId)
+        ) return true
+        if (activeMainTab != PAGE_VOICE || wakePage.visibility != View.VISIBLE) {
+            transcriptStore.saveResponse(payload)
+            return true
+        }
+        pendingVoiceAgentTranscriptId = 0L
+        transcriptStore.clear()
+        processVoiceAgentTranscript(
+            payload.optBoolean("transcription_success", false),
+            payload.optString("content")
+        )
+        return true
+    }
+
+    private fun processVoiceAgentTranscript(success: Boolean, content: String) {
+        val transcript = content.trim()
+        if (!success || transcript.isBlank()) {
+            updateWakeVoiceUi(
+                getString(R.string.voice_status_transcription_failed),
+                transcript.ifBlank { getString(R.string.voice_status_retry_later) }
+            )
+            scheduleVoiceRestart(1200L)
+            return
+        }
+        updateWakeVoiceUi(getString(R.string.voice_status_transcribed), transcript)
+        submitVoiceAgentGoal(transcript)
+    }
+
     private fun voiceAssistantTargetContact(config: VoiceAssistantConfig = VoiceAssistantSettings.get(this)): Contact {
-        return contactById(resolveVoiceAssistantTargetContactId(config.targetContactId))
+        val contactId = if (config.routingMode == VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT) {
+            resolveVoiceAssistantSttContactId(config.targetContactId)
+        } else {
+            resolveVoiceAssistantTargetContactId(config.targetContactId)
+        }
+        return contactById(contactId)
+    }
+
+    private fun resolveVoiceAssistantSttContactId(configuredId: String): String {
+        if (configuredId.isNotBlank() &&
+            AppStore.usesPcConnectorTunnel(this, configuredId) &&
+            AppStore.outgoingTopicForContact(this, configuredId) != null
+        ) {
+            return configuredId
+        }
+        val contacts = AppStore.contacts(this)
+        for (index in 0 until contacts.length()) {
+            val raw = contacts.optJSONObject(index) ?: continue
+            if (raw.optBoolean("deleted", false)) continue
+            val id = raw.optString("id").ifBlank { jsonSignalasiId(raw) }
+            if (id.isNotBlank() &&
+                AppStore.usesPcConnectorTunnel(this, id) &&
+                AppStore.outgoingTopicForContact(this, id) != null
+            ) {
+                return id
+            }
+        }
+        return CONTACT_HERMES.id
     }
 
     private fun resolveVoiceAssistantTargetContactId(configuredId: String): String {
@@ -3895,6 +4090,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             VoiceAssistantSettings.setWelcomeText(this, welcome)
             VoiceAssistantSettings.setSpeakReplies(this, false)
             VoiceAssistantSettings.setTargetContact(this, codexId)
+            VoiceAssistantSettings.setRoutingMode(this, VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT)
             val config = VoiceAssistantSettings.get(this)
             val resolvedTarget = resolveVoiceAssistantTargetContactId(config.targetContactId)
             val ok = config.enabled &&
@@ -3908,6 +4104,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 config.microsoftVoice == "zh-CN-XiaoxiaoNeural" &&
                 config.welcomeText == welcome &&
                 !config.speakReplies &&
+                config.routingMode == VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT &&
                 config.targetContactId == codexId &&
                 resolvedTarget == codexId
             prefs.edit()
@@ -3925,6 +4122,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     .put("microsoft_voice", config.microsoftVoice)
                     .put("welcome_text", config.welcomeText)
                     .put("speak_replies", config.speakReplies)
+                    .put("routing_mode", config.routingMode)
                     .put("target_contact_id", config.targetContactId)
                     .put("resolved_target_contact_id", resolvedTarget)
                     .toString())
@@ -4267,6 +4465,37 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         Log.i("SignalASIVoice", "Voice pipeline send source=$source target=${contact.id} seconds=$seconds bytes=${finalFile.length()} messageId=$msgId")
         publishInlineVoiceFile(msg.id, contact, finalFile)
         return true
+    }
+
+    private fun requestVoiceAgentTranscription(sourceFile: File, contact: Contact): Boolean {
+        if (!sourceFile.exists()) return false
+        val topic = AppStore.outgoingTopicForContact(this, contact.id) ?: return false
+        val requestId = newMessageId()
+        val transcriptStore = VoiceAgentTranscriptStore(this)
+        pendingVoiceAgentTranscriptId = requestId
+        transcriptStore.begin(requestId)
+        val sent = runCatching {
+            val audioBase64 = Base64.encodeToString(sourceFile.readBytes(), Base64.NO_WRAP)
+            SignalASIMqttClient.publishInlineAudioMessage(
+                fileName = sourceFile.name,
+                size = sourceFile.length(),
+                contentType = "audio/mp4",
+                audioBase64 = audioBase64,
+                contactId = contact.id,
+                topicOverride = topic,
+                audioMode = "transcribe_only",
+                clientMessageId = requestId
+            )
+        }.getOrElse {
+            Log.e("SignalASIVoice", "Voice Agent transcription request failed", it)
+            false
+        }
+        if (!sent) {
+            pendingVoiceAgentTranscriptId = 0L
+            transcriptStore.clear()
+        }
+        sourceFile.delete()
+        return sent
     }
 
     private fun publishInlineVoiceFile(messageId: Long, contact: Contact, file: File) {
@@ -6261,14 +6490,49 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         })
 
         addSectionTitle(getString(R.string.voice_section_target))
-        val targetContact = voiceAssistantTargetContact(config)
-        featureContent.addView(featureRow(getString(R.string.voice_default_target), targetContact.name, R.drawable.ic_avatar_hermes, getString(R.string.common_select)).apply {
+        featureContent.addView(featureRow(
+            getString(R.string.voice_routing_mode),
+            getString(R.string.voice_routing_mode_subtitle),
+            R.drawable.ic_agent_node,
+            voiceRoutingModeLabel(config.routingMode)
+        ).apply {
             setOnClickListener {
-                val contacts = storedContacts().ifEmpty { listOf(CONTACT_HERMES) }
+                val nativeAgent = getString(R.string.voice_routing_native_agent)
+                val contactChat = getString(R.string.voice_routing_contact)
+                showChoiceDialog(
+                    getString(R.string.voice_routing_mode),
+                    listOf(nativeAgent, contactChat),
+                    voiceRoutingModeLabel(config.routingMode)
+                ) { selected ->
+                    VoiceAssistantSettings.setRoutingMode(
+                        this@MainActivity,
+                        if (selected == nativeAgent) VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT
+                        else VoiceAssistantSettings.ROUTING_MODE_CONTACT
+                    )
+                    showVoiceAssistantSettingsPage()
+                }
+            }
+        })
+        val targetContact = voiceAssistantTargetContact(config)
+        val targetTitle = if (config.routingMode == VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT) {
+            getString(R.string.voice_stt_target)
+        } else {
+            getString(R.string.voice_default_target)
+        }
+        featureContent.addView(featureRow(targetTitle, targetContact.name, R.drawable.ic_avatar_hermes, getString(R.string.common_select)).apply {
+            setOnClickListener {
+                val contacts = storedContacts().filter { contact ->
+                    if (config.routingMode == VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT) {
+                        AppStore.usesPcConnectorTunnel(this@MainActivity, contact.id) &&
+                            AppStore.outgoingTopicForContact(this@MainActivity, contact.id) != null
+                    } else {
+                        AppStore.canCommunicateWith(this@MainActivity, contact.id)
+                    }
+                }.ifEmpty { listOf(CONTACT_HERMES) }
                 val labels = contacts.map { "${it.name} (${it.id})" }
                 val current = contacts.indexOfFirst { it.id == targetContact.id }.coerceAtLeast(0)
                 android.app.AlertDialog.Builder(this@MainActivity)
-                    .setTitle(getString(R.string.voice_default_target))
+                    .setTitle(targetTitle)
                     .setSingleChoiceItems(labels.toTypedArray(), current) { dialog, which ->
                         VoiceAssistantSettings.setTargetContact(this@MainActivity, contacts[which].id)
                         dialog.dismiss()
@@ -6288,6 +6552,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun ttsProviderLabel(provider: String): String =
         if (provider == VoiceAssistantSettings.PROVIDER_ANDROID) getString(R.string.voice_tts_android) else getString(R.string.voice_tts_microsoft)
+
+    private fun voiceRoutingModeLabel(mode: String): String =
+        if (mode == VoiceAssistantSettings.ROUTING_MODE_CONTACT) {
+            getString(R.string.voice_routing_contact)
+        } else {
+            getString(R.string.voice_routing_native_agent)
+        }
 
     private fun onOffLabel(enabled: Boolean): String =
         getString(if (enabled) R.string.common_on else R.string.common_off)
