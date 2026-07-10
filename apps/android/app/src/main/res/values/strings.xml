@@ -367,6 +367,14 @@
     <string name="agent_action_queue_meta">%1$s / %2$s risk</string>
     <string name="agent_action_queue_dependencies">%1$d dependencies / %2$d output handoffs</string>
     <string name="agent_action_queue_result">%1$s</string>
+    <string name="agent_plan_edit_title">Edit Plan Step</string>
+    <string name="agent_plan_edit_action">Edit Step</string>
+    <string name="agent_plan_move_up">Move Up</string>
+    <string name="agent_plan_move_down">Move Down</string>
+    <string name="agent_plan_remove_action">Remove Step</string>
+    <string name="agent_plan_remove_action_message">Remove &quot;%1$s&quot; from this plan?</string>
+    <string name="agent_plan_action_description">Step description</string>
+    <string name="agent_plan_action_input">Approved input</string>
     <string name="agent_section_requirements">Requirements</string>
     <string name="agent_requirements_empty">No active execution requirements</string>
     <string name="agent_requirement_granted">Ready</string>

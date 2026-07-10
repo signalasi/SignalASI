@@ -605,6 +605,14 @@
     <string name="agent_plan_context_revision_value">第 %1$d 版 / 已重规划 %2$d 次</string>
     <string name="agent_plan_context_checkpoints">有效检查点</string>
     <string name="agent_action_queue_dependencies">%1$d 个依赖 / %2$d 个结果传递</string>
+    <string name="agent_plan_edit_title">编辑计划步骤</string>
+    <string name="agent_plan_edit_action">编辑步骤</string>
+    <string name="agent_plan_move_up">上移</string>
+    <string name="agent_plan_move_down">下移</string>
+    <string name="agent_plan_remove_action">删除步骤</string>
+    <string name="agent_plan_remove_action_message">从当前计划中删除“%1$s”吗？</string>
+    <string name="agent_plan_action_description">步骤说明</string>
+    <string name="agent_plan_action_input">已批准的输入内容</string>
     <string name="agent_plan_context_tool_graph">工具任务图</string>
     <string name="agent_plan_context_tool_graph_value">深度 %1$d / 已完成 %2$d 个节点</string>
     <string name="agent_plan_context_tool_budget">工具调用预算</string>

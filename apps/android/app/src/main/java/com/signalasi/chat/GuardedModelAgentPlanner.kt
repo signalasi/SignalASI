@@ -39,7 +39,7 @@ class GuardedModelAgentPlanner(
             )
         }
         return AgentModelPlanParser.parse(request, raw, settings)
-            ?.let(::enforceRegisteredDeviceRisk)
+            ?.let { AgentActionRiskHardener.enforce(appContext, it) }
             ?.copy(
                 plannerProfile = "guarded-model:${contact.optString("cloud_model").take(80)}",
                 routeRationale = "A configured model proposed this plan; all actions were resolved and validated locally."
@@ -48,24 +48,6 @@ class GuardedModelAgentPlanner(
                 plannerProfile = "rule-based-invalid-model-plan",
                 routeRationale = "Model output failed local ActionPlan validation; deterministic fallback used."
             )
-    }
-
-    private fun enforceRegisteredDeviceRisk(plan: AgentPlan): AgentPlan {
-        val store = CustomDeviceConnectorStore(appContext)
-        val actions = plan.actions.map { action ->
-            if (action.kind != AgentActionKind.CONTROL_DEVICE) return@map action
-            val connectorId = action.parameters["connector_id"].orEmpty()
-            val risk = when {
-                connectorId.startsWith("custom-device:") ->
-                    store.find(connectorId.removePrefix("custom-device:"))?.risk ?: AgentRisk.HIGH
-                connectorId == "home-assistant" ->
-                    HomeAssistantDeviceClient.riskForPrompt(appContext, action.parameters["prompt"].orEmpty())
-                else -> AgentRisk.HIGH
-            }
-            action.copy(risk = risk)
-        }
-        val hardened = plan.copy(actions = actions)
-        return hardened.copy(validation = AgentPlanValidator.validate(hardened))
     }
 
     private fun resolveCloudPlannerContact(preferredId: String): JSONObject? {

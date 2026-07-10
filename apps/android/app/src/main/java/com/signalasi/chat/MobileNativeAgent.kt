@@ -428,19 +428,22 @@ class MobileNativeAgent(
     fun approveNextAction(highRiskConfirmed: Boolean = false): AgentUiState {
         val plan = currentPlan ?: return snapshot()
         if (phase == AgentPhase.PAUSED) return snapshot()
-        if (plan.safetyReview.blocked) {
+        val hardenedPlan = AgentActionRiskHardener.enforce(appContext, plan)
+        val preparedPlan = hardenedPlan
+            .blockActionsWithFailedDependencies()
+            .let { it.withSafetyReview(safetyPolicy.review(it)) }
+        currentPlan = preparedPlan
+        if (preparedPlan.safetyReview.blocked) {
             phase = AgentPhase.BLOCKED
             lastActionResult = AgentActionResult(
                 actionId = "safety-policy",
                 success = false,
-                message = plan.safetyReview.reason.ifBlank { "Action blocked by safety policy" }
+                message = preparedPlan.safetyReview.reason.ifBlank { "Action blocked by safety policy" }
             )
-            recordAudit(AgentAuditEvent.ACTION_BLOCKED, plan.safetyReview.reason.ifBlank { "blocked" })
+            recordAudit(AgentAuditEvent.ACTION_BLOCKED, preparedPlan.safetyReview.reason.ifBlank { "blocked" })
             saveTaskRecord()
             return snapshot()
         }
-        val preparedPlan = plan.blockActionsWithFailedDependencies()
-        currentPlan = preparedPlan
         val nextAction = preparedPlan.nextRunnableAction() ?: return noRunnableActionState(preparedPlan)
         if (nextAction.risk.weight >= AgentRisk.HIGH.weight && !highRiskConfirmed) {
             phase = AgentPhase.WAITING_CONFIRMATION
@@ -458,8 +461,16 @@ class MobileNativeAgent(
 
     private fun executeFirstPendingAction(): AgentUiState {
         val plan = currentPlan ?: return snapshot()
-        val preparedPlan = plan.blockActionsWithFailedDependencies()
+        val hardenedPlan = AgentActionRiskHardener.enforce(appContext, plan)
+        val preparedPlan = hardenedPlan
+            .blockActionsWithFailedDependencies()
+            .let { it.withSafetyReview(safetyPolicy.review(it)) }
         currentPlan = preparedPlan
+        if (preparedPlan.safetyReview.blocked || preparedPlan.safetyReview.requiresConfirmation) {
+            phase = if (preparedPlan.safetyReview.blocked) AgentPhase.BLOCKED else AgentPhase.WAITING_CONFIRMATION
+            persistSession()
+            return snapshot()
+        }
         val nextAction = preparedPlan.nextRunnableAction() ?: return noRunnableActionState(preparedPlan)
         return executePlannedAction(preparedPlan, nextAction, userConfirmed = false)
     }
@@ -486,63 +497,65 @@ class MobileNativeAgent(
         nextAction: AgentAction,
         userConfirmed: Boolean
     ): AgentUiState {
-        val reviewedPlan = plan.withSafetyReview(safetyPolicy.review(plan))
+        val hardenedPlan = AgentActionRiskHardener.enforce(appContext, plan)
+        val hardenedAction = hardenedPlan.actions.firstOrNull { it.id == nextAction.id } ?: nextAction
+        val reviewedPlan = hardenedPlan.withSafetyReview(safetyPolicy.review(hardenedPlan))
         currentPlan = reviewedPlan
         if (reviewedPlan.safetyReview.blocked) {
             phase = if (safetySettingsStore.load().executionPaused) AgentPhase.PAUSED else AgentPhase.BLOCKED
             val reason = reviewedPlan.safetyReview.reason.ifBlank { "Action blocked by current capability settings" }
-            lastActionResult = AgentActionResult(nextAction.id, false, reason)
-            recordAudit(AgentAuditEvent.ACTION_BLOCKED, "execution_recheck:${nextAction.id}:$reason")
+            lastActionResult = AgentActionResult(hardenedAction.id, false, reason)
+            recordAudit(AgentAuditEvent.ACTION_BLOCKED, "execution_recheck:${hardenedAction.id}:$reason")
             saveTaskRecord()
             return snapshot()
         }
         val autonomySettings = AgentModelPlannerSettingsStore(appContext).load()
-        val autonomyDecision = AgentAutonomyGuard.review(reviewedPlan, nextAction, autonomySettings)
+        val autonomyDecision = AgentAutonomyGuard.review(reviewedPlan, hardenedAction, autonomySettings)
         if (!autonomyDecision.allowed) {
             phase = AgentPhase.BLOCKED
-            lastActionResult = AgentActionResult(nextAction.id, false, autonomyDecision.reason)
-            currentPlan = reviewedPlan.markAction(nextAction.id, AgentActionStatus.BLOCKED, lastActionResult)
+            lastActionResult = AgentActionResult(hardenedAction.id, false, autonomyDecision.reason)
+            currentPlan = reviewedPlan.markAction(hardenedAction.id, AgentActionStatus.BLOCKED, lastActionResult)
             recordAudit(
                 AgentAuditEvent.AUTONOMY_GUARD_BLOCKED,
-                "action=${nextAction.id}; calls=${autonomyDecision.completedToolCalls}; repeated=${autonomyDecision.repeatedCalls}"
+                "action=${hardenedAction.id}; calls=${autonomyDecision.completedToolCalls}; repeated=${autonomyDecision.repeatedCalls}"
             )
             saveTaskRecord()
             return snapshot()
         }
         phase = AgentPhase.EXECUTING
-        currentPlan = reviewedPlan.markAction(nextAction.id, AgentActionStatus.RUNNING)
+        currentPlan = reviewedPlan.markAction(hardenedAction.id, AgentActionStatus.RUNNING)
         currentScreen = captureScreen()
         val executionScreen = currentScreen
         val checkpoint = AgentExecutionContinuity.checkpointBefore(
-            action = nextAction,
+            action = hardenedAction,
             screen = executionScreen,
             planRevision = reviewedPlan.revision
         )
         currentPlan = currentPlan?.addCheckpoint(checkpoint)
         recordAudit(
             AgentAuditEvent.CHECKPOINT_SAVED,
-            "checkpoint=${checkpoint.id}; action=${nextAction.id}; rollback=${checkpoint.rollbackAction != null}"
+            "checkpoint=${checkpoint.id}; action=${hardenedAction.id}; rollback=${checkpoint.rollbackAction != null}"
         )
         val executionAction = currentPlan?.materializeToolInput(
-            action = nextAction,
+            action = hardenedAction,
             allowOutputHandoff = AgentModelPlannerSettingsStore(appContext).load().multiAgentCoordination
-        ) ?: nextAction
-        if (executionAction.parameters["prompt"] != nextAction.parameters["prompt"]) {
+        ) ?: hardenedAction
+        if (executionAction.parameters["prompt"] != hardenedAction.parameters["prompt"]) {
             recordAudit(
                 AgentAuditEvent.TOOL_OUTPUT_HANDOFF,
-                "action=${nextAction.id}; sources=${nextAction.outputSourceIds().size}; target=${nextAction.target}"
+                "action=${hardenedAction.id}; sources=${hardenedAction.outputSourceIds().size}; target=${hardenedAction.target}"
             )
         }
         lastActionResult = actionExecutor.execute(executionAction, currentScreen)
         phase = AgentPhase.VERIFYING
         val observation = captureVerificationScreen(
-            action = nextAction,
+            action = hardenedAction,
             beforeAction = executionScreen,
             actionResult = lastActionResult
         )
         currentScreen = observation.screen
-        lastActionResult = applyObservationResult(nextAction, lastActionResult, observation)
-        val recovery = recoverActionIfSafe(nextAction, lastActionResult, observation)
+        lastActionResult = applyObservationResult(hardenedAction, lastActionResult, observation)
+        val recovery = recoverActionIfSafe(hardenedAction, lastActionResult, observation)
         currentScreen = recovery.observation.screen
         lastActionResult = applyRecoveryMetadata(recovery.result, recovery)
         val awaitingResponse = lastActionResult?.metadata?.get("awaiting_response") == "true"
@@ -551,16 +564,16 @@ class MobileNativeAgent(
             awaitingResponse -> AgentActionStatus.WAITING_RESPONSE
             else -> AgentActionStatus.COMPLETED
         }
-        val updatedPlan = currentPlan?.markAction(nextAction.id, finalStatus, lastActionResult)
-            ?.addVerification(AgentVerificationResult.from(nextAction.id, lastActionResult, recovery))
+        val updatedPlan = currentPlan?.markAction(hardenedAction.id, finalStatus, lastActionResult)
+            ?.addVerification(AgentVerificationResult.from(hardenedAction.id, lastActionResult, recovery))
         val hasPendingBeforeReplan = updatedPlan?.actions?.any {
             it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
         } == true
-        val preservesToolGraph = updatedPlan?.hasOutputHandoffFrom(nextAction.id) == true
+        val preservesToolGraph = updatedPlan?.hasOutputHandoffFrom(hardenedAction.id) == true
         val replanReason = when {
-            lastActionResult?.success != true -> "action_failed:${nextAction.kind.name}"
-            hasPendingBeforeReplan && nextAction.kind.mayChangeScreen() && !preservesToolGraph ->
-                "screen_updated_after:${nextAction.kind.name}"
+            lastActionResult?.success != true -> "action_failed:${hardenedAction.kind.name}"
+            hasPendingBeforeReplan && hardenedAction.kind.mayChangeScreen() && !preservesToolGraph ->
+                "screen_updated_after:${hardenedAction.kind.name}"
             else -> ""
         }
         val continuedPlan = if (updatedPlan != null && replanReason.isNotBlank()) {
@@ -579,16 +592,16 @@ class MobileNativeAgent(
             lastActionResult?.success != true && continuedPlan === updatedPlan -> AgentPhase.FAILED
             awaitingResponse -> AgentPhase.WAITING_RESPONSE
             hasNextAction && continuedPlan?.safetyReview?.requiresConfirmation == false -> {
-                recordAudit(AgentAuditEvent.INVOCATION_AUDIT, invocationAuditDetail(continuedPlan, nextAction, lastActionResult, userConfirmed))
-                recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${nextAction.kind}:${finalStatus}")
+                recordAudit(AgentAuditEvent.INVOCATION_AUDIT, invocationAuditDetail(continuedPlan, hardenedAction, lastActionResult, userConfirmed))
+                recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${hardenedAction.kind}:${finalStatus}")
                 saveTaskRecord()
                 return executeFirstPendingAction()
             }
             hasNextAction -> AgentPhase.WAITING_CONFIRMATION
             else -> AgentPhase.COMPLETED
         }
-        continuedPlan?.let { recordAudit(AgentAuditEvent.INVOCATION_AUDIT, invocationAuditDetail(it, nextAction, lastActionResult, userConfirmed)) }
-        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${nextAction.kind}:${finalStatus}")
+        continuedPlan?.let { recordAudit(AgentAuditEvent.INVOCATION_AUDIT, invocationAuditDetail(it, hardenedAction, lastActionResult, userConfirmed)) }
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${hardenedAction.kind}:${finalStatus}")
         saveTaskRecord()
         return snapshot()
     }
@@ -967,6 +980,98 @@ class MobileNativeAgent(
         } else {
             snapshot()
         }
+    }
+
+    fun updatePendingAction(actionId: String, description: String, input: String): AgentUiState {
+        val plan = currentPlan ?: return snapshot()
+        return applyPlanEdit(
+            AgentPlanEditor.updatePendingAction(
+                plan,
+                actionId,
+                description,
+                input
+            )
+        )
+    }
+
+    fun removePendingAction(actionId: String): AgentUiState {
+        val plan = currentPlan ?: return snapshot()
+        return applyPlanEdit(AgentPlanEditor.removePendingAction(plan, actionId))
+    }
+
+    fun movePendingAction(actionId: String, offset: Int): AgentUiState {
+        val plan = currentPlan ?: return snapshot()
+        return applyPlanEdit(AgentPlanEditor.movePendingAction(plan, actionId, offset))
+    }
+
+    private fun applyPlanEdit(result: AgentPlanEditResult): AgentUiState {
+        val edited = result.plan
+        if (!result.success || edited == null) {
+            lastActionResult = AgentActionResult(
+                actionId = "agent-plan-edit-rejected",
+                success = false,
+                message = result.error.ifBlank { "Plan edit was rejected" }
+            )
+            recordAudit(
+                AgentAuditEvent.PLAN_EDIT_REJECTED,
+                "reason_hash=${lastActionResult?.message.orEmpty().hashCode()}"
+            )
+            return snapshot()
+        }
+        val targets = connectorRegistry.availableTargets()
+        val memories = memoryStore.recall(currentGoal)
+        val runtimeContext = buildRuntimeContext(
+            goal = currentGoal,
+            screen = currentScreen,
+            targets = targets,
+            memories = memories,
+            knowledgeItems = knowledgeStore.search(currentGoal),
+            knowledgeStats = knowledgeStore.stats()
+        )
+        val rebuilt = AgentPlanFactory.actions(
+            AgentRequest(
+                goal = currentGoal,
+                screen = currentScreen,
+                targets = targets,
+                memories = memories,
+                runtimeContext = runtimeContext,
+                executionHistory = edited.actionHistory,
+                replanReason = "user_edited_plan"
+            ),
+            edited.actions
+        )
+        var merged = rebuilt.copy(
+            planId = edited.planId,
+            plannerProfile = edited.plannerProfile,
+            revision = edited.revision,
+            replanCount = edited.replanCount,
+            actionHistory = edited.actionHistory,
+            checkpoints = edited.checkpoints,
+            verificationResults = edited.verificationResults,
+            routeRationale = edited.routeRationale
+        )
+        merged = merged.copy(validation = AgentPlanValidator.validate(merged))
+        merged = AgentActionRiskHardener.enforce(appContext, merged)
+        val reviewed = merged.withSafetyReview(safetyPolicy.review(merged))
+        currentPlan = reviewed
+        phase = when {
+            reviewed.safetyReview.blocked -> AgentPhase.BLOCKED
+            reviewed.actions.any {
+                it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
+            } -> AgentPhase.WAITING_CONFIRMATION
+            else -> AgentPhase.COMPLETED
+        }
+        lastActionResult = AgentActionResult(
+            actionId = "agent-plan-edited",
+            success = true,
+            message = "Plan revision ${reviewed.revision} saved"
+        )
+        recordAudit(
+            AgentAuditEvent.PLAN_EDITED,
+            "revision=${reviewed.revision}; actions=${reviewed.actions.size}"
+        )
+        saveTaskRecord()
+        return snapshot()
     }
 
     private fun replanFromCurrentState(
@@ -7504,6 +7609,8 @@ enum class AgentAuditEvent {
     CHECKPOINT_RESTORE_FAILED,
     PLAN_REPLANNED,
     PLAN_REPLAN_LIMIT_REACHED,
+    PLAN_EDITED,
+    PLAN_EDIT_REJECTED,
     TOOL_OUTPUT_HANDOFF,
     TOOL_GRAPH_BLOCKED,
     AUTONOMY_GUARD_BLOCKED,

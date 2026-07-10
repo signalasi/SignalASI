@@ -2528,7 +2528,93 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 setTypeface(null, android.graphics.Typeface.BOLD)
                 text = action.status.name.lowercase(Locale.US).replace('_', ' ')
             })
+            if (action.status in setOf(
+                    AgentActionStatus.PROPOSED,
+                    AgentActionStatus.PENDING_CONFIRMATION
+                )
+            ) {
+                setOnClickListener { showAgentPlanActionEditMenu(action) }
+            }
         }
+    }
+
+    private fun showAgentPlanActionEditMenu(action: AgentAction) {
+        val labels = arrayOf(
+            getString(R.string.agent_plan_edit_action),
+            getString(R.string.agent_plan_move_up),
+            getString(R.string.agent_plan_move_down),
+            getString(R.string.agent_plan_remove_action)
+        )
+        android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.agent_plan_edit_title))
+            .setItems(labels) { _, which ->
+                when (which) {
+                    0 -> showAgentPlanActionInputDialog(action)
+                    1 -> runAgentOperationAsync { mobileNativeAgent.movePendingAction(action.id, -1) }
+                    2 -> runAgentOperationAsync { mobileNativeAgent.movePendingAction(action.id, 1) }
+                    3 -> confirmRemoveAgentPlanAction(action)
+                }
+            }
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .show()
+    }
+
+    private fun showAgentPlanActionInputDialog(action: AgentAction) {
+        val descriptionInput = EditText(this).apply {
+            hint = getString(R.string.agent_plan_action_description)
+            setText(action.description)
+            selectAll()
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            minLines = 2
+        }
+        val inputKey = AgentPlanEditor.inputKey(action)
+        val actionInput = inputKey?.let {
+            EditText(this).apply {
+                hint = getString(R.string.agent_plan_action_input)
+                setText(AgentPlanEditor.inputValue(action))
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                minLines = 3
+            }
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+            addView(descriptionInput, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            actionInput?.let { input ->
+                addView(input, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(12) })
+            }
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.agent_plan_edit_action))
+            .setView(container)
+            .setPositiveButton(getString(R.string.common_save)) { _, _ ->
+                runAgentOperationAsync {
+                    mobileNativeAgent.updatePendingAction(
+                        action.id,
+                        descriptionInput.text?.toString().orEmpty(),
+                        actionInput?.text?.toString().orEmpty()
+                    )
+                }
+            }
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .show()
+    }
+
+    private fun confirmRemoveAgentPlanAction(action: AgentAction) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.agent_plan_remove_action))
+            .setMessage(getString(R.string.agent_plan_remove_action_message, action.description))
+            .setPositiveButton(getString(R.string.common_delete)) { _, _ ->
+                runAgentOperationAsync { mobileNativeAgent.removePendingAction(action.id) }
+            }
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .show()
     }
 
     private fun agentActionStatusColor(status: AgentActionStatus): Int = when (status) {
