@@ -168,6 +168,11 @@
     <string name="automation_no_workflows">No saved workflows</string>
     <string name="automation_create_workflow_hint">Use: save workflow Name :: goal</string>
     <string name="automation_run">Run</string>
+    <string name="automation_schedules">Schedules</string>
+    <string name="automation_no_schedules">No workflow schedules</string>
+    <string name="automation_schedule_hint">Use: schedule workflow Name at 09:00</string>
+    <string name="automation_every_minutes">Every %1$d minutes</string>
+    <string name="automation_schedule_subtitle">%1$s · Next %2$s</string>
     <string name="automation_morning_brief">Morning Brief</string>
     <string name="automation_morning_brief_subtitle">Push news and status every day at 08:00</string>
     <string name="automation_health_check">Health Check</string>
@@ -233,6 +238,11 @@
     <string name="agent_status_waiting_confirmation">Confirm action</string>
     <string name="agent_status_executing">Executing action</string>
     <string name="agent_status_waiting_response">Waiting for response</string>
+    <string name="agent_schedule_notification_title">Scheduled Agent · %1$s</string>
+    <string name="agent_schedule_workflow_missing">The scheduled workflow no longer exists.</string>
+    <string name="agent_schedule_busy">Another Agent task is active. This run was skipped safely.</string>
+    <string name="agent_schedule_approval_required">Approval required: %1$s</string>
+    <string name="agent_schedule_started">Scheduled workflow started.</string>
     <string name="agent_status_paused">Task paused</string>
     <string name="agent_status_paused_subtitle">Execution is paused. Resume when you are ready.</string>
     <string name="agent_status_blocked">Action blocked</string>
@@ -678,7 +688,7 @@
     <string name="backup_password_hint">Set an encryption password</string>
     <string name="backup_include_messages">Back up chat history</string>
     <string name="backup_include_agent_data">Agent memory and knowledge</string>
-    <string name="backup_include_agent_data_subtitle">Memory, knowledge, workflows, task history, safety settings, and Home Assistant configuration</string>
+    <string name="backup_include_agent_data_subtitle">Memory, knowledge, workflows and schedules, task history, safety settings, and Home Assistant configuration</string>
     <string name="backup_included">Included</string>
     <string name="backup_password_required">Enter a backup password</string>
     <string name="backup_export_file_name">signalasi_backup.hcbak</string>

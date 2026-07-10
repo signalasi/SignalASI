@@ -26,6 +26,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
 import java.util.UUID
+import java.util.Date
+import java.text.SimpleDateFormat
 
 private val SENSITIVE_MEMORY_TERMS = listOf(
     "password",
@@ -61,6 +63,7 @@ class MobileNativeAgent(
     private val knowledgeStore: AgentKnowledgeStore = SharedPreferencesAgentKnowledgeStore(context),
     private val taskStore: AgentTaskStore = SharedPreferencesAgentTaskStore(context),
     private val workflowStore: AgentWorkflowStore = SharedPreferencesAgentWorkflowStore(context),
+    private val workflowScheduleStore: AgentWorkflowScheduleStore = AgentWorkflowScheduleStore(context),
     private val connectorRegistry: AgentConnectorRegistry = AppStoreAgentConnectorRegistry(context),
     private val sessionStore: AgentSessionStore = SharedPreferencesAgentSessionStore(context)
 ) {
@@ -115,6 +118,11 @@ class MobileNativeAgent(
             lastActionResult = lastActionResult,
             recentTasks = taskStore.recent(limit = 3)
         )
+    }
+
+    fun reloadSession(): AgentUiState {
+        restoreSession(sessionStore.load())
+        return snapshot()
     }
 
     fun observeCurrentScreen(): AgentUiState {
@@ -232,6 +240,24 @@ class MobileNativeAgent(
         }
         workflowRunCommandValue(currentGoal)?.let { name ->
             return runWorkflowCommand(name)
+        }
+        workflowScheduleCommandValue(currentGoal)?.let { request ->
+            return scheduleWorkflowCommand(request)
+        }
+        if (workflowScheduleSyntaxCommand(currentGoal)) {
+            return completeWorkflowManagementCommand(
+                actionId = "schedule-workflow-syntax",
+                description = "Show workflow schedule syntax",
+                result = "Use: schedule workflow Name at HH:mm, or schedule workflow Name every 30 minutes",
+                risk = AgentRisk.LOW,
+                parameters = emptyMap()
+            )
+        }
+        if (workflowScheduleListCommand(currentGoal)) {
+            return showWorkflowSchedulesCommand()
+        }
+        workflowScheduleCancelCommandValue(currentGoal)?.let { name ->
+            return cancelWorkflowScheduleCommand(name)
         }
         if (templateListCommand(currentGoal)) {
             return showTemplatesCommand()
@@ -936,6 +962,58 @@ class MobileNativeAgent(
 
     private fun workflowDeleteCommandValue(goal: String): String? {
         val prefixes = listOf("delete workflow ", "remove workflow ")
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
+    private fun workflowScheduleCommandValue(goal: String): WorkflowScheduleRequest? {
+        val daily = Regex(
+            "^(?:schedule workflow|schedule)\\s+(.+?)\\s+at\\s+(\\d{1,2}):(\\d{2})$",
+            RegexOption.IGNORE_CASE
+        ).matchEntire(goal.trim())
+        if (daily != null) {
+            val name = daily.groupValues[1].trim()
+            val hour = daily.groupValues[2].toIntOrNull() ?: return null
+            val minute = daily.groupValues[3].toIntOrNull() ?: return null
+            return WorkflowScheduleRequest(
+                workflowName = name,
+                kind = AgentWorkflowScheduleKind.DAILY,
+                hour = hour,
+                minute = minute
+            )
+        }
+        val interval = Regex(
+            "^(?:schedule workflow|schedule)\\s+(.+?)\\s+every\\s+(\\d+)\\s+(minutes?|hours?|days?)$",
+            RegexOption.IGNORE_CASE
+        ).matchEntire(goal.trim()) ?: return null
+        val amount = interval.groupValues[2].toLongOrNull() ?: return null
+        val unit = interval.groupValues[3].lowercase(Locale.US)
+        val minutes = when {
+            unit.startsWith("day") -> amount * 24L * 60L
+            unit.startsWith("hour") -> amount * 60L
+            else -> amount
+        }.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        return WorkflowScheduleRequest(
+            workflowName = interval.groupValues[1].trim(),
+            kind = AgentWorkflowScheduleKind.INTERVAL,
+            intervalMinutes = minutes
+        )
+    }
+
+    private fun workflowScheduleListCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "schedules" ||
+            normalized == "list schedules" ||
+            normalized == "show schedules" ||
+            normalized == "workflow schedules"
+    }
+
+    private fun workflowScheduleSyntaxCommand(goal: String): Boolean =
+        goal.startsWith("schedule workflow ", ignoreCase = true) ||
+            goal.startsWith("schedule ", ignoreCase = true)
+
+    private fun workflowScheduleCancelCommandValue(goal: String): String? {
+        val prefixes = listOf("cancel schedule ", "delete schedule ", "remove schedule ")
         val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
         return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
     }
@@ -2078,6 +2156,9 @@ class MobileNativeAgent(
     }
 
     private fun deleteWorkflowCommand(name: String): AgentUiState {
+        workflowScheduleStore.findByWorkflowName(name)?.let { schedule ->
+            AgentWorkflowScheduler.cancel(appContext, schedule)
+        }
         val deleted = workflowStore.delete(name)
         val result = if (deleted > 0) "Deleted workflow $name" else "Workflow '$name' was not found"
         return completeWorkflowManagementCommand(
@@ -2101,6 +2182,94 @@ class MobileNativeAgent(
         recordAudit(AgentAuditEvent.WORKFLOW_RUN, "workflow_id=${workflow.id}; name_hash=${workflow.name.hashCode()}")
         return submitGoal(workflow.goal)
     }
+
+    private fun scheduleWorkflowCommand(request: WorkflowScheduleRequest): AgentUiState {
+        val workflow = workflowStore.find(request.workflowName) ?: return completeWorkflowManagementCommand(
+            actionId = "schedule-workflow-missing",
+            description = "Find workflow for scheduling",
+            result = "Workflow '${request.workflowName}' was not found",
+            risk = AgentRisk.LOW,
+            parameters = mapOf("workflow_name" to request.workflowName)
+        )
+        val outcome = runCatching {
+            when (request.kind) {
+                AgentWorkflowScheduleKind.DAILY -> AgentWorkflowScheduler.scheduleDaily(
+                    appContext,
+                    workflow,
+                    request.hour,
+                    request.minute
+                )
+                AgentWorkflowScheduleKind.INTERVAL -> AgentWorkflowScheduler.scheduleInterval(
+                    appContext,
+                    workflow,
+                    request.intervalMinutes
+                )
+            }
+        }
+        val schedule = outcome.getOrNull()
+        val result = schedule?.let {
+            "Scheduled ${workflow.name}: ${workflowScheduleLabel(it)}; next=${formatScheduleTime(it.nextRunAtMillis)}"
+        } ?: (outcome.exceptionOrNull()?.message ?: "Workflow could not be scheduled")
+        return completeWorkflowManagementCommand(
+            actionId = "schedule-workflow",
+            description = "Schedule reusable Agent workflow",
+            result = result,
+            risk = AgentRisk.MEDIUM,
+            parameters = mapOf(
+                "workflow_name" to workflow.name,
+                "schedule_kind" to request.kind.name,
+                "scheduled" to (schedule != null).toString()
+            )
+        )
+    }
+
+    private fun showWorkflowSchedulesCommand(): AgentUiState {
+        val schedules = workflowScheduleStore.list()
+        val result = if (schedules.isEmpty()) {
+            "No workflow schedules"
+        } else {
+            buildString {
+                append("Workflow schedules: ").append(schedules.size)
+                schedules.take(20).forEach { schedule ->
+                    append("\n").append(schedule.workflowName)
+                    append(" | ").append(workflowScheduleLabel(schedule))
+                    append(" | next=").append(formatScheduleTime(schedule.nextRunAtMillis))
+                }
+            }
+        }
+        return completeWorkflowManagementCommand(
+            actionId = "list-workflow-schedules",
+            description = "Show Agent workflow schedules",
+            result = result,
+            risk = AgentRisk.LOW,
+            parameters = mapOf("schedule_count" to schedules.size.toString())
+        )
+    }
+
+    private fun cancelWorkflowScheduleCommand(name: String): AgentUiState {
+        val schedule = workflowScheduleStore.findByWorkflowName(name)
+        val result = if (schedule == null) {
+            "Schedule '$name' was not found"
+        } else {
+            AgentWorkflowScheduler.cancel(appContext, schedule)
+            "Cancelled schedule for ${schedule.workflowName}"
+        }
+        return completeWorkflowManagementCommand(
+            actionId = "cancel-workflow-schedule",
+            description = "Cancel Agent workflow schedule",
+            result = result,
+            risk = AgentRisk.MEDIUM,
+            parameters = mapOf("workflow_name" to name, "cancelled" to (schedule != null).toString())
+        )
+    }
+
+    private fun workflowScheduleLabel(schedule: AgentWorkflowSchedule): String = when (schedule.kind) {
+        AgentWorkflowScheduleKind.DAILY -> "daily at %02d:%02d".format(Locale.US, schedule.hour, schedule.minute)
+        AgentWorkflowScheduleKind.INTERVAL -> "every ${schedule.intervalMinutes} minutes"
+    }
+
+    private fun formatScheduleTime(timestampMillis: Long): String =
+        if (timestampMillis <= 0L) "pending" else SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(timestampMillis))
 
     private fun showTemplatesCommand(): AgentUiState {
         val templates = AgentWorkflowTemplates.all
@@ -5695,6 +5864,14 @@ private data class AgentPermissionChecklistItem(
     val ready: Boolean,
     val required: Boolean,
     val fixCommand: String
+)
+
+private data class WorkflowScheduleRequest(
+    val workflowName: String,
+    val kind: AgentWorkflowScheduleKind,
+    val hour: Int = -1,
+    val minute: Int = -1,
+    val intervalMinutes: Int = 0
 )
 
 enum class AgentConnectorStatus {

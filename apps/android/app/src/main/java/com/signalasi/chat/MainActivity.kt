@@ -441,6 +441,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (intent?.getBooleanExtra("signalasi_open_agent", false) == true) {
+            intent.removeExtra("signalasi_open_agent")
+            showMainTab(PAGE_AGENT)
+            renderAgentState(mobileNativeAgent.reloadSession())
+        }
         handleDebugSendIntent(intent)
         handleDebugIncomingIntent(intent)
     }
@@ -483,6 +488,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         super.onResume()
         AppForegroundTracker.onActivityResumed()
         AgentConnectorResponseBus.addListener(agentConnectorResponseListener)
+        val restoredAgentState = mobileNativeAgent.reloadSession()
+        if (activeMainTab == PAGE_AGENT) renderAgentState(restoredAgentState)
         consumePendingAgentConnectorResponses()
         reloadChatHistoryIfChanged()
     }
@@ -5285,6 +5292,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun showAutomationFeaturePage() {
         val workflows = SharedPreferencesAgentWorkflowStore(this).list()
+        val schedules = AgentWorkflowScheduleStore(this).list()
         val templates = AgentWorkflowTemplates.all
         showFeaturePage(getString(R.string.automation_title))
         featureContent.addView(featureHeroCard(
@@ -5314,6 +5322,26 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 })
             }
         }
+        addSectionTitle(getString(R.string.automation_schedules))
+        if (schedules.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.automation_no_schedules),
+                getString(R.string.automation_schedule_hint),
+                R.drawable.ic_protocol_link,
+                ""
+            ))
+        } else {
+            schedules.forEach { schedule ->
+                featureContent.addView(featureRow(
+                    schedule.workflowName,
+                    automationScheduleSubtitle(schedule),
+                    R.drawable.ic_protocol_link,
+                    getString(R.string.status_enabled)
+                ).apply {
+                    setOnClickListener { openAgentWorkflow("cancel schedule ${schedule.workflowName}") }
+                })
+            }
+        }
         addSectionTitle(getString(R.string.automation_templates))
         templates.forEach { template ->
             featureContent.addView(featureRow(
@@ -5331,6 +5359,22 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         hideFeaturePage()
         showMainTab(PAGE_AGENT)
         prefillAgentGoal(command)
+    }
+
+    private fun automationScheduleSubtitle(schedule: AgentWorkflowSchedule): String {
+        val cadence = when (schedule.kind) {
+            AgentWorkflowScheduleKind.DAILY -> "%02d:%02d".format(Locale.US, schedule.hour, schedule.minute)
+            AgentWorkflowScheduleKind.INTERVAL -> getString(
+                R.string.automation_every_minutes,
+                schedule.intervalMinutes
+            )
+        }
+        val next = if (schedule.nextRunAtMillis > 0L) {
+            SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(schedule.nextRunAtMillis))
+        } else {
+            "-"
+        }
+        return getString(R.string.automation_schedule_subtitle, cadence, next)
     }
 
     private fun showSecurityFeaturePage() {

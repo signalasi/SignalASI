@@ -17,6 +17,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         private const val CHANNEL_ID = "signalasi_message_service"
         private const val NOTIFICATION_ID = 1001
         private const val MESSAGE_NOTIFICATION_ID = 1002
+        private const val AGENT_SCHEDULE_NOTIFICATION_ID = 1003
     }
 
     override fun onCreate() {
@@ -29,6 +30,9 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         handleDebugIncoming(intent)
+        if (intent?.action == AgentWorkflowScheduler.ACTION_RUN_SCHEDULE) {
+            executeScheduledWorkflow(intent.getStringExtra(AgentWorkflowScheduler.EXTRA_SCHEDULE_ID).orEmpty())
+        }
         SignalASIMqttClient.connect(this)
         return START_STICKY
     }
@@ -98,6 +102,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
     private fun showIncomingNotification(message: StoredIncomingMessage) {
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("signalasi_open_agent", true)
         }
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -115,6 +120,62 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
             .setShowWhen(true)
             .build()
         getSystemService(NotificationManager::class.java).notify(MESSAGE_NOTIFICATION_ID, notification)
+    }
+
+    private fun executeScheduledWorkflow(scheduleId: String) {
+        if (scheduleId.isBlank()) return
+        val schedule = AgentWorkflowScheduleStore(this).findById(scheduleId) ?: return
+        val workflowStore = SharedPreferencesAgentWorkflowStore(this)
+        val workflow = workflowStore.findById(schedule.workflowId) ?: run {
+            AgentWorkflowScheduler.cancel(this, schedule)
+            showScheduledAgentNotification(
+                schedule.workflowName,
+                getString(R.string.agent_schedule_workflow_missing)
+            )
+            return
+        }
+        val agent = MobileNativeAgent(this)
+        if (agent.snapshot().runningTaskCount > 0) {
+            showScheduledAgentNotification(workflow.name, getString(R.string.agent_schedule_busy))
+            return
+        }
+        workflowStore.markRun(workflow.id)
+        val state = agent.submitGoal(workflow.goal)
+        val detail = when {
+            state.phase == AgentPhase.WAITING_CONFIRMATION -> getString(
+                R.string.agent_schedule_approval_required,
+                state.pendingAction?.description.orEmpty().ifBlank { workflow.goal }
+            )
+            state.phase == AgentPhase.BLOCKED -> state.plan?.safetyReview?.reason
+                ?.ifBlank { getString(R.string.agent_status_blocked) }
+                ?: getString(R.string.agent_status_blocked)
+            state.phase == AgentPhase.WAITING_RESPONSE -> getString(R.string.agent_status_waiting_response)
+            state.lastActionResult != null -> state.lastActionResult.message
+            else -> getString(R.string.agent_schedule_started)
+        }
+        showScheduledAgentNotification(workflow.name, detail)
+    }
+
+    private fun showScheduledAgentNotification(workflowName: String, detail: String) {
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            AGENT_SCHEDULE_NOTIFICATION_ID,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = Notification.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_tab_agent_filled)
+            .setContentTitle(getString(R.string.agent_schedule_notification_title, workflowName))
+            .setContentText(detail.take(160))
+            .setStyle(Notification.BigTextStyle().bigText(detail))
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setShowWhen(true)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(AGENT_SCHEDULE_NOTIFICATION_ID, notification)
     }
 
     private fun handleDebugIncoming(intent: Intent?) {

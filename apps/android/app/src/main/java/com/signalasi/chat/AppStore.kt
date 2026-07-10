@@ -841,7 +841,10 @@ object AppStore {
         payload.optJSONObject("profile")?.let { writeObject(context, KEY_PROFILE, it) }
         payload.optJSONArray("contacts")?.let { writeArray(context, KEY_CONTACTS, it) }
         payload.optJSONArray("friend_requests")?.let { writeArray(context, KEY_FRIEND_REQUESTS, it) }
-        payload.optJSONObject("agent_data")?.let { AgentBackupData.restore(context, it) }
+        payload.optJSONObject("agent_data")?.let {
+            AgentBackupData.restore(context, it)
+            AgentWorkflowScheduler.restoreAll(context)
+        }
         if (includeMessages) {
             payload.optJSONObject("messages")?.let {
                 context.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
@@ -853,6 +856,7 @@ object AppStore {
     }
 
     fun destroyAllPrivateData(context: Context) {
+        AgentWorkflowScheduler.cancelAll(context)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences(OLD_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
@@ -867,6 +871,7 @@ object AppStore {
         context.getSharedPreferences("signalasi_agent_tasks", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_safety", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_workflows", Context.MODE_PRIVATE).edit().clear().commit()
+        context.getSharedPreferences("signalasi_agent_workflow_schedules", Context.MODE_PRIVATE).edit().clear().commit()
         AgentConnectorResponseStore.clear(context)
         HomeAssistantSettingsStore.clear(context)
         runCatching { AgentStorageCipher.deleteMasterKey() }

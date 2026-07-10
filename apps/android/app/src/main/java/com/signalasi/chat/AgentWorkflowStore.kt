@@ -23,6 +23,7 @@ data class AgentWorkflowTemplate(
 
 interface AgentWorkflowStore {
     fun list(): List<AgentWorkflow>
+    fun findById(id: String): AgentWorkflow?
     fun find(name: String): AgentWorkflow?
     fun save(name: String, goal: String): AgentWorkflow
     fun delete(name: String): Int
@@ -33,6 +34,8 @@ class SharedPreferencesAgentWorkflowStore(context: Context) : AgentWorkflowStore
     private val preferences = AgentEncryptedPreferences(context, PREFS)
 
     override fun list(): List<AgentWorkflow> = loadItems().sortedByDescending { it.updatedAtMillis }
+
+    override fun findById(id: String): AgentWorkflow? = loadItems().firstOrNull { it.id == id }
 
     override fun find(name: String): AgentWorkflow? {
         val cleanName = normalizeName(name)

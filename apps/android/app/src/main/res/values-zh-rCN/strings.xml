@@ -158,6 +158,11 @@
     <string name="automation_no_workflows">暂无已保存工作流</string>
     <string name="automation_create_workflow_hint">使用：save workflow 名称 :: 目标</string>
     <string name="automation_run">运行</string>
+    <string name="automation_schedules">定时计划</string>
+    <string name="automation_no_schedules">暂无工作流定时计划</string>
+    <string name="automation_schedule_hint">使用：schedule workflow 名称 at 09:00</string>
+    <string name="automation_every_minutes">每 %1$d 分钟</string>
+    <string name="automation_schedule_subtitle">%1$s · 下次 %2$s</string>
     <string name="automation_morning_brief">晨间简报</string>
     <string name="automation_morning_brief_subtitle">每天 08:00 推送新闻和状态</string>
     <string name="automation_health_check">健康检查</string>
@@ -551,7 +556,7 @@
     <string name="backup_password_hint">设置加密密码</string>
     <string name="backup_include_messages">备份聊天记录</string>
     <string name="backup_include_agent_data">智能体记忆与知识库</string>
-    <string name="backup_include_agent_data_subtitle">记忆、知识库、工作流、任务历史、安全设置和 Home Assistant 配置</string>
+    <string name="backup_include_agent_data_subtitle">记忆、知识库、工作流与定时计划、任务历史、安全设置和 Home Assistant 配置</string>
     <string name="backup_included">已包含</string>
     <string name="backup_password_required">请输入备份密码</string>
     <string name="backup_export_file_name">signalasi_backup.hcbak</string>
@@ -629,6 +634,11 @@
     <string name="agent_status_waiting_confirmation">确认动作</string>
     <string name="agent_status_executing">正在执行动作</string>
     <string name="agent_status_waiting_response">等待回复</string>
+    <string name="agent_schedule_notification_title">定时智能体 · %1$s</string>
+    <string name="agent_schedule_workflow_missing">定时工作流已不存在。</string>
+    <string name="agent_schedule_busy">另一个智能体任务正在运行，本次已安全跳过。</string>
+    <string name="agent_schedule_approval_required">需要确认：%1$s</string>
+    <string name="agent_schedule_started">定时工作流已启动。</string>
     <string name="agent_status_blocked">动作已阻断</string>
     <string name="agent_status_blocked_subtitle">安全策略已停止此任务</string>
     <string name="agent_status_completed">动作已完成</string>
