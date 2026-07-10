@@ -10,6 +10,7 @@ import android.content.pm.ApplicationInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Base64
+import org.json.JSONObject
 
 class MessageService : Service(), SignalASIMqttClient.Listener {
     companion object {
@@ -42,6 +43,21 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
     override fun onMessage(payload: String) {
         if (AppForegroundTracker.isForeground()) return
         val stored = ChatHistoryStore.appendIncoming(this, payload) ?: return
+        val envelope = runCatching { JSONObject(payload) }.getOrNull()
+        if (envelope?.optString("type").orEmpty().ifBlank { "text" } == "text") {
+            val sourceMessageId = envelope?.optString("source_message_id")?.toLongOrNull()
+                ?: envelope?.optLong("source_message_id", 0L)?.takeIf { it > 0L }
+            if (sourceMessageId != null) {
+                AgentConnectorResponseBus.publish(
+                    this,
+                    AgentConnectorResponse(
+                        sourceMessageId = sourceMessageId,
+                        contactId = envelope?.optString("contact_id").orEmpty().ifBlank { stored.contactId },
+                        content = stored.content
+                    )
+                )
+            }
+        }
         if (stored.notify) {
             showIncomingNotification(stored)
             ChatHistoryStore.markNotified(this, stored.contactId, stored.messageId)

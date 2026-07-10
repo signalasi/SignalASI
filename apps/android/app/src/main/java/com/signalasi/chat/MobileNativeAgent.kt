@@ -99,6 +99,7 @@ class MobileNativeAgent(
                 phase == AgentPhase.WAITING_CONFIRMATION ||
                 phase == AgentPhase.EXECUTING ||
                 phase == AgentPhase.VERIFYING ||
+                phase == AgentPhase.WAITING_RESPONSE ||
                 phase == AgentPhase.PAUSED) 1 else 0,
             steps = currentPlan?.steps ?: defaultSteps(),
             lastEvent = if (currentGoal.isBlank()) AgentEvent.WAITING_FOR_GOAL else AgentEvent.GOAL_RECEIVED,
@@ -332,10 +333,11 @@ class MobileNativeAgent(
             actionResult = lastActionResult
         )
         currentScreen = verificationScreen
-        val finalStatus = if (lastActionResult?.success == true) {
-            AgentActionStatus.COMPLETED
-        } else {
-            AgentActionStatus.FAILED
+        val awaitingResponse = lastActionResult?.metadata?.get("awaiting_response") == "true"
+        val finalStatus = when {
+            lastActionResult?.success != true -> AgentActionStatus.FAILED
+            awaitingResponse -> AgentActionStatus.WAITING_RESPONSE
+            else -> AgentActionStatus.COMPLETED
         }
         val updatedPlan = currentPlan?.markAction(nextAction.id, finalStatus, lastActionResult)
             ?.addVerification(AgentVerificationResult.from(nextAction.id, lastActionResult, verificationScreen))
@@ -343,6 +345,7 @@ class MobileNativeAgent(
         val hasNextAction = updatedPlan?.actions?.any { it.status == AgentActionStatus.PENDING_CONFIRMATION } == true
         phase = when {
             lastActionResult?.success != true -> AgentPhase.FAILED
+            awaitingResponse -> AgentPhase.WAITING_RESPONSE
             hasNextAction && updatedPlan?.safetyReview?.requiresConfirmation == false -> {
                 recordAudit(AgentAuditEvent.INVOCATION_AUDIT, invocationAuditDetail(updatedPlan, nextAction, lastActionResult, userConfirmed))
                 recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${nextAction.kind}:${finalStatus}")
@@ -355,6 +358,48 @@ class MobileNativeAgent(
         updatedPlan?.let { recordAudit(AgentAuditEvent.INVOCATION_AUDIT, invocationAuditDetail(it, nextAction, lastActionResult, userConfirmed)) }
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${nextAction.kind}:${finalStatus}")
         saveTaskRecord()
+        return snapshot()
+    }
+
+    fun acceptConnectorResponse(
+        sourceMessageId: Long,
+        contactId: String,
+        content: String,
+        success: Boolean = true
+    ): AgentUiState? {
+        if (sourceMessageId <= 0L || content.isBlank()) return null
+        val pendingResult = lastActionResult ?: return null
+        if (phase != AgentPhase.WAITING_RESPONSE) return null
+        if (pendingResult.metadata["source_message_id"]?.toLongOrNull() != sourceMessageId) return null
+        val expectedContactId = pendingResult.metadata["contact_id"].orEmpty()
+        if (expectedContactId.isNotBlank() && contactId.isNotBlank() && expectedContactId != contactId) return null
+        val plan = currentPlan ?: return null
+        val actionId = pendingResult.actionId
+        val response = content.trim().take(MAX_CONNECTOR_RESPONSE_CHARACTERS)
+        val completedResult = AgentActionResult(
+            actionId = actionId,
+            success = success,
+            message = response,
+            metadata = pendingResult.metadata + mapOf(
+                "awaiting_response" to "false",
+                "response_received_at" to System.currentTimeMillis().toString()
+            )
+        )
+        val responseStatus = if (success) AgentActionStatus.COMPLETED else AgentActionStatus.FAILED
+        currentPlan = plan.markAction(actionId, responseStatus, completedResult)
+        lastActionResult = completedResult
+        phase = if (!success) {
+            AgentPhase.FAILED
+        } else if (currentPlan?.actions?.any { it.status == AgentActionStatus.PENDING_CONFIRMATION } == true) {
+            AgentPhase.WAITING_CONFIRMATION
+        } else {
+            AgentPhase.COMPLETED
+        }
+        recordAudit(
+            AgentAuditEvent.CONNECTOR_RESPONSE_RECEIVED,
+            "source_message_id=$sourceMessageId; contact=$contactId; success=$success; chars=${response.length}"
+        )
+        saveTaskRecord(result = response)
         return snapshot()
     }
 
@@ -417,10 +462,10 @@ class MobileNativeAgent(
     fun resumeCurrentTask(): AgentUiState {
         if (phase != AgentPhase.PAUSED) return snapshot()
         val plan = currentPlan ?: return observeCurrentScreen()
-        phase = if (plan.actions.any { it.status == AgentActionStatus.PENDING_CONFIRMATION }) {
-            AgentPhase.WAITING_CONFIRMATION
-        } else {
-            AgentPhase.PLANNING
+        phase = when {
+            plan.actions.any { it.status == AgentActionStatus.WAITING_RESPONSE } -> AgentPhase.WAITING_RESPONSE
+            plan.actions.any { it.status == AgentActionStatus.PENDING_CONFIRMATION } -> AgentPhase.WAITING_CONFIRMATION
+            else -> AgentPhase.PLANNING
         }
         lastActionResult = AgentActionResult(
             actionId = "agent-resumed",
@@ -2486,7 +2531,7 @@ class MobileNativeAgent(
                 targetTitle = plan.route.targetTitle.ifBlank { plan.selectedAgentOrModel },
                 risk = plan.safetyReview.risk,
                 blocked = plan.safetyReview.blocked,
-                result = result.ifBlank { plan.safetyReview.reason },
+                result = result.ifBlank { plan.safetyReview.reason }.take(MAX_TASK_RESULT_CHARACTERS),
                 verification = plan.verificationResults.lastOrNull()?.let { verification ->
                     "${verification.observedApp}:${verification.observedTitle}:${verification.success}"
                 }.orEmpty()
@@ -2560,6 +2605,8 @@ class MobileNativeAgent(
 
     companion object {
         private const val MAX_AUDIT_ITEMS = 20
+        private const val MAX_CONNECTOR_RESPONSE_CHARACTERS = 24_000
+        private const val MAX_TASK_RESULT_CHARACTERS = 4_000
     }
 }
 
@@ -4022,7 +4069,17 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         return AgentActionResult(
             actionId = action.id,
             success = published,
-            message = if (published) "Sent task to ${action.target}" else "Could not send task to ${action.target}"
+            message = if (published) "Waiting for ${action.target} response" else "Could not send task to ${action.target}",
+            metadata = if (published) {
+                mapOf(
+                    "awaiting_response" to "true",
+                    "source_message_id" to messageId.toString(),
+                    "contact_id" to contactId,
+                    "target" to action.target
+                )
+            } else {
+                emptyMap()
+            }
         )
     }
 
@@ -4076,11 +4133,26 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                     .put("delivery_trace", trace)
                     .toString()
             )
+            AgentConnectorResponseBus.publish(
+                appContext,
+                AgentConnectorResponse(
+                    sourceMessageId = messageId,
+                    contactId = contactId,
+                    content = reply,
+                    success = result.isSuccess
+                )
+            )
         }.start()
         return AgentActionResult(
             actionId = action.id,
             success = true,
-            message = "Queued cloud model task to ${contact.optString("name", contactId)}"
+            message = "Waiting for ${contact.optString("name", contactId)} response",
+            metadata = mapOf(
+                "awaiting_response" to "true",
+                "source_message_id" to messageId.toString(),
+                "contact_id" to contactId,
+                "target" to contact.optString("name", contactId)
+            )
         )
     }
 
@@ -4834,11 +4906,13 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("action_id", result.actionId)
         .put("success", result.success)
         .put("message", result.message)
+        .put("metadata", JSONObject(result.metadata))
 
     private fun decodeActionResult(json: JSONObject): AgentActionResult = AgentActionResult(
         actionId = json.optString("action_id"),
         success = json.optBoolean("success"),
-        message = json.optString("message")
+        message = json.optString("message"),
+        metadata = decodeStringMap(json.optJSONObject("metadata"))
     )
 
     private fun encodeAudit(audit: AgentAuditEntry): JSONObject = JSONObject()
@@ -5131,6 +5205,9 @@ data class AgentPlan(
                     status == AgentActionStatus.FAILED && step.kind == AgentStepKind.CONFIRM_AND_ACT -> {
                         step.copy(status = AgentStepStatus.CURRENT)
                     }
+                    status == AgentActionStatus.WAITING_RESPONSE && step.kind == AgentStepKind.CONFIRM_AND_ACT -> {
+                        step.copy(status = AgentStepStatus.CURRENT)
+                    }
                     step.kind == AgentStepKind.ANALYZE_GOAL || step.kind == AgentStepKind.BUILD_PLAN -> {
                         step.copy(status = AgentStepStatus.DONE)
                     }
@@ -5226,7 +5303,8 @@ data class AgentSafetyReview(
 data class AgentActionResult(
     val actionId: String,
     val success: Boolean,
-    val message: String
+    val message: String,
+    val metadata: Map<String, String> = emptyMap()
 )
 
 data class AgentVerificationResult(
@@ -5276,6 +5354,7 @@ enum class AgentPhase {
     WAITING_CONFIRMATION,
     EXECUTING,
     VERIFYING,
+    WAITING_RESPONSE,
     PAUSED,
     CANCELLED,
     BLOCKED,
@@ -5325,6 +5404,7 @@ enum class AgentActionStatus {
     PROPOSED,
     PENDING_CONFIRMATION,
     RUNNING,
+    WAITING_RESPONSE,
     COMPLETED,
     FAILED,
     BLOCKED
@@ -5405,6 +5485,7 @@ enum class AgentAuditEvent {
     SCREEN_OBSERVED,
     GOAL_RECEIVED,
     INVOCATION_AUDIT,
+    CONNECTOR_RESPONSE_RECEIVED,
     MEMORY_SKIPPED,
     MEMORY_FORGOTTEN,
     KNOWLEDGE_IMPORTED,

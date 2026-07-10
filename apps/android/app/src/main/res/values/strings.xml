@@ -227,6 +227,7 @@
     <string name="agent_status_accessibility_needed_subtitle">Tap here to open Accessibility settings</string>
     <string name="agent_status_waiting_confirmation">Confirm action</string>
     <string name="agent_status_executing">Executing action</string>
+    <string name="agent_status_waiting_response">Waiting for response</string>
     <string name="agent_status_paused">Task paused</string>
     <string name="agent_status_paused_subtitle">Execution is paused. Resume when you are ready.</string>
     <string name="agent_status_blocked">Action blocked</string>

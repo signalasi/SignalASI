@@ -240,6 +240,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val cloudExecutor = Executors.newCachedThreadPool()
     private val historySaveSeq = AtomicInteger()
     private lateinit var mobileNativeAgent: MobileNativeAgent
+    private val agentConnectorResponseListener = AgentConnectorResponseListener { response ->
+        runOnUiThread { consumeAgentConnectorResponse(response) }
+    }
     private val messages = mutableMapOf<String, MutableList<ChatMessage>>()
     private val summaries = mutableMapOf<String, ContactSummary>()
     private var selectedContact: Contact? = null
@@ -479,13 +482,48 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     override fun onResume() {
         super.onResume()
         AppForegroundTracker.onActivityResumed()
+        AgentConnectorResponseBus.addListener(agentConnectorResponseListener)
+        consumePendingAgentConnectorResponses()
         reloadChatHistoryIfChanged()
     }
 
     override fun onPause() {
+        AgentConnectorResponseBus.removeListener(agentConnectorResponseListener)
         saveChatHistory(sync = true)
         AppForegroundTracker.onActivityPaused()
         super.onPause()
+    }
+
+    private fun publishAgentConnectorResponse(envelope: JSONObject?, message: ChatMessage) {
+        if (envelope?.optString("type").orEmpty().ifBlank { "text" } != "text") return
+        val sourceMessageId = envelope?.optString("source_message_id")?.toLongOrNull()
+            ?: envelope?.optLong("source_message_id", 0L)?.takeIf { it > 0L }
+            ?: return
+        AgentConnectorResponseBus.publish(
+            this,
+            AgentConnectorResponse(
+                sourceMessageId = sourceMessageId,
+                contactId = envelope?.optString("contact_id").orEmpty().ifBlank { message.contact.id },
+                content = message.content
+            )
+        )
+    }
+
+    private fun consumeAgentConnectorResponse(response: AgentConnectorResponse) {
+        val state = mobileNativeAgent.acceptConnectorResponse(
+            sourceMessageId = response.sourceMessageId,
+            contactId = response.contactId,
+            content = response.content,
+            success = response.success
+        ) ?: return
+        AgentConnectorResponseStore.remove(this, response)
+        renderAgentState(state)
+    }
+
+    private fun consumePendingAgentConnectorResponses() {
+        AgentConnectorResponseStore.pending(this).forEach { response ->
+            consumeAgentConnectorResponse(response)
+        }
     }
 
     override fun onBackPressed() {
@@ -543,11 +581,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     override fun onMessage(payload: String) {
         runOnUiThread {
+            val envelope = runCatching { JSONObject(payload) }.getOrNull()
             val msg = parseIncomingMessage(payload)
             if (msg.content.isBlank()) return@runOnUiThread
             msg.deliveryTrace.add(newTraceEvent("received", "MQTT inbound"))
             msg.deliveryTrace.add(newTraceEvent("decrypted", "SignalASI Link"))
             addMessage(msg, fromIncoming = true)
+            publishAgentConnectorResponse(envelope, msg)
             showVoiceAssistantReply(msg)
             maybeSpeakIncomingReply(msg)
         }
@@ -790,6 +830,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             val state = mobileNativeAgent.snapshot()
             if (state.phase == AgentPhase.PAUSED) {
                 renderAgentState(mobileNativeAgent.resumeCurrentTask())
+            } else if (state.phase == AgentPhase.WAITING_RESPONSE) {
+                renderAgentState(mobileNativeAgent.cancelCurrentTask())
             } else if (state.pendingAction != null) {
                 renderAgentState(mobileNativeAgent.cancelCurrentTask())
             } else if (agentVoiceListening) {
@@ -814,11 +856,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val state = mobileNativeAgent.snapshot()
         if (state.phase == AgentPhase.PAUSED) {
             renderAgentState(mobileNativeAgent.resumeCurrentTask())
+        } else if (state.phase == AgentPhase.WAITING_RESPONSE) {
+            return
         } else if (state.pendingAction != null) {
             if (state.pendingAction.kind == AgentActionKind.IMPORT_WEB_KNOWLEDGE) {
                 runAgentOperationAsync { mobileNativeAgent.approveNextAction() }
             } else {
                 renderAgentState(mobileNativeAgent.approveNextAction())
+                consumePendingAgentConnectorResponses()
             }
         } else {
             submitAgentGoal()
@@ -1591,6 +1636,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             state.phase == AgentPhase.BLOCKED -> getString(R.string.agent_status_blocked)
             state.phase == AgentPhase.WAITING_CONFIRMATION -> getString(R.string.agent_status_waiting_confirmation)
             state.phase == AgentPhase.EXECUTING -> getString(R.string.agent_status_executing)
+            state.phase == AgentPhase.WAITING_RESPONSE -> getString(R.string.agent_status_waiting_response)
             state.phase == AgentPhase.PAUSED -> getString(R.string.agent_status_paused)
             state.phase == AgentPhase.COMPLETED -> getString(R.string.agent_status_completed)
             state.phase == AgentPhase.FAILED -> getString(R.string.agent_status_failed)
@@ -1688,14 +1734,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         )
         agentVoiceButton.text = when {
             state.phase == AgentPhase.PAUSED -> getString(R.string.agent_resume_button)
+            state.phase == AgentPhase.WAITING_RESPONSE -> getString(R.string.common_cancel)
             pendingAction != null -> getString(R.string.common_cancel)
             else -> getString(R.string.agent_voice_button)
         }
         agentSubmitButton.text = when {
             state.phase == AgentPhase.PAUSED -> "›"
+            state.phase == AgentPhase.WAITING_RESPONSE -> "…"
             pendingAction != null -> getString(R.string.agent_confirm_button)
             else -> "›"
         }
+        agentSubmitButton.isEnabled = state.phase != AgentPhase.WAITING_RESPONSE && !agentOperationInFlight
 
         val statusViews = mapOf(
             AgentStepKind.OBSERVE_SCREEN to Pair(agentStepObserveNumber, agentStepObserveStatus),
@@ -2321,6 +2370,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         AgentActionStatus.FAILED,
         AgentActionStatus.BLOCKED -> getColorCompat(R.color.unread_red)
         AgentActionStatus.RUNNING -> getColorCompat(R.color.signalasi_green)
+        AgentActionStatus.WAITING_RESPONSE -> getColorCompat(R.color.signalasi_green)
         else -> getColorCompat(R.color.text_secondary)
     }
 
@@ -2756,6 +2806,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         task.phase == AgentPhase.EXECUTING ||
             task.phase == AgentPhase.VERIFYING ||
             task.phase == AgentPhase.PLANNING ||
+            task.phase == AgentPhase.WAITING_RESPONSE ||
             task.phase == AgentPhase.WAITING_CONFIRMATION -> getString(R.string.agent_recent_status_running)
         else -> task.phase.name.lowercase(Locale.US)
     }
