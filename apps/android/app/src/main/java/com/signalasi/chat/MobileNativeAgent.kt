@@ -2700,7 +2700,7 @@ class MobileNativeAgent(
         result: String,
         parameters: Map<String, String>
     ): AgentUiState {
-        val success = currentScreen.isAccessibilityEnabled
+        val success = currentScreen.isAccessibilityEnabled || currentScreen.visualScene.available
         val status = if (success) AgentActionStatus.COMPLETED else AgentActionStatus.FAILED
         val action = AgentAction(
             id = actionId,
@@ -4397,6 +4397,9 @@ interface ScreenPerceptionProvider {
 
 class AndroidScreenPerceptionProvider(private val context: Context) : ScreenPerceptionProvider {
     override fun capture(): ScreenContext {
+        if (AgentScreenCaptureService.isActive()) {
+            AgentScreenCaptureService.requestCapture(context.applicationContext)
+        }
         val defaultTitle = context.getString(R.string.tab_agent)
         val screen = SignalASIAccessibilityService.captureCurrentScreen(
             defaultApp = "SignalASI",
@@ -4409,6 +4412,9 @@ class AndroidScreenPerceptionProvider(private val context: Context) : ScreenPerc
     }
 
     override fun capture(foregroundApp: String, pageTitle: String): ScreenContext {
+        if (AgentScreenCaptureService.isActive()) {
+            AgentScreenCaptureService.requestCapture(context.applicationContext)
+        }
         val screen = SignalASIAccessibilityService.captureCurrentScreen(
             defaultApp = foregroundApp,
             defaultTitle = pageTitle
@@ -4635,7 +4641,12 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                     risk = AgentRisk.MEDIUM,
                     status = AgentActionStatus.PENDING_CONFIRMATION,
                     description = "Tap the first clickable element",
-                    parameters = mapOf("bounds" to firstElement?.bounds.orEmpty())
+                    parameters = mapOf(
+                        "bounds" to firstElement?.bounds.orEmpty(),
+                        "element_origin" to firstElement?.origin?.name.orEmpty(),
+                        "element_role" to firstElement?.visualRole?.name.orEmpty(),
+                        "element_confidence" to firstElement?.confidence?.toString().orEmpty()
+                    )
                 )
             }
             lower.startsWith("tap ") || lower.startsWith("click ") -> namedTapAction(request)
@@ -4752,7 +4763,10 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             parameters = mapOf(
                 "bounds" to element?.bounds.orEmpty(),
                 "query" to query,
-                "matched_label" to element?.label.orEmpty()
+                "matched_label" to element?.label.orEmpty(),
+                "element_origin" to element?.origin?.name.orEmpty(),
+                "element_role" to element?.visualRole?.name.orEmpty(),
+                "element_confidence" to element?.confidence?.toString().orEmpty()
             )
         )
     }
@@ -4773,7 +4787,10 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             parameters = mapOf(
                 "bounds" to element?.bounds.orEmpty(),
                 "query" to query,
-                "matched_label" to element?.label.orEmpty()
+                "matched_label" to element?.label.orEmpty(),
+                "element_origin" to element?.origin?.name.orEmpty(),
+                "element_role" to element?.visualRole?.name.orEmpty(),
+                "element_confidence" to element?.confidence?.toString().orEmpty()
             )
         )
     }
@@ -4798,19 +4815,16 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 "text" to text,
                 "field_bounds" to field?.bounds.orEmpty(),
                 "query" to query,
-                "matched_label" to field?.label.orEmpty()
+                "matched_label" to field?.label.orEmpty(),
+                "field_origin" to field?.origin?.name.orEmpty(),
+                "field_confidence" to field?.confidence?.toString().orEmpty()
             )
         )
     }
 
     private fun findElementByQuery(elements: List<ScreenElement>, query: String): ScreenElement? {
-        val normalizedQuery = query.normalizedElementQuery()
-        if (normalizedQuery.isBlank()) return elements.firstOrNull()
-        return elements.firstOrNull { element ->
-            element.label.normalizedElementQuery().contains(normalizedQuery) ||
-                element.viewId.normalizedElementQuery().contains(normalizedQuery) ||
-                element.className.normalizedElementQuery().contains(normalizedQuery)
-        }
+        if (query.isBlank()) return elements.firstOrNull()
+        return AgentScreenElementMatcher.resolve(query, elements)
     }
 
     private fun connectorAction(request: AgentRequest, connectorId: String, description: String): AgentAction {
@@ -5356,8 +5370,18 @@ object AgentPlanValidator {
                 action.parameters["bounds"].isNullOrBlank()) {
                 issues += "action_bounds_missing:${action.id}"
             }
+            if ((action.kind == AgentActionKind.TAP || action.kind == AgentActionKind.LONG_PRESS) &&
+                !action.parameters["bounds"].isNullOrBlank() &&
+                !validBounds(action.parameters["bounds"].orEmpty())) {
+                issues += "action_bounds_invalid:${action.id}"
+            }
             if (action.kind == AgentActionKind.TYPE_TEXT && action.parameters["text"].isNullOrBlank()) {
                 issues += "action_text_missing:${action.id}"
+            }
+            if (action.kind == AgentActionKind.TYPE_TEXT &&
+                !action.parameters["field_bounds"].isNullOrBlank() &&
+                !validBounds(action.parameters["field_bounds"].orEmpty())) {
+                issues += "action_field_bounds_invalid:${action.id}"
             }
             if (action.kind == AgentActionKind.IMPORT_WEB_KNOWLEDGE && action.parameters["url"].isNullOrBlank()) {
                 issues += "action_url_missing:${action.id}"
@@ -5400,6 +5424,16 @@ object AgentPlanValidator {
             issues = issues
         )
     }
+
+    private fun validBounds(value: String): Boolean {
+        val bounds = value.split(',').mapNotNull { it.trim().toIntOrNull() }
+        if (bounds.size != 4) return false
+        val (left, top, right, bottom) = bounds
+        return left >= 0 && top >= 0 && right > left && bottom > top &&
+            right <= MAX_GROUNDED_COORDINATE && bottom <= MAX_GROUNDED_COORDINATE
+    }
+
+    private const val MAX_GROUNDED_COORDINATE = 20_000
 }
 
 interface AgentSafetyPolicy {
@@ -5526,12 +5560,15 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         AgentActionKind.TYPE_TEXT -> {
             val text = action.parameters["text"].orEmpty()
             val fieldBounds = action.parameters["field_bounds"].orEmpty()
+            val fieldOrigin = action.parameters["field_origin"].orEmpty()
             if (text.isBlank()) {
                 AgentActionResult(action.id, false, "No text was provided")
             } else {
                 serviceAction(action.id, "Text input executed") {
                     if (fieldBounds.isBlank()) {
                         SignalASIAccessibilityService.performTextInput(text)
+                    } else if (fieldOrigin == AgentElementOrigin.VISUAL_OCR.name) {
+                        SignalASIAccessibilityService.performGroundedTextInput(fieldBounds, text)
                     } else {
                         SignalASIAccessibilityService.performTextInput(fieldBounds, text)
                     }
@@ -6946,7 +6983,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
     }
 
     private fun encodeSession(snapshot: AgentSessionSnapshot): JSONObject = JSONObject()
-        .put("version", 2)
+        .put("version", 3)
         .put("session_id", snapshot.sessionId)
         .put("phase", snapshot.phase.name)
         .put("current_goal", snapshot.currentGoal)
@@ -6991,6 +7028,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("sensitive_flags", JSONArray().also { array ->
             screen.sensitiveFlags.forEach { array.put(it) }
         })
+        .put("visual_scene", encodeVisualScene(screen.visualScene))
         .put("clipboard_context", encodeClipboardContext(screen.clipboard))
         .put("notification_context", encodeNotificationContext(screen.notifications))
         .put("installed_apps", encodeInstalledApps(screen.installedApps))
@@ -7016,6 +7054,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
             inputFields = decodeElements(json.optJSONArray("input_fields")),
             scrollableRegions = decodeElements(json.optJSONArray("scrollable_regions")),
             sensitiveFlags = decodeStringList(json.optJSONArray("sensitive_flags")),
+            visualScene = decodeVisualScene(json.optJSONObject("visual_scene")),
             clipboard = decodeClipboardContext(json.optJSONObject("clipboard_context")),
             notifications = decodeNotificationContext(json.optJSONObject("notification_context")),
             installedApps = decodeInstalledApps(json.optJSONArray("installed_apps")),
@@ -7500,6 +7539,10 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("view_id", element.viewId)
         .put("class_name", element.className)
         .put("bounds", element.bounds)
+        .put("origin", element.origin.name)
+        .put("confidence", element.confidence.toDouble())
+        .put("visual_role", element.visualRole.name)
+        .put("actionable", element.actionable)
 
     private fun decodeElements(array: JSONArray?): List<ScreenElement> {
         if (array == null) return emptyList()
@@ -7517,7 +7560,64 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
             label = item.optString("label"),
             viewId = item.optString("view_id"),
             className = item.optString("class_name"),
-            bounds = item.optString("bounds")
+            bounds = item.optString("bounds"),
+            origin = enumOrDefault(item.optString("origin"), AgentElementOrigin.ACCESSIBILITY),
+            confidence = item.optDouble("confidence", 1.0).toFloat().coerceIn(0f, 1f),
+            visualRole = enumOrDefault(item.optString("visual_role"), AgentVisualRole.UNKNOWN),
+            actionable = item.optBoolean("actionable", true)
+        )
+    }
+
+    private fun encodeVisualScene(scene: AgentVisualScene): JSONObject = JSONObject()
+        .put("width", scene.width)
+        .put("height", scene.height)
+        .put("model_profile", scene.modelProfile)
+        .put("action_candidate_count", scene.actionCandidateCount)
+        .put("input_candidate_count", scene.inputCandidateCount)
+        .put("timestamp_millis", scene.timestampMillis)
+        .put("elements", JSONArray().also { array ->
+            scene.elements.take(MAX_SESSION_VISUAL_ELEMENTS).forEach { element ->
+                array.put(
+                    JSONObject()
+                        .put("text", element.text)
+                        .put("bounds", element.bounds)
+                        .put("confidence", element.confidence.toDouble())
+                        .put("role", element.role.name)
+                        .put("actionable", element.actionable)
+                        .put("input_candidate", element.inputCandidate)
+                )
+            }
+        })
+
+    private fun decodeVisualScene(json: JSONObject?): AgentVisualScene {
+        if (json == null) return AgentVisualScene()
+        val elements = buildList {
+            val array = json.optJSONArray("elements") ?: JSONArray()
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val text = item.optString("text").trim()
+                val bounds = item.optString("bounds")
+                if (text.isBlank() || bounds.isBlank()) continue
+                add(
+                    AgentVisualElement(
+                        text = text,
+                        bounds = bounds,
+                        confidence = item.optDouble("confidence", 1.0).toFloat().coerceIn(0f, 1f),
+                        role = enumOrDefault(item.optString("role"), AgentVisualRole.UNKNOWN),
+                        actionable = item.optBoolean("actionable"),
+                        inputCandidate = item.optBoolean("input_candidate")
+                    )
+                )
+            }
+        }
+        return AgentVisualScene(
+            width = json.optInt("width"),
+            height = json.optInt("height"),
+            modelProfile = json.optString("model_profile", "none"),
+            elements = elements,
+            actionCandidateCount = json.optInt("action_candidate_count", elements.count { it.actionable }),
+            inputCandidateCount = json.optInt("input_candidate_count", elements.count { it.inputCandidate }),
+            timestampMillis = json.optLong("timestamp_millis")
         )
     }
 
@@ -7542,6 +7642,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
     companion object {
         private const val PREFS = "signalasi_agent_runtime"
         private const val KEY_SESSION = "session"
+        private const val MAX_SESSION_VISUAL_ELEMENTS = 60
     }
 }
 
@@ -7633,6 +7734,7 @@ data class ScreenContext(
     val inputFields: List<ScreenElement> = emptyList(),
     val scrollableRegions: List<ScreenElement> = emptyList(),
     val sensitiveFlags: List<String> = emptyList(),
+    val visualScene: AgentVisualScene = AgentVisualScene(),
     val clipboard: ClipboardContext = ClipboardContext(),
     val notifications: AgentNotificationContext = AgentNotificationContext(),
     val installedApps: List<InstalledAppInfo> = emptyList(),

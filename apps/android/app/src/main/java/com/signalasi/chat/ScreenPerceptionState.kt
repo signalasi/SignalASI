@@ -5,6 +5,7 @@ import java.util.concurrent.CopyOnWriteArraySet
 data class AgentVisualScreenResult(
     val success: Boolean,
     val textLines: List<String> = emptyList(),
+    val scene: AgentVisualScene = AgentVisualScene(),
     val width: Int = 0,
     val height: Int = 0,
     val sourcePackage: String = "",
@@ -13,14 +14,18 @@ data class AgentVisualScreenResult(
 ) {
     companion object {
         fun success(
-            textLines: List<String>,
+            scene: AgentVisualScene,
             width: Int,
             height: Int,
             sourcePackage: String = ""
         ): AgentVisualScreenResult =
             AgentVisualScreenResult(
                 success = true,
-                textLines = textLines.map { it.take(MAX_VISUAL_TEXT_LENGTH) }.take(MAX_VISUAL_TEXT_ITEMS),
+                textLines = scene.elements
+                    .map { it.text.take(MAX_VISUAL_TEXT_LENGTH) }
+                    .distinct()
+                    .take(MAX_VISUAL_TEXT_ITEMS),
+                scene = scene,
                 width = width.coerceAtLeast(0),
                 height = height.coerceAtLeast(0),
                 sourcePackage = sourcePackage.take(MAX_PACKAGE_LENGTH)
@@ -90,6 +95,7 @@ object ScreenPerceptionState {
             it.sourcePackage.isBlank() || it.sourcePackage == snapshot.packageName
         }
         val visualTexts = matchingVisual?.textLines.orEmpty()
+        val visualScene = matchingVisual?.scene ?: AgentVisualScene()
         val combinedTexts = snapshot.visibleTexts
             .plus(visualTexts)
             .map { it.trim() }
@@ -101,22 +107,28 @@ object ScreenPerceptionState {
             .plus(visualSensitiveFlags)
             .distinct()
             .take(MAX_SENSITIVE_FLAGS)
+        val clickableElements = AgentVisualGrounding.fuseClickableElements(
+            snapshot.clickableElements,
+            visualScene
+        )
+        val inputFields = AgentVisualGrounding.fuseInputFields(snapshot.inputFields, visualScene)
         return ScreenContext(
             foregroundApp = displayPackageName(snapshot.packageName, defaultApp),
             activityName = snapshot.className,
             pageTitle = snapshot.pageTitle.ifBlank { defaultTitle },
             visibleTextCount = combinedTexts.size,
-            clickableNodeCount = snapshot.clickableElements.size,
-            inputFieldCount = snapshot.inputFields.size,
+            clickableNodeCount = clickableElements.size,
+            inputFieldCount = inputFields.size,
             scrollableRegionCount = snapshot.scrollableRegions.size,
             sensitiveFlagCount = combinedSensitiveFlags.size,
             visibleTexts = combinedTexts,
             selectedText = snapshot.selectedText,
             focusedInputField = snapshot.focusedInputField,
-            clickableElements = snapshot.clickableElements,
-            inputFields = snapshot.inputFields,
+            clickableElements = clickableElements,
+            inputFields = inputFields,
             scrollableRegions = snapshot.scrollableRegions,
             sensitiveFlags = combinedSensitiveFlags,
+            visualScene = visualScene,
             isAccessibilityEnabled = true,
             snapshotAgeMillis = minOf(
                 now - snapshot.timestampMillis,
@@ -132,14 +144,22 @@ object ScreenPerceptionState {
         now: Long
     ): ScreenContext {
         val lines = visual?.textLines.orEmpty()
+        val scene = visual?.scene ?: AgentVisualScene()
+        val clickableElements = AgentVisualGrounding.fuseClickableElements(emptyList(), scene)
+        val inputFields = AgentVisualGrounding.fuseInputFields(emptyList(), scene)
         val sensitiveFlags = sensitiveFlagsFor(lines)
         return ScreenContext(
             foregroundApp = visual?.sourcePackage?.ifBlank { defaultApp } ?: defaultApp,
             pageTitle = visual?.sourcePackage?.substringAfterLast('.')?.ifBlank { defaultTitle } ?: defaultTitle,
             visibleTextCount = lines.size,
             visibleTexts = lines,
+            clickableNodeCount = clickableElements.size,
+            inputFieldCount = inputFields.size,
+            clickableElements = clickableElements,
+            inputFields = inputFields,
             sensitiveFlagCount = sensitiveFlags.size,
             sensitiveFlags = sensitiveFlags,
+            visualScene = scene,
             isAccessibilityEnabled = false,
             snapshotAgeMillis = visual?.let { now - it.timestampMillis } ?: 0L
         )
@@ -212,5 +232,9 @@ data class ScreenElement(
     val label: String,
     val viewId: String,
     val className: String,
-    val bounds: String
+    val bounds: String,
+    val origin: AgentElementOrigin = AgentElementOrigin.ACCESSIBILITY,
+    val confidence: Float = 1f,
+    val visualRole: AgentVisualRole = AgentVisualRole.UNKNOWN,
+    val actionable: Boolean = true
 )

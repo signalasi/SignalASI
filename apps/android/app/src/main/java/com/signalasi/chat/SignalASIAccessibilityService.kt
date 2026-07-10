@@ -121,6 +121,23 @@ class SignalASIAccessibilityService : AccessibilityService() {
         return setNodeText(node, text)
     }
 
+    private fun tapThenType(bounds: String, text: String): Boolean {
+        val rect = parseBounds(bounds) ?: return false
+        val path = Path().apply { moveTo(rect.centerX().toFloat(), rect.centerY().toFloat()) }
+        return dispatchGesture(
+            GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
+                .build(),
+            object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription) {
+                    val focused = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                    if (focused != null) setNodeText(focused, text)
+                }
+            },
+            null
+        )
+    }
+
     private fun clearFocusedField(): Boolean {
         val node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
         return setNodeText(node, "")
@@ -154,6 +171,7 @@ class SignalASIAccessibilityService : AccessibilityService() {
     private fun parseBounds(bounds: String): Rect? {
         val parts = bounds.split(",").mapNotNull { it.trim().toIntOrNull() }
         if (parts.size != 4) return null
+        if (parts[0] < 0 || parts[1] < 0 || parts[2] <= parts[0] || parts[3] <= parts[1]) return null
         return Rect(parts[0], parts[1], parts[2], parts[3])
     }
 
@@ -188,6 +206,9 @@ class SignalASIAccessibilityService : AccessibilityService() {
 
         fun performTextInput(bounds: String, text: String): Boolean =
             activeService?.typeIntoField(bounds, text) == true
+
+        fun performGroundedTextInput(bounds: String, text: String): Boolean =
+            activeService?.tapThenType(bounds, text) == true
 
         fun performClearText(): Boolean = activeService?.clearFocusedField() == true
 

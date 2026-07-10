@@ -139,7 +139,15 @@ object AgentModelPlanParser {
         AgentActionKind.LONG_PRESS -> resolveElement(
             input.optString("element_query"),
             request.screen.clickableElements
-        )?.let { mapOf("bounds" to it.bounds, "matched_label" to it.safeLabel()) }
+        )?.let {
+            mapOf(
+                "bounds" to it.bounds,
+                "matched_label" to it.safeLabel(),
+                "element_origin" to it.origin.name,
+                "element_role" to it.visualRole.name,
+                "element_confidence" to it.confidence.toString()
+            )
+        }
 
         AgentActionKind.TYPE_TEXT -> {
             val text = input.optString("text").take(MAX_TEXT_INPUT_CHARACTERS)
@@ -147,7 +155,9 @@ object AgentModelPlanParser {
             if (text.isBlank() || field == null || field.isSensitiveInput()) null else mapOf(
                 "text" to text,
                 "field_bounds" to field.bounds,
-                "matched_label" to field.safeLabel()
+                "matched_label" to field.safeLabel(),
+                "field_origin" to field.origin.name,
+                "field_confidence" to field.confidence.toString()
             )
         }
 
@@ -156,7 +166,9 @@ object AgentModelPlanParser {
             val field = resolveInputField(input.optString("field_query"), request.screen)
             if (field == null || field.isSensitiveInput()) null else mapOf(
                 "field_bounds" to field.bounds,
-                "matched_label" to field.safeLabel()
+                "matched_label" to field.safeLabel(),
+                "field_origin" to field.origin.name,
+                "field_confidence" to field.confidence.toString()
             )
         }
 
@@ -230,13 +242,7 @@ object AgentModelPlanParser {
         if (query.isBlank()) screen.focusedInputField else resolveElement(query, screen.inputFields)
 
     private fun resolveElement(query: String, elements: List<ScreenElement>): ScreenElement? {
-        val clean = query.normalizedQuery()
-        if (clean.isBlank()) return null
-        return elements.firstOrNull { element ->
-            element.label.normalizedQuery().contains(clean) ||
-                element.viewId.normalizedQuery().contains(clean) ||
-                element.className.normalizedQuery().contains(clean)
-        }
+        return AgentScreenElementMatcher.resolve(query, elements)
     }
 
     private fun swipeParameters(direction: String): Map<String, String>? = when (direction.lowercase(Locale.US)) {

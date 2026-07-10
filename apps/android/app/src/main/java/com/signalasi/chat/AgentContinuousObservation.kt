@@ -131,6 +131,10 @@ class AgentContinuousObservationController(
             .joinToString("\u001f")
             .hashCode(),
         visibleTextCount = visibleTextCount,
+        visualLayoutHash = visualScene.elements
+            .take(MAX_FINGERPRINT_VISUAL_ITEMS)
+            .joinToString("\u001f") { "${it.text}:${it.bounds}:${it.role.name}" }
+            .hashCode(),
         clickableNodeCount = clickableNodeCount,
         inputFieldCount = inputFieldCount,
         scrollableRegionCount = scrollableRegionCount
@@ -143,6 +147,7 @@ class AgentContinuousObservationController(
         const val MAX_ALLOWED_SAMPLES = 30
         const val MAX_SAMPLE_INTERVAL_MILLIS = 2_000L
         const val MAX_FINGERPRINT_TEXT_ITEMS = 80
+        const val MAX_FINGERPRINT_VISUAL_ITEMS = 120
     }
 }
 
@@ -152,6 +157,7 @@ private data class AgentScreenFingerprint(
     val pageTitle: String,
     val visibleTextHash: Int,
     val visibleTextCount: Int,
+    val visualLayoutHash: Int,
     val clickableNodeCount: Int,
     val inputFieldCount: Int,
     val scrollableRegionCount: Int

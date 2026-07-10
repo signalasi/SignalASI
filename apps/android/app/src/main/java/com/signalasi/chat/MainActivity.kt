@@ -252,7 +252,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
                 Toast.makeText(
                     this,
-                    getString(R.string.agent_screen_ocr_ready, result.textLines.size),
+                    getString(
+                        R.string.agent_screen_visual_ready,
+                        result.textLines.size,
+                        result.scene.actionCandidateCount,
+                        result.scene.inputCandidateCount
+                    ),
                     Toast.LENGTH_SHORT
                 ).show()
             } else if (result.error.isNotBlank()) {
@@ -2962,6 +2967,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (deviceStatusMatches) {
             addScreenDeviceStatusSection(screen.deviceStatus)
         }
+        if (screen.visualScene.available) {
+            agentScreenDetailList.addView(agentScreenSectionTitle(getString(R.string.agent_screen_visual_grounding)))
+            agentScreenDetailList.addView(agentVisualSummaryRow(screen.visualScene))
+        }
         addScreenInstalledAppsSection(launchableApps)
         addScreenTextSection(getString(R.string.agent_screen_texts), visibleTexts)
         addScreenElementSection(getString(R.string.agent_screen_actions), actions, AgentScreenCommandKind.TAP)
@@ -3202,6 +3211,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun agentScreenElementRow(item: ScreenElement, commandKind: AgentScreenCommandKind): View {
         val label = item.label.ifBlank { item.viewId.ifBlank { item.className } }
+        val commandTarget = item.viewId.takeIf { item.origin == AgentElementOrigin.VISUAL_OCR && it.isNotBlank() }
+            ?: label
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundResource(R.drawable.agent_step_background)
@@ -3211,7 +3222,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(6) }
             setOnClickListener {
-                prefillAgentGoal(agentScreenCommand(label, commandKind))
+                prefillAgentGoal(agentScreenCommand(commandTarget, commandKind))
             }
 
             addView(TextView(this@MainActivity).apply {
@@ -3226,10 +3237,54 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 textSize = 11f
                 maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
-                text = getString(R.string.agent_screen_bounds, item.bounds.ifBlank { "-" })
+                text = getString(
+                    R.string.agent_screen_element_grounding,
+                    item.bounds.ifBlank { "-" },
+                    elementOriginLabel(item.origin),
+                    visualRoleLabel(item.visualRole),
+                    (item.confidence * 100).toInt().coerceIn(0, 100)
+                )
             })
         }
     }
+
+    private fun agentVisualSummaryRow(scene: AgentVisualScene): View = TextView(this).apply {
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(6) }
+        setBackgroundResource(R.drawable.agent_step_background)
+        setPadding(dp(14), dp(10), dp(14), dp(10))
+        setTextColor(getColorCompat(R.color.text_primary))
+        textSize = 13f
+        text = getString(
+            R.string.agent_screen_visual_summary,
+            scene.modelProfile,
+            scene.elements.size,
+            scene.actionCandidateCount,
+            scene.inputCandidateCount
+        )
+    }
+
+    private fun elementOriginLabel(origin: AgentElementOrigin): String = getString(
+        when (origin) {
+            AgentElementOrigin.ACCESSIBILITY -> R.string.agent_screen_origin_accessibility
+            AgentElementOrigin.VISUAL_OCR -> R.string.agent_screen_origin_visual
+            AgentElementOrigin.FUSED -> R.string.agent_screen_origin_fused
+        }
+    )
+
+    private fun visualRoleLabel(role: AgentVisualRole): String = getString(
+        when (role) {
+            AgentVisualRole.TITLE -> R.string.agent_visual_role_title
+            AgentVisualRole.BUTTON -> R.string.agent_visual_role_button
+            AgentVisualRole.INPUT -> R.string.agent_visual_role_input
+            AgentVisualRole.NAVIGATION -> R.string.agent_visual_role_navigation
+            AgentVisualRole.LIST_ITEM -> R.string.agent_visual_role_list_item
+            AgentVisualRole.TEXT -> R.string.agent_visual_role_text
+            AgentVisualRole.UNKNOWN -> R.string.agent_visual_role_unknown
+        }
+    )
 
     private fun agentScreenCommand(label: String, kind: AgentScreenCommandKind): String = when (kind) {
         AgentScreenCommandKind.TAP -> "tap $label"
@@ -6732,6 +6787,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             setOnClickListener { cycleAgentModelMaxActions() }
         })
         addSectionTitle(getString(R.string.on_device_agent_section_capabilities))
+        val visualScene = mobileNativeAgent.snapshot().currentScreen.visualScene
+        featureContent.addView(featureValueRow(
+            getString(R.string.on_device_agent_visual_model),
+            getString(R.string.on_device_agent_visual_model_subtitle),
+            R.drawable.ic_scan,
+            if (visualScene.available) visualScene.modelProfile else getString(R.string.permission_needs_setup)
+        ).apply {
+            setOnClickListener { startAgentScreenUnderstanding() }
+        })
         featureContent.addView(featureSwitchRow(
             getString(R.string.on_device_agent_allow_screen_observation),
             getString(R.string.on_device_agent_allow_screen_observation_subtitle),

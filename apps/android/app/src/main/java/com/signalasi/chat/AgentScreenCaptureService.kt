@@ -313,15 +313,24 @@ private class AgentScreenOcr(private val context: Context) {
         }
         recognizer.process(InputImage.fromBitmap(bitmap, 0))
             .addOnSuccessListener { text ->
-                val lines = text.textBlocks
+                val rawElements = text.textBlocks
                     .flatMap { it.lines }
-                    .map { it.text.replace(Regex("\\s+"), " ").trim() }
-                    .filter { it.isNotBlank() }
-                    .distinct()
+                    .mapNotNull { line ->
+                        val value = line.text.replace(Regex("\\s+"), " ").trim()
+                        val bounds = line.boundingBox ?: return@mapNotNull null
+                        if (value.isBlank()) return@mapNotNull null
+                        AgentVisualElement(
+                            text = value,
+                            bounds = "${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}",
+                            confidence = DEFAULT_OCR_CONFIDENCE
+                        )
+                    }
+                    .distinctBy { "${it.text}:${it.bounds}" }
                     .take(MAX_OCR_LINES)
+                val scene = AgentVisualGrounding.analyze(rawElements, bitmap.width, bitmap.height)
                 onResult(
                     AgentVisualScreenResult.success(
-                        lines,
+                        scene,
                         bitmap.width,
                         bitmap.height,
                         sourcePackage
@@ -342,5 +351,6 @@ private class AgentScreenOcr(private val context: Context) {
 
     private companion object {
         const val MAX_OCR_LINES = 120
+        const val DEFAULT_OCR_CONFIDENCE = 0.82f
     }
 }
