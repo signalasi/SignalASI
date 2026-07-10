@@ -60,6 +60,7 @@ class MobileNativeAgent(
     private val memoryStore: AgentMemoryStore = SharedPreferencesAgentMemoryStore(context),
     private val knowledgeStore: AgentKnowledgeStore = SharedPreferencesAgentKnowledgeStore(context),
     private val taskStore: AgentTaskStore = SharedPreferencesAgentTaskStore(context),
+    private val workflowStore: AgentWorkflowStore = SharedPreferencesAgentWorkflowStore(context),
     private val connectorRegistry: AgentConnectorRegistry = AppStoreAgentConnectorRegistry(context),
     private val sessionStore: AgentSessionStore = SharedPreferencesAgentSessionStore(context)
 ) {
@@ -210,6 +211,33 @@ class MobileNativeAgent(
         }
         taskSearchCommandValue(currentGoal)?.let { query ->
             return searchTasksCommand(query)
+        }
+        workflowSaveCommandValue(currentGoal)?.let { (name, workflowGoal) ->
+            return saveWorkflowCommand(name, workflowGoal)
+        }
+        if (workflowSaveSyntaxCommand(currentGoal)) {
+            return completeWorkflowManagementCommand(
+                actionId = "save-workflow-syntax",
+                description = "Show workflow save syntax",
+                result = "Use: save workflow Name :: goal",
+                risk = AgentRisk.LOW,
+                parameters = emptyMap()
+            )
+        }
+        if (workflowListCommand(currentGoal)) {
+            return showWorkflowsCommand()
+        }
+        workflowDeleteCommandValue(currentGoal)?.let { name ->
+            return deleteWorkflowCommand(name)
+        }
+        workflowRunCommandValue(currentGoal)?.let { name ->
+            return runWorkflowCommand(name)
+        }
+        if (templateListCommand(currentGoal)) {
+            return showTemplatesCommand()
+        }
+        templateRunCommandValue(currentGoal)?.let { name ->
+            return runTemplateCommand(name)
         }
         if (memoryOverviewCommand(currentGoal)) {
             return showMemoryOverviewCommand()
@@ -875,6 +903,56 @@ class MobileNativeAgent(
         }
     }
 
+    private fun workflowSaveCommandValue(goal: String): Pair<String, String>? {
+        val prefixes = listOf("save workflow ", "create workflow ")
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        val payload = goal.drop(prefix.length).trim()
+        val separator = when {
+            "::" in payload -> "::"
+            "=>" in payload -> "=>"
+            else -> return null
+        }
+        val name = payload.substringBefore(separator).trim()
+        val workflowGoal = payload.substringAfter(separator).trim()
+        return if (name.isNotBlank() && workflowGoal.isNotBlank()) name to workflowGoal else null
+    }
+
+    private fun workflowSaveSyntaxCommand(goal: String): Boolean =
+        goal.startsWith("save workflow ", ignoreCase = true) ||
+            goal.startsWith("create workflow ", ignoreCase = true)
+
+    private fun workflowListCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "workflows" ||
+            normalized == "list workflows" ||
+            normalized == "show workflows"
+    }
+
+    private fun workflowRunCommandValue(goal: String): String? {
+        val prefixes = listOf("run workflow ", "start workflow ")
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
+    private fun workflowDeleteCommandValue(goal: String): String? {
+        val prefixes = listOf("delete workflow ", "remove workflow ")
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
+    private fun templateListCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "workflow templates" ||
+            normalized == "list templates" ||
+            normalized == "show templates"
+    }
+
+    private fun templateRunCommandValue(goal: String): String? {
+        val prefixes = listOf("run template ", "start template ")
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
     private fun memoryOverviewCommand(goal: String): Boolean {
         val normalized = goal.trim().lowercase(Locale.US)
         return normalized == "memory status" ||
@@ -1098,7 +1176,7 @@ class MobileNativeAgent(
 
     private fun showCallableInventoryCommand(filter: CallableInventoryFilter): AgentUiState {
         val targets = connectorRegistry.availableTargets()
-        val tools = AgentSystemToolPlanner.availableTools()
+        val tools = workflowSystemTools() + AgentSystemToolPlanner.availableTools()
         val result = callableInventorySummary(filter, targets, tools)
         val action = AgentAction(
             id = "show-callable-inventory",
@@ -1142,7 +1220,7 @@ class MobileNativeAgent(
 
     private fun searchCallableInventoryCommand(query: String): AgentUiState {
         val targets = connectorRegistry.availableTargets()
-        val tools = AgentSystemToolPlanner.availableTools()
+        val tools = workflowSystemTools() + AgentSystemToolPlanner.availableTools()
         val result = callableInventorySearchSummary(query, targets, tools)
         val action = AgentAction(
             id = "search-callable-inventory",
@@ -1955,6 +2033,151 @@ class MobileNativeAgent(
         return snapshot()
     }
 
+    private fun saveWorkflowCommand(name: String, workflowGoal: String): AgentUiState {
+        val blockReason = sensitiveMemoryReason(workflowGoal, currentScreen)
+        val outcome = if (blockReason == null) runCatching { workflowStore.save(name, workflowGoal) } else null
+        val saved = outcome?.isSuccess == true
+        val result = if (blockReason != null) {
+            "Workflow was not saved: $blockReason"
+        } else {
+            outcome?.fold(
+                onSuccess = { workflow -> "Saved workflow ${workflow.name}" },
+                onFailure = { error -> error.message ?: "Workflow could not be saved" }
+            ) ?: "Workflow could not be saved"
+        }
+        return completeWorkflowManagementCommand(
+            actionId = "save-workflow",
+            description = "Save reusable Agent workflow",
+            result = result,
+            risk = AgentRisk.LOW,
+            parameters = mapOf("workflow_name" to name, "saved" to saved.toString())
+        )
+    }
+
+    private fun showWorkflowsCommand(): AgentUiState {
+        val workflows = workflowStore.list()
+        val result = if (workflows.isEmpty()) {
+            "No saved workflows. Use: save workflow Name :: goal"
+        } else {
+            buildString {
+                append("Saved workflows: ").append(workflows.size)
+                workflows.take(20).forEach { workflow ->
+                    append("\n").append(workflow.name)
+                    append(" | runs=").append(workflow.runCount)
+                    append(" | ").append(workflow.goal.replace(Regex("\\s+"), " ").take(120))
+                }
+            }
+        }
+        return completeWorkflowManagementCommand(
+            actionId = "list-workflows",
+            description = "Show saved Agent workflows",
+            result = result,
+            risk = AgentRisk.LOW,
+            parameters = mapOf("workflow_count" to workflows.size.toString())
+        )
+    }
+
+    private fun deleteWorkflowCommand(name: String): AgentUiState {
+        val deleted = workflowStore.delete(name)
+        val result = if (deleted > 0) "Deleted workflow $name" else "Workflow '$name' was not found"
+        return completeWorkflowManagementCommand(
+            actionId = "delete-workflow",
+            description = "Delete saved Agent workflow",
+            result = result,
+            risk = AgentRisk.MEDIUM,
+            parameters = mapOf("workflow_name" to name, "deleted_count" to deleted.toString())
+        )
+    }
+
+    private fun runWorkflowCommand(name: String): AgentUiState {
+        val workflow = workflowStore.find(name) ?: return completeWorkflowManagementCommand(
+            actionId = "run-workflow-missing",
+            description = "Find saved Agent workflow",
+            result = "Workflow '$name' was not found",
+            risk = AgentRisk.LOW,
+            parameters = mapOf("workflow_name" to name)
+        )
+        workflowStore.markRun(workflow.id)
+        recordAudit(AgentAuditEvent.WORKFLOW_RUN, "workflow_id=${workflow.id}; name_hash=${workflow.name.hashCode()}")
+        return submitGoal(workflow.goal)
+    }
+
+    private fun showTemplatesCommand(): AgentUiState {
+        val templates = AgentWorkflowTemplates.all
+        val result = buildString {
+            append("Workflow templates: ").append(templates.size)
+            templates.forEach { template ->
+                append("\n").append(template.name).append(" | ").append(template.goal)
+            }
+        }
+        return completeWorkflowManagementCommand(
+            actionId = "list-workflow-templates",
+            description = "Show built-in Agent workflow templates",
+            result = result,
+            risk = AgentRisk.LOW,
+            parameters = mapOf("template_count" to templates.size.toString())
+        )
+    }
+
+    private fun runTemplateCommand(name: String): AgentUiState {
+        val template = AgentWorkflowTemplates.find(name) ?: return completeWorkflowManagementCommand(
+            actionId = "run-template-missing",
+            description = "Find Agent workflow template",
+            result = "Template '$name' was not found",
+            risk = AgentRisk.LOW,
+            parameters = mapOf("template_name" to name)
+        )
+        recordAudit(AgentAuditEvent.WORKFLOW_RUN, "template_id=${template.id}")
+        return submitGoal(template.goal)
+    }
+
+    private fun completeWorkflowManagementCommand(
+        actionId: String,
+        description: String,
+        result: String,
+        risk: AgentRisk,
+        parameters: Map<String, String>
+    ): AgentUiState {
+        val action = AgentAction(
+            id = actionId,
+            kind = AgentActionKind.DRAFT_PLAN,
+            target = "Agent Workflows",
+            risk = risk,
+            status = AgentActionStatus.COMPLETED,
+            description = description,
+            parameters = parameters,
+            result = result
+        )
+        currentPlan = AgentPlan(
+            goal = currentGoal,
+            screen = currentScreen,
+            steps = completedSteps(),
+            actions = listOf(action),
+            selectedAgentOrModel = "Agent Workflows",
+            confirmationRequired = false,
+            expectedResult = result,
+            route = AgentRoute(
+                routeId = "agent-workflows",
+                kind = AgentRouteKind.LOCAL_SYSTEM,
+                targetId = "agent-workflows",
+                targetTitle = "Agent Workflows",
+                status = AgentConnectorStatus.AVAILABLE,
+                deliveryMode = "local",
+                capabilities = listOf(AgentCapability.TASK_EXECUTION)
+            ),
+            safetyReview = AgentSafetyReview(
+                risk = risk,
+                requiresConfirmation = false,
+                mode = safetyPolicy.permissionMode()
+            )
+        )
+        phase = AgentPhase.COMPLETED
+        lastActionResult = AgentActionResult(action.id, true, result)
+        recordAudit(AgentAuditEvent.WORKFLOW_UPDATED, "action=$actionId; ${parameters.entries.joinToString { "${it.key}:${it.value}" }}")
+        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
+        return snapshot()
+    }
+
     private fun callableInventorySummary(
         filter: CallableInventoryFilter,
         targets: List<AgentCallableTarget>,
@@ -2451,9 +2674,35 @@ class MobileNativeAgent(
         memoryCapture = safetySettingsStore.load().memoryCapture,
         callableTargets = targets,
         memories = memories,
+        systemTools = workflowSystemTools() + AgentSystemToolPlanner.availableTools(),
         knowledgeItems = knowledgeItems,
         knowledgeStats = knowledgeStats
     )
+
+    private fun workflowSystemTools(): List<AgentSystemTool> {
+        val workflows = workflowStore.list().take(3).map { workflow ->
+            AgentSystemTool(
+                id = "workflow:${workflow.id}",
+                title = workflow.name,
+                kind = AgentActionKind.DRAFT_PLAN,
+                risk = AgentRisk.MEDIUM,
+                capabilities = listOf(AgentCapability.TASK_EXECUTION),
+                examples = listOf("run workflow ${workflow.name}")
+            )
+        }
+        val templateLimit = if (workflows.isEmpty()) 3 else 1
+        val templates = AgentWorkflowTemplates.all.take(templateLimit).map { template ->
+            AgentSystemTool(
+                id = "template:${template.id}",
+                title = template.name,
+                kind = AgentActionKind.DRAFT_PLAN,
+                risk = AgentRisk.LOW,
+                capabilities = listOf(AgentCapability.TASK_EXECUTION),
+                examples = listOf("run template ${template.name}")
+            )
+        }
+        return workflows + templates
+    }
 
     private fun buildKnowledgeContent(
         goal: String,
@@ -5489,6 +5738,8 @@ enum class AgentAuditEvent {
     MEMORY_SKIPPED,
     MEMORY_FORGOTTEN,
     KNOWLEDGE_IMPORTED,
+    WORKFLOW_UPDATED,
+    WORKFLOW_RUN,
     ACTION_EXECUTED,
     ACTION_BLOCKED,
     TASK_CANCELLED,

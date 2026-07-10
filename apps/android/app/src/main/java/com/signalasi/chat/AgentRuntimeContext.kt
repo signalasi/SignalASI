@@ -55,6 +55,7 @@ object AgentRuntimeContextBuilder {
         memoryCapture: Boolean,
         callableTargets: List<AgentCallableTarget>,
         memories: List<AgentMemoryItem>,
+        systemTools: List<AgentSystemTool> = AgentSystemToolPlanner.availableTools(),
         knowledgeItems: List<AgentKnowledgeItem> = emptyList(),
         knowledgeStats: AgentKnowledgeStats = AgentKnowledgeStats()
     ): AgentRuntimeContext = AgentRuntimeContext(
@@ -64,7 +65,7 @@ object AgentRuntimeContextBuilder {
         permissionMode = permissionMode,
         highRiskGuard = highRiskGuard,
         memoryCapture = memoryCapture,
-        systemTools = AgentSystemToolPlanner.availableTools(),
+        systemTools = systemTools,
         callableTargets = callableTargets,
         memories = memories,
         knowledgeItems = knowledgeItems,

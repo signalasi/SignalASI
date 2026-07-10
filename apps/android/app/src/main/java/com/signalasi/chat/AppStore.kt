@@ -866,6 +866,7 @@ object AppStore {
         context.getSharedPreferences("signalasi_agent_knowledge", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_tasks", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_safety", Context.MODE_PRIVATE).edit().clear().commit()
+        context.getSharedPreferences("signalasi_agent_workflows", Context.MODE_PRIVATE).edit().clear().commit()
         AgentConnectorResponseStore.clear(context)
         HomeAssistantSettingsStore.clear(context)
         runCatching { AgentStorageCipher.deleteMasterKey() }

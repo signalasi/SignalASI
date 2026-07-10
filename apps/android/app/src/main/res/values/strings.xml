@@ -163,6 +163,11 @@
     <string name="automation_hero_subtitle">Let AI actively handle fixed tasks</string>
     <string name="section_active">Active</string>
     <string name="section_plan">Plan</string>
+    <string name="automation_saved_workflows">Saved Workflows</string>
+    <string name="automation_templates">Templates</string>
+    <string name="automation_no_workflows">No saved workflows</string>
+    <string name="automation_create_workflow_hint">Use: save workflow Name :: goal</string>
+    <string name="automation_run">Run</string>
     <string name="automation_morning_brief">Morning Brief</string>
     <string name="automation_morning_brief_subtitle">Push news and status every day at 08:00</string>
     <string name="automation_health_check">Health Check</string>
@@ -673,7 +678,7 @@
     <string name="backup_password_hint">Set an encryption password</string>
     <string name="backup_include_messages">Back up chat history</string>
     <string name="backup_include_agent_data">Agent memory and knowledge</string>
-    <string name="backup_include_agent_data_subtitle">Memory, knowledge, task history, safety settings, and Home Assistant configuration</string>
+    <string name="backup_include_agent_data_subtitle">Memory, knowledge, workflows, task history, safety settings, and Home Assistant configuration</string>
     <string name="backup_included">Included</string>
     <string name="backup_password_required">Enter a backup password</string>
     <string name="backup_export_file_name">signalasi_backup.hcbak</string>

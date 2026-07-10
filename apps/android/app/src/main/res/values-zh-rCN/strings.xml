@@ -153,6 +153,11 @@
     <string name="automation_hero_subtitle">让 AI 主动处理固定任务</string>
     <string name="section_active">运行中</string>
     <string name="section_plan">计划</string>
+    <string name="automation_saved_workflows">已保存工作流</string>
+    <string name="automation_templates">模板</string>
+    <string name="automation_no_workflows">暂无已保存工作流</string>
+    <string name="automation_create_workflow_hint">使用：save workflow 名称 :: 目标</string>
+    <string name="automation_run">运行</string>
     <string name="automation_morning_brief">晨间简报</string>
     <string name="automation_morning_brief_subtitle">每天 08:00 推送新闻和状态</string>
     <string name="automation_health_check">健康检查</string>
@@ -546,7 +551,7 @@
     <string name="backup_password_hint">设置加密密码</string>
     <string name="backup_include_messages">备份聊天记录</string>
     <string name="backup_include_agent_data">智能体记忆与知识库</string>
-    <string name="backup_include_agent_data_subtitle">记忆、知识库、任务历史、安全设置和 Home Assistant 配置</string>
+    <string name="backup_include_agent_data_subtitle">记忆、知识库、工作流、任务历史、安全设置和 Home Assistant 配置</string>
     <string name="backup_included">已包含</string>
     <string name="backup_password_required">请输入备份密码</string>
     <string name="backup_export_file_name">signalasi_backup.hcbak</string>

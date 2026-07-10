@@ -5284,14 +5284,53 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun showAutomationFeaturePage() {
+        val workflows = SharedPreferencesAgentWorkflowStore(this).list()
+        val templates = AgentWorkflowTemplates.all
         showFeaturePage(getString(R.string.automation_title))
-        featureContent.addView(featureHeroCard(getString(R.string.automation_hero_title), getString(R.string.automation_hero_subtitle), R.drawable.ic_send_plane, "#FFB020", getString(R.string.count_items, 4)))
-        addSectionTitle(getString(R.string.section_active))
-        featureContent.addView(featureRow(getString(R.string.automation_morning_brief), getString(R.string.automation_morning_brief_subtitle), R.drawable.ic_send_plane, getString(R.string.status_running)))
-        featureContent.addView(featureRow(getString(R.string.automation_health_check), getString(R.string.automation_health_check_subtitle), R.drawable.ic_protocol_link, getString(R.string.status_running)))
-        addSectionTitle(getString(R.string.section_plan))
-        featureContent.addView(featureRow(getString(R.string.automation_device_alert), getString(R.string.automation_device_alert_subtitle), R.drawable.ic_security_shield, getString(R.string.status_enabled)))
-        featureContent.addView(featureRow(getString(R.string.automation_knowledge_review), getString(R.string.automation_knowledge_review_subtitle), R.drawable.ic_agent_node, getString(R.string.status_running)))
+        featureContent.addView(featureHeroCard(
+            getString(R.string.automation_hero_title),
+            getString(R.string.automation_hero_subtitle),
+            R.drawable.ic_send_plane,
+            "#FFB020",
+            getString(R.string.count_items, workflows.size)
+        ))
+        addSectionTitle(getString(R.string.automation_saved_workflows))
+        if (workflows.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.automation_no_workflows),
+                getString(R.string.automation_create_workflow_hint),
+                R.drawable.ic_send_plane,
+                ""
+            ))
+        } else {
+            workflows.forEach { workflow ->
+                featureContent.addView(featureRow(
+                    workflow.name,
+                    workflow.goal,
+                    R.drawable.ic_send_plane,
+                    getString(R.string.automation_run)
+                ).apply {
+                    setOnClickListener { openAgentWorkflow("run workflow ${workflow.name}") }
+                })
+            }
+        }
+        addSectionTitle(getString(R.string.automation_templates))
+        templates.forEach { template ->
+            featureContent.addView(featureRow(
+                template.name,
+                template.goal,
+                R.drawable.ic_agent_node,
+                getString(R.string.automation_run)
+            ).apply {
+                setOnClickListener { openAgentWorkflow("run template ${template.name}") }
+            })
+        }
+    }
+
+    private fun openAgentWorkflow(command: String) {
+        hideFeaturePage()
+        showMainTab(PAGE_AGENT)
+        prefillAgentGoal(command)
     }
 
     private fun showSecurityFeaturePage() {

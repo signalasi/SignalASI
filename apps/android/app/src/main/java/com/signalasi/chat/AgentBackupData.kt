@@ -8,6 +8,7 @@ object AgentBackupData {
     private const val MEMORY_PREFS = "signalasi_agent_memory"
     private const val KNOWLEDGE_PREFS = "signalasi_agent_knowledge"
     private const val TASK_PREFS = "signalasi_agent_tasks"
+    private const val WORKFLOW_PREFS = "signalasi_agent_workflows"
     private const val ITEMS_KEY = "items"
 
     fun export(context: Context): JSONObject {
@@ -18,6 +19,7 @@ object AgentBackupData {
             .put("memory", readArray(context, MEMORY_PREFS, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS))
             .put("knowledge", readArray(context, KNOWLEDGE_PREFS, MAX_KNOWLEDGE_ITEMS, MAX_KNOWLEDGE_ITEM_CHARACTERS))
             .put("tasks", readArray(context, TASK_PREFS, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS))
+            .put("workflows", readArray(context, WORKFLOW_PREFS, MAX_WORKFLOW_ITEMS, MAX_WORKFLOW_ITEM_CHARACTERS))
             .put(
                 "safety",
                 JSONObject()
@@ -47,6 +49,10 @@ object AgentBackupData {
         payload.optJSONArray("tasks")?.let { input ->
             val sanitized = sanitizeArray(input, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS)
             AgentEncryptedPreferences(context, TASK_PREFS).writeString(ITEMS_KEY, sanitized.toString())
+        }
+        payload.optJSONArray("workflows")?.let { input ->
+            val sanitized = sanitizeArray(input, MAX_WORKFLOW_ITEMS, MAX_WORKFLOW_ITEM_CHARACTERS)
+            AgentEncryptedPreferences(context, WORKFLOW_PREFS).writeString(ITEMS_KEY, sanitized.toString())
         }
         payload.optJSONObject("safety")?.let { json ->
             SharedPreferencesAgentSafetySettingsStore(context).save(
@@ -98,6 +104,8 @@ object AgentBackupData {
     private const val MAX_KNOWLEDGE_ITEM_CHARACTERS = 20_000
     private const val MAX_TASK_ITEMS = 200
     private const val MAX_TASK_ITEM_CHARACTERS = 12_000
+    private const val MAX_WORKFLOW_ITEMS = 100
+    private const val MAX_WORKFLOW_ITEM_CHARACTERS = 4_000
     private const val MAX_URL_CHARACTERS = 2_000
     private const val MAX_SECRET_CHARACTERS = 8_000
     private const val MAX_ENTITY_ID_CHARACTERS = 240
