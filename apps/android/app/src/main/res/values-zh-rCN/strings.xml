@@ -697,6 +697,9 @@
     <string name="agent_running_tasks_targets_value">运行任务：%1$d / 可调用对象：%2$d</string>
     <string name="agent_status_waiting_confirmation">确认动作</string>
     <string name="agent_status_executing">正在执行动作</string>
+    <string name="agent_high_risk_confirmation_title">确认高风险操作</string>
+    <string name="agent_high_risk_confirmation_message">操作：%1$s\n目标：%2$s\n风险：%3$s\n\n此操作可能影响安全、隐私、财产或他人。请再次确认后执行。</string>
+    <string name="agent_high_risk_confirmation_execute">确认并执行</string>
     <string name="agent_status_verifying">正在验证结果</string>
     <string name="agent_status_waiting_response">等待回复</string>
     <string name="agent_verification_observation">%1$s / %2$d 次采样 / %3$dms</string>

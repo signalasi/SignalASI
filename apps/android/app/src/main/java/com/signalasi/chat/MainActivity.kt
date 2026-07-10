@@ -911,10 +911,32 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         } else if (state.phase == AgentPhase.WAITING_RESPONSE) {
             return
         } else if (state.pendingAction != null) {
-            runAgentOperationAsync { mobileNativeAgent.approveNextAction() }
+            if (state.pendingAction.risk.weight >= AgentRisk.HIGH.weight) {
+                showHighRiskAgentConfirmation(state.pendingAction)
+            } else {
+                runAgentOperationAsync { mobileNativeAgent.approveNextAction() }
+            }
         } else {
             submitAgentGoal()
         }
+    }
+
+    private fun showHighRiskAgentConfirmation(action: AgentAction) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.agent_high_risk_confirmation_title))
+            .setMessage(
+                getString(
+                    R.string.agent_high_risk_confirmation_message,
+                    action.description,
+                    action.target.ifBlank { "-" },
+                    action.risk.name
+                )
+            )
+            .setPositiveButton(getString(R.string.agent_high_risk_confirmation_execute)) { _, _ ->
+                runAgentOperationAsync { mobileNativeAgent.approveNextAction(highRiskConfirmed = true) }
+            }
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .show()
     }
 
     private fun runAgentOperationAsync(operation: () -> AgentUiState) {

@@ -147,7 +147,12 @@ object HomeAssistantDeviceClient {
         }
     }
 
-    fun listEntities(context: Context, query: String = "", limit: Int = 40): HomeAssistantEntityResult {
+    fun listEntities(
+        context: Context,
+        query: String = "",
+        limit: Int = 40,
+        domains: Set<String> = emptySet()
+    ): HomeAssistantEntityResult {
         val settings = HomeAssistantSettingsStore.load(context)
         if (!settings.configured) {
             return HomeAssistantEntityResult(false, false, "Home Assistant local API is not configured")
@@ -161,6 +166,7 @@ object HomeAssistantDeviceClient {
                     val entityId = item.optString("entity_id").trim()
                     if (entityId.isBlank()) continue
                     val domain = entityId.substringBefore('.', "unknown")
+                    if (domains.isNotEmpty() && domain !in domains) continue
                     val attributes = item.optJSONObject("attributes") ?: JSONObject()
                     val friendlyName = attributes.optString("friendly_name").ifBlank { entityId }
                     val state = item.optString("state", "unknown")
@@ -185,6 +191,38 @@ object HomeAssistantDeviceClient {
                 message = "Loaded ${entities.size} Home Assistant entities",
                 entities = entities
             )
+        }
+    }
+
+    fun listScenes(context: Context, limit: Int = 40): HomeAssistantEntityResult =
+        listEntities(context, limit = limit, domains = setOf("scene"))
+
+    fun listAutomations(context: Context, limit: Int = 40): HomeAssistantEntityResult =
+        listEntities(context, limit = limit, domains = setOf("automation"))
+
+    fun listScripts(context: Context, limit: Int = 40): HomeAssistantEntityResult =
+        listEntities(context, limit = limit, domains = setOf("script"))
+
+    fun entityIdForPrompt(prompt: String): String = entityRegex.find(prompt)?.value.orEmpty()
+
+    fun entityIdForPrompt(context: Context, prompt: String): String =
+        entityIdForPrompt(prompt).ifBlank { HomeAssistantSettingsStore.load(context).defaultEntityId }
+
+    fun riskForPrompt(prompt: String): AgentRisk = riskForEntity(prompt, entityIdForPrompt(prompt))
+
+    fun riskForPrompt(context: Context, prompt: String): AgentRisk =
+        riskForEntity(prompt, entityIdForPrompt(context, prompt))
+
+    private fun riskForEntity(prompt: String, entityId: String): AgentRisk {
+        val lower = prompt.lowercase(Locale.US)
+        val domain = entityId.substringBefore('.', "")
+        return when {
+            domain in HIGH_RISK_CONTROL_DOMAINS -> AgentRisk.HIGH
+            domain == "cover" && HIGH_RISK_CONTROL_TERMS.any { lower.contains(it) } -> AgentRisk.HIGH
+            domain in MEDIUM_RISK_CONTROL_DOMAINS -> AgentRisk.MEDIUM
+            HIGH_RISK_CONTROL_TERMS.any { lower.contains(it) } -> AgentRisk.HIGH
+            MEDIUM_RISK_CONTROL_TERMS.any { lower.contains(it) } -> AgentRisk.MEDIUM
+            else -> AgentRisk.LOW
         }
     }
 
@@ -224,7 +262,21 @@ object HomeAssistantDeviceClient {
         val lower = prompt.lowercase(Locale.US)
         val entityId = entityRegex.find(prompt)?.value ?: settings.defaultEntityId
         if (entityId.isBlank()) return null
+        val entityDomain = entityId.substringBefore('.', "homeassistant")
+        val requestedDomain = when {
+            lower.contains("run automation") || lower.contains("trigger automation") -> "automation"
+            lower.contains("run script") || lower.contains("execute script") -> "script"
+            lower.contains("activate scene") || lower.contains("run scene") -> "scene"
+            else -> null
+        }
+        if (requestedDomain != null && entityDomain != requestedDomain) return null
         val service = when {
+            entityId.startsWith("automation.") || lower.contains("run automation") || lower.contains("trigger automation") ->
+                "trigger"
+            entityId.startsWith("script.") || lower.contains("run script") || lower.contains("execute script") ->
+                "turn_on"
+            entityId.startsWith("scene.") || lower.contains("activate scene") || lower.contains("run scene") ->
+                "turn_on"
             lower.contains("turn off") || lower.contains("power off") || lower.endsWith(" off") -> "turn_off"
             lower.contains("turn on") || lower.contains("power on") || lower.endsWith(" on") -> "turn_on"
             lower.contains("toggle") || lower.contains("switch") -> "toggle"
@@ -235,14 +287,23 @@ object HomeAssistantDeviceClient {
             lower.contains("activate") || lower.contains("scene") -> "turn_on"
             else -> "toggle"
         }
-        val entityDomain = entityId.substringBefore('.', "homeassistant")
         val serviceDomain = when (service) {
-            "turn_on", "turn_off", "toggle" -> "homeassistant"
+            "trigger" -> "automation"
+            "turn_on" -> when (entityDomain) {
+                "scene", "script" -> entityDomain
+                else -> "homeassistant"
+            }
+            "turn_off", "toggle" -> "homeassistant"
             "open_cover", "close_cover" -> "cover"
             "lock", "unlock" -> "lock"
             else -> entityDomain
         }
-        return HomeAssistantCommand(serviceDomain, service, entityId)
+        return HomeAssistantCommand(
+            domain = serviceDomain,
+            service = service,
+            entityId = entityId,
+            skipConditions = service == "trigger" && lower.contains("skip condition")
+        )
     }
 
     private fun runServiceCall(
@@ -257,7 +318,13 @@ object HomeAssistantDeviceClient {
                     postJson(
                         url = "${settings.baseUrl}/api/services/${command.domain}/${command.service}",
                         token = settings.accessToken,
-                        body = JSONObject().put("entity_id", command.entityId)
+                        body = JSONObject()
+                            .put("entity_id", command.entityId)
+                            .apply {
+                                if (command.service == "trigger") {
+                                    put("skip_condition", command.skipConditions)
+                                }
+                            }
                     )
                     HomeAssistantCommandResult(
                         handled = true,
@@ -378,10 +445,54 @@ object HomeAssistantDeviceClient {
         "lock",
         "person"
     )
+
+    private val HIGH_RISK_CONTROL_DOMAINS = setOf(
+        "alarm_control_panel",
+        "automation",
+        "camera",
+        "lock",
+        "siren",
+        "script",
+        "valve"
+    )
+
+    private val MEDIUM_RISK_CONTROL_DOMAINS = setOf(
+        "climate",
+        "cover",
+        "fan",
+        "scene",
+        "switch",
+        "vacuum"
+    )
+
+    private val HIGH_RISK_CONTROL_TERMS = listOf(
+        "alarm",
+        "camera",
+        "door",
+        "gate",
+        "garage",
+        "lock",
+        "security",
+        "siren",
+        "valve"
+    )
+
+    private val MEDIUM_RISK_CONTROL_TERMS = listOf(
+        "automation",
+        "blind",
+        "climate",
+        "cover",
+        "curtain",
+        "scene",
+        "script",
+        "switch",
+        "thermostat"
+    )
 }
 
 private data class HomeAssistantCommand(
     val domain: String,
     val service: String,
-    val entityId: String
+    val entityId: String,
+    val skipConditions: Boolean = false
 )

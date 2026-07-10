@@ -60,7 +60,7 @@ private val SENSITIVE_MEMORY_TERMS = listOf(
 class MobileNativeAgent(
     context: Context,
     private val perceptionProvider: ScreenPerceptionProvider = AndroidScreenPerceptionProvider(context),
-    private val planner: AgentPlanner = RuleBasedAgentPlanner(),
+    private val planner: AgentPlanner = RuleBasedAgentPlanner(context),
     private val safetySettingsStore: AgentSafetySettingsStore = SharedPreferencesAgentSafetySettingsStore(context),
     private val safetyPolicy: AgentSafetyPolicy = DefaultAgentSafetyPolicy(safetySettingsStore),
     private val actionExecutor: AgentActionExecutor = AndroidAgentActionExecutor(context),
@@ -216,6 +216,9 @@ class MobileNativeAgent(
         }
         if (homeAssistantEntitiesCommand(currentGoal)) {
             return showHomeAssistantEntitiesCommand()
+        }
+        homeAssistantCollectionCommand(currentGoal)?.let { collection ->
+            return showHomeAssistantCollectionCommand(collection)
         }
         homeAssistantEntitySearchCommandValue(currentGoal)?.let { query ->
             return searchHomeAssistantEntitiesCommand(query)
@@ -416,7 +419,7 @@ class MobileNativeAgent(
         return snapshot()
     }
 
-    fun approveNextAction(): AgentUiState {
+    fun approveNextAction(highRiskConfirmed: Boolean = false): AgentUiState {
         val plan = currentPlan ?: return snapshot()
         if (phase == AgentPhase.PAUSED) return snapshot()
         if (plan.safetyReview.blocked) {
@@ -432,6 +435,17 @@ class MobileNativeAgent(
         }
         val nextAction = plan.actions.firstOrNull { it.status == AgentActionStatus.PENDING_CONFIRMATION }
             ?: return snapshot()
+        if (nextAction.risk.weight >= AgentRisk.HIGH.weight && !highRiskConfirmed) {
+            phase = AgentPhase.WAITING_CONFIRMATION
+            lastActionResult = AgentActionResult(
+                actionId = nextAction.id,
+                success = false,
+                message = "Secondary confirmation is required for this high-risk action"
+            )
+            recordAudit(AgentAuditEvent.ACTION_BLOCKED, "secondary_confirmation_required:${nextAction.id}")
+            persistSession()
+            return snapshot()
+        }
         return executePlannedAction(plan, nextAction, userConfirmed = true)
     }
 
@@ -985,6 +999,19 @@ class MobileNativeAgent(
             normalized == "show home assistant entities" ||
             normalized == "list smart devices" ||
             normalized == "show smart devices"
+    }
+
+    private fun homeAssistantCollectionCommand(goal: String): String? {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return when (normalized) {
+            "home assistant scenes", "list home assistant scenes", "show home assistant scenes",
+            "list scenes", "show scenes" -> "scenes"
+            "home assistant automations", "list home assistant automations", "show home assistant automations",
+            "list automations", "show automations" -> "automations"
+            "home assistant scripts", "list home assistant scripts", "show home assistant scripts",
+            "list scripts", "show scripts" -> "scripts"
+            else -> null
+        }
     }
 
     private fun homeAssistantEntitySearchCommandValue(goal: String): String? {
@@ -2131,6 +2158,24 @@ class MobileNativeAgent(
             description = "List Home Assistant entities",
             response = response,
             parameters = mapOf("entity_count" to response.entities.size.toString())
+        )
+    }
+
+    private fun showHomeAssistantCollectionCommand(collection: String): AgentUiState {
+        val response = when (collection) {
+            "scenes" -> HomeAssistantDeviceClient.listScenes(appContext)
+            "automations" -> HomeAssistantDeviceClient.listAutomations(appContext)
+            "scripts" -> HomeAssistantDeviceClient.listScripts(appContext)
+            else -> HomeAssistantEntityResult(true, false, "Unknown Home Assistant collection")
+        }
+        return completeHomeAssistantEntityResult(
+            actionId = "list-home-assistant-$collection",
+            description = "List Home Assistant $collection",
+            response = response,
+            parameters = mapOf(
+                "collection" to collection,
+                "entity_count" to response.entities.size.toString()
+            )
         )
     }
 
@@ -3839,7 +3884,7 @@ interface AgentPlanner {
     fun plan(request: AgentRequest): AgentPlan
 }
 
-class RuleBasedAgentPlanner : AgentPlanner {
+class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner {
     override fun plan(request: AgentRequest): AgentPlan {
         val actions = actionsFor(request)
         return AgentPlanFactory.actions(request, actions)
@@ -4148,16 +4193,29 @@ class RuleBasedAgentPlanner : AgentPlanner {
 
     private fun deviceAction(request: AgentRequest): AgentAction {
         val target = request.targets.firstOrNull { it.kind == AgentConnectorKind.DEVICE }
+        val entityId = context?.let { HomeAssistantDeviceClient.entityIdForPrompt(it, request.goal) }
+            ?: HomeAssistantDeviceClient.entityIdForPrompt(request.goal)
+        val risk = context?.let { HomeAssistantDeviceClient.riskForPrompt(it, request.goal) }
+            ?: HomeAssistantDeviceClient.riskForPrompt(request.goal)
+        val lower = request.goal.lowercase(Locale.US)
+        val description = when {
+            lower.contains("automation") -> "Trigger a Home Assistant automation"
+            lower.contains("script") -> "Run a Home Assistant script"
+            lower.contains("scene") -> "Activate a Home Assistant scene"
+            else -> "Control a trusted device connector"
+        }
         return AgentAction(
             id = "device-control",
             kind = AgentActionKind.CONTROL_DEVICE,
-            target = target?.title ?: "Home Assistant",
-            risk = AgentRisk.HIGH,
+            target = entityId.ifBlank { target?.title ?: "Home Assistant" },
+            risk = risk,
             status = AgentActionStatus.PENDING_CONFIRMATION,
-            description = "Control a trusted device connector",
+            description = description,
             parameters = mapOf(
                 "connector_id" to (target?.id ?: "home-assistant"),
-                "prompt" to request.goal
+                "prompt" to request.goal,
+                "entity_id" to entityId,
+                "device_risk" to risk.name
             )
         )
     }
