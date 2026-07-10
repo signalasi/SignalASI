@@ -163,6 +163,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentRunningTasksText: TextView
     private lateinit var agentMemoryText: TextView
     private lateinit var agentKnowledgeText: TextView
+    @Volatile private var agentOperationInFlight = false
     private lateinit var agentScreenSearchInput: EditText
     private lateinit var agentScreenDetailList: LinearLayout
     private lateinit var agentActionQueueList: LinearLayout
@@ -809,13 +810,35 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun handleAgentPrimaryAction() {
+        if (agentOperationInFlight) return
         val state = mobileNativeAgent.snapshot()
         if (state.phase == AgentPhase.PAUSED) {
             renderAgentState(mobileNativeAgent.resumeCurrentTask())
         } else if (state.pendingAction != null) {
-            renderAgentState(mobileNativeAgent.approveNextAction())
+            if (state.pendingAction.kind == AgentActionKind.IMPORT_WEB_KNOWLEDGE) {
+                runAgentOperationAsync { mobileNativeAgent.approveNextAction() }
+            } else {
+                renderAgentState(mobileNativeAgent.approveNextAction())
+            }
         } else {
             submitAgentGoal()
+        }
+    }
+
+    private fun runAgentOperationAsync(operation: () -> AgentUiState) {
+        if (agentOperationInFlight) return
+        agentOperationInFlight = true
+        agentSubmitButton.isEnabled = false
+        thread(name = "signalasi-agent-operation") {
+            val outcome = runCatching(operation)
+            runOnUiThread {
+                agentOperationInFlight = false
+                agentSubmitButton.isEnabled = true
+                renderAgentState(outcome.getOrElse { mobileNativeAgent.snapshot() })
+                outcome.exceptionOrNull()?.let { error ->
+                    Toast.makeText(this, error.message ?: "Agent operation failed", Toast.LENGTH_LONG).show()
+                }
+            }
         }
     }
 

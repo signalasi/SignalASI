@@ -3046,6 +3046,7 @@ object AgentPlanFactory {
     private fun selectedAgentOrModel(action: AgentAction): String = when (action.kind) {
         AgentActionKind.CALL_CONNECTOR,
         AgentActionKind.CONTROL_DEVICE -> action.target
+        AgentActionKind.IMPORT_WEB_KNOWLEDGE -> "Agent Knowledge"
         else -> "Mobile Executor"
     }
 
@@ -3089,7 +3090,8 @@ object AgentPlanFactory {
                     granted = target?.status == AgentConnectorStatus.AVAILABLE
                 )
             }
-            AgentActionKind.DRAFT_PLAN -> Unit
+            AgentActionKind.DRAFT_PLAN,
+            AgentActionKind.IMPORT_WEB_KNOWLEDGE -> Unit
         }
         if (action.kind == AgentActionKind.PASTE_TEXT) {
             permissions += AgentPermissionRequirement(
@@ -3154,6 +3156,7 @@ object AgentPlanFactory {
         AgentActionKind.LOCK_SCREEN -> "Wake and unlock the phone manually to continue."
         AgentActionKind.CALL_CONNECTOR,
         AgentActionKind.CONTROL_DEVICE -> "Keep the task in chat history and report delivery failure."
+        AgentActionKind.IMPORT_WEB_KNOWLEDGE -> "Remove the imported source if extraction or indexing is incorrect."
         else -> "Stop execution and ask the user before retrying."
     }
 
@@ -3172,6 +3175,7 @@ object AgentPlanFactory {
         AgentActionKind.CREATE_NOTIFICATION -> "A local Android notification is created."
         AgentActionKind.CALL_CONNECTOR -> "The task is sent to the paired agent contact."
         AgentActionKind.CONTROL_DEVICE -> "The trusted device connector receives the task."
+        AgentActionKind.IMPORT_WEB_KNOWLEDGE -> "The web page is extracted and indexed in Agent knowledge."
         else -> action.description
     }
 
@@ -3181,6 +3185,7 @@ object AgentPlanFactory {
     private fun timeoutFor(action: AgentAction): Int = when (action.kind) {
         AgentActionKind.CALL_CONNECTOR,
         AgentActionKind.CONTROL_DEVICE -> 120
+        AgentActionKind.IMPORT_WEB_KNOWLEDGE -> 45
         AgentActionKind.OPEN_URL,
         AgentActionKind.OPEN_APP,
         AgentActionKind.SET_ALARM -> 30
@@ -3201,6 +3206,7 @@ object AgentPlanFactory {
             }
         }
         AgentActionKind.CONTROL_DEVICE -> "Device route selected because the goal targets Home Assistant or smart devices."
+        AgentActionKind.IMPORT_WEB_KNOWLEDGE -> "Knowledge route selected to extract and index a user-approved web page."
         AgentActionKind.READ_SCREEN,
         AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
         AgentActionKind.COPY_SCREEN_TEXT -> "Local perception route selected because the task depends on the current phone screen."
@@ -3237,6 +3243,7 @@ object AgentRouteResolver {
                 null -> AgentRouteKind.UNKNOWN
             }
             AgentActionKind.CONTROL_DEVICE -> AgentRouteKind.DEVICE_CONNECTOR
+            AgentActionKind.IMPORT_WEB_KNOWLEDGE -> AgentRouteKind.KNOWLEDGE
             AgentActionKind.READ_SCREEN,
             AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
             AgentActionKind.DRAFT_PLAN,
@@ -3291,6 +3298,9 @@ object AgentPlanValidator {
             }
             if (action.kind == AgentActionKind.TYPE_TEXT && action.parameters["text"].isNullOrBlank()) {
                 issues += "action_text_missing:${action.id}"
+            }
+            if (action.kind == AgentActionKind.IMPORT_WEB_KNOWLEDGE && action.parameters["url"].isNullOrBlank()) {
+                issues += "action_url_missing:${action.id}"
             }
         }
         if (plan.safetyReview.risk.weight >= AgentRisk.HIGH.weight && !plan.confirmationRequired) {
@@ -3472,6 +3482,14 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         AgentActionKind.CREATE_NOTIFICATION -> createLocalNotification(action)
         AgentActionKind.CALL_CONNECTOR -> dispatchConnectorTask(action)
         AgentActionKind.CONTROL_DEVICE -> dispatchDeviceTask(action)
+        AgentActionKind.IMPORT_WEB_KNOWLEDGE -> importWebKnowledge(action)
+    }
+
+    private fun importWebKnowledge(action: AgentAction): AgentActionResult {
+        val url = action.parameters["url"].orEmpty()
+        if (url.isBlank()) return AgentActionResult(action.id, false, "No web page URL was provided")
+        val result = AgentKnowledgeImporter(context).importWebPage(url)
+        return AgentActionResult(action.id, result.success, result.message)
     }
 
     private fun saveScreenKnowledge(action: AgentAction, screen: ScreenContext): AgentActionResult {
@@ -4810,6 +4828,7 @@ private fun AgentActionKind.mayChangeScreen(): Boolean = when (this) {
     AgentActionKind.PASTE_TEXT,
     AgentActionKind.COPY_SCREEN_TEXT,
     AgentActionKind.CREATE_NOTIFICATION,
+    AgentActionKind.IMPORT_WEB_KNOWLEDGE,
     AgentActionKind.CALL_CONNECTOR,
     AgentActionKind.CONTROL_DEVICE -> false
 }
@@ -5063,6 +5082,7 @@ enum class AgentActionKind {
     OPEN_URL,
     SET_ALARM,
     CREATE_NOTIFICATION,
+    IMPORT_WEB_KNOWLEDGE,
     COPY_SCREEN_TEXT,
     DELETE_TEXT,
     PASTE_TEXT,

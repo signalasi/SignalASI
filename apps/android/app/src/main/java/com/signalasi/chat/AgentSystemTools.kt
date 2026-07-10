@@ -187,6 +187,24 @@ object AgentSystemToolPlanner {
                     extras = mapOf("calendar_title" to title.ifBlank { "SignalASI task" })
                 )
             }
+            lower.startsWith("import webpage ") ||
+                lower.startsWith("save webpage ") ||
+                lower.startsWith("add webpage to knowledge ") -> {
+                val url = when {
+                    lower.startsWith("import webpage ") -> goal.substring("import webpage ".length).trim()
+                    lower.startsWith("save webpage ") -> goal.substring("save webpage ".length).trim()
+                    else -> goal.substring("add webpage to knowledge ".length).trim()
+                }
+                AgentAction(
+                    id = "import-webpage-knowledge",
+                    kind = AgentActionKind.IMPORT_WEB_KNOWLEDGE,
+                    target = "Agent Knowledge",
+                    risk = AgentRisk.MEDIUM,
+                    status = AgentActionStatus.PENDING_CONFIRMATION,
+                    description = "Import web page into Agent knowledge",
+                    parameters = mapOf("url" to normalizeUrl(url))
+                )
+            }
             lower.startsWith("open url ") || lower.startsWith("open website ") -> {
                 val url = if (lower.startsWith("open url ")) {
                     goal.substring("open url ".length).trim()
@@ -636,6 +654,14 @@ object AgentSystemToolPlanner {
             risk = AgentRisk.MEDIUM,
             capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.TASK_EXECUTION),
             examples = listOf("open url https://example.com", "search web SignalASI", "open map Shenzhen")
+        ),
+        AgentSystemTool(
+            id = "knowledge-import",
+            title = "Knowledge Import",
+            kind = AgentActionKind.IMPORT_WEB_KNOWLEDGE,
+            risk = AgentRisk.MEDIUM,
+            capabilities = listOf(AgentCapability.KNOWLEDGE_SEARCH, AgentCapability.TASK_EXECUTION),
+            examples = listOf("import webpage https://example.com", "save webpage https://example.com")
         ),
         AgentSystemTool(
             id = "alarm",
