@@ -693,6 +693,11 @@
     <string name="agent_observation_changed_stable">屏幕已变化并稳定</string>
     <string name="agent_observation_changed_unstable">屏幕已变化，仍在更新</string>
     <string name="agent_observation_timed_out">未观察到屏幕变化</string>
+    <string name="agent_verification_recovery">%1$s / 重试 %2$d 次</string>
+    <string name="agent_recovery_not_needed">无需恢复</string>
+    <string name="agent_recovery_succeeded">已自动恢复</string>
+    <string name="agent_recovery_failed">自动恢复失败</string>
+    <string name="agent_recovery_manual_required">需要手动确认</string>
     <string name="agent_schedule_notification_title">定时智能体 · %1$s</string>
     <string name="agent_schedule_workflow_missing">定时工作流已不存在。</string>
     <string name="agent_schedule_busy">另一个智能体任务正在运行，本次已安全跳过。</string>

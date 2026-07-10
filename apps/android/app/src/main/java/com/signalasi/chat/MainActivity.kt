@@ -2191,6 +2191,28 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     )
                 })
 
+                if (result.recoveryDecision != AgentRecoveryDecision.NOT_NEEDED) {
+                    addView(TextView(this@MainActivity).apply {
+                        setTextColor(
+                            getColorCompat(
+                                if (result.recoveryDecision == AgentRecoveryDecision.RETRY_SUCCEEDED) {
+                                    R.color.wechat_green
+                                } else {
+                                    R.color.text_secondary
+                                }
+                            )
+                        )
+                        textSize = 11f
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                        text = getString(
+                            R.string.agent_verification_recovery,
+                            recoveryDecisionLabel(result.recoveryDecision),
+                            result.recoveryAttemptCount
+                        )
+                    })
+                }
+
                 addView(TextView(this@MainActivity).apply {
                     setTextColor(getColorCompat(R.color.text_secondary))
                     textSize = 11f
@@ -2242,6 +2264,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             AgentObservationDecision.CHANGED_AND_STABLE -> R.string.agent_observation_changed_stable
             AgentObservationDecision.CHANGED_BUT_UNSTABLE -> R.string.agent_observation_changed_unstable
             AgentObservationDecision.TIMED_OUT -> R.string.agent_observation_timed_out
+        }
+    )
+
+    private fun recoveryDecisionLabel(decision: AgentRecoveryDecision): String = getString(
+        when (decision) {
+            AgentRecoveryDecision.NOT_NEEDED -> R.string.agent_recovery_not_needed
+            AgentRecoveryDecision.RETRY_SUCCEEDED -> R.string.agent_recovery_succeeded
+            AgentRecoveryDecision.RETRY_FAILED -> R.string.agent_recovery_failed
+            AgentRecoveryDecision.MANUAL_REQUIRED -> R.string.agent_recovery_manual_required
         }
     )
 

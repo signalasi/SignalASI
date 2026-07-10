@@ -367,6 +367,11 @@
     <string name="agent_observation_changed_stable">Changed and stable</string>
     <string name="agent_observation_changed_unstable">Changed, still moving</string>
     <string name="agent_observation_timed_out">No change observed</string>
+    <string name="agent_verification_recovery">%1$s / %2$d retries</string>
+    <string name="agent_recovery_not_needed">No recovery needed</string>
+    <string name="agent_recovery_succeeded">Recovered automatically</string>
+    <string name="agent_recovery_failed">Automatic recovery failed</string>
+    <string name="agent_recovery_manual_required">Manual confirmation required</string>
     <string name="agent_current_app_value">Current app: %1$s</string>
     <string name="agent_callable_targets_value">Callable targets: %1$d</string>
     <string name="agent_running_tasks_value">Running tasks: %1$d</string>

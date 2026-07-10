@@ -65,6 +65,7 @@ class MobileNativeAgent(
     private val safetyPolicy: AgentSafetyPolicy = DefaultAgentSafetyPolicy(safetySettingsStore),
     private val actionExecutor: AgentActionExecutor = AndroidAgentActionExecutor(context),
     private val observationController: AgentContinuousObservationController = AgentContinuousObservationController(),
+    private val recoveryController: AgentActionRecoveryController = AgentActionRecoveryController(),
     private val memoryStore: AgentMemoryStore = SharedPreferencesAgentMemoryStore(context),
     private val knowledgeStore: AgentKnowledgeStore = SharedPreferencesAgentKnowledgeStore(context),
     private val taskStore: AgentTaskStore = SharedPreferencesAgentTaskStore(context),
@@ -445,6 +446,9 @@ class MobileNativeAgent(
         )
         currentScreen = observation.screen
         lastActionResult = applyObservationResult(nextAction, lastActionResult, observation)
+        val recovery = recoverActionIfSafe(nextAction, lastActionResult, observation)
+        currentScreen = recovery.observation.screen
+        lastActionResult = applyRecoveryMetadata(recovery.result, recovery)
         val awaitingResponse = lastActionResult?.metadata?.get("awaiting_response") == "true"
         val finalStatus = when {
             lastActionResult?.success != true -> AgentActionStatus.FAILED
@@ -452,9 +456,9 @@ class MobileNativeAgent(
             else -> AgentActionStatus.COMPLETED
         }
         val updatedPlan = currentPlan?.markAction(nextAction.id, finalStatus, lastActionResult)
-            ?.addVerification(AgentVerificationResult.from(nextAction.id, lastActionResult, observation))
+            ?.addVerification(AgentVerificationResult.from(nextAction.id, lastActionResult, recovery))
         currentPlan = updatedPlan
-        recordAudit(AgentAuditEvent.SCREEN_VERIFIED, observation.evidence)
+        recordAudit(AgentAuditEvent.SCREEN_VERIFIED, recovery.observation.evidence)
         val hasNextAction = updatedPlan?.actions?.any { it.status == AgentActionStatus.PENDING_CONFIRMATION } == true
         phase = when {
             lastActionResult?.success != true -> AgentPhase.FAILED
@@ -553,6 +557,46 @@ class MobileNativeAgent(
             result.copy(metadata = metadata)
         }
     }
+
+    private fun recoverActionIfSafe(
+        action: AgentAction,
+        result: AgentActionResult?,
+        observation: AgentObservationOutcome
+    ): AgentRecoveryOutcome {
+        val recovery = recoveryController.recover(action, result, observation) {
+            recordAudit(AgentAuditEvent.ACTION_RECOVERY_STARTED, "action:${action.kind}:${action.id}")
+            val retryScreen = observation.screen
+            val retryResult = actionExecutor.execute(action, retryScreen)
+            val retryObservation = captureVerificationScreen(action, retryScreen, retryResult)
+            AgentRecoveryAttempt(
+                result = applyObservationResult(action, retryResult, retryObservation),
+                observation = retryObservation
+            )
+        }
+        when (recovery.decision) {
+            AgentRecoveryDecision.RETRY_SUCCEEDED,
+            AgentRecoveryDecision.RETRY_FAILED -> recordAudit(
+                AgentAuditEvent.ACTION_RECOVERY_COMPLETED,
+                "action:${action.kind}:${recovery.decision}:attempts=${recovery.attemptCount}"
+            )
+            AgentRecoveryDecision.MANUAL_REQUIRED -> recordAudit(
+                AgentAuditEvent.ACTION_RECOVERY_MANUAL_REQUIRED,
+                "action:${action.kind}:${action.id}"
+            )
+            AgentRecoveryDecision.NOT_NEEDED -> Unit
+        }
+        return recovery
+    }
+
+    private fun applyRecoveryMetadata(
+        result: AgentActionResult?,
+        recovery: AgentRecoveryOutcome
+    ): AgentActionResult? = result?.copy(
+        metadata = result.metadata + mapOf(
+            "recovery_decision" to recovery.decision.name,
+            "recovery_attempt_count" to recovery.attemptCount.toString()
+        )
+    )
 
     fun cancelCurrentTask(): AgentUiState {
         phase = AgentPhase.CANCELLED
@@ -5882,6 +5926,8 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("observation_duration_millis", result.observationDurationMillis)
         .put("screen_changed", result.screenChanged)
         .put("screen_stable", result.screenStable)
+        .put("recovery_decision", result.recoveryDecision.name)
+        .put("recovery_attempt_count", result.recoveryAttemptCount)
         .put("timestamp_millis", result.timestampMillis)
 
     private fun decodeVerificationResults(array: JSONArray?): List<AgentVerificationResult> {
@@ -5906,6 +5952,11 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
                         observationDurationMillis = item.optLong("observation_duration_millis"),
                         screenChanged = item.optBoolean("screen_changed"),
                         screenStable = item.optBoolean("screen_stable", true),
+                        recoveryDecision = enumOrDefault(
+                            item.optString("recovery_decision"),
+                            AgentRecoveryDecision.NOT_NEEDED
+                        ),
+                        recoveryAttemptCount = item.optInt("recovery_attempt_count"),
                         timestampMillis = item.optLong("timestamp_millis")
                     )
                 )
@@ -6408,26 +6459,30 @@ data class AgentVerificationResult(
     val observationDurationMillis: Long = 0L,
     val screenChanged: Boolean = false,
     val screenStable: Boolean = true,
+    val recoveryDecision: AgentRecoveryDecision = AgentRecoveryDecision.NOT_NEEDED,
+    val recoveryAttemptCount: Int = 0,
     val timestampMillis: Long = System.currentTimeMillis()
 ) {
     companion object {
         fun from(
             actionId: String,
             actionResult: AgentActionResult?,
-            observation: AgentObservationOutcome
+            recovery: AgentRecoveryOutcome
         ): AgentVerificationResult = AgentVerificationResult(
             actionId = actionId,
             success = actionResult?.success == true,
-            observedApp = observation.screen.foregroundApp,
-            observedTitle = observation.screen.pageTitle,
-            visibleTextCount = observation.screen.visibleTextCount,
-            clickableNodeCount = observation.screen.clickableNodeCount,
+            observedApp = recovery.observation.screen.foregroundApp,
+            observedTitle = recovery.observation.screen.pageTitle,
+            visibleTextCount = recovery.observation.screen.visibleTextCount,
+            clickableNodeCount = recovery.observation.screen.clickableNodeCount,
             evidence = actionResult?.message.orEmpty(),
-            observationDecision = observation.decision,
-            observationSampleCount = observation.sampleCount,
-            observationDurationMillis = observation.durationMillis,
-            screenChanged = observation.screenChanged,
-            screenStable = observation.screenStable
+            observationDecision = recovery.observation.decision,
+            observationSampleCount = recovery.observation.sampleCount,
+            observationDurationMillis = recovery.observation.durationMillis,
+            screenChanged = recovery.observation.screenChanged,
+            screenStable = recovery.observation.screenStable,
+            recoveryDecision = recovery.decision,
+            recoveryAttemptCount = recovery.attemptCount
         )
     }
 }
@@ -6602,6 +6657,9 @@ enum class AgentCapability {
 enum class AgentAuditEvent {
     SCREEN_OBSERVED,
     SCREEN_VERIFIED,
+    ACTION_RECOVERY_STARTED,
+    ACTION_RECOVERY_COMPLETED,
+    ACTION_RECOVERY_MANUAL_REQUIRED,
     GOAL_RECEIVED,
     INVOCATION_AUDIT,
     CONNECTOR_RESPONSE_RECEIVED,
