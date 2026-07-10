@@ -65,6 +65,7 @@ class MobileNativeAgent(
     private val workflowStore: AgentWorkflowStore = SharedPreferencesAgentWorkflowStore(context),
     private val workflowScheduleStore: AgentWorkflowScheduleStore = AgentWorkflowScheduleStore(context),
     private val workflowTriggerStore: AgentWorkflowTriggerStore = AgentWorkflowTriggerStore(context),
+    private val workflowExecutionHistoryStore: AgentWorkflowExecutionHistoryStore = AgentWorkflowExecutionHistoryStore(context),
     private val connectorRegistry: AgentConnectorRegistry = AppStoreAgentConnectorRegistry(context),
     private val sessionStore: AgentSessionStore = SharedPreferencesAgentSessionStore(context)
 ) {
@@ -75,6 +76,7 @@ class MobileNativeAgent(
     private var currentScreen: ScreenContext = perceptionProvider.capture()
     private var currentPlan: AgentPlan? = null
     private var lastActionResult: AgentActionResult? = null
+    private var activeWorkflowExecutionId: String? = null
     private val auditTrail = mutableListOf<AgentAuditEntry>()
 
     init {
@@ -82,6 +84,7 @@ class MobileNativeAgent(
     }
 
     fun snapshot(): AgentUiState {
+        syncActiveWorkflowExecution()
         val targets = connectorRegistry.availableTargets()
         val memories = if (currentGoal.isNotBlank()) memoryStore.recall(currentGoal) else emptyList()
         val context = buildRuntimeContext(
@@ -124,6 +127,13 @@ class MobileNativeAgent(
     fun reloadSession(): AgentUiState {
         restoreSession(sessionStore.load())
         return snapshot()
+    }
+
+    fun attachWorkflowExecution(executionId: String) {
+        val cleanId = executionId.trim()
+        if (cleanId.isBlank() || workflowExecutionHistoryStore.findById(cleanId) == null) return
+        activeWorkflowExecutionId = cleanId
+        persistSession()
     }
 
     fun observeCurrentScreen(): AgentUiState {
@@ -235,6 +245,24 @@ class MobileNativeAgent(
         }
         if (workflowListCommand(currentGoal)) {
             return showWorkflowsCommand()
+        }
+        if (workflowHistoryListCommand(currentGoal)) {
+            return showWorkflowHistoryCommand()
+        }
+        workflowTriggerConditionCommandValue(currentGoal)?.let { request ->
+            return attachWorkflowTriggerConditionCommand(request)
+        }
+        workflowTriggerConditionsClearCommandValue(currentGoal)?.let { triggerId ->
+            return clearWorkflowTriggerConditionsCommand(triggerId)
+        }
+        if (workflowTriggerConditionSyntaxCommand(currentGoal)) {
+            return completeWorkflowManagementCommand(
+                actionId = "workflow-trigger-condition-syntax",
+                description = "Show workflow trigger condition syntax",
+                result = "Use: add trigger condition TRIGGER_ID :: charging, battery at least 50%, network available, or time 09:00-17:00",
+                risk = AgentRisk.LOW,
+                parameters = emptyMap()
+            )
         }
         workflowTriggerCreateCommandValue(currentGoal)?.let { request ->
             return createWorkflowTriggerCommand(request)
@@ -973,10 +1001,110 @@ class MobileNativeAgent(
             normalized == "show workflows"
     }
 
+    private fun workflowHistoryListCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "workflow history" ||
+            normalized == "workflow execution history" ||
+            normalized == "workflow run history" ||
+            normalized == "workflow runs" ||
+            normalized == "list workflow history" ||
+            normalized == "list workflow runs" ||
+            normalized == "show workflow history" ||
+            normalized == "show workflow runs"
+    }
+
     private fun workflowRunCommandValue(goal: String): String? {
         val prefixes = listOf("run workflow ", "start workflow ")
         val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
         return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
+    private fun workflowTriggerConditionCommandValue(goal: String): WorkflowTriggerConditionRequest? {
+        val cleanGoal = goal.trim()
+        val match = listOf(
+            Regex(
+                "^(?:add|attach)\\s+(?:workflow\\s+)?trigger\\s+condition\\s+(\\S+)\\s*(?:::|when|if)\\s*(.+)$",
+                RegexOption.IGNORE_CASE
+            ),
+            Regex(
+                "^(?:add|attach)\\s+condition\\s+to\\s+(?:workflow\\s+)?trigger\\s+(\\S+)\\s*(?:::|when|if)\\s*(.+)$",
+                RegexOption.IGNORE_CASE
+            )
+        ).firstNotNullOfOrNull { it.matchEntire(cleanGoal) } ?: return null
+        val triggerId = match.groupValues[1].trim()
+        val condition = parseWorkflowTriggerCondition(match.groupValues[2]) ?: return null
+        return WorkflowTriggerConditionRequest(triggerId, condition)
+    }
+
+    private fun parseWorkflowTriggerCondition(value: String): AgentWorkflowCondition? {
+        val normalized = value.trim().lowercase(Locale.US).replace(Regex("\\s+"), " ")
+        when (normalized) {
+            "charging", "device charging", "is charging", "charging required" ->
+                return AgentWorkflowCondition.DeviceCharging(required = true)
+            "not charging", "device not charging", "is not charging" ->
+                return AgentWorkflowCondition.DeviceCharging(required = false)
+            "network available", "network availability", "online", "connected" ->
+                return AgentWorkflowCondition.NetworkAvailable(required = true)
+            "network unavailable", "offline", "no network", "disconnected" ->
+                return AgentWorkflowCondition.NetworkAvailable(required = false)
+        }
+
+        Regex(
+            "^battery(?:\\s+threshold)?\\s+(below|under|at most|at least|above|over|<=|>=|<|>)\\s*(\\d{1,3})%?$",
+            RegexOption.IGNORE_CASE
+        ).matchEntire(normalized)?.let { match ->
+            val percent = match.groupValues[2].toIntOrNull()?.takeIf { it in 0..100 } ?: return null
+            val comparison = when (match.groupValues[1].lowercase(Locale.US)) {
+                "below", "under", "<" -> AgentWorkflowBatteryComparison.BELOW
+                "at most", "<=" -> AgentWorkflowBatteryComparison.AT_MOST
+                "at least", ">=" -> AgentWorkflowBatteryComparison.AT_LEAST
+                "above", "over", ">" -> AgentWorkflowBatteryComparison.ABOVE
+                else -> return null
+            }
+            return AgentWorkflowCondition.BatteryThreshold(percent, comparison)
+        }
+
+        Regex(
+            "^(?:time(?:\\s+window)?|between)\\s+(\\d{1,2}):(\\d{2})\\s*(?:-|to|and)\\s*(\\d{1,2}):(\\d{2})$",
+            RegexOption.IGNORE_CASE
+        ).matchEntire(normalized)?.let { match ->
+            val start = minuteOfDay(match.groupValues[1], match.groupValues[2]) ?: return null
+            val end = minuteOfDay(match.groupValues[3], match.groupValues[4]) ?: return null
+            return AgentWorkflowCondition.TimeWindow(start, end)
+        }
+        return null
+    }
+
+    private fun minuteOfDay(hourValue: String, minuteValue: String): Int? {
+        val hour = hourValue.toIntOrNull()?.takeIf { it in 0..23 } ?: return null
+        val minute = minuteValue.toIntOrNull()?.takeIf { it in 0..59 } ?: return null
+        return hour * 60 + minute
+    }
+
+    private fun workflowTriggerConditionsClearCommandValue(goal: String): String? {
+        val patterns = listOf(
+            Regex(
+                "^(?:clear|remove)\\s+(?:workflow\\s+)?trigger\\s+conditions\\s+(\\S+)$",
+                RegexOption.IGNORE_CASE
+            ),
+            Regex(
+                "^(?:clear|remove)\\s+(?:all\\s+)?conditions\\s+from\\s+(?:workflow\\s+)?trigger\\s+(\\S+)$",
+                RegexOption.IGNORE_CASE
+            )
+        )
+        return patterns.firstNotNullOfOrNull { pattern ->
+            pattern.matchEntire(goal.trim())?.groupValues?.get(1)?.trim()?.takeIf { it.isNotBlank() }
+        }
+    }
+
+    private fun workflowTriggerConditionSyntaxCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized.startsWith("add trigger condition ") ||
+            normalized.startsWith("attach trigger condition ") ||
+            normalized.startsWith("add workflow trigger condition ") ||
+            normalized.startsWith("attach workflow trigger condition ") ||
+            normalized.startsWith("add condition to trigger ") ||
+            normalized.startsWith("attach condition to trigger ")
     }
 
     private fun workflowTriggerCreateCommandValue(goal: String): WorkflowTriggerRequest? {
@@ -2261,6 +2389,97 @@ class MobileNativeAgent(
         )
     }
 
+    private fun showWorkflowHistoryCommand(): AgentUiState {
+        val records = workflowExecutionHistoryStore.recent(limit = 20)
+        val result = if (records.isEmpty()) {
+            "No workflow execution history"
+        } else {
+            buildString {
+                append("Workflow execution history: ").append(records.size)
+                records.forEach { record ->
+                    append("\n").append(record.id)
+                    append(" | ").append(record.workflowName)
+                    append(" | ").append(record.source.name.lowercase(Locale.US))
+                    append(" | ").append(record.status.name.lowercase(Locale.US).replace('_', ' '))
+                    append(" | started=").append(formatWorkflowExecutionTime(record.startedAtMillis))
+                    if (record.completedAtMillis > 0L) {
+                        append(" | completed=").append(formatWorkflowExecutionTime(record.completedAtMillis))
+                    }
+                    if (record.resultSummary.isNotBlank()) {
+                        append(" | ").append(record.resultSummary.replace(Regex("\\s+"), " ").take(160))
+                    }
+                }
+            }
+        }
+        return completeWorkflowManagementCommand(
+            actionId = "list-workflow-history",
+            description = "Show Agent workflow execution history",
+            result = result,
+            risk = AgentRisk.LOW,
+            parameters = mapOf("history_count" to records.size.toString())
+        )
+    }
+
+    private fun attachWorkflowTriggerConditionCommand(request: WorkflowTriggerConditionRequest): AgentUiState {
+        val trigger = workflowTriggerStore.findById(request.triggerId)
+            ?: return completeWorkflowManagementCommand(
+                actionId = "attach-workflow-trigger-condition-missing",
+                description = "Find workflow trigger for condition",
+                result = "Workflow trigger '${request.triggerId}' was not found",
+                risk = AgentRisk.LOW,
+                parameters = mapOf("trigger_id" to request.triggerId)
+            )
+        val conditions = (trigger.conditions + request.condition).distinct()
+        val outcome = runCatching { workflowTriggerStore.upsert(trigger.copy(conditions = conditions)) }
+        val attached = outcome.isSuccess
+        val result = if (attached) {
+            "Attached condition to trigger ${trigger.id}: ${workflowConditionLabel(request.condition)}"
+        } else {
+            outcome.exceptionOrNull()?.message ?: "Workflow trigger condition could not be attached"
+        }
+        return completeWorkflowManagementCommand(
+            actionId = "attach-workflow-trigger-condition",
+            description = "Attach condition to encrypted Agent workflow trigger",
+            result = result,
+            risk = AgentRisk.MEDIUM,
+            parameters = mapOf(
+                "trigger_id" to trigger.id,
+                "condition_count" to conditions.size.toString(),
+                "attached" to attached.toString()
+            )
+        )
+    }
+
+    private fun clearWorkflowTriggerConditionsCommand(triggerId: String): AgentUiState {
+        val trigger = workflowTriggerStore.findById(triggerId)
+            ?: return completeWorkflowManagementCommand(
+                actionId = "clear-workflow-trigger-conditions-missing",
+                description = "Find workflow trigger for condition cleanup",
+                result = "Workflow trigger '$triggerId' was not found",
+                risk = AgentRisk.LOW,
+                parameters = mapOf("trigger_id" to triggerId)
+            )
+        val clearedCount = trigger.conditions.size
+        val outcome = runCatching { workflowTriggerStore.upsert(trigger.copy(conditions = emptyList())) }
+        val cleared = outcome.isSuccess
+        val result = if (cleared) {
+            "Cleared $clearedCount conditions from trigger ${trigger.id}"
+        } else {
+            outcome.exceptionOrNull()?.message ?: "Workflow trigger conditions could not be cleared"
+        }
+        return completeWorkflowManagementCommand(
+            actionId = "clear-workflow-trigger-conditions",
+            description = "Clear encrypted Agent workflow trigger conditions",
+            result = result,
+            risk = AgentRisk.MEDIUM,
+            parameters = mapOf(
+                "trigger_id" to trigger.id,
+                "cleared_count" to clearedCount.toString(),
+                "cleared" to cleared.toString()
+            )
+        )
+    }
+
     private fun createWorkflowTriggerCommand(request: WorkflowTriggerRequest): AgentUiState {
         val workflow = workflowStore.find(request.workflowName) ?: return completeWorkflowManagementCommand(
             actionId = "create-workflow-trigger-missing",
@@ -2307,6 +2526,9 @@ class MobileNativeAgent(
                     append("\n").append(trigger.id)
                     append(" | ").append(trigger.workflowName)
                     append(" | ").append(workflowTriggerLabel(trigger))
+                    if (trigger.conditions.isNotEmpty()) {
+                        append(" | if ").append(trigger.conditions.joinToString(" and ", transform = ::workflowConditionLabel))
+                    }
                     append(" | ").append(if (trigger.enabled) "enabled" else "disabled")
                 }
             }
@@ -2344,6 +2566,29 @@ class MobileNativeAgent(
         AgentWorkflowTriggerKind.BATTERY_LOW -> "battery low"
     }
 
+    private fun workflowConditionLabel(condition: AgentWorkflowCondition): String = when (condition) {
+        is AgentWorkflowCondition.DeviceCharging -> if (condition.required) "charging" else "not charging"
+        is AgentWorkflowCondition.BatteryThreshold -> {
+            val comparison = when (condition.comparison) {
+                AgentWorkflowBatteryComparison.BELOW -> "below"
+                AgentWorkflowBatteryComparison.AT_MOST -> "at most"
+                AgentWorkflowBatteryComparison.AT_LEAST -> "at least"
+                AgentWorkflowBatteryComparison.ABOVE -> "above"
+            }
+            "battery $comparison ${condition.percent}%"
+        }
+        is AgentWorkflowCondition.NetworkAvailable -> if (condition.required) "network available" else "network unavailable"
+        is AgentWorkflowCondition.TimeWindow -> "time %02d:%02d-%02d:%02d".format(
+            Locale.US,
+            condition.startMinuteOfDay / 60,
+            condition.startMinuteOfDay % 60,
+            condition.endMinuteOfDay / 60,
+            condition.endMinuteOfDay % 60
+        )
+        is AgentWorkflowCondition.Text -> "text contains '${condition.expected}'"
+        is AgentWorkflowCondition.PackageName -> "package matches '${condition.expected}'"
+    }
+
     private fun deleteWorkflowCommand(name: String): AgentUiState {
         val workflow = workflowStore.find(name)
         workflowScheduleStore.findByWorkflowName(name)?.let { schedule ->
@@ -2355,8 +2600,13 @@ class MobileNativeAgent(
         } else {
             0
         }
+        val deletedHistory = if (deleted > 0 && workflow != null) {
+            workflowExecutionHistoryStore.deleteForWorkflow(workflow.id)
+        } else {
+            0
+        }
         val result = if (deleted > 0) {
-            "Deleted workflow ${workflow?.name ?: name}; removed triggers=$deletedTriggers"
+            "Deleted workflow ${workflow?.name ?: name}; removed triggers=$deletedTriggers; removed history=$deletedHistory"
         } else {
             "Workflow '$name' was not found"
         }
@@ -2368,7 +2618,8 @@ class MobileNativeAgent(
             parameters = mapOf(
                 "workflow_name" to name,
                 "deleted_count" to deleted.toString(),
-                "deleted_trigger_count" to deletedTriggers.toString()
+                "deleted_trigger_count" to deletedTriggers.toString(),
+                "deleted_history_count" to deletedHistory.toString()
             )
         )
     }
@@ -2382,6 +2633,14 @@ class MobileNativeAgent(
             parameters = mapOf("workflow_name" to name)
         )
         workflowStore.markRun(workflow.id)
+        val execution = AgentWorkflowExecutionRecord(
+            workflowId = workflow.id,
+            workflowName = workflow.name,
+            source = AgentWorkflowExecutionSource.MANUAL,
+            status = AgentWorkflowExecutionStatus.RUNNING
+        )
+        workflowExecutionHistoryStore.upsert(execution)
+        activeWorkflowExecutionId = execution.id
         recordAudit(AgentAuditEvent.WORKFLOW_RUN, "workflow_id=${workflow.id}; name_hash=${workflow.name.hashCode()}")
         return submitGoal(workflow.goal)
     }
@@ -2473,6 +2732,56 @@ class MobileNativeAgent(
 
     private fun formatScheduleTime(timestampMillis: Long): String =
         if (timestampMillis <= 0L) "pending" else SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(timestampMillis))
+
+    private fun formatWorkflowExecutionTime(timestampMillis: Long): String =
+        SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(timestampMillis))
+
+    private fun syncActiveWorkflowExecution() {
+        val executionId = activeWorkflowExecutionId ?: return
+        val record = workflowExecutionHistoryStore.findById(executionId) ?: run {
+            activeWorkflowExecutionId = null
+            return
+        }
+        val status = when (phase) {
+            AgentPhase.WAITING_CONFIRMATION -> AgentWorkflowExecutionStatus.WAITING_CONFIRMATION
+            AgentPhase.WAITING_RESPONSE -> AgentWorkflowExecutionStatus.WAITING_RESPONSE
+            AgentPhase.COMPLETED -> AgentWorkflowExecutionStatus.COMPLETED
+            AgentPhase.FAILED -> AgentWorkflowExecutionStatus.FAILED
+            AgentPhase.CANCELLED -> AgentWorkflowExecutionStatus.CANCELLED
+            AgentPhase.BLOCKED -> AgentWorkflowExecutionStatus.BLOCKED
+            AgentPhase.OBSERVING,
+            AgentPhase.PLANNING,
+            AgentPhase.EXECUTING,
+            AgentPhase.VERIFYING,
+            AgentPhase.PAUSED -> AgentWorkflowExecutionStatus.RUNNING
+        }
+        val terminal = status == AgentWorkflowExecutionStatus.COMPLETED ||
+            status == AgentWorkflowExecutionStatus.FAILED ||
+            status == AgentWorkflowExecutionStatus.CANCELLED ||
+            status == AgentWorkflowExecutionStatus.BLOCKED
+        val summary = lastActionResult?.message.orEmpty().trim().take(2_000)
+        val completedAtMillis = when {
+            !terminal -> 0L
+            record.completedAtMillis > 0L -> record.completedAtMillis
+            else -> System.currentTimeMillis()
+        }
+        if (record.status != status ||
+            record.completedAtMillis != completedAtMillis ||
+            record.resultSummary != summary
+        ) {
+            workflowExecutionHistoryStore.upsert(
+                record.copy(
+                    status = status,
+                    completedAtMillis = completedAtMillis,
+                    resultSummary = summary
+                )
+            )
+        }
+        if (terminal) {
+            activeWorkflowExecutionId = null
+            persistSession()
+        }
+    }
 
     private fun showTemplatesCommand(): AgentUiState {
         val templates = AgentWorkflowTemplates.all
@@ -3205,6 +3514,7 @@ class MobileNativeAgent(
         currentScreen = session.currentScreen
         currentPlan = session.currentPlan
         lastActionResult = session.lastActionResult
+        activeWorkflowExecutionId = session.activeWorkflowExecutionId.takeIf { it.isNotBlank() }
         auditTrail.clear()
         auditTrail.addAll(session.auditTrail.takeLast(MAX_AUDIT_ITEMS))
     }
@@ -3219,6 +3529,7 @@ class MobileNativeAgent(
                 currentPlan = currentPlan,
                 auditTrail = auditTrail.toList(),
                 lastActionResult = lastActionResult,
+                activeWorkflowExecutionId = activeWorkflowExecutionId.orEmpty(),
                 updatedAtMillis = System.currentTimeMillis()
             )
         )
@@ -5111,6 +5422,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
             snapshot.auditTrail.forEach { array.put(encodeAudit(it)) }
         })
         .put("last_action_result", snapshot.lastActionResult?.let { encodeActionResult(it) })
+        .put("active_workflow_execution_id", snapshot.activeWorkflowExecutionId)
         .put("updated_at", snapshot.updatedAtMillis)
 
     private fun decodeSession(json: JSONObject): AgentSessionSnapshot = AgentSessionSnapshot(
@@ -5121,6 +5433,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         currentPlan = json.optJSONObject("current_plan")?.let { decodePlan(it) },
         auditTrail = decodeAuditTrail(json.optJSONArray("audit_trail")),
         lastActionResult = json.optJSONObject("last_action_result")?.let { decodeActionResult(it) },
+        activeWorkflowExecutionId = json.optString("active_workflow_execution_id"),
         updatedAtMillis = json.optLong("updated_at", 0L)
     )
 
@@ -5663,6 +5976,7 @@ data class AgentSessionSnapshot(
     val currentPlan: AgentPlan?,
     val auditTrail: List<AgentAuditEntry>,
     val lastActionResult: AgentActionResult?,
+    val activeWorkflowExecutionId: String = "",
     val updatedAtMillis: Long
 )
 
@@ -6081,6 +6395,11 @@ private data class WorkflowTriggerRequest(
     val workflowName: String,
     val kind: AgentWorkflowTriggerKind,
     val condition: String = ""
+)
+
+private data class WorkflowTriggerConditionRequest(
+    val triggerId: String,
+    val condition: AgentWorkflowCondition
 )
 
 enum class AgentConnectorStatus {

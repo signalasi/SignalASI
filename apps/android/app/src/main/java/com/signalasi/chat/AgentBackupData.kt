@@ -11,6 +11,7 @@ object AgentBackupData {
     private const val WORKFLOW_PREFS = "signalasi_agent_workflows"
     private const val SCHEDULE_PREFS = "signalasi_agent_workflow_schedules"
     private const val TRIGGER_PREFS = "signalasi_agent_workflow_triggers"
+    private const val WORKFLOW_EXECUTION_HISTORY_PREFS = "signalasi_agent_workflow_execution_history"
     private const val ITEMS_KEY = "items"
 
     fun export(context: Context): JSONObject {
@@ -24,6 +25,15 @@ object AgentBackupData {
             .put("workflows", readArray(context, WORKFLOW_PREFS, MAX_WORKFLOW_ITEMS, MAX_WORKFLOW_ITEM_CHARACTERS))
             .put("workflow_schedules", readArray(context, SCHEDULE_PREFS, MAX_SCHEDULE_ITEMS, MAX_SCHEDULE_ITEM_CHARACTERS))
             .put("workflow_triggers", readArray(context, TRIGGER_PREFS, MAX_TRIGGER_ITEMS, MAX_TRIGGER_ITEM_CHARACTERS))
+            .put(
+                "workflow_execution_history",
+                readArray(
+                    context,
+                    WORKFLOW_EXECUTION_HISTORY_PREFS,
+                    MAX_WORKFLOW_EXECUTION_HISTORY_ITEMS,
+                    MAX_WORKFLOW_EXECUTION_HISTORY_ITEM_CHARACTERS
+                )
+            )
             .put(
                 "safety",
                 JSONObject()
@@ -65,6 +75,15 @@ object AgentBackupData {
         payload.optJSONArray("workflow_triggers")?.let { input ->
             val sanitized = sanitizeArray(input, MAX_TRIGGER_ITEMS, MAX_TRIGGER_ITEM_CHARACTERS)
             AgentEncryptedPreferences(context, TRIGGER_PREFS).writeString(ITEMS_KEY, sanitized.toString())
+        }
+        payload.optJSONArray("workflow_execution_history")?.let { input ->
+            val sanitized = sanitizeArray(
+                input,
+                MAX_WORKFLOW_EXECUTION_HISTORY_ITEMS,
+                MAX_WORKFLOW_EXECUTION_HISTORY_ITEM_CHARACTERS
+            )
+            AgentEncryptedPreferences(context, WORKFLOW_EXECUTION_HISTORY_PREFS)
+                .writeString(ITEMS_KEY, sanitized.toString())
         }
         payload.optJSONObject("safety")?.let { json ->
             SharedPreferencesAgentSafetySettingsStore(context).save(
@@ -121,7 +140,9 @@ object AgentBackupData {
     private const val MAX_SCHEDULE_ITEMS = 100
     private const val MAX_SCHEDULE_ITEM_CHARACTERS = 4_000
     private const val MAX_TRIGGER_ITEMS = 100
-    private const val MAX_TRIGGER_ITEM_CHARACTERS = 4_000
+    private const val MAX_TRIGGER_ITEM_CHARACTERS = 20_000
+    private const val MAX_WORKFLOW_EXECUTION_HISTORY_ITEMS = 200
+    private const val MAX_WORKFLOW_EXECUTION_HISTORY_ITEM_CHARACTERS = 4_000
     private const val MAX_URL_CHARACTERS = 2_000
     private const val MAX_SECRET_CHARACTERS = 8_000
     private const val MAX_ENTITY_ID_CHARACTERS = 240

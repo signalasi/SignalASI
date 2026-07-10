@@ -130,7 +130,11 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
     private fun executeScheduledWorkflow(scheduleId: String) {
         if (scheduleId.isBlank()) return
         val schedule = AgentWorkflowScheduleStore(this).findById(scheduleId) ?: return
-        executeWorkflow(schedule.workflowId, schedule.workflowName) {
+        executeWorkflow(
+            workflowId = schedule.workflowId,
+            workflowName = schedule.workflowName,
+            source = AgentWorkflowExecutionSource.SCHEDULE
+        ) {
             AgentWorkflowScheduler.cancel(this, schedule)
         }
     }
@@ -139,7 +143,11 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         if (triggerId.isBlank()) return
         val triggerStore = AgentWorkflowTriggerStore(this)
         val trigger = triggerStore.findById(triggerId) ?: return
-        executeWorkflow(trigger.workflowId, trigger.workflowName) {
+        executeWorkflow(
+            workflowId = trigger.workflowId,
+            workflowName = trigger.workflowName,
+            source = AgentWorkflowExecutionSource.EVENT
+        ) {
             triggerStore.deleteForWorkflow(trigger.workflowId)
         }
     }
@@ -147,6 +155,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
     private fun executeWorkflow(
         workflowId: String,
         workflowName: String,
+        source: AgentWorkflowExecutionSource,
         onWorkflowMissing: () -> Unit
     ) {
         val workflowStore = SharedPreferencesAgentWorkflowStore(this)
@@ -156,11 +165,34 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
             return
         }
         val agent = MobileNativeAgent(this)
+        val startedAtMillis = System.currentTimeMillis()
         if (agent.snapshot().runningTaskCount > 0) {
-            showScheduledAgentNotification(workflow.name, getString(R.string.agent_schedule_busy))
+            val detail = getString(R.string.agent_schedule_busy)
+            AgentWorkflowExecutionHistoryStore(this).upsert(
+                AgentWorkflowExecutionRecord(
+                    workflowId = workflow.id,
+                    workflowName = workflow.name,
+                    source = source,
+                    status = AgentWorkflowExecutionStatus.SKIPPED,
+                    startedAtMillis = startedAtMillis,
+                    completedAtMillis = System.currentTimeMillis(),
+                    resultSummary = detail
+                )
+            )
+            showScheduledAgentNotification(workflow.name, detail)
             return
         }
         workflowStore.markRun(workflow.id)
+        val executionStore = AgentWorkflowExecutionHistoryStore(this)
+        val execution = AgentWorkflowExecutionRecord(
+            workflowId = workflow.id,
+            workflowName = workflow.name,
+            source = source,
+            status = AgentWorkflowExecutionStatus.RUNNING,
+            startedAtMillis = startedAtMillis
+        )
+        executionStore.upsert(execution)
+        agent.attachWorkflowExecution(execution.id)
         val state = agent.submitGoal(workflow.goal)
         val detail = when {
             state.phase == AgentPhase.WAITING_CONFIRMATION -> getString(
@@ -174,7 +206,34 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
             state.lastActionResult != null -> state.lastActionResult.message
             else -> getString(R.string.agent_schedule_started)
         }
+        val status = workflowExecutionStatus(state.phase)
+        executionStore.upsert(
+            execution.copy(
+                status = status,
+                completedAtMillis = if (status.isTerminal()) System.currentTimeMillis() else 0L,
+                resultSummary = detail.take(2_000)
+            )
+        )
         showScheduledAgentNotification(workflow.name, detail)
+    }
+
+    private fun workflowExecutionStatus(phase: AgentPhase): AgentWorkflowExecutionStatus = when (phase) {
+        AgentPhase.WAITING_CONFIRMATION -> AgentWorkflowExecutionStatus.WAITING_CONFIRMATION
+        AgentPhase.WAITING_RESPONSE -> AgentWorkflowExecutionStatus.WAITING_RESPONSE
+        AgentPhase.COMPLETED -> AgentWorkflowExecutionStatus.COMPLETED
+        AgentPhase.FAILED -> AgentWorkflowExecutionStatus.FAILED
+        AgentPhase.CANCELLED -> AgentWorkflowExecutionStatus.CANCELLED
+        AgentPhase.BLOCKED -> AgentWorkflowExecutionStatus.BLOCKED
+        else -> AgentWorkflowExecutionStatus.RUNNING
+    }
+
+    private fun AgentWorkflowExecutionStatus.isTerminal(): Boolean = when (this) {
+        AgentWorkflowExecutionStatus.COMPLETED,
+        AgentWorkflowExecutionStatus.SKIPPED,
+        AgentWorkflowExecutionStatus.FAILED,
+        AgentWorkflowExecutionStatus.CANCELLED,
+        AgentWorkflowExecutionStatus.BLOCKED -> true
+        else -> false
     }
 
     private fun showScheduledAgentNotification(workflowName: String, detail: String) {

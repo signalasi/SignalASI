@@ -5294,6 +5294,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val workflows = SharedPreferencesAgentWorkflowStore(this).list()
         val schedules = AgentWorkflowScheduleStore(this).list()
         val triggers = AgentWorkflowTriggerStore(this).list()
+        val recentExecutions = AgentWorkflowExecutionHistoryStore(this).recent()
         val templates = AgentWorkflowTemplates.all
         showFeaturePage(getString(R.string.automation_title))
         featureContent.addView(featureHeroCard(
@@ -5363,6 +5364,27 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 })
             }
         }
+        addSectionTitle(getString(R.string.automation_recent_executions))
+        if (recentExecutions.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.automation_no_recent_executions),
+                getString(R.string.automation_run_command_hint),
+                R.drawable.ic_security_shield,
+                ""
+            ))
+        } else {
+            recentExecutions.forEach { execution ->
+                featureContent.addView(featureRow(
+                    execution.workflowName,
+                    automationExecutionSubtitle(execution),
+                    R.drawable.ic_security_shield,
+                    getString(
+                        R.string.automation_run_status,
+                        automationExecutionStatusLabel(execution.status)
+                    )
+                ))
+            }
+        }
         addSectionTitle(getString(R.string.automation_templates))
         templates.forEach { template ->
             featureContent.addView(featureRow(
@@ -5410,13 +5432,61 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 getString(R.string.automation_trigger_battery_low)
         }
         val status = getString(if (trigger.enabled) R.string.status_enabled else R.string.common_off)
-        return getString(
-            R.string.automation_trigger_subtitle,
-            event,
-            trigger.cooldownMinutes,
-            status
-        )
+        return listOf(
+            getString(
+                R.string.automation_trigger_subtitle,
+                event,
+                trigger.cooldownMinutes,
+                status
+            ),
+            automationTriggerConditionCountLabel(trigger)
+        ).joinToString("\n")
     }
+
+    private fun automationTriggerConditionCountLabel(trigger: AgentWorkflowTrigger): String =
+        getString(
+            R.string.automation_trigger_condition_count,
+            trigger.conditions.size
+        )
+
+    private fun automationExecutionSubtitle(execution: AgentWorkflowExecutionRecord): String {
+        val source = automationExecutionSourceLabel(execution.source)
+        val timestamp = execution.completedAtMillis.takeIf { it > 0L }
+            ?: execution.startedAtMillis.takeIf { it > 0L }
+        val time = timestamp?.let {
+            SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(it))
+        } ?: getString(R.string.status_unknown)
+        val result = execution.resultSummary.trim()
+            .ifBlank { getString(R.string.automation_run_result_empty) }
+        return listOf(
+            getString(R.string.automation_run_source, source),
+            getString(R.string.automation_run_time, time),
+            getString(R.string.automation_run_result, result)
+        ).joinToString("\n")
+    }
+
+    private fun automationExecutionSourceLabel(source: AgentWorkflowExecutionSource): String = getString(
+        when (source) {
+            AgentWorkflowExecutionSource.MANUAL -> R.string.automation_run_source_manual
+            AgentWorkflowExecutionSource.SCHEDULE -> R.string.automation_run_source_schedule
+            AgentWorkflowExecutionSource.EVENT -> R.string.automation_run_source_event
+        }
+    )
+
+    private fun automationExecutionStatusLabel(status: AgentWorkflowExecutionStatus): String = getString(
+        when (status) {
+            AgentWorkflowExecutionStatus.RUNNING -> R.string.automation_run_status_running
+            AgentWorkflowExecutionStatus.WAITING_CONFIRMATION ->
+                R.string.automation_run_status_waiting_confirmation
+            AgentWorkflowExecutionStatus.WAITING_RESPONSE ->
+                R.string.automation_run_status_waiting_response
+            AgentWorkflowExecutionStatus.COMPLETED -> R.string.automation_run_status_completed
+            AgentWorkflowExecutionStatus.SKIPPED -> R.string.automation_run_status_skipped
+            AgentWorkflowExecutionStatus.FAILED -> R.string.automation_run_status_failed
+            AgentWorkflowExecutionStatus.CANCELLED -> R.string.automation_run_status_cancelled
+            AgentWorkflowExecutionStatus.BLOCKED -> R.string.automation_run_status_blocked
+        }
+    )
 
     private fun showSecurityFeaturePage() {
         val connectorContacts = activePcConnectorContacts()
