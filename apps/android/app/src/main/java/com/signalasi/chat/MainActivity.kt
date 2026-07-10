@@ -1925,6 +1925,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         ).joinToString(" / ")
         val rows = listOf(
             R.string.agent_plan_context_goal to state.currentGoal.ifBlank { plan.goal },
+            R.string.agent_plan_context_planner to plan.plannerProfile.ifBlank { "rule-based-local" },
             R.string.agent_plan_context_route to routeLabel.ifBlank { plan.selectedAgentOrModel.ifBlank { "-" } },
             R.string.agent_plan_context_reason to plan.routeRationale.ifBlank { "-" },
             R.string.agent_plan_context_expected to plan.expectedResult.ifBlank { "-" },
@@ -6201,6 +6202,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun showOnDeviceAgentFeaturePage() {
         showFeaturePage(getString(R.string.on_device_agent_title))
         val safetySettings = mobileNativeAgent.safetySettings()
+        val modelPlannerSettings = mobileNativeAgent.modelPlannerSettings()
         featureContent.addView(featureHeroCard(
             getString(R.string.on_device_agent_hero_title),
             getString(R.string.on_device_agent_hero_subtitle),
@@ -6243,6 +6245,39 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             safetySettings.executionPaused
         ).apply {
             setOnClickListener { toggleAgentExecutionPaused() }
+        })
+        addSectionTitle(getString(R.string.on_device_agent_section_intelligence))
+        featureContent.addView(featureSwitchRow(
+            getString(R.string.on_device_agent_model_planner),
+            getString(R.string.on_device_agent_model_planner_subtitle),
+            R.drawable.ic_agent_node,
+            modelPlannerSettings.enabled
+        ).apply {
+            setOnClickListener { toggleAgentModelPlanner() }
+        })
+        featureContent.addView(featureSwitchRow(
+            getString(R.string.on_device_agent_model_screen_text),
+            getString(R.string.on_device_agent_model_screen_text_subtitle),
+            R.drawable.ic_scan,
+            modelPlannerSettings.shareScreenText
+        ).apply {
+            setOnClickListener { toggleAgentModelScreenText() }
+        })
+        featureContent.addView(featureValueRow(
+            getString(R.string.on_device_agent_model_source),
+            getString(R.string.on_device_agent_model_source_subtitle),
+            R.drawable.ic_protocol_link,
+            agentModelPlannerSourceLabel(modelPlannerSettings.cloudContactId)
+        ).apply {
+            setOnClickListener { showAgentModelPlannerSourceDialog() }
+        })
+        featureContent.addView(featureValueRow(
+            getString(R.string.on_device_agent_model_max_actions),
+            getString(R.string.on_device_agent_model_max_actions_subtitle),
+            R.drawable.ic_agent_node,
+            modelPlannerSettings.maxActions.toString()
+        ).apply {
+            setOnClickListener { cycleAgentModelMaxActions() }
         })
         addSectionTitle(getString(R.string.on_device_agent_section_capabilities))
         featureContent.addView(featureSwitchRow(
@@ -6348,6 +6383,74 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val next = !mobileNativeAgent.safetySettings().executionPaused
         mobileNativeAgent.updateExecutionPaused(next)
         showOnDeviceAgentFeaturePage()
+    }
+
+    private fun toggleAgentModelPlanner() {
+        val next = !mobileNativeAgent.modelPlannerSettings().enabled
+        mobileNativeAgent.updateModelPlannerEnabled(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun toggleAgentModelScreenText() {
+        val next = !mobileNativeAgent.modelPlannerSettings().shareScreenText
+        mobileNativeAgent.updateModelPlannerScreenText(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun cycleAgentModelMaxActions() {
+        val current = mobileNativeAgent.modelPlannerSettings().maxActions
+        val next = when {
+            current < 4 -> 4
+            current < 8 -> 8
+            current < 12 -> 12
+            else -> 4
+        }
+        mobileNativeAgent.updateModelPlannerMaxActions(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun showAgentModelPlannerSourceDialog() {
+        val settings = mobileNativeAgent.modelPlannerSettings()
+        val sources = configuredAgentPlannerSources()
+        val ids = listOf("") + sources.map { it.first }
+        val labels = listOf(getString(R.string.on_device_agent_model_source_automatic)) +
+            sources.map { it.second }
+        val selected = ids.indexOf(settings.cloudContactId).coerceAtLeast(0)
+        android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.on_device_agent_model_source))
+            .setSingleChoiceItems(labels.toTypedArray(), selected) { dialog, which ->
+                mobileNativeAgent.updateModelPlannerCloudContact(ids[which])
+                dialog.dismiss()
+                showOnDeviceAgentFeaturePage()
+            }
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .show()
+    }
+
+    private fun agentModelPlannerSourceLabel(contactId: String): String =
+        configuredAgentPlannerSources().firstOrNull { it.first == contactId }?.second
+            ?: getString(R.string.on_device_agent_model_source_automatic)
+
+    private fun configuredAgentPlannerSources(): List<Pair<String, String>> {
+        val contacts = AppStore.contacts(this)
+        return buildList {
+            for (index in 0 until contacts.length()) {
+                val contact = contacts.optJSONObject(index) ?: continue
+                if (contact.optBoolean("deleted", false)) continue
+                if (contact.optString("delivery_mode") != "cloud_api") continue
+                if (contact.optString("setup_status").ifBlank { "ready" } != "ready") continue
+                val id = contact.optString("id").ifBlank { contact.optString("signalasi_id") }
+                val selected = AppStore.selectedCloudModelContact(this@MainActivity, id) ?: contact
+                if (id.isBlank() || selected.optString("cloud_model").isBlank()) continue
+                if (selected.optString("cloud_endpoint").isBlank() || selected.optString("cloud_api_key").isBlank()) continue
+                val provider = selected.optString("cloud_provider")
+                    .ifBlank { selected.optString("display_name") }
+                    .ifBlank { selected.optString("name") }
+                    .ifBlank { id }
+                val model = selected.optString("cloud_model")
+                add(id to "$provider / $model")
+            }
+        }
     }
 
     private fun toggleAgentScreenObservation() {

@@ -593,6 +593,16 @@
     <string name="on_device_agent_status_paused">已暂停</string>
     <string name="on_device_agent_execution_pause">暂停全部执行</string>
     <string name="on_device_agent_execution_pause_subtitle">立即停止自动执行，同时保留观察能力</string>
+    <string name="on_device_agent_section_intelligence">规划智能</string>
+    <string name="on_device_agent_model_planner">模型驱动规划</string>
+    <string name="on_device_agent_model_planner_subtitle">由已配置的云模型提出动作计划，Android 在本地验证每个动作</string>
+    <string name="on_device_agent_model_screen_text">共享屏幕文字用于规划</string>
+    <string name="on_device_agent_model_screen_text_subtitle">在模型规划请求中包含非敏感的可见文字和控件标签</string>
+    <string name="on_device_agent_model_source">规划模型</string>
+    <string name="on_device_agent_model_source_subtitle">选择用于提出动作计划的已配置云模型</string>
+    <string name="on_device_agent_model_source_automatic">自动选择</string>
+    <string name="on_device_agent_model_max_actions">最大规划动作数</string>
+    <string name="on_device_agent_model_max_actions_subtitle">每个模型计划最多包含 4、8 或 12 个经验证动作</string>
     <string name="on_device_agent_section_capabilities">能力授权</string>
     <string name="on_device_agent_allow_screen_observation">屏幕理解</string>
     <string name="on_device_agent_allow_screen_observation_subtitle">允许智能体运行时采集结构化屏幕上下文</string>
@@ -720,6 +730,7 @@
     <string name="agent_running_tasks_targets_value">运行任务：%1$d / 可调用对象：%2$d</string>
     <string name="agent_status_waiting_confirmation">确认动作</string>
     <string name="agent_status_executing">正在执行动作</string>
+    <string name="agent_plan_context_planner">规划器</string>
     <string name="agent_high_risk_confirmation_title">确认高风险操作</string>
     <string name="agent_high_risk_confirmation_message">操作：%1$s\n目标：%2$s\n风险：%3$s\n\n此操作可能影响安全、隐私、财产或他人。请再次确认后执行。</string>
     <string name="agent_high_risk_confirmation_execute">确认并执行</string>

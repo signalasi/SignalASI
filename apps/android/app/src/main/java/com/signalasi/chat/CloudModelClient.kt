@@ -18,20 +18,40 @@ object CloudModelClient {
     }
 
     fun send(context: Context, contact: JSONObject, turns: List<ChatMessage>): String {
+        return send(context, contact, turns, SYSTEM_PROMPT)
+    }
+
+    fun sendStructured(context: Context, contact: JSONObject, systemPrompt: String, prompt: String): String {
+        val turn = ChatMessage(0L, prompt, true, Contact("me", context.getString(R.string.chat_me), ""))
+        return send(context, contact, listOf(turn), systemPrompt.take(4_000))
+    }
+
+    private fun send(
+        context: Context,
+        contact: JSONObject,
+        turns: List<ChatMessage>,
+        systemPrompt: String
+    ): String {
         validateContact(context, contact)
         val style = contact.optString("cloud_api_style", "openai")
         return when (style) {
-            "anthropic" -> sendAnthropic(context, contact, turns)
-            "gemini" -> sendGemini(context, contact, turns)
-            else -> sendOpenAiCompatible(context, contact, turns)
+            "anthropic" -> sendAnthropic(context, contact, turns, systemPrompt)
+            "gemini" -> sendGemini(context, contact, turns, systemPrompt)
+            else -> sendOpenAiCompatible(context, contact, turns, systemPrompt)
         }
     }
 
-    private fun sendOpenAiCompatible(context: Context, contact: JSONObject, turns: List<ChatMessage>): String {
+    private fun sendOpenAiCompatible(
+        context: Context,
+        contact: JSONObject,
+        turns: List<ChatMessage>,
+        systemPrompt: String
+    ): String {
         val body = JSONObject()
             .put("model", contact.getString("cloud_model"))
-            .put("messages", openAiMessages(context, turns))
+            .put("messages", openAiMessages(context, turns, systemPrompt))
             .put("stream", false)
+            .apply { if (systemPrompt != SYSTEM_PROMPT) put("temperature", 0.1) }
         val text = postJson(
             contact.getString("cloud_endpoint"),
             openAiHeaders(contact),
@@ -47,11 +67,16 @@ object CloudModelClient {
             .ifBlank { text.take(1200) }
     }
 
-    private fun sendAnthropic(context: Context, contact: JSONObject, turns: List<ChatMessage>): String {
+    private fun sendAnthropic(
+        context: Context,
+        contact: JSONObject,
+        turns: List<ChatMessage>,
+        systemPrompt: String
+    ): String {
         val body = JSONObject()
             .put("model", contact.getString("cloud_model"))
-            .put("system", SYSTEM_PROMPT)
-            .put("max_tokens", 1200)
+            .put("system", systemPrompt)
+            .put("max_tokens", if (systemPrompt == SYSTEM_PROMPT) 1200 else 3000)
             .put("messages", anthropicMessages(context, turns))
         val text = postJson(
             contact.getString("cloud_endpoint"),
@@ -66,18 +91,23 @@ object CloudModelClient {
         return textBlocks(json.optJSONArray("content")).ifBlank { text.take(1200) }
     }
 
-    private fun sendGemini(context: Context, contact: JSONObject, turns: List<ChatMessage>): String {
+    private fun sendGemini(
+        context: Context,
+        contact: JSONObject,
+        turns: List<ChatMessage>,
+        systemPrompt: String
+    ): String {
         val endpoint = contact.getString("cloud_endpoint")
         val separator = if (endpoint.contains("?")) "&" else "?"
         val url = endpoint + separator + "key=" + URLEncoder.encode(contact.getString("cloud_api_key"), "UTF-8")
         val body = JSONObject()
             .put("system_instruction", JSONObject().put("parts", JSONArray()
-                .put(JSONObject().put("text", SYSTEM_PROMPT))
+                .put(JSONObject().put("text", systemPrompt))
             ))
             .put("contents", geminiContents(context, turns))
             .put("generationConfig", JSONObject()
-                .put("temperature", 0.7)
-                .put("maxOutputTokens", 1200)
+                .put("temperature", if (systemPrompt == SYSTEM_PROMPT) 0.7 else 0.1)
+                .put("maxOutputTokens", if (systemPrompt == SYSTEM_PROMPT) 1200 else 3000)
             )
         val text = postJson(url, emptyMap(), body)
         val json = JSONObject(text)
@@ -97,8 +127,8 @@ object CloudModelClient {
         if (apiKey.isBlank()) error(context.getString(R.string.cloud_api_key_required))
     }
 
-    private fun openAiMessages(context: Context, turns: List<ChatMessage>): JSONArray =
-        JSONArray().put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT)).also { messages ->
+    private fun openAiMessages(context: Context, turns: List<ChatMessage>, systemPrompt: String): JSONArray =
+        JSONArray().put(JSONObject().put("role", "system").put("content", systemPrompt)).also { messages ->
             normalizedTurns(context, turns).forEach { turn ->
                 messages.put(JSONObject()
                     .put("role", if (turn.isMine) "user" else "assistant")

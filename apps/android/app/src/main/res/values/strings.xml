@@ -373,6 +373,7 @@
     <string name="agent_section_plan_context">Plan Context</string>
     <string name="agent_plan_context_empty">No active plan context</string>
     <string name="agent_plan_context_goal">Goal</string>
+    <string name="agent_plan_context_planner">Planner</string>
     <string name="agent_plan_context_route">Route</string>
     <string name="agent_plan_context_reason">Reason</string>
     <string name="agent_plan_context_expected">Expected</string>
@@ -749,6 +750,16 @@
     <string name="on_device_agent_memory_capture_subtitle">Allow Agent tasks and explicit notes to update long-term memory and knowledge</string>
     <string name="on_device_agent_execution_pause">Pause All Execution</string>
     <string name="on_device_agent_execution_pause_subtitle">Immediately stop automatic execution while keeping observation available</string>
+    <string name="on_device_agent_section_intelligence">Planning Intelligence</string>
+    <string name="on_device_agent_model_planner">Model-driven Planning</string>
+    <string name="on_device_agent_model_planner_subtitle">Let a configured cloud model propose ActionPlans; Android validates every action locally</string>
+    <string name="on_device_agent_model_screen_text">Share Screen Text for Planning</string>
+    <string name="on_device_agent_model_screen_text_subtitle">Include non-sensitive visible text and element labels in model planning requests</string>
+    <string name="on_device_agent_model_source">Planning Model</string>
+    <string name="on_device_agent_model_source_subtitle">Choose the configured cloud model that proposes ActionPlans</string>
+    <string name="on_device_agent_model_source_automatic">Automatic</string>
+    <string name="on_device_agent_model_max_actions">Maximum Planned Actions</string>
+    <string name="on_device_agent_model_max_actions_subtitle">Limit each model-generated plan to 4, 8, or 12 validated actions</string>
     <string name="on_device_agent_section_capabilities">Capability Access</string>
     <string name="on_device_agent_allow_screen_observation">Screen Understanding</string>
     <string name="on_device_agent_allow_screen_observation_subtitle">Allow the Agent runtime to capture structured screen context</string>

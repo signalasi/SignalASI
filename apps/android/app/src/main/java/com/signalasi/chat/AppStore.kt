@@ -877,6 +877,7 @@ object AppStore {
         AgentConnectorResponseStore.clear(context)
         HomeAssistantSettingsStore.clear(context)
         CustomDeviceConnectorStore(context).clear()
+        AgentModelPlannerSettingsStore(context).clear()
         runCatching { AgentStorageCipher.deleteMasterKey() }
         SignalASICrypto.resetLocalIdentity(context)
         context.cacheDir.deleteRecursively()

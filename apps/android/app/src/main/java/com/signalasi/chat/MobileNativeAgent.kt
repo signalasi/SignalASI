@@ -60,7 +60,7 @@ private val SENSITIVE_MEMORY_TERMS = listOf(
 class MobileNativeAgent(
     context: Context,
     private val perceptionProvider: ScreenPerceptionProvider = AndroidScreenPerceptionProvider(context),
-    private val planner: AgentPlanner = RuleBasedAgentPlanner(context),
+    private val planner: AgentPlanner = GuardedModelAgentPlanner(context),
     private val safetySettingsStore: AgentSafetySettingsStore = SharedPreferencesAgentSafetySettingsStore(context),
     private val safetyPolicy: AgentSafetyPolicy = DefaultAgentSafetyPolicy(safetySettingsStore),
     private val actionExecutor: AgentActionExecutor = AndroidAgentActionExecutor(context),
@@ -383,6 +383,10 @@ class MobileNativeAgent(
         )
         val safetyReview = safetyPolicy.review(draftPlan)
         currentPlan = draftPlan.withSafetyReview(safetyReview)
+        recordAudit(
+            AgentAuditEvent.INVOCATION_AUDIT,
+            "planner=${draftPlan.plannerProfile}; actions=${draftPlan.actions.size}; valid=${draftPlan.validation.valid}"
+        )
         phase = when {
             safetyReview.blocked -> AgentPhase.BLOCKED
             safetyReview.requiresConfirmation -> AgentPhase.WAITING_CONFIRMATION
@@ -728,6 +732,40 @@ class MobileNativeAgent(
     }
 
     fun safetySettings(): AgentSafetySettings = safetySettingsStore.load()
+
+    fun modelPlannerSettings(): AgentModelPlannerSettings = AgentModelPlannerSettingsStore(appContext).load()
+
+    fun updateModelPlannerEnabled(enabled: Boolean): AgentUiState {
+        val store = AgentModelPlannerSettingsStore(appContext)
+        store.save(store.load().copy(enabled = enabled))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "model_planner_enabled:$enabled")
+        return snapshot()
+    }
+
+    fun updateModelPlannerScreenText(enabled: Boolean): AgentUiState {
+        val store = AgentModelPlannerSettingsStore(appContext)
+        store.save(store.load().copy(shareScreenText = enabled))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "model_planner_share_screen_text:$enabled")
+        return snapshot()
+    }
+
+    fun updateModelPlannerMaxActions(maxActions: Int): AgentUiState {
+        val store = AgentModelPlannerSettingsStore(appContext)
+        store.save(store.load().copy(maxActions = maxActions.coerceIn(1, 12)))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "model_planner_max_actions:${maxActions.coerceIn(1, 12)}")
+        return snapshot()
+    }
+
+    fun updateModelPlannerCloudContact(contactId: String): AgentUiState {
+        val store = AgentModelPlannerSettingsStore(appContext)
+        val normalizedId = contactId.trim().take(120)
+        store.save(store.load().copy(cloudContactId = normalizedId))
+        recordAudit(
+            AgentAuditEvent.SETTINGS_UPDATED,
+            "model_planner_cloud_contact:${normalizedId.ifBlank { "automatic" }}"
+        )
+        return snapshot()
+    }
 
     fun updatePermissionMode(mode: PermissionMode): AgentUiState {
         safetySettingsStore.save(safetySettingsStore.load().copy(permissionMode = mode))
