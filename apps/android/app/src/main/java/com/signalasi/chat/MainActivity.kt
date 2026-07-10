@@ -884,7 +884,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             renderAgentState(mobileNativeAgent.updateMemoryCapture(next))
         }
         agentMemoryText.setOnClickListener { showAgentMemoryPage() }
-        agentKnowledgeText.setOnClickListener { openAgentKnowledgeImportPicker() }
+        agentKnowledgeText.setOnClickListener { showAgentKnowledgePage() }
         agentSubmitButton.setOnClickListener { handleAgentPrimaryAction() }
         agentGoalInput.setOnEditorActionListener { _, _, _ ->
             submitAgentGoal()
@@ -7029,6 +7029,195 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         ))
     }
 
+    private fun showAgentKnowledgePage(query: String = "") {
+        showFeaturePage(getString(R.string.agent_knowledge_title))
+        val stats = mobileNativeAgent.snapshot().runtimeContext.knowledgeStats
+        val sourceGroups = mobileNativeAgent.knowledgeSourceGroups()
+        featureContent.addView(featureHeroCard(
+            getString(R.string.agent_knowledge_hero_title),
+            getString(R.string.agent_knowledge_hero_subtitle),
+            R.drawable.ic_protocol_link,
+            "#08A88A",
+            getString(R.string.agent_knowledge_source_badge, stats.sourceCount)
+        ))
+
+        addSectionTitle(getString(R.string.agent_knowledge_section_actions))
+        featureContent.addView(featureRow(
+            getString(R.string.agent_knowledge_import),
+            getString(R.string.agent_knowledge_import_subtitle),
+            R.drawable.ic_protocol_link,
+            getString(R.string.agent_knowledge_add)
+        ).apply { setOnClickListener { openAgentKnowledgeImportPicker() } })
+        featureContent.addView(featureRow(
+            getString(R.string.agent_knowledge_search),
+            if (query.isBlank()) getString(R.string.agent_knowledge_search_subtitle) else query,
+            R.drawable.ic_tab_discover,
+            getString(R.string.agent_knowledge_search_action)
+        ).apply {
+            setOnClickListener {
+                showTextSettingDialog(getString(R.string.agent_knowledge_search), query) { value ->
+                    showAgentKnowledgePage(value)
+                }
+            }
+        })
+
+        if (query.isNotBlank()) {
+            val hits = mobileNativeAgent.searchKnowledge(query)
+            addSectionTitle(getString(R.string.agent_knowledge_section_results, hits.size))
+            if (hits.isEmpty()) {
+                featureContent.addView(featureValueRow(
+                    getString(R.string.agent_knowledge_no_results),
+                    query,
+                    R.drawable.ic_tab_discover,
+                    ""
+                ))
+            } else {
+                hits.forEachIndexed { index, hit ->
+                    featureContent.addView(featureValueRow(
+                        "[${index + 1}] ${hit.item.title.substringBeforeLast(" [")}",
+                        hit.excerpt,
+                        R.drawable.ic_protocol_link,
+                        getString(R.string.agent_knowledge_score, hit.score)
+                    ))
+                }
+            }
+        }
+
+        addSectionTitle(getString(R.string.agent_knowledge_section_sources, sourceGroups.size))
+        if (sourceGroups.isEmpty()) {
+            featureContent.addView(featureValueRow(
+                getString(R.string.agent_knowledge_empty_title),
+                getString(R.string.agent_knowledge_empty_subtitle),
+                R.drawable.ic_protocol_link,
+                ""
+            ))
+        } else {
+            sourceGroups.forEach { group ->
+                featureContent.addView(featureValueRow(
+                    group.title,
+                    getString(
+                        R.string.agent_knowledge_source_subtitle,
+                        group.chunkCount,
+                        knowledgeCloudAccessLabel(group.cloudAccess),
+                        knowledgeAgentAccessLabel(group.agentAccess)
+                    ),
+                    R.drawable.ic_protocol_link,
+                    getString(R.string.agent_knowledge_manage)
+                ).apply { setOnClickListener { showAgentKnowledgeSourceActions(group) } })
+            }
+        }
+
+        val audit = mobileNativeAgent.knowledgeAccessAudit(limit = 8)
+        if (audit.isNotEmpty()) {
+            addSectionTitle(getString(R.string.agent_knowledge_section_audit))
+            audit.forEach { entry ->
+                val time = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(entry.timestampMillis))
+                featureContent.addView(featureValueRow(
+                    entry.targetId,
+                    getString(
+                        R.string.agent_knowledge_audit_subtitle,
+                        entry.sourceCount,
+                        entry.evidenceModes.joinToString(" / ") { knowledgeEvidenceModeLabel(it) },
+                        entry.blockedMatchCount
+                    ),
+                    R.drawable.ic_security_shield,
+                    time
+                ))
+            }
+        }
+    }
+
+    private fun showAgentKnowledgeSourceActions(group: AgentKnowledgeSourceGroup) {
+        val options = arrayOf(
+            getString(R.string.agent_knowledge_cloud_access),
+            getString(R.string.agent_knowledge_agent_access)
+        )
+        android.app.AlertDialog.Builder(this)
+            .setTitle(group.title)
+            .setItems(options) { _, which ->
+                if (which == 0) showAgentKnowledgeCloudAccessDialog(group)
+                else showAgentKnowledgeAgentAccessDialog(group)
+            }
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .show()
+    }
+
+    private fun showAgentKnowledgeCloudAccessDialog(group: AgentKnowledgeSourceGroup) {
+        val policies = AgentKnowledgeCloudAccess.entries
+        val labels = policies.map(::knowledgeCloudAccessLabel)
+        android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.agent_knowledge_cloud_access))
+            .setSingleChoiceItems(labels.toTypedArray(), policies.indexOf(group.cloudAccess)) { dialog, which ->
+                mobileNativeAgent.updateKnowledgeSourceAccess(
+                    group.itemIds,
+                    policies[which],
+                    group.agentAccess,
+                    group.allowedAgentIds
+                )
+                dialog.dismiss()
+                showAgentKnowledgePage()
+            }
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .show()
+    }
+
+    private fun showAgentKnowledgeAgentAccessDialog(group: AgentKnowledgeSourceGroup) {
+        val policies = AgentKnowledgeAgentAccess.entries
+        val labels = policies.map(::knowledgeAgentAccessLabel)
+        android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.agent_knowledge_agent_access))
+            .setSingleChoiceItems(labels.toTypedArray(), policies.indexOf(group.agentAccess)) { dialog, which ->
+                dialog.dismiss()
+                val selected = policies[which]
+                if (selected == AgentKnowledgeAgentAccess.SELECTED_AGENTS) {
+                    showTextSettingDialog(
+                        getString(R.string.agent_knowledge_selected_agents),
+                        group.allowedAgentIds.joinToString(", ")
+                    ) { rawIds ->
+                        mobileNativeAgent.updateKnowledgeSourceAccess(
+                            group.itemIds,
+                            group.cloudAccess,
+                            selected,
+                            rawIds.split(',').map { it.trim() }.filter { it.isNotBlank() }
+                        )
+                        showAgentKnowledgePage()
+                    }
+                } else {
+                    mobileNativeAgent.updateKnowledgeSourceAccess(
+                        group.itemIds,
+                        group.cloudAccess,
+                        selected
+                    )
+                    showAgentKnowledgePage()
+                }
+            }
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .show()
+    }
+
+    private fun knowledgeCloudAccessLabel(value: AgentKnowledgeCloudAccess): String = getString(
+        when (value) {
+            AgentKnowledgeCloudAccess.DENY -> R.string.agent_knowledge_access_local_only
+            AgentKnowledgeCloudAccess.SUMMARY_ONLY -> R.string.agent_knowledge_access_summary
+            AgentKnowledgeCloudAccess.FULL -> R.string.agent_knowledge_access_full
+        }
+    )
+
+    private fun knowledgeAgentAccessLabel(value: AgentKnowledgeAgentAccess): String = getString(
+        when (value) {
+            AgentKnowledgeAgentAccess.LOCAL_ONLY -> R.string.agent_knowledge_agent_local_only
+            AgentKnowledgeAgentAccess.SELECTED_AGENTS -> R.string.agent_knowledge_agent_selected
+            AgentKnowledgeAgentAccess.ANY_PAIRED_AGENT -> R.string.agent_knowledge_agent_any
+        }
+    )
+
+    private fun knowledgeEvidenceModeLabel(value: AgentKnowledgeEvidenceMode): String = getString(
+        when (value) {
+            AgentKnowledgeEvidenceMode.FULL -> R.string.agent_knowledge_access_full
+            AgentKnowledgeEvidenceMode.SUMMARY -> R.string.agent_knowledge_access_summary
+        }
+    )
+
     private fun showAgentMemoryConflictDialog(conflict: AgentMemoryConflict) {
         val candidates = conflict.candidates.sortedBy { it.version }
         val options = candidates.map { item ->
@@ -8324,6 +8513,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             runOnUiThread {
                 renderAgentState(mobileNativeAgent.recordKnowledgeImport(result))
                 Toast.makeText(this, result.message, Toast.LENGTH_LONG).show()
+                if (result.success) showAgentKnowledgePage()
             }
         }
     }

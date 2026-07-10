@@ -127,6 +127,13 @@ class AgentKnowledgeImporter(
         val indexedText = normalized.take(MAX_EXTRACTED_CHARACTERS)
         val chunks = chunkText(indexedText)
         val importedAt = System.currentTimeMillis()
+        val documentSummary = indexedText
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .take(480)
+        val semanticTags = AgentKnowledgeTextAnalyzer.tokens("$title ${indexedText.take(2_000)}")
+            .filter { it.length in 2..40 }
+            .take(12)
         val items = chunks.mapIndexed { index, chunk ->
             AgentKnowledgeItem(
                 id = UUID.nameUUIDFromBytes("$source#$index".toByteArray(Charsets.UTF_8)).toString(),
@@ -134,7 +141,14 @@ class AgentKnowledgeImporter(
                 title = if (chunks.size == 1) title else "$title [${index + 1}/${chunks.size}]",
                 content = chunk,
                 source = source,
-                tags = listOf("import", mimeType).plus(sourceTags).filter { it.isNotBlank() }.distinct(),
+                tags = listOf("import", mimeType)
+                    .plus(sourceTags)
+                    .plus(semanticTags)
+                    .filter { it.isNotBlank() }
+                    .distinct(),
+                summary = documentSummary,
+                chunkIndex = index,
+                chunkCount = chunks.size,
                 updatedAtMillis = importedAt + index
             )
         }
