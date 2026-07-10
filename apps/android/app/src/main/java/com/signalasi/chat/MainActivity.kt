@@ -5293,6 +5293,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun showAutomationFeaturePage() {
         val workflows = SharedPreferencesAgentWorkflowStore(this).list()
         val schedules = AgentWorkflowScheduleStore(this).list()
+        val triggers = AgentWorkflowTriggerStore(this).list()
         val templates = AgentWorkflowTemplates.all
         showFeaturePage(getString(R.string.automation_title))
         featureContent.addView(featureHeroCard(
@@ -5342,6 +5343,26 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 })
             }
         }
+        addSectionTitle(getString(R.string.automation_event_triggers))
+        if (triggers.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.automation_no_event_triggers),
+                getString(R.string.automation_event_trigger_hint),
+                R.drawable.ic_protocol_link,
+                ""
+            ))
+        } else {
+            triggers.forEach { trigger ->
+                featureContent.addView(featureRow(
+                    trigger.workflowName,
+                    automationTriggerSubtitle(trigger),
+                    R.drawable.ic_protocol_link,
+                    getString(R.string.common_delete)
+                ).apply {
+                    setOnClickListener { openAgentWorkflow("delete trigger ${trigger.id}") }
+                })
+            }
+        }
         addSectionTitle(getString(R.string.automation_templates))
         templates.forEach { template ->
             featureContent.addView(featureRow(
@@ -5375,6 +5396,26 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "-"
         }
         return getString(R.string.automation_schedule_subtitle, cadence, next)
+    }
+
+    private fun automationTriggerSubtitle(trigger: AgentWorkflowTrigger): String {
+        val event = when (trigger.kind) {
+            AgentWorkflowTriggerKind.NOTIFICATION_PACKAGE ->
+                getString(R.string.automation_trigger_notification_package, trigger.condition)
+            AgentWorkflowTriggerKind.NOTIFICATION_TEXT ->
+                getString(R.string.automation_trigger_notification_text, trigger.condition)
+            AgentWorkflowTriggerKind.POWER_CONNECTED ->
+                getString(R.string.automation_trigger_power_connected)
+            AgentWorkflowTriggerKind.BATTERY_LOW ->
+                getString(R.string.automation_trigger_battery_low)
+        }
+        val status = getString(if (trigger.enabled) R.string.status_enabled else R.string.common_off)
+        return getString(
+            R.string.automation_trigger_subtitle,
+            event,
+            trigger.cooldownMinutes,
+            status
+        )
     }
 
     private fun showSecurityFeaturePage() {

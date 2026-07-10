@@ -30,8 +30,13 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         handleDebugIncoming(intent)
-        if (intent?.action == AgentWorkflowScheduler.ACTION_RUN_SCHEDULE) {
-            executeScheduledWorkflow(intent.getStringExtra(AgentWorkflowScheduler.EXTRA_SCHEDULE_ID).orEmpty())
+        when (intent?.action) {
+            AgentWorkflowScheduler.ACTION_RUN_SCHEDULE -> executeScheduledWorkflow(
+                intent.getStringExtra(AgentWorkflowScheduler.EXTRA_SCHEDULE_ID).orEmpty()
+            )
+            AgentWorkflowTriggerEngine.ACTION_RUN_TRIGGER -> executeTriggeredWorkflow(
+                intent.getStringExtra(AgentWorkflowTriggerEngine.EXTRA_TRIGGER_ID).orEmpty()
+            )
         }
         SignalASIMqttClient.connect(this)
         return START_STICKY
@@ -125,13 +130,29 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
     private fun executeScheduledWorkflow(scheduleId: String) {
         if (scheduleId.isBlank()) return
         val schedule = AgentWorkflowScheduleStore(this).findById(scheduleId) ?: return
-        val workflowStore = SharedPreferencesAgentWorkflowStore(this)
-        val workflow = workflowStore.findById(schedule.workflowId) ?: run {
+        executeWorkflow(schedule.workflowId, schedule.workflowName) {
             AgentWorkflowScheduler.cancel(this, schedule)
-            showScheduledAgentNotification(
-                schedule.workflowName,
-                getString(R.string.agent_schedule_workflow_missing)
-            )
+        }
+    }
+
+    private fun executeTriggeredWorkflow(triggerId: String) {
+        if (triggerId.isBlank()) return
+        val triggerStore = AgentWorkflowTriggerStore(this)
+        val trigger = triggerStore.findById(triggerId) ?: return
+        executeWorkflow(trigger.workflowId, trigger.workflowName) {
+            triggerStore.deleteForWorkflow(trigger.workflowId)
+        }
+    }
+
+    private fun executeWorkflow(
+        workflowId: String,
+        workflowName: String,
+        onWorkflowMissing: () -> Unit
+    ) {
+        val workflowStore = SharedPreferencesAgentWorkflowStore(this)
+        val workflow = workflowStore.findById(workflowId) ?: run {
+            onWorkflowMissing()
+            showScheduledAgentNotification(workflowName, getString(R.string.agent_schedule_workflow_missing))
             return
         }
         val agent = MobileNativeAgent(this)

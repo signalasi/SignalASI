@@ -80,5 +80,13 @@
         <receiver
             android:name=".AgentWorkflowAlarmReceiver"
             android:exported="false" />
+        <receiver
+            android:name=".AgentWorkflowEventReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.ACTION_POWER_CONNECTED" />
+                <action android:name="android.intent.action.BATTERY_LOW" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

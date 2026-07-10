@@ -173,6 +173,17 @@
     <string name="automation_schedule_hint">Use: schedule workflow Name at 09:00</string>
     <string name="automation_every_minutes">Every %1$d minutes</string>
     <string name="automation_schedule_subtitle">%1$s · Next %2$s</string>
+    <string name="automation_event_triggers">Event Triggers</string>
+    <string name="automation_no_event_triggers">No event triggers</string>
+    <string name="automation_event_trigger_hint">Run a saved workflow when an event matches</string>
+    <string name="automation_trigger_notification_package">Notification from %1$s</string>
+    <string name="automation_trigger_notification_text">Notification contains %1$s</string>
+    <string name="automation_trigger_power_connected">Power Connected</string>
+    <string name="automation_trigger_battery_low">Battery Low</string>
+    <string name="automation_trigger_subtitle">%1$s · %2$d min cooldown · %3$s</string>
+    <string name="automation_delete_trigger_title">Delete Event Trigger</string>
+    <string name="automation_delete_trigger_subtitle">Remove this trigger without deleting the saved workflow</string>
+    <string name="automation_trigger_deleted">Deleted the trigger for %1$s</string>
     <string name="automation_morning_brief">Morning Brief</string>
     <string name="automation_morning_brief_subtitle">Push news and status every day at 08:00</string>
     <string name="automation_health_check">Health Check</string>
@@ -688,7 +699,7 @@
     <string name="backup_password_hint">Set an encryption password</string>
     <string name="backup_include_messages">Back up chat history</string>
     <string name="backup_include_agent_data">Agent memory and knowledge</string>
-    <string name="backup_include_agent_data_subtitle">Memory, knowledge, workflows and schedules, task history, safety settings, and Home Assistant configuration</string>
+    <string name="backup_include_agent_data_subtitle">Memory, knowledge, workflows, schedules and event triggers, task history, safety settings, and Home Assistant configuration</string>
     <string name="backup_included">Included</string>
     <string name="backup_password_required">Enter a backup password</string>
     <string name="backup_export_file_name">signalasi_backup.hcbak</string>

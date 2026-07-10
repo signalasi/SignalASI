@@ -163,6 +163,17 @@
     <string name="automation_schedule_hint">使用：schedule workflow 名称 at 09:00</string>
     <string name="automation_every_minutes">每 %1$d 分钟</string>
     <string name="automation_schedule_subtitle">%1$s · 下次 %2$s</string>
+    <string name="automation_event_triggers">事件触发器</string>
+    <string name="automation_no_event_triggers">暂无事件触发器</string>
+    <string name="automation_event_trigger_hint">事件匹配时运行已保存的工作流</string>
+    <string name="automation_trigger_notification_package">收到来自 %1$s 的通知</string>
+    <string name="automation_trigger_notification_text">通知包含 %1$s</string>
+    <string name="automation_trigger_power_connected">已连接电源</string>
+    <string name="automation_trigger_battery_low">电量不足</string>
+    <string name="automation_trigger_subtitle">%1$s · 冷却 %2$d 分钟 · %3$s</string>
+    <string name="automation_delete_trigger_title">删除事件触发器</string>
+    <string name="automation_delete_trigger_subtitle">移除此触发器，但保留已保存的工作流</string>
+    <string name="automation_trigger_deleted">已删除 %1$s 的触发器</string>
     <string name="automation_morning_brief">晨间简报</string>
     <string name="automation_morning_brief_subtitle">每天 08:00 推送新闻和状态</string>
     <string name="automation_health_check">健康检查</string>
@@ -556,7 +567,7 @@
     <string name="backup_password_hint">设置加密密码</string>
     <string name="backup_include_messages">备份聊天记录</string>
     <string name="backup_include_agent_data">智能体记忆与知识库</string>
-    <string name="backup_include_agent_data_subtitle">记忆、知识库、工作流与定时计划、任务历史、安全设置和 Home Assistant 配置</string>
+    <string name="backup_include_agent_data_subtitle">记忆、知识库、工作流、定时计划与事件触发器、任务历史、安全设置和 Home Assistant 配置</string>
     <string name="backup_included">已包含</string>
     <string name="backup_password_required">请输入备份密码</string>
     <string name="backup_export_file_name">signalasi_backup.hcbak</string>

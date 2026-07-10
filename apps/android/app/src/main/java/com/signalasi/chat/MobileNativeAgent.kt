@@ -64,6 +64,7 @@ class MobileNativeAgent(
     private val taskStore: AgentTaskStore = SharedPreferencesAgentTaskStore(context),
     private val workflowStore: AgentWorkflowStore = SharedPreferencesAgentWorkflowStore(context),
     private val workflowScheduleStore: AgentWorkflowScheduleStore = AgentWorkflowScheduleStore(context),
+    private val workflowTriggerStore: AgentWorkflowTriggerStore = AgentWorkflowTriggerStore(context),
     private val connectorRegistry: AgentConnectorRegistry = AppStoreAgentConnectorRegistry(context),
     private val sessionStore: AgentSessionStore = SharedPreferencesAgentSessionStore(context)
 ) {
@@ -234,6 +235,24 @@ class MobileNativeAgent(
         }
         if (workflowListCommand(currentGoal)) {
             return showWorkflowsCommand()
+        }
+        workflowTriggerCreateCommandValue(currentGoal)?.let { request ->
+            return createWorkflowTriggerCommand(request)
+        }
+        if (workflowTriggerCreateSyntaxCommand(currentGoal)) {
+            return completeWorkflowManagementCommand(
+                actionId = "create-workflow-trigger-syntax",
+                description = "Show workflow trigger syntax",
+                result = "Use: trigger workflow Name when notification package com.example, notification text contains words, charging, or battery low",
+                risk = AgentRisk.LOW,
+                parameters = emptyMap()
+            )
+        }
+        if (workflowTriggerListCommand(currentGoal)) {
+            return showWorkflowTriggersCommand()
+        }
+        workflowTriggerDeleteCommandValue(currentGoal)?.let { triggerId ->
+            return deleteWorkflowTriggerCommand(triggerId)
         }
         workflowDeleteCommandValue(currentGoal)?.let { name ->
             return deleteWorkflowCommand(name)
@@ -956,6 +975,93 @@ class MobileNativeAgent(
 
     private fun workflowRunCommandValue(goal: String): String? {
         val prefixes = listOf("run workflow ", "start workflow ")
+        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
+        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
+    }
+
+    private fun workflowTriggerCreateCommandValue(goal: String): WorkflowTriggerRequest? {
+        val cleanGoal = goal.trim()
+        val conversationalMatch = listOf(
+            Regex(
+                "^(?:create|add)\\s+(?:workflow\\s+)?trigger\\s+(?:for\\s+)?(.+?)\\s+(?:when|on)\\s+(.+)$",
+                RegexOption.IGNORE_CASE
+            ),
+            Regex(
+                "^trigger\\s+workflow\\s+(.+?)\\s+(?:when|on)\\s+(.+)$",
+                RegexOption.IGNORE_CASE
+            )
+        ).firstNotNullOfOrNull { it.matchEntire(cleanGoal) }
+        val delimiterMatch = Regex(
+            "^(?:create|add)\\s+(?:workflow\\s+)?trigger\\s+(?:for\\s+)?(.+?)\\s*::\\s*(.+)$",
+            RegexOption.IGNORE_CASE
+        ).matchEntire(cleanGoal)
+        val match = conversationalMatch ?: delimiterMatch ?: return null
+        val workflowName = match.groupValues[1].trim()
+        val triggerClause = match.groupValues[2].trim()
+        if (workflowName.isBlank() || triggerClause.isBlank()) return null
+
+        val packageMatch = Regex(
+            "^notification\\s+(?:from\\s+)?package(?:\\s+(?:contains|matches))?(?:\\s*::\\s*|\\s+)(.+)$",
+            RegexOption.IGNORE_CASE
+        ).matchEntire(triggerClause)
+        if (packageMatch != null) {
+            return WorkflowTriggerRequest(
+                workflowName = workflowName,
+                kind = AgentWorkflowTriggerKind.NOTIFICATION_PACKAGE,
+                condition = packageMatch.groupValues[1].trim()
+            ).takeIf { it.condition.isNotBlank() }
+        }
+
+        val textMatch = Regex(
+            "^notification\\s+text(?:\\s+(?:contains|matches))?(?:\\s*::\\s*|\\s+)(.+)$",
+            RegexOption.IGNORE_CASE
+        ).matchEntire(triggerClause)
+        if (textMatch != null) {
+            return WorkflowTriggerRequest(
+                workflowName = workflowName,
+                kind = AgentWorkflowTriggerKind.NOTIFICATION_TEXT,
+                condition = textMatch.groupValues[1].trim()
+            ).takeIf { it.condition.isNotBlank() }
+        }
+
+        val normalizedClause = triggerClause.lowercase(Locale.US).replace(Regex("\\s+"), " ")
+        return when (normalizedClause) {
+            "charging", "power connected", "power connection" -> WorkflowTriggerRequest(
+                workflowName = workflowName,
+                kind = AgentWorkflowTriggerKind.POWER_CONNECTED
+            )
+            "battery low", "low battery" -> WorkflowTriggerRequest(
+                workflowName = workflowName,
+                kind = AgentWorkflowTriggerKind.BATTERY_LOW
+            )
+            else -> null
+        }
+    }
+
+    private fun workflowTriggerCreateSyntaxCommand(goal: String): Boolean =
+        goal.startsWith("create trigger ", ignoreCase = true) ||
+            goal.startsWith("add trigger ", ignoreCase = true) ||
+            goal.startsWith("create workflow trigger ", ignoreCase = true) ||
+            goal.startsWith("add workflow trigger ", ignoreCase = true) ||
+            goal.startsWith("trigger workflow ", ignoreCase = true)
+
+    private fun workflowTriggerListCommand(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        return normalized == "triggers" ||
+            normalized == "list triggers" ||
+            normalized == "show triggers" ||
+            normalized == "workflow triggers" ||
+            normalized == "list workflow triggers" ||
+            normalized == "show workflow triggers"
+    }
+
+    private fun workflowTriggerDeleteCommandValue(goal: String): String? {
+        val prefixes = listOf(
+            "delete workflow trigger ",
+            "remove workflow trigger ",
+            "delete trigger ",
+            "remove trigger "
+        )
         val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
         return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
     }
@@ -2155,18 +2261,115 @@ class MobileNativeAgent(
         )
     }
 
+    private fun createWorkflowTriggerCommand(request: WorkflowTriggerRequest): AgentUiState {
+        val workflow = workflowStore.find(request.workflowName) ?: return completeWorkflowManagementCommand(
+            actionId = "create-workflow-trigger-missing",
+            description = "Find workflow for event trigger",
+            result = "Workflow '${request.workflowName}' was not found",
+            risk = AgentRisk.LOW,
+            parameters = mapOf("workflow_name" to request.workflowName)
+        )
+        val trigger = AgentWorkflowTrigger(
+            workflowId = workflow.id,
+            workflowName = workflow.name,
+            kind = request.kind,
+            condition = request.condition.take(240)
+        )
+        val outcome = runCatching { workflowTriggerStore.upsert(trigger) }
+        val created = outcome.isSuccess
+        val result = if (created) {
+            "Created trigger ${trigger.id} for ${workflow.name}: ${workflowTriggerLabel(trigger)}"
+        } else {
+            outcome.exceptionOrNull()?.message ?: "Workflow trigger could not be created"
+        }
+        return completeWorkflowManagementCommand(
+            actionId = "create-workflow-trigger",
+            description = "Create encrypted Agent workflow event trigger",
+            result = result,
+            risk = AgentRisk.MEDIUM,
+            parameters = mapOf(
+                "workflow_name" to workflow.name,
+                "trigger_id" to trigger.id,
+                "trigger_kind" to trigger.kind.name,
+                "created" to created.toString()
+            )
+        )
+    }
+
+    private fun showWorkflowTriggersCommand(): AgentUiState {
+        val triggers = workflowTriggerStore.list()
+        val result = if (triggers.isEmpty()) {
+            "No workflow triggers"
+        } else {
+            buildString {
+                append("Workflow triggers: ").append(triggers.size)
+                triggers.take(20).forEach { trigger ->
+                    append("\n").append(trigger.id)
+                    append(" | ").append(trigger.workflowName)
+                    append(" | ").append(workflowTriggerLabel(trigger))
+                    append(" | ").append(if (trigger.enabled) "enabled" else "disabled")
+                }
+            }
+        }
+        return completeWorkflowManagementCommand(
+            actionId = "list-workflow-triggers",
+            description = "Show encrypted Agent workflow event triggers",
+            result = result,
+            risk = AgentRisk.LOW,
+            parameters = mapOf("trigger_count" to triggers.size.toString())
+        )
+    }
+
+    private fun deleteWorkflowTriggerCommand(triggerId: String): AgentUiState {
+        val trigger = workflowTriggerStore.findById(triggerId)
+        val deleted = if (trigger == null) 0 else workflowTriggerStore.delete(trigger.id)
+        val result = if (trigger != null && deleted > 0) {
+            "Deleted trigger ${trigger.id} for ${trigger.workflowName}"
+        } else {
+            "Workflow trigger '$triggerId' was not found"
+        }
+        return completeWorkflowManagementCommand(
+            actionId = "delete-workflow-trigger",
+            description = "Delete encrypted Agent workflow event trigger",
+            result = result,
+            risk = AgentRisk.MEDIUM,
+            parameters = mapOf("trigger_id" to triggerId, "deleted_count" to deleted.toString())
+        )
+    }
+
+    private fun workflowTriggerLabel(trigger: AgentWorkflowTrigger): String = when (trigger.kind) {
+        AgentWorkflowTriggerKind.NOTIFICATION_PACKAGE -> "notification package contains '${trigger.condition}'"
+        AgentWorkflowTriggerKind.NOTIFICATION_TEXT -> "notification text contains '${trigger.condition}'"
+        AgentWorkflowTriggerKind.POWER_CONNECTED -> "charging"
+        AgentWorkflowTriggerKind.BATTERY_LOW -> "battery low"
+    }
+
     private fun deleteWorkflowCommand(name: String): AgentUiState {
+        val workflow = workflowStore.find(name)
         workflowScheduleStore.findByWorkflowName(name)?.let { schedule ->
             AgentWorkflowScheduler.cancel(appContext, schedule)
         }
         val deleted = workflowStore.delete(name)
-        val result = if (deleted > 0) "Deleted workflow $name" else "Workflow '$name' was not found"
+        val deletedTriggers = if (deleted > 0 && workflow != null) {
+            workflowTriggerStore.deleteForWorkflow(workflow.id)
+        } else {
+            0
+        }
+        val result = if (deleted > 0) {
+            "Deleted workflow ${workflow?.name ?: name}; removed triggers=$deletedTriggers"
+        } else {
+            "Workflow '$name' was not found"
+        }
         return completeWorkflowManagementCommand(
             actionId = "delete-workflow",
             description = "Delete saved Agent workflow",
             result = result,
             risk = AgentRisk.MEDIUM,
-            parameters = mapOf("workflow_name" to name, "deleted_count" to deleted.toString())
+            parameters = mapOf(
+                "workflow_name" to name,
+                "deleted_count" to deleted.toString(),
+                "deleted_trigger_count" to deletedTriggers.toString()
+            )
         )
     }
 
@@ -5872,6 +6075,12 @@ private data class WorkflowScheduleRequest(
     val hour: Int = -1,
     val minute: Int = -1,
     val intervalMinutes: Int = 0
+)
+
+private data class WorkflowTriggerRequest(
+    val workflowName: String,
+    val kind: AgentWorkflowTriggerKind,
+    val condition: String = ""
 )
 
 enum class AgentConnectorStatus {

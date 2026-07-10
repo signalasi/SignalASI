@@ -17,11 +17,15 @@ class SignalASINotificationListenerService : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         sbn ?: return
+        val item = notificationItem(sbn)
         synchronized(lock) {
-            val next = listOf(notificationItem(sbn))
+            val next = listOf(item)
                 .plus(latestItems.filterNot { it.key == sbn.key })
                 .take(MAX_ITEMS)
             latestItems = next
+        }
+        if (sbn.packageName != packageName) {
+            AgentWorkflowTriggerEngine.onNotification(applicationContext, item)
         }
     }
 
