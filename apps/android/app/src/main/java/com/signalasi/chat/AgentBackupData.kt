@@ -56,6 +56,8 @@ object AgentBackupData {
                     .put("share_screen_text", modelPlanner.shareScreenText)
                     .put("max_actions", modelPlanner.maxActions)
                     .put("cloud_contact_id", modelPlanner.cloudContactId)
+                    .put("dynamic_replanning", modelPlanner.dynamicReplanning)
+                    .put("max_replans", modelPlanner.maxReplans)
             )
             .put(
                 "home_assistant",
@@ -138,7 +140,9 @@ object AgentBackupData {
                     enabled = json.optBoolean("enabled", false),
                     shareScreenText = json.optBoolean("share_screen_text", false),
                     maxActions = json.optInt("max_actions", 8).coerceIn(1, 12),
-                    cloudContactId = json.optString("cloud_contact_id").take(120)
+                    cloudContactId = json.optString("cloud_contact_id").take(120),
+                    dynamicReplanning = json.optBoolean("dynamic_replanning", true),
+                    maxReplans = json.optInt("max_replans", 3).coerceIn(1, 5)
                 )
             )
         }

@@ -185,6 +185,8 @@ class MobileNativeAgent(
             approveTaskCommand(requestedGoal) -> return approveNextAction()
             pauseTaskCommand(requestedGoal) -> return pauseCurrentTask()
             resumeTaskCommand(requestedGoal) -> return resumeCurrentTask()
+            replanTaskCommand(requestedGoal) -> return replanCurrentTask()
+            rollbackTaskCommand(requestedGoal) -> return rollbackLastAction()
             cancelTaskCommand(requestedGoal) -> return cancelCurrentTask()
         }
         currentGoal = requestedGoal
@@ -480,6 +482,16 @@ class MobileNativeAgent(
         currentPlan = reviewedPlan.markAction(nextAction.id, AgentActionStatus.RUNNING)
         currentScreen = captureScreen()
         val executionScreen = currentScreen
+        val checkpoint = AgentExecutionContinuity.checkpointBefore(
+            action = nextAction,
+            screen = executionScreen,
+            planRevision = reviewedPlan.revision
+        )
+        currentPlan = currentPlan?.addCheckpoint(checkpoint)
+        recordAudit(
+            AgentAuditEvent.CHECKPOINT_SAVED,
+            "checkpoint=${checkpoint.id}; action=${nextAction.id}; rollback=${checkpoint.rollbackAction != null}"
+        )
         lastActionResult = actionExecutor.execute(nextAction, currentScreen)
         phase = AgentPhase.VERIFYING
         val observation = captureVerificationScreen(
@@ -500,15 +512,32 @@ class MobileNativeAgent(
         }
         val updatedPlan = currentPlan?.markAction(nextAction.id, finalStatus, lastActionResult)
             ?.addVerification(AgentVerificationResult.from(nextAction.id, lastActionResult, recovery))
-        currentPlan = updatedPlan
+        val hasPendingBeforeReplan = updatedPlan?.actions?.any {
+            it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
+        } == true
+        val replanReason = when {
+            lastActionResult?.success != true -> "action_failed:${nextAction.kind.name}"
+            hasPendingBeforeReplan && nextAction.kind.mayChangeScreen() ->
+                "screen_updated_after:${nextAction.kind.name}"
+            else -> ""
+        }
+        val continuedPlan = if (updatedPlan != null && replanReason.isNotBlank()) {
+            replanFromCurrentState(updatedPlan, replanReason) ?: updatedPlan
+        } else {
+            updatedPlan
+        }
+        currentPlan = continuedPlan
         recordAudit(AgentAuditEvent.SCREEN_VERIFIED, recovery.observation.evidence)
-        val hasNextAction = updatedPlan?.actions?.any { it.status == AgentActionStatus.PENDING_CONFIRMATION } == true
+        val hasNextAction = continuedPlan?.actions?.any {
+            it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
+        } == true
         phase = when {
             safetySettingsStore.load().executionPaused -> AgentPhase.PAUSED
-            lastActionResult?.success != true -> AgentPhase.FAILED
+            continuedPlan?.safetyReview?.blocked == true -> AgentPhase.BLOCKED
+            lastActionResult?.success != true && continuedPlan === updatedPlan -> AgentPhase.FAILED
             awaitingResponse -> AgentPhase.WAITING_RESPONSE
-            hasNextAction && updatedPlan?.safetyReview?.requiresConfirmation == false -> {
-                recordAudit(AgentAuditEvent.INVOCATION_AUDIT, invocationAuditDetail(updatedPlan, nextAction, lastActionResult, userConfirmed))
+            hasNextAction && continuedPlan?.safetyReview?.requiresConfirmation == false -> {
+                recordAudit(AgentAuditEvent.INVOCATION_AUDIT, invocationAuditDetail(continuedPlan, nextAction, lastActionResult, userConfirmed))
                 recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${nextAction.kind}:${finalStatus}")
                 saveTaskRecord()
                 return executeFirstPendingAction()
@@ -516,7 +545,7 @@ class MobileNativeAgent(
             hasNextAction -> AgentPhase.WAITING_CONFIRMATION
             else -> AgentPhase.COMPLETED
         }
-        updatedPlan?.let { recordAudit(AgentAuditEvent.INVOCATION_AUDIT, invocationAuditDetail(it, nextAction, lastActionResult, userConfirmed)) }
+        continuedPlan?.let { recordAudit(AgentAuditEvent.INVOCATION_AUDIT, invocationAuditDetail(it, nextAction, lastActionResult, userConfirmed)) }
         recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${nextAction.kind}:${finalStatus}")
         saveTaskRecord()
         return snapshot()
@@ -547,13 +576,32 @@ class MobileNativeAgent(
             )
         )
         val responseStatus = if (success) AgentActionStatus.COMPLETED else AgentActionStatus.FAILED
-        currentPlan = plan.markAction(actionId, responseStatus, completedResult)
+        val responsePlan = plan.markAction(actionId, responseStatus, completedResult)
+        currentPlan = responsePlan
         lastActionResult = completedResult
+        val hasPendingActions = responsePlan.actions.any {
+            it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
+        }
+        val continuedPlan = if (hasPendingActions || !success) {
+            currentScreen = captureScreen()
+            replanFromCurrentState(
+                responsePlan,
+                if (success) "connector_response_received" else "connector_response_failed"
+            ) ?: responsePlan
+        } else {
+            responsePlan
+        }
+        currentPlan = continuedPlan
         phase = if (safetySettingsStore.load().executionPaused) {
             AgentPhase.PAUSED
-        } else if (!success) {
+        } else if (continuedPlan.safetyReview.blocked) {
+            AgentPhase.BLOCKED
+        } else if (!success && continuedPlan === responsePlan) {
             AgentPhase.FAILED
-        } else if (currentPlan?.actions?.any { it.status == AgentActionStatus.PENDING_CONFIRMATION } == true) {
+        } else if (continuedPlan.actions.any {
+                it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
+            }
+        ) {
             AgentPhase.WAITING_CONFIRMATION
         } else {
             AgentPhase.COMPLETED
@@ -563,7 +611,25 @@ class MobileNativeAgent(
             "source_message_id=$sourceMessageId; contact=$contactId; success=$success; chars=${response.length}"
         )
         saveTaskRecord(result = response)
-        return snapshot()
+        return if (
+            !continuedPlan.safetyReview.blocked &&
+            !continuedPlan.safetyReview.requiresConfirmation &&
+            continuedPlan.actions.any {
+                it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
+            }
+        ) {
+            executeFirstPendingAction()
+        } else {
+            snapshot()
+        }
+    }
+
+    fun canAcceptConnectorResponse(sourceMessageId: Long, contactId: String): Boolean {
+        if (sourceMessageId <= 0L || phase != AgentPhase.WAITING_RESPONSE) return false
+        val pendingResult = lastActionResult ?: return false
+        if (pendingResult.metadata["source_message_id"]?.toLongOrNull() != sourceMessageId) return false
+        val expectedContactId = pendingResult.metadata["contact_id"].orEmpty()
+        return expectedContactId.isBlank() || contactId.isBlank() || expectedContactId == contactId
     }
 
     private fun captureVerificationScreen(
@@ -731,6 +797,192 @@ class MobileNativeAgent(
         return executePlannedAction(reviewedPlan, retryAction, userConfirmed = true)
     }
 
+    fun replanCurrentTask(): AgentUiState {
+        val plan = currentPlan ?: return snapshot()
+        currentScreen = captureScreen()
+        val replanned = replanFromCurrentState(plan, "user_requested_replan", force = true)
+        if (replanned == null) {
+            lastActionResult = AgentActionResult(
+                actionId = "agent-replan-unavailable",
+                success = false,
+                message = "A validated model replan is not available"
+            )
+            persistSession()
+            return snapshot()
+        }
+        currentPlan = replanned
+        phase = when {
+            replanned.safetyReview.blocked -> AgentPhase.BLOCKED
+            replanned.safetyReview.requiresConfirmation -> AgentPhase.WAITING_CONFIRMATION
+            else -> AgentPhase.PLANNING
+        }
+        lastActionResult = AgentActionResult(
+            actionId = "agent-replanned",
+            success = true,
+            message = "Plan revision ${replanned.revision} is ready"
+        )
+        saveTaskRecord()
+        persistSession()
+        return if (!replanned.safetyReview.blocked && !replanned.safetyReview.requiresConfirmation) {
+            executeFirstPendingAction()
+        } else {
+            snapshot()
+        }
+    }
+
+    fun rollbackLastAction(): AgentUiState {
+        val plan = currentPlan ?: return snapshot()
+        val allActions = plan.actionHistory + plan.actions
+        val latestCompletedAction = allActions.lastOrNull {
+            it.status == AgentActionStatus.COMPLETED
+        }
+        val checkpoint = latestCompletedAction?.let { completedAction ->
+            plan.checkpoints.asReversed().firstOrNull { item ->
+                item.status == AgentCheckpointStatus.ACTIVE &&
+                    item.rollbackAction != null &&
+                    item.actionId == completedAction.id
+            }
+        } ?: run {
+            lastActionResult = AgentActionResult(
+                actionId = "agent-rollback-unavailable",
+                success = false,
+                message = "No reversible completed action is available"
+            )
+            return snapshot()
+        }
+        val rollbackAction = checkpoint.rollbackAction ?: return snapshot()
+        phase = AgentPhase.EXECUTING
+        val beforeRollback = captureScreen()
+        lastActionResult = actionExecutor.execute(rollbackAction, beforeRollback)
+        phase = AgentPhase.VERIFYING
+        val observation = captureVerificationScreen(rollbackAction, beforeRollback, lastActionResult)
+        currentScreen = observation.screen
+        lastActionResult = applyObservationResult(rollbackAction, lastActionResult, observation)
+        val rollbackSucceeded = lastActionResult?.success == true
+        val checkpointStatus = if (rollbackSucceeded) {
+            AgentCheckpointStatus.RESTORED
+        } else {
+            AgentCheckpointStatus.INVALIDATED
+        }
+        val invalidatedMessage = "Invalidated after rollback"
+        val rolledPlan = plan.markCheckpoint(checkpoint.id, checkpointStatus).copy(
+            actionHistory = plan.actionHistory.map { action ->
+                if (rollbackSucceeded && action.id == checkpoint.actionId) {
+                    action.copy(status = AgentActionStatus.ROLLED_BACK, result = "Rolled back by user")
+                } else {
+                    action
+                }
+            },
+            actions = plan.actions.map { action ->
+                when {
+                    rollbackSucceeded && action.id == checkpoint.actionId ->
+                        action.copy(status = AgentActionStatus.ROLLED_BACK, result = "Rolled back by user")
+                    rollbackSucceeded && action.status in setOf(
+                        AgentActionStatus.PENDING_CONFIRMATION,
+                        AgentActionStatus.PROPOSED
+                    ) -> action.copy(status = AgentActionStatus.BLOCKED, result = invalidatedMessage)
+                    else -> action
+                }
+            }
+        )
+        currentPlan = rolledPlan
+        recordAudit(
+            if (rollbackSucceeded) AgentAuditEvent.CHECKPOINT_RESTORED else AgentAuditEvent.CHECKPOINT_RESTORE_FAILED,
+            "checkpoint=${checkpoint.id}; action=${checkpoint.actionId}"
+        )
+        if (!rollbackSucceeded) {
+            phase = AgentPhase.FAILED
+            saveTaskRecord()
+            persistSession()
+            return snapshot()
+        }
+        val replanned = replanFromCurrentState(rolledPlan, "user_requested_rollback", force = true)
+        if (replanned == null) {
+            phase = AgentPhase.PAUSED
+            lastActionResult = lastActionResult?.copy(
+                message = "Rollback completed; submit a new goal or enable model replanning to continue"
+            )
+            saveTaskRecord()
+            persistSession()
+            return snapshot()
+        }
+        currentPlan = replanned
+        phase = when {
+            replanned.safetyReview.blocked -> AgentPhase.BLOCKED
+            replanned.safetyReview.requiresConfirmation -> AgentPhase.WAITING_CONFIRMATION
+            else -> AgentPhase.PLANNING
+        }
+        saveTaskRecord()
+        persistSession()
+        return if (!replanned.safetyReview.blocked && !replanned.safetyReview.requiresConfirmation) {
+            executeFirstPendingAction()
+        } else {
+            snapshot()
+        }
+    }
+
+    private fun replanFromCurrentState(
+        plan: AgentPlan,
+        reason: String,
+        force: Boolean = false
+    ): AgentPlan? {
+        val settings = AgentModelPlannerSettingsStore(appContext).load()
+        if (!settings.enabled || (!settings.dynamicReplanning && !force)) return null
+        if (plan.replanCount >= settings.maxReplans) {
+            recordAudit(
+                AgentAuditEvent.PLAN_REPLAN_LIMIT_REACHED,
+                "revision=${plan.revision}; replans=${plan.replanCount}"
+            )
+            return null
+        }
+        val targets = connectorRegistry.availableTargets()
+        val memories = memoryStore.recall(currentGoal)
+        val knowledgeItems = knowledgeStore.search(currentGoal)
+        val runtimeContext = buildRuntimeContext(
+            goal = currentGoal,
+            screen = currentScreen,
+            targets = targets,
+            memories = memories,
+            knowledgeItems = knowledgeItems,
+            knowledgeStats = knowledgeStore.stats()
+        )
+        val history = plan.historyForReplan()
+        val proposal = planner.plan(
+            AgentRequest(
+                goal = currentGoal,
+                screen = currentScreen,
+                targets = targets,
+                memories = memories,
+                runtimeContext = runtimeContext,
+                executionHistory = history,
+                replanReason = reason
+            )
+        )
+        if (!proposal.plannerProfile.startsWith("guarded-model:")) return null
+        val revision = plan.revision + 1
+        val revisedActions = proposal.actions.mapIndexed { index, action ->
+            action.copy(id = "r$revision-${index + 1}-${action.id}")
+        }
+        var revised = proposal.copy(
+            planId = plan.planId,
+            actions = revisedActions,
+            revision = revision,
+            replanCount = plan.replanCount + 1,
+            actionHistory = history,
+            checkpoints = plan.checkpoints,
+            verificationResults = plan.verificationResults,
+            routeRationale = proposal.routeRationale + " Replanned from the latest verified screen state."
+        )
+        revised = revised.copy(validation = AgentPlanValidator.validate(revised))
+        if (!revised.validation.valid) return null
+        val reviewed = revised.withSafetyReview(safetyPolicy.review(revised))
+        recordAudit(
+            AgentAuditEvent.PLAN_REPLANNED,
+            "revision=$revision; reason=${reason.take(120)}; actions=${revisedActions.size}"
+        )
+        return reviewed
+    }
+
     fun safetySettings(): AgentSafetySettings = safetySettingsStore.load()
 
     fun modelPlannerSettings(): AgentModelPlannerSettings = AgentModelPlannerSettingsStore(appContext).load()
@@ -764,6 +1016,21 @@ class MobileNativeAgent(
             AgentAuditEvent.SETTINGS_UPDATED,
             "model_planner_cloud_contact:${normalizedId.ifBlank { "automatic" }}"
         )
+        return snapshot()
+    }
+
+    fun updateModelPlannerDynamicReplanning(enabled: Boolean): AgentUiState {
+        val store = AgentModelPlannerSettingsStore(appContext)
+        store.save(store.load().copy(dynamicReplanning = enabled))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "model_planner_dynamic_replanning:$enabled")
+        return snapshot()
+    }
+
+    fun updateModelPlannerMaxReplans(maxReplans: Int): AgentUiState {
+        val store = AgentModelPlannerSettingsStore(appContext)
+        val normalized = maxReplans.coerceIn(1, 5)
+        store.save(store.load().copy(maxReplans = normalized))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "model_planner_max_replans:$normalized")
         return snapshot()
     }
 
@@ -980,6 +1247,22 @@ class MobileNativeAgent(
             normalized == "resume task" ||
             normalized == "resume execution" ||
             normalized == "continue task"
+    }
+
+    private fun replanTaskCommand(goal: String): Boolean {
+        val normalized = goal.lowercase(Locale.US)
+        return normalized == "replan" ||
+            normalized == "replan task" ||
+            normalized == "update plan" ||
+            normalized == "plan again"
+    }
+
+    private fun rollbackTaskCommand(goal: String): Boolean {
+        val normalized = goal.lowercase(Locale.US)
+        return normalized == "rollback" ||
+            normalized == "rollback task" ||
+            normalized == "undo last action" ||
+            normalized == "restore checkpoint"
     }
 
     private fun cancelTaskCommand(goal: String): Boolean {
@@ -3751,18 +4034,35 @@ class MobileNativeAgent(
 
     private fun restoreSession(session: AgentSessionSnapshot?) {
         if (session == null) return
+        val executionWasInterrupted = session.phase == AgentPhase.EXECUTING ||
+            session.phase == AgentPhase.VERIFYING
         sessionId = session.sessionId.ifBlank { UUID.randomUUID().toString() }
-        phase = session.phase
+        phase = if (executionWasInterrupted) AgentPhase.PAUSED else session.phase
         currentGoal = session.currentGoal
         currentScreen = session.currentScreen
         if (!safetySettingsStore.load().screenObservationAllowed) {
             currentScreen = captureScreen()
         }
-        currentPlan = session.currentPlan
-        lastActionResult = session.lastActionResult
+        currentPlan = if (executionWasInterrupted) {
+            session.currentPlan?.recoverInterruptedExecution()
+        } else {
+            session.currentPlan
+        }
+        lastActionResult = if (executionWasInterrupted) {
+            AgentActionResult(
+                actionId = "agent-interrupted",
+                success = false,
+                message = "Execution was interrupted and restored at the last checkpoint"
+            )
+        } else {
+            session.lastActionResult
+        }
         activeWorkflowExecutionId = session.activeWorkflowExecutionId.takeIf { it.isNotBlank() }
         auditTrail.clear()
         auditTrail.addAll(session.auditTrail.takeLast(MAX_AUDIT_ITEMS))
+        if (executionWasInterrupted) {
+            recordAudit(AgentAuditEvent.TASK_INTERRUPTED, "restored_to_safe_pause")
+        }
     }
 
     private fun persistSession() {
@@ -5863,7 +6163,7 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
     }
 
     private fun encodeSession(snapshot: AgentSessionSnapshot): JSONObject = JSONObject()
-        .put("version", 1)
+        .put("version", 2)
         .put("session_id", snapshot.sessionId)
         .put("phase", snapshot.phase.name)
         .put("current_goal", snapshot.currentGoal)
@@ -6067,6 +6367,8 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         .put("timeout_seconds", plan.timeoutSeconds)
         .put("planner_profile", plan.plannerProfile)
         .put("context_digest", plan.contextDigest)
+        .put("revision", plan.revision)
+        .put("replan_count", plan.replanCount)
         .put("route_rationale", plan.routeRationale)
         .put("route", encodeRoute(plan.route))
         .put("validation", encodePlanValidation(plan.validation))
@@ -6078,6 +6380,12 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         })
         .put("actions", JSONArray().also { array ->
             plan.actions.forEach { array.put(encodeAction(it)) }
+        })
+        .put("action_history", JSONArray().also { array ->
+            plan.actionHistory.forEach { array.put(encodeAction(it)) }
+        })
+        .put("checkpoints", JSONArray().also { array ->
+            plan.checkpoints.forEach { array.put(encodeCheckpoint(it)) }
         })
         .put("safety_review", encodeSafetyReview(plan.safetyReview))
 
@@ -6095,11 +6403,15 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         timeoutSeconds = json.optInt("timeout_seconds", 60),
         plannerProfile = json.optString("planner_profile", "rule-based-local"),
         contextDigest = json.optString("context_digest"),
+        revision = json.optInt("revision", 1).coerceAtLeast(1),
+        replanCount = json.optInt("replan_count", 0).coerceAtLeast(0),
         routeRationale = json.optString("route_rationale"),
         route = decodeRoute(json.optJSONObject("route")),
         validation = decodePlanValidation(json.optJSONObject("validation")),
         verificationResults = decodeVerificationResults(json.optJSONArray("verification_results")),
-        safetyReview = decodeSafetyReview(json.optJSONObject("safety_review"))
+        safetyReview = decodeSafetyReview(json.optJSONObject("safety_review")),
+        actionHistory = decodeActions(json.optJSONArray("action_history")),
+        checkpoints = decodeCheckpoints(json.optJSONArray("checkpoints"))
     )
 
     private fun encodeRoute(route: AgentRoute): JSONObject = JSONObject()
@@ -6283,6 +6595,57 @@ class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
         }
     }
 
+    private fun encodeCheckpoint(checkpoint: AgentExecutionCheckpoint): JSONObject = JSONObject()
+        .put("id", checkpoint.id)
+        .put("action_id", checkpoint.actionId)
+        .put("plan_revision", checkpoint.planRevision)
+        .put("foreground_app", checkpoint.foregroundApp)
+        .put("activity_name", checkpoint.activityName)
+        .put("page_title", checkpoint.pageTitle)
+        .put("screen_digest", checkpoint.screenDigest)
+        .put("rollback_action", checkpoint.rollbackAction?.let { encodeAction(it) })
+        .put("status", checkpoint.status.name)
+        .put("created_at_millis", checkpoint.createdAtMillis)
+
+    private fun decodeCheckpoints(array: JSONArray?): List<AgentExecutionCheckpoint> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                add(
+                    AgentExecutionCheckpoint(
+                        id = item.optString("id").ifBlank { UUID.randomUUID().toString() },
+                        actionId = item.optString("action_id"),
+                        planRevision = item.optInt("plan_revision", 1).coerceAtLeast(1),
+                        foregroundApp = item.optString("foreground_app"),
+                        activityName = item.optString("activity_name"),
+                        pageTitle = item.optString("page_title"),
+                        screenDigest = item.optString("screen_digest"),
+                        rollbackAction = item.optJSONObject("rollback_action")?.let { decodeAction(it) },
+                        status = enumOrDefault(
+                            item.optString("status"),
+                            AgentCheckpointStatus.ACTIVE
+                        ),
+                        createdAtMillis = item.optLong("created_at_millis", System.currentTimeMillis())
+                    )
+                )
+            }
+        }
+    }
+
+    private fun decodeAction(item: JSONObject): AgentAction = AgentAction(
+        id = item.optString("id"),
+        kind = enumOrDefault(item.optString("kind"), AgentActionKind.DRAFT_PLAN),
+        target = item.optString("target"),
+        risk = enumOrDefault(item.optString("risk"), AgentRisk.LOW),
+        status = enumOrDefault(item.optString("status"), AgentActionStatus.PENDING_CONFIRMATION),
+        description = item.optString("description"),
+        parameters = decodeStringMap(item.optJSONObject("parameters")),
+        requiresConfirmation = item.optBoolean("requires_confirmation", true),
+        result = item.optString("result"),
+        evidence = item.optString("evidence")
+    )
+
     private fun encodeSafetyReview(review: AgentSafetyReview): JSONObject = JSONObject()
         .put("risk", review.risk.name)
         .put("requires_confirmation", review.requiresConfirmation)
@@ -6458,7 +6821,9 @@ data class AgentRequest(
     val screen: ScreenContext,
     val targets: List<AgentCallableTarget>,
     val memories: List<AgentMemoryItem>,
-    val runtimeContext: AgentRuntimeContext
+    val runtimeContext: AgentRuntimeContext,
+    val executionHistory: List<AgentAction> = emptyList(),
+    val replanReason: String = ""
 )
 
 data class AgentCallableTarget(
@@ -6611,7 +6976,11 @@ data class AgentPlan(
     val route: AgentRoute = AgentRoute(),
     val validation: AgentPlanValidation = AgentPlanValidation(),
     val verificationResults: List<AgentVerificationResult> = emptyList(),
-    val safetyReview: AgentSafetyReview = AgentSafetyReview()
+    val safetyReview: AgentSafetyReview = AgentSafetyReview(),
+    val revision: Int = 1,
+    val replanCount: Int = 0,
+    val actionHistory: List<AgentAction> = emptyList(),
+    val checkpoints: List<AgentExecutionCheckpoint> = emptyList()
 ) {
     fun withSafetyReview(review: AgentSafetyReview): AgentPlan {
         val reviewedActions = if (review.blocked) {
@@ -6877,7 +7246,8 @@ enum class AgentActionStatus {
     WAITING_RESPONSE,
     COMPLETED,
     FAILED,
-    BLOCKED
+    BLOCKED,
+    ROLLED_BACK
 }
 
 enum class AgentRisk(val weight: Int) {
@@ -6973,6 +7343,11 @@ enum class AgentCapability {
 enum class AgentAuditEvent {
     SCREEN_OBSERVED,
     SCREEN_VERIFIED,
+    CHECKPOINT_SAVED,
+    CHECKPOINT_RESTORED,
+    CHECKPOINT_RESTORE_FAILED,
+    PLAN_REPLANNED,
+    PLAN_REPLAN_LIMIT_REACHED,
     ACTION_RECOVERY_STARTED,
     ACTION_RECOVERY_COMPLETED,
     ACTION_RECOVERY_MANUAL_REQUIRED,
@@ -6989,6 +7364,7 @@ enum class AgentAuditEvent {
     TASK_CANCELLED,
     TASK_PAUSED,
     TASK_RESUMED,
+    TASK_INTERRUPTED,
     SETTINGS_UPDATED
 }
 

@@ -107,6 +107,19 @@ private object AgentModelPlanningPrompt {
         append("CALL_CONNECTOR/CONTROL_DEVICE require an exact connector_id from inventory. ")
         append("Never create more than ").append(settings.maxActions.coerceIn(1, 12)).append(" actions.\n\n")
         append("User goal: ").append(request.goal.take(2_000)).append("\n")
+        if (request.replanReason.isNotBlank()) {
+            append("Replan reason: ").append(request.replanReason.take(500)).append("\n")
+            append("Continue from the current state. Do not repeat completed actions unless the screen proves they were undone.\n")
+        }
+        if (request.executionHistory.isNotEmpty()) {
+            append("Execution history:\n")
+            request.executionHistory.takeLast(30).forEach { action ->
+                append("- ").append(action.kind.name)
+                    .append(" | ").append(action.status.name)
+                    .append(" | ").append(action.description.take(180))
+                    .append("\n")
+            }
+        }
         append("Current app: ").append(request.screen.foregroundApp.take(160)).append("\n")
         append("Current page: ").append(request.screen.pageTitle.take(160)).append("\n")
         append("Screen counts: text=").append(request.screen.visibleTextCount)

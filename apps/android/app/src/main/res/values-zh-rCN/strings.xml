@@ -601,6 +601,13 @@
     <string name="on_device_agent_model_source">规划模型</string>
     <string name="on_device_agent_model_source_subtitle">选择用于提出动作计划的已配置云模型</string>
     <string name="on_device_agent_model_source_automatic">自动选择</string>
+    <string name="agent_plan_context_revision">计划修订</string>
+    <string name="agent_plan_context_revision_value">第 %1$d 版 / 已重规划 %2$d 次</string>
+    <string name="agent_plan_context_checkpoints">有效检查点</string>
+    <string name="on_device_agent_dynamic_replanning">动态重规划</string>
+    <string name="on_device_agent_dynamic_replanning_subtitle">每个动作后重新观察，屏幕变化或执行失败时重建后续步骤</string>
+    <string name="on_device_agent_max_replans">最大重规划次数</string>
+    <string name="on_device_agent_max_replans_subtitle">每个任务最多允许 1、3 或 5 次自主计划修订</string>
     <string name="on_device_agent_model_max_actions">最大规划动作数</string>
     <string name="on_device_agent_model_max_actions_subtitle">每个模型计划最多包含 4、8 或 12 个经验证动作</string>
     <string name="on_device_agent_section_capabilities">能力授权</string>

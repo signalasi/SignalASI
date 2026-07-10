@@ -544,14 +544,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun consumeAgentConnectorResponse(response: AgentConnectorResponse) {
-        val state = mobileNativeAgent.acceptConnectorResponse(
-            sourceMessageId = response.sourceMessageId,
-            contactId = response.contactId,
-            content = response.content,
-            success = response.success
-        ) ?: return
+        if (agentOperationInFlight) return
+        if (!mobileNativeAgent.canAcceptConnectorResponse(response.sourceMessageId, response.contactId)) return
         AgentConnectorResponseStore.remove(this, response)
-        renderAgentState(state)
+        runAgentOperationAsync {
+            mobileNativeAgent.acceptConnectorResponse(
+                sourceMessageId = response.sourceMessageId,
+                contactId = response.contactId,
+                content = response.content,
+                success = response.success
+            ) ?: mobileNativeAgent.snapshot()
+        }
     }
 
     private fun consumePendingAgentConnectorResponses() {
@@ -1930,6 +1933,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             R.string.agent_plan_context_reason to plan.routeRationale.ifBlank { "-" },
             R.string.agent_plan_context_expected to plan.expectedResult.ifBlank { "-" },
             R.string.agent_plan_context_rollback to plan.rollbackStrategy.ifBlank { "-" },
+            R.string.agent_plan_context_revision to getString(
+                R.string.agent_plan_context_revision_value,
+                plan.revision,
+                plan.replanCount
+            ),
+            R.string.agent_plan_context_checkpoints to plan.checkpoints.count {
+                it.status == AgentCheckpointStatus.ACTIVE
+            }.toString(),
             R.string.agent_plan_context_timeout to getString(R.string.agent_plan_context_timeout_value, plan.timeoutSeconds)
         )
         rows.forEachIndexed { index, row ->
@@ -6271,6 +6282,22 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         ).apply {
             setOnClickListener { showAgentModelPlannerSourceDialog() }
         })
+        featureContent.addView(featureSwitchRow(
+            getString(R.string.on_device_agent_dynamic_replanning),
+            getString(R.string.on_device_agent_dynamic_replanning_subtitle),
+            R.drawable.ic_agent_node,
+            modelPlannerSettings.dynamicReplanning
+        ).apply {
+            setOnClickListener { toggleAgentDynamicReplanning() }
+        })
+        featureContent.addView(featureValueRow(
+            getString(R.string.on_device_agent_max_replans),
+            getString(R.string.on_device_agent_max_replans_subtitle),
+            R.drawable.ic_agent_node,
+            modelPlannerSettings.maxReplans.toString()
+        ).apply {
+            setOnClickListener { cycleAgentModelMaxReplans() }
+        })
         featureContent.addView(featureValueRow(
             getString(R.string.on_device_agent_model_max_actions),
             getString(R.string.on_device_agent_model_max_actions_subtitle),
@@ -6451,6 +6478,23 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 add(id to "$provider / $model")
             }
         }
+    }
+
+    private fun toggleAgentDynamicReplanning() {
+        val next = !mobileNativeAgent.modelPlannerSettings().dynamicReplanning
+        mobileNativeAgent.updateModelPlannerDynamicReplanning(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun cycleAgentModelMaxReplans() {
+        val current = mobileNativeAgent.modelPlannerSettings().maxReplans
+        val next = when {
+            current < 3 -> 3
+            current < 5 -> 5
+            else -> 1
+        }
+        mobileNativeAgent.updateModelPlannerMaxReplans(next)
+        showOnDeviceAgentFeaturePage()
     }
 
     private fun toggleAgentScreenObservation() {
