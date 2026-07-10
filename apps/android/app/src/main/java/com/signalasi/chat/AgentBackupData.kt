@@ -20,7 +20,7 @@ object AgentBackupData {
         val homeAssistant = HomeAssistantSettingsStore.load(context)
         val customDevices = CustomDeviceConnectorStore(context).exportJson()
         return JSONObject()
-            .put("version", 4)
+            .put("version", 5)
             .put("memory", readArray(context, MEMORY_PREFS, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS))
             .put("knowledge", readArray(context, KNOWLEDGE_PREFS, MAX_KNOWLEDGE_ITEMS, MAX_KNOWLEDGE_ITEM_CHARACTERS))
             .put("tasks", readArray(context, TASK_PREFS, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS))
@@ -58,6 +58,9 @@ object AgentBackupData {
                     .put("cloud_contact_id", modelPlanner.cloudContactId)
                     .put("dynamic_replanning", modelPlanner.dynamicReplanning)
                     .put("max_replans", modelPlanner.maxReplans)
+                    .put("multi_agent_coordination", modelPlanner.multiAgentCoordination)
+                    .put("share_agent_outputs_with_planner", modelPlanner.shareAgentOutputsWithPlanner)
+                    .put("max_agent_hops", modelPlanner.maxAgentHops)
             )
             .put(
                 "home_assistant",
@@ -142,7 +145,10 @@ object AgentBackupData {
                     maxActions = json.optInt("max_actions", 8).coerceIn(1, 12),
                     cloudContactId = json.optString("cloud_contact_id").take(120),
                     dynamicReplanning = json.optBoolean("dynamic_replanning", true),
-                    maxReplans = json.optInt("max_replans", 3).coerceIn(1, 5)
+                    maxReplans = json.optInt("max_replans", 3).coerceIn(1, 5),
+                    multiAgentCoordination = json.optBoolean("multi_agent_coordination", true),
+                    shareAgentOutputsWithPlanner = json.optBoolean("share_agent_outputs_with_planner", false),
+                    maxAgentHops = json.optInt("max_agent_hops", 4).coerceIn(1, 8)
                 )
             )
         }

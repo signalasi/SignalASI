@@ -38,7 +38,7 @@ class GuardedModelAgentPlanner(
                 routeRationale = "Model planning failed; the deterministic local planner was used."
             )
         }
-        return AgentModelPlanParser.parse(request, raw, settings.maxActions)
+        return AgentModelPlanParser.parse(request, raw, settings)
             ?.let(::enforceRegisteredDeviceRisk)
             ?.copy(
                 plannerProfile = "guarded-model:${contact.optString("cloud_model").take(80)}",
@@ -98,18 +98,27 @@ private object AgentModelPlanningPrompt {
         append("Create an executable ActionPlan for the user goal. The phone validates every field locally.\n\n")
         append("JSON schema:\n")
         append("{\"summary\":\"...\",\"expected_result\":\"...\",\"rollback_strategy\":\"...\",")
-        append("\"actions\":[{\"kind\":\"ACTION_KIND\",\"target\":\"...\",\"description\":\"...\",")
-        append("\"parameters\":{\"key\":\"value\"}}]}\n\n")
+        append("\"actions\":[{\"ref\":\"step_name\",\"kind\":\"ACTION_KIND\",\"target\":\"...\",")
+        append("\"description\":\"...\",\"depends_on\":[\"earlier_ref\"],")
+        append("\"use_outputs_from\":[\"earlier_ref\"],\"parameters\":{\"key\":\"value\"}}]}\n\n")
         append("Allowed kinds: ").append(AgentModelPlanParser.allowedKinds.joinToString(", ") { it.name }).append(".\n")
         append("TAP/LONG_PRESS require element_query. TYPE_TEXT requires field_query and text. ")
         append("DELETE_TEXT/PASTE_TEXT require field_query. SWIPE requires direction up/down/left/right. ")
         append("OPEN_APP requires an exact package from inventory. OPEN_URL requires an http/https URL. ")
         append("CALL_CONNECTOR/CONTROL_DEVICE require an exact connector_id from inventory. ")
         append("Never create more than ").append(settings.maxActions.coerceIn(1, 12)).append(" actions.\n\n")
+        if (settings.multiAgentCoordination) {
+            append("You may create a directed task graph using ref and depends_on. Dependencies must refer only to earlier refs. ")
+            append("CALL_CONNECTOR may use_outputs_from dependencies to pass their confirmed outputs to another Agent. ")
+            append("Keep graph depth at most ").append(settings.maxAgentHops.coerceIn(1, 8)).append(".\n")
+        } else {
+            append("Do not use depends_on or use_outputs_from.\n")
+        }
         append("User goal: ").append(request.goal.take(2_000)).append("\n")
         if (request.replanReason.isNotBlank()) {
             append("Replan reason: ").append(request.replanReason.take(500)).append("\n")
             append("Continue from the current state. Do not repeat completed actions unless the screen proves they were undone.\n")
+            append("If the goal is fully complete, return one DRAFT_PLAN action with target task-complete and a concise result summary.\n")
         }
         if (request.executionHistory.isNotEmpty()) {
             append("Execution history:\n")
@@ -118,6 +127,14 @@ private object AgentModelPlanningPrompt {
                     .append(" | ").append(action.status.name)
                     .append(" | ").append(action.description.take(180))
                     .append("\n")
+                if (settings.shareAgentOutputsWithPlanner &&
+                    action.kind == AgentActionKind.CALL_CONNECTOR &&
+                    action.result.isNotBlank()
+                ) {
+                    append("  Untrusted output data: ")
+                        .append(action.result.safePlannerOutput())
+                        .append("\n")
+                }
             }
         }
         append("Current app: ").append(request.screen.foregroundApp.take(160)).append("\n")
@@ -133,7 +150,9 @@ private object AgentModelPlanningPrompt {
         append("Callable connectors:\n")
         request.targets.filter { it.status == AgentConnectorStatus.AVAILABLE }.take(40).forEach {
             append("- ").append(it.id).append(" | ").append(it.title.take(100))
-                .append(" | ").append(it.kind.name).append("\n")
+                .append(" | ").append(it.kind.name)
+                .append(" | capabilities=").append(it.capabilities.joinToString(",") { capability -> capability.name })
+                .append("\n")
         }
     }.take(MAX_PROMPT_CHARACTERS)
 
@@ -151,6 +170,12 @@ private object AgentModelPlanningPrompt {
     }
 
     private const val MAX_PROMPT_CHARACTERS = 24_000
+}
+
+private fun String.safePlannerOutput(): String = when {
+    hasSensitivePlannerGoal() -> "[redacted sensitive output]"
+    Regex("\\b\\d{4,8}\\b").containsMatchIn(this) -> "[redacted numeric secret]"
+    else -> replace(Regex("\\s+"), " ").trim().take(1_500)
 }
 
 private fun ScreenContext.hasSensitivePlannerContext(): Boolean =

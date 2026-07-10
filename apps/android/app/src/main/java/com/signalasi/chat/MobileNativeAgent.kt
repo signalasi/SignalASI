@@ -439,8 +439,9 @@ class MobileNativeAgent(
             saveTaskRecord()
             return snapshot()
         }
-        val nextAction = plan.actions.firstOrNull { it.status == AgentActionStatus.PENDING_CONFIRMATION }
-            ?: return snapshot()
+        val preparedPlan = plan.blockActionsWithFailedDependencies()
+        currentPlan = preparedPlan
+        val nextAction = preparedPlan.nextRunnableAction() ?: return noRunnableActionState(preparedPlan)
         if (nextAction.risk.weight >= AgentRisk.HIGH.weight && !highRiskConfirmed) {
             phase = AgentPhase.WAITING_CONFIRMATION
             lastActionResult = AgentActionResult(
@@ -452,15 +453,32 @@ class MobileNativeAgent(
             persistSession()
             return snapshot()
         }
-        return executePlannedAction(plan, nextAction, userConfirmed = true)
+        return executePlannedAction(preparedPlan, nextAction, userConfirmed = true)
     }
 
     private fun executeFirstPendingAction(): AgentUiState {
         val plan = currentPlan ?: return snapshot()
-        val nextAction = plan.actions.firstOrNull {
+        val preparedPlan = plan.blockActionsWithFailedDependencies()
+        currentPlan = preparedPlan
+        val nextAction = preparedPlan.nextRunnableAction() ?: return noRunnableActionState(preparedPlan)
+        return executePlannedAction(preparedPlan, nextAction, userConfirmed = false)
+    }
+
+    private fun noRunnableActionState(plan: AgentPlan): AgentUiState {
+        val hasPending = plan.actions.any {
             it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
-        } ?: return snapshot()
-        return executePlannedAction(plan, nextAction, userConfirmed = false)
+        }
+        if (hasPending) {
+            phase = AgentPhase.BLOCKED
+            lastActionResult = AgentActionResult(
+                actionId = "agent-tool-graph-blocked",
+                success = false,
+                message = "No task-graph node has satisfied dependencies"
+            )
+            recordAudit(AgentAuditEvent.TOOL_GRAPH_BLOCKED, "revision=${plan.revision}")
+        }
+        persistSession()
+        return snapshot()
     }
 
     private fun executePlannedAction(
@@ -492,7 +510,17 @@ class MobileNativeAgent(
             AgentAuditEvent.CHECKPOINT_SAVED,
             "checkpoint=${checkpoint.id}; action=${nextAction.id}; rollback=${checkpoint.rollbackAction != null}"
         )
-        lastActionResult = actionExecutor.execute(nextAction, currentScreen)
+        val executionAction = currentPlan?.materializeToolInput(
+            action = nextAction,
+            allowOutputHandoff = AgentModelPlannerSettingsStore(appContext).load().multiAgentCoordination
+        ) ?: nextAction
+        if (executionAction.parameters["prompt"] != nextAction.parameters["prompt"]) {
+            recordAudit(
+                AgentAuditEvent.TOOL_OUTPUT_HANDOFF,
+                "action=${nextAction.id}; sources=${nextAction.outputSourceIds().size}; target=${nextAction.target}"
+            )
+        }
+        lastActionResult = actionExecutor.execute(executionAction, currentScreen)
         phase = AgentPhase.VERIFYING
         val observation = captureVerificationScreen(
             action = nextAction,
@@ -515,9 +543,10 @@ class MobileNativeAgent(
         val hasPendingBeforeReplan = updatedPlan?.actions?.any {
             it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
         } == true
+        val preservesToolGraph = updatedPlan?.hasOutputHandoffFrom(nextAction.id) == true
         val replanReason = when {
             lastActionResult?.success != true -> "action_failed:${nextAction.kind.name}"
-            hasPendingBeforeReplan && nextAction.kind.mayChangeScreen() ->
+            hasPendingBeforeReplan && nextAction.kind.mayChangeScreen() && !preservesToolGraph ->
                 "screen_updated_after:${nextAction.kind.name}"
             else -> ""
         }
@@ -582,7 +611,13 @@ class MobileNativeAgent(
         val hasPendingActions = responsePlan.actions.any {
             it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
         }
-        val continuedPlan = if (hasPendingActions || !success) {
+        val plannerSettings = AgentModelPlannerSettingsStore(appContext).load()
+        val preservesToolGraph = success && responsePlan.hasOutputHandoffFrom(actionId)
+        val closesAutonomousLoop = success &&
+            !hasPendingActions &&
+            plannerSettings.multiAgentCoordination &&
+            plannerSettings.shareAgentOutputsWithPlanner
+        val continuedPlan = if ((hasPendingActions && !preservesToolGraph) || !success || closesAutonomousLoop) {
             currentScreen = captureScreen()
             replanFromCurrentState(
                 responsePlan,
@@ -960,8 +995,14 @@ class MobileNativeAgent(
         )
         if (!proposal.plannerProfile.startsWith("guarded-model:")) return null
         val revision = plan.revision + 1
-        val revisedActions = proposal.actions.mapIndexed { index, action ->
-            action.copy(id = "r$revision-${index + 1}-${action.id}")
+        val actionIdMap = proposal.actions.mapIndexed { index, action ->
+            action.id to "r$revision-${index + 1}-${action.id}"
+        }.toMap()
+        val revisedActions = proposal.actions.map { action ->
+            action.remapToolGraphIds(
+                newId = actionIdMap.getValue(action.id),
+                idMap = actionIdMap
+            )
         }
         var revised = proposal.copy(
             planId = plan.planId,
@@ -1031,6 +1072,28 @@ class MobileNativeAgent(
         val normalized = maxReplans.coerceIn(1, 5)
         store.save(store.load().copy(maxReplans = normalized))
         recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "model_planner_max_replans:$normalized")
+        return snapshot()
+    }
+
+    fun updateMultiAgentCoordination(enabled: Boolean): AgentUiState {
+        val store = AgentModelPlannerSettingsStore(appContext)
+        store.save(store.load().copy(multiAgentCoordination = enabled))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "multi_agent_coordination:$enabled")
+        return snapshot()
+    }
+
+    fun updateShareAgentOutputsWithPlanner(enabled: Boolean): AgentUiState {
+        val store = AgentModelPlannerSettingsStore(appContext)
+        store.save(store.load().copy(shareAgentOutputsWithPlanner = enabled))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "share_agent_outputs_with_planner:$enabled")
+        return snapshot()
+    }
+
+    fun updateMaxAgentHops(maxAgentHops: Int): AgentUiState {
+        val store = AgentModelPlannerSettingsStore(appContext)
+        val normalized = maxAgentHops.coerceIn(1, 8)
+        store.save(store.load().copy(maxAgentHops = normalized))
+        recordAudit(AgentAuditEvent.SETTINGS_UPDATED, "max_agent_hops:$normalized")
         return snapshot()
     }
 
@@ -5052,6 +5115,9 @@ object AgentPlanValidator {
         val issues = mutableListOf<String>()
         if (plan.goal.isBlank()) issues += "goal_blank"
         if (plan.actions.isEmpty()) issues += "actions_empty"
+        val actionIds = plan.actions.map { it.id }
+        if (actionIds.distinct().size != actionIds.size) issues += "action_ids_duplicate"
+        val actionIndex = plan.actions.mapIndexed { index, action -> action.id to index }.toMap()
         plan.actions.forEach { action ->
             if (action.description.isBlank()) issues += "action_description_blank:${action.id}"
             if ((action.kind == AgentActionKind.TAP || action.kind == AgentActionKind.LONG_PRESS) &&
@@ -5072,7 +5138,24 @@ object AgentPlanValidator {
                     issues += "notification_reply_text_missing:${action.id}"
                 }
             }
+            action.dependencyIds().forEach { dependencyId ->
+                val dependencyIndex = actionIndex[dependencyId]
+                val currentIndex = actionIndex[action.id] ?: -1
+                if (dependencyIndex == null) {
+                    issues += "action_dependency_missing:${action.id}:$dependencyId"
+                } else if (dependencyIndex >= currentIndex) {
+                    issues += "action_dependency_order_invalid:${action.id}:$dependencyId"
+                }
+            }
+            val outputSources = action.outputSourceIds()
+            if (outputSources.any { it !in action.dependencyIds() }) {
+                issues += "action_output_source_not_dependency:${action.id}"
+            }
+            if (outputSources.isNotEmpty() && action.kind != AgentActionKind.CALL_CONNECTOR) {
+                issues += "action_output_handoff_not_connector:${action.id}"
+            }
         }
+        if (plan.toolGraphDepth() == Int.MAX_VALUE) issues += "action_dependency_cycle"
         if (plan.safetyReview.risk.weight >= AgentRisk.HIGH.weight && !plan.confirmationRequired) {
             issues += "high_risk_without_confirmation"
         }
@@ -5188,7 +5271,11 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         AgentActionKind.DRAFT_PLAN -> AgentActionResult(
             actionId = action.id,
             success = true,
-            message = "Task plan confirmed"
+            message = if (action.target == "task-complete") {
+                action.description.ifBlank { "Task completed" }
+            } else {
+                "Task plan confirmed"
+            }
         )
         AgentActionKind.OPEN_APP -> openApp(action)
         AgentActionKind.BACK -> serviceAction(action.id, "Back action executed") {
@@ -5636,6 +5723,9 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         if (connectorAliases("cloud-models").any { it == connectorId }) {
             return dispatchCloudModelTask(action, prompt)
         }
+        if (AppStore.isCloudApiContact(context, connectorId)) {
+            return dispatchCloudModelTask(action, prompt, connectorId)
+        }
         val contactId = resolveConnectorContactId(connectorId)
             ?: return AgentActionResult(action.id, false, "${action.target} is not paired")
         return dispatchContactTask(action, contactId, prompt)
@@ -5756,8 +5846,12 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         )
     }
 
-    private fun dispatchCloudModelTask(action: AgentAction, prompt: String): AgentActionResult {
-        val contact = resolveCloudModelContact()
+    private fun dispatchCloudModelTask(
+        action: AgentAction,
+        prompt: String,
+        preferredContactId: String = ""
+    ): AgentActionResult {
+        val contact = resolveCloudModelContact(preferredContactId)
             ?: return AgentActionResult(action.id, false, "No cloud model contact is configured")
         val contactId = contact.optString("id").ifBlank { contact.optString("signalasi_id") }
         val selectedModel = AppStore.selectedCloudModelContact(context, contactId) ?: contact
@@ -5855,7 +5949,17 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         return null
     }
 
-    private fun resolveCloudModelContact(): JSONObject? {
+    private fun resolveCloudModelContact(preferredContactId: String = ""): JSONObject? {
+        if (preferredContactId.isNotBlank()) {
+            AppStore.selectedCloudModelContact(context, preferredContactId)?.let { contact ->
+                if (!contact.optBoolean("deleted", false) &&
+                    contact.optString("setup_status").ifBlank { "ready" } == "ready" &&
+                    contact.optString("cloud_model").isNotBlank()
+                ) {
+                    return contact
+                }
+            }
+        }
         val contacts = AppStore.contacts(context)
         for (index in 0 until contacts.length()) {
             val contact = contacts.optJSONObject(index) ?: continue
@@ -6073,6 +6177,7 @@ class AppStoreAgentConnectorRegistry(
 
     override fun availableTargets(): List<AgentCallableTarget> {
         val builtIn = fallback.availableTargets().map { target -> target.copy(status = statusFor(target)) }
+        val cloudProviders = cloudProviderTargets()
         val customDevices = CustomDeviceConnectorStore(appContext).list().filter { it.enabled }.map { connector ->
             AgentCallableTarget(
                 id = "custom-device:${connector.id}",
@@ -6082,7 +6187,37 @@ class AppStoreAgentConnectorRegistry(
                 capabilities = listOf(AgentCapability.DEVICE_CONTROL)
             )
         }
-        return builtIn + customDevices
+        return (builtIn + cloudProviders + customDevices).distinctBy { it.id }
+    }
+
+    private fun cloudProviderTargets(): List<AgentCallableTarget> {
+        val contacts = AppStore.contacts(appContext)
+        return buildList {
+            for (index in 0 until contacts.length()) {
+                val contact = contacts.optJSONObject(index) ?: continue
+                if (contact.optBoolean("deleted", false)) continue
+                if (contact.optString("delivery_mode") != "cloud_api") continue
+                val id = contact.optString("id").ifBlank { contact.optString("signalasi_id") }
+                if (id.isBlank()) continue
+                val selected = AppStore.selectedCloudModelContact(appContext, id) ?: contact
+                val ready = selected.optString("setup_status").ifBlank { "ready" } == "ready" &&
+                    selected.optString("cloud_model").isNotBlank() &&
+                    selected.optString("cloud_endpoint").isNotBlank() &&
+                    selected.optString("cloud_api_key").isNotBlank()
+                add(
+                    AgentCallableTarget(
+                        id = id,
+                        title = selected.optString("display_name")
+                            .ifBlank { selected.optString("name") }
+                            .ifBlank { selected.optString("cloud_provider") }
+                            .ifBlank { id },
+                        kind = AgentConnectorKind.MODEL,
+                        status = if (ready) AgentConnectorStatus.AVAILABLE else AgentConnectorStatus.NEEDS_SETUP,
+                        capabilities = listOf(AgentCapability.CHAT, AgentCapability.REASONING)
+                    )
+                )
+            }
+        }
     }
 
     private fun statusFor(target: AgentCallableTarget): AgentConnectorStatus = when (target.id) {
@@ -7348,6 +7483,8 @@ enum class AgentAuditEvent {
     CHECKPOINT_RESTORE_FAILED,
     PLAN_REPLANNED,
     PLAN_REPLAN_LIMIT_REACHED,
+    TOOL_OUTPUT_HANDOFF,
+    TOOL_GRAPH_BLOCKED,
     ACTION_RECOVERY_STARTED,
     ACTION_RECOVERY_COMPLETED,
     ACTION_RECOVERY_MANUAL_REQUIRED,

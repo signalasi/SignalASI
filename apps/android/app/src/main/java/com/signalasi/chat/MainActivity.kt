@@ -1941,6 +1941,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             R.string.agent_plan_context_checkpoints to plan.checkpoints.count {
                 it.status == AgentCheckpointStatus.ACTIVE
             }.toString(),
+            R.string.agent_plan_context_tool_graph to getString(
+                R.string.agent_plan_context_tool_graph_value,
+                plan.toolGraphDepth(),
+                plan.actionHistory.size
+            ),
             R.string.agent_plan_context_timeout to getString(R.string.agent_plan_context_timeout_value, plan.timeoutSeconds)
         )
         rows.forEachIndexed { index, row ->
@@ -2486,6 +2491,20 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         action.risk.name.lowercase(Locale.US)
                     )
                 })
+
+                if (action.dependencyIds().isNotEmpty()) {
+                    addView(TextView(this@MainActivity).apply {
+                        setTextColor(getColorCompat(R.color.text_secondary))
+                        textSize = 11f
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                        text = getString(
+                            R.string.agent_action_queue_dependencies,
+                            action.dependencyIds().size,
+                            action.outputSourceIds().size
+                        )
+                    })
+                }
 
                 if (action.result.isNotBlank()) {
                     addView(TextView(this@MainActivity).apply {
@@ -6298,6 +6317,30 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         ).apply {
             setOnClickListener { cycleAgentModelMaxReplans() }
         })
+        featureContent.addView(featureSwitchRow(
+            getString(R.string.on_device_agent_multi_agent_coordination),
+            getString(R.string.on_device_agent_multi_agent_coordination_subtitle),
+            R.drawable.ic_protocol_link,
+            modelPlannerSettings.multiAgentCoordination
+        ).apply {
+            setOnClickListener { toggleMultiAgentCoordination() }
+        })
+        featureContent.addView(featureSwitchRow(
+            getString(R.string.on_device_agent_share_agent_outputs),
+            getString(R.string.on_device_agent_share_agent_outputs_subtitle),
+            R.drawable.ic_security_shield,
+            modelPlannerSettings.shareAgentOutputsWithPlanner
+        ).apply {
+            setOnClickListener { toggleShareAgentOutputsWithPlanner() }
+        })
+        featureContent.addView(featureValueRow(
+            getString(R.string.on_device_agent_max_agent_hops),
+            getString(R.string.on_device_agent_max_agent_hops_subtitle),
+            R.drawable.ic_protocol_link,
+            modelPlannerSettings.maxAgentHops.toString()
+        ).apply {
+            setOnClickListener { cycleMaxAgentHops() }
+        })
         featureContent.addView(featureValueRow(
             getString(R.string.on_device_agent_model_max_actions),
             getString(R.string.on_device_agent_model_max_actions_subtitle),
@@ -6494,6 +6537,29 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             else -> 1
         }
         mobileNativeAgent.updateModelPlannerMaxReplans(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun toggleMultiAgentCoordination() {
+        val next = !mobileNativeAgent.modelPlannerSettings().multiAgentCoordination
+        mobileNativeAgent.updateMultiAgentCoordination(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun toggleShareAgentOutputsWithPlanner() {
+        val next = !mobileNativeAgent.modelPlannerSettings().shareAgentOutputsWithPlanner
+        mobileNativeAgent.updateShareAgentOutputsWithPlanner(next)
+        showOnDeviceAgentFeaturePage()
+    }
+
+    private fun cycleMaxAgentHops() {
+        val current = mobileNativeAgent.modelPlannerSettings().maxAgentHops
+        val next = when {
+            current < 4 -> 4
+            current < 8 -> 8
+            else -> 2
+        }
+        mobileNativeAgent.updateMaxAgentHops(next)
         showOnDeviceAgentFeaturePage()
     }
 

@@ -29,13 +29,29 @@ object AgentModelPlanParser {
         AgentActionKind.CONTROL_DEVICE
     )
 
-    fun parse(request: AgentRequest, raw: String, maxActions: Int): AgentPlan? {
+    fun parse(request: AgentRequest, raw: String, settings: AgentModelPlannerSettings): AgentPlan? {
         val json = extractJson(raw) ?: return null
         val input = json.optJSONArray("actions") ?: return null
-        if (input.length() !in 1..maxActions.coerceIn(1, MAX_ACTIONS)) return null
+        if (input.length() !in 1..settings.maxActions.coerceIn(1, MAX_ACTIONS)) return null
+        val refs = mutableMapOf<String, Pair<Int, String>>()
+        for (index in 0 until input.length()) {
+            val item = input.optJSONObject(index) ?: return null
+            val ref = normalizedRef(item.optString("ref").ifBlank { "step-${index + 1}" }) ?: return null
+            if (refs.containsKey(ref)) return null
+            refs[ref] = index to "model-${index + 1}-$ref"
+        }
         val actions = mutableListOf<AgentAction>()
         for (index in 0 until input.length()) {
-            val action = parseAction(request, input.optJSONObject(index), index) ?: return null
+            val item = input.optJSONObject(index) ?: return null
+            val ref = normalizedRef(item.optString("ref").ifBlank { "step-${index + 1}" }) ?: return null
+            val action = parseAction(
+                request = request,
+                json = item,
+                index = index,
+                actionId = refs.getValue(ref).second,
+                refs = refs,
+                allowCoordination = settings.multiAgentCoordination
+            ) ?: return null
             actions += action
         }
         val plan = AgentPlanFactory.actions(request, actions).copy(
@@ -44,21 +60,42 @@ object AgentModelPlanParser {
             rollbackStrategy = json.optString("rollback_strategy").trim().take(500)
                 .ifBlank { "Stop execution and restore the last safe checkpoint." }
         )
-        return plan.takeIf { AgentPlanValidator.validate(it).valid }
+        return plan.takeIf {
+            AgentPlanValidator.validate(it).valid && it.toolGraphDepth() <= settings.maxAgentHops
+        }
     }
 
-    private fun parseAction(request: AgentRequest, json: JSONObject?, index: Int): AgentAction? {
-        json ?: return null
+    private fun parseAction(
+        request: AgentRequest,
+        json: JSONObject,
+        index: Int,
+        actionId: String,
+        refs: Map<String, Pair<Int, String>>,
+        allowCoordination: Boolean
+    ): AgentAction? {
         val kind = runCatching {
             AgentActionKind.valueOf(json.optString("kind").trim().uppercase(Locale.US))
         }.getOrNull()?.takeIf { it in allowedKinds } ?: return null
-        val parameters = resolveParameters(kind, json.optJSONObject("parameters") ?: JSONObject(), request)
+        val dependencyRefs = json.optJSONArray("depends_on").stringValues()
+        val outputRefs = json.optJSONArray("use_outputs_from").stringValues()
+        if (!allowCoordination && (dependencyRefs.isNotEmpty() || outputRefs.isNotEmpty())) return null
+        if (outputRefs.isNotEmpty() && kind != AgentActionKind.CALL_CONNECTOR) return null
+        if (outputRefs.any { it !in dependencyRefs }) return null
+        val dependencyIds = resolvePriorRefs(dependencyRefs, refs, index) ?: return null
+        val outputSourceIds = resolvePriorRefs(outputRefs, refs, index) ?: return null
+        val nodeRef = refs.entries.firstOrNull { it.value.second == actionId }?.key ?: return null
+        val resolved = resolveParameters(kind, json.optJSONObject("parameters") ?: JSONObject(), request)
             ?: return null
+        val parameters = resolved + mapOf(
+            "node_ref" to nodeRef,
+            "depends_on" to dependencyIds.joinToString(","),
+            "use_outputs_from" to outputSourceIds.joinToString(",")
+        )
         val target = resolveTarget(kind, json.optString("target"), parameters, request)
         val description = json.optString("description").trim().take(300)
             .ifBlank { defaultDescription(kind, target) }
         return AgentAction(
-            id = "model-${index + 1}-${kind.name.lowercase(Locale.US)}",
+            id = actionId,
             kind = kind,
             target = target,
             risk = localRisk(kind, parameters, target),
@@ -68,6 +105,30 @@ object AgentModelPlanParser {
             requiresConfirmation = true
         )
     }
+
+    private fun resolvePriorRefs(
+        values: List<String>,
+        refs: Map<String, Pair<Int, String>>,
+        currentIndex: Int
+    ): List<String>? = values.map { value ->
+        val ref = normalizedRef(value) ?: return null
+        val resolved = refs[ref] ?: return null
+        if (resolved.first >= currentIndex) return null
+        resolved.second
+    }.distinct()
+
+    private fun org.json.JSONArray?.stringValues(): List<String> {
+        if (this == null) return emptyList()
+        return buildList {
+            for (index in 0 until length()) {
+                optString(index).trim().takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }
+    }
+
+    private fun normalizedRef(value: String): String? = value.trim()
+        .lowercase(Locale.US)
+        .takeIf { it.matches(Regex("[a-z0-9][a-z0-9_-]{0,47}")) }
 
     private fun resolveParameters(
         kind: AgentActionKind,

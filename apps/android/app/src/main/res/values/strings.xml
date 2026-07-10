@@ -365,6 +365,7 @@
     <string name="agent_section_action_queue">Action Queue</string>
     <string name="agent_action_queue_empty">No active Agent plan</string>
     <string name="agent_action_queue_meta">%1$s / %2$s risk</string>
+    <string name="agent_action_queue_dependencies">%1$d dependencies / %2$d output handoffs</string>
     <string name="agent_action_queue_result">%1$s</string>
     <string name="agent_section_requirements">Requirements</string>
     <string name="agent_requirements_empty">No active execution requirements</string>
@@ -381,6 +382,8 @@
     <string name="agent_plan_context_revision">Plan Revision</string>
     <string name="agent_plan_context_revision_value">Revision %1$d / %2$d replans</string>
     <string name="agent_plan_context_checkpoints">Active Checkpoints</string>
+    <string name="agent_plan_context_tool_graph">Tool Graph</string>
+    <string name="agent_plan_context_tool_graph_value">Depth %1$d / %2$d completed nodes</string>
     <string name="agent_plan_context_timeout">Timeout</string>
     <string name="agent_plan_context_timeout_value">%1$ds</string>
     <string name="agent_section_verification">Verification</string>
@@ -765,6 +768,12 @@
     <string name="on_device_agent_dynamic_replanning_subtitle">Observe after each action and rebuild remaining steps when the screen changes or execution fails</string>
     <string name="on_device_agent_max_replans">Maximum Replans</string>
     <string name="on_device_agent_max_replans_subtitle">Bound autonomous recovery to 1, 3, or 5 plan revisions per task</string>
+    <string name="on_device_agent_multi_agent_coordination">Multi-Agent Coordination</string>
+    <string name="on_device_agent_multi_agent_coordination_subtitle">Allow validated task graphs to call multiple paired Agents with explicit dependencies</string>
+    <string name="on_device_agent_share_agent_outputs">Share Agent Outputs with Planner</string>
+    <string name="on_device_agent_share_agent_outputs_subtitle">Send redacted Agent results to the selected planning model for the next decision</string>
+    <string name="on_device_agent_max_agent_hops">Maximum Agent Hops</string>
+    <string name="on_device_agent_max_agent_hops_subtitle">Limit each task graph to 2, 4, or 8 dependency levels</string>
     <string name="on_device_agent_model_max_actions">Maximum Planned Actions</string>
     <string name="on_device_agent_model_max_actions_subtitle">Limit each model-generated plan to 4, 8, or 12 validated actions</string>
     <string name="on_device_agent_section_capabilities">Capability Access</string>
