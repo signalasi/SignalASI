@@ -814,6 +814,8 @@ object AppStore {
             .put("profile", profile(context))
             .put("includes_contacts", includeContacts)
             .put("includes_messages", includeMessages)
+            .put("includes_agent_data", true)
+            .put("agent_data", AgentBackupData.export(context))
         if (includeContacts) {
             payload.put("contacts", contacts(context))
             payload.put("friend_requests", friendRequests(context))
@@ -839,6 +841,7 @@ object AppStore {
         payload.optJSONObject("profile")?.let { writeObject(context, KEY_PROFILE, it) }
         payload.optJSONArray("contacts")?.let { writeArray(context, KEY_CONTACTS, it) }
         payload.optJSONArray("friend_requests")?.let { writeArray(context, KEY_FRIEND_REQUESTS, it) }
+        payload.optJSONObject("agent_data")?.let { AgentBackupData.restore(context, it) }
         if (includeMessages) {
             payload.optJSONObject("messages")?.let {
                 context.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)

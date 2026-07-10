@@ -668,10 +668,13 @@
     <string name="common_clear">Clear</string>
     <string name="backup_export_title">Back Up Chat History</string>
     <string name="backup_encrypted_title">Encrypted Backup</string>
-    <string name="backup_encrypted_subtitle">Back up identity, contacts, and optional chat history</string>
+    <string name="backup_encrypted_subtitle">Back up identity, contacts, Agent data, and optional chat history</string>
     <string name="backup_password_section">Backup Password</string>
     <string name="backup_password_hint">Set an encryption password</string>
     <string name="backup_include_messages">Back up chat history</string>
+    <string name="backup_include_agent_data">Agent memory and knowledge</string>
+    <string name="backup_include_agent_data_subtitle">Memory, knowledge, task history, safety settings, and Home Assistant configuration</string>
+    <string name="backup_included">Included</string>
     <string name="backup_password_required">Enter a backup password</string>
     <string name="backup_export_file_name">signalasi_backup.hcbak</string>
     <string name="backup_export_success">Exported to the selected location</string>

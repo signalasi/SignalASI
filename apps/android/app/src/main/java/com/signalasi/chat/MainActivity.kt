@@ -6510,6 +6510,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         featureContent.addView(includeMessagesCb, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)).apply {
             bottomMargin = dp(18)
         })
+        featureContent.addView(
+            featureRow(
+                getString(R.string.backup_include_agent_data),
+                getString(R.string.backup_include_agent_data_subtitle),
+                R.drawable.ic_agent_node,
+                getString(R.string.backup_included)
+            ),
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(18)
+            }
+        )
         featureContent.addView(TextView(this).apply {
             text = getString(R.string.common_export)
             gravity = Gravity.CENTER

@@ -541,10 +541,13 @@
     <string name="common_clear">清除</string>
     <string name="backup_export_title">备份聊天记录</string>
     <string name="backup_encrypted_title">加密备份</string>
-    <string name="backup_encrypted_subtitle">备份身份、联系人和可选聊天记录</string>
+    <string name="backup_encrypted_subtitle">备份身份、联系人、智能体数据和可选聊天记录</string>
     <string name="backup_password_section">备份密码</string>
     <string name="backup_password_hint">设置加密密码</string>
     <string name="backup_include_messages">备份聊天记录</string>
+    <string name="backup_include_agent_data">智能体记忆与知识库</string>
+    <string name="backup_include_agent_data_subtitle">记忆、知识库、任务历史、安全设置和 Home Assistant 配置</string>
+    <string name="backup_included">已包含</string>
     <string name="backup_password_required">请输入备份密码</string>
     <string name="backup_export_file_name">signalasi_backup.hcbak</string>
     <string name="backup_export_success">已导出到选择的位置</string>
