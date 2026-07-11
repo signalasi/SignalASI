@@ -147,17 +147,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var mainPage: LinearLayout
     private lateinit var mainTopBar: LinearLayout
     private lateinit var agentPage: LinearLayout
-    private lateinit var agentStatusCard: LinearLayout
-    private lateinit var agentStatusTitle: TextView
-    private lateinit var agentStatusSubtitle: TextView
-    private lateinit var agentSafetyBadge: TextView
     private lateinit var agentOutputTitle: TextView
     private lateinit var agentOutputText: TextView
     private lateinit var agentOutputMeta: TextView
-    private lateinit var agentQuickUnderstandButton: TextView
-    private lateinit var agentQuickSaveScreenButton: TextView
-    private lateinit var agentQuickSearchKnowledgeButton: TextView
-    private lateinit var agentQuickPermissionsButton: TextView
+    private lateinit var agentQuickUnderstandButton: ImageButton
+    private lateinit var agentQuickSaveScreenButton: ImageButton
+    private lateinit var agentQuickSearchKnowledgeButton: ImageButton
+    private lateinit var agentQuickPermissionsButton: ImageButton
+    private lateinit var agentRecentTasksButton: ImageButton
     private lateinit var agentPermissionModeButton: TextView
     private lateinit var agentHighRiskGuardButton: TextView
     private lateinit var agentMemoryCaptureButton: TextView
@@ -179,14 +176,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentGoalInput: EditText
     private lateinit var agentVoiceButton: TextView
     private lateinit var agentSubmitButton: TextView
-    private lateinit var agentStepObserveNumber: TextView
-    private lateinit var agentStepAnalyzeNumber: TextView
-    private lateinit var agentStepPlanNumber: TextView
-    private lateinit var agentStepActNumber: TextView
-    private lateinit var agentStepObserveStatus: TextView
-    private lateinit var agentStepAnalyzeStatus: TextView
-    private lateinit var agentStepPlanStatus: TextView
-    private lateinit var agentStepActStatus: TextView
     private lateinit var contactPage: LinearLayout
     private lateinit var directoryPage: LinearLayout
     private lateinit var discoverPage: LinearLayout
@@ -363,10 +352,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         mainPage = findViewById(R.id.mainPage)
         mainTopBar = findViewById(R.id.mainTopBar)
         agentPage = findViewById(R.id.agentPage)
-        agentStatusCard = findViewById(R.id.agentStatusCard)
-        agentStatusTitle = findViewById(R.id.agentStatusTitle)
-        agentStatusSubtitle = findViewById(R.id.agentStatusSubtitle)
-        agentSafetyBadge = findViewById(R.id.agentSafetyBadge)
         agentOutputTitle = findViewById(R.id.agentOutputTitle)
         agentOutputText = findViewById(R.id.agentOutputText)
         agentOutputMeta = findViewById(R.id.agentOutputMeta)
@@ -374,6 +359,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentQuickSaveScreenButton = findViewById(R.id.agentQuickSaveScreenButton)
         agentQuickSearchKnowledgeButton = findViewById(R.id.agentQuickSearchKnowledgeButton)
         agentQuickPermissionsButton = findViewById(R.id.agentQuickPermissionsButton)
+        agentRecentTasksButton = findViewById(R.id.agentRecentTasksButton)
         agentPermissionModeButton = findViewById(R.id.agentPermissionModeButton)
         agentHighRiskGuardButton = findViewById(R.id.agentHighRiskGuardButton)
         agentMemoryCaptureButton = findViewById(R.id.agentMemoryCaptureButton)
@@ -394,14 +380,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentGoalInput = findViewById(R.id.agentGoalInput)
         agentVoiceButton = findViewById(R.id.agentVoiceButton)
         agentSubmitButton = findViewById(R.id.agentSubmitButton)
-        agentStepObserveNumber = findViewById(R.id.agentStepObserveNumber)
-        agentStepAnalyzeNumber = findViewById(R.id.agentStepAnalyzeNumber)
-        agentStepPlanNumber = findViewById(R.id.agentStepPlanNumber)
-        agentStepActNumber = findViewById(R.id.agentStepActNumber)
-        agentStepObserveStatus = findViewById(R.id.agentStepObserveStatus)
-        agentStepAnalyzeStatus = findViewById(R.id.agentStepAnalyzeStatus)
-        agentStepPlanStatus = findViewById(R.id.agentStepPlanStatus)
-        agentStepActStatus = findViewById(R.id.agentStepActStatus)
         contactPage = findViewById(R.id.contactPage)
         directoryPage = findViewById(R.id.directoryPage)
         discoverPage = findViewById(R.id.discoverPage)
@@ -860,14 +838,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun configureAgentPage() {
         renderAgentState(restoredOrFreshAgentState())
-        agentStatusCard.setOnClickListener {
-            val state = mobileNativeAgent.snapshot()
-            if (state.currentScreen.isAccessibilityEnabled || ScreenPerceptionState.hasRecentVisualCapture()) {
-                renderAgentState(mobileNativeAgent.observeCurrentScreen())
-            } else {
-                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            }
-        }
         agentQuickUnderstandButton.setOnClickListener {
             startAgentScreenUnderstanding()
         }
@@ -879,6 +849,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         agentQuickPermissionsButton.setOnClickListener {
             showOnDeviceAgentFeaturePage()
+        }
+        agentRecentTasksButton.setOnClickListener {
+            showAgentRecentTasksPage()
         }
         agentPermissionModeButton.setOnClickListener {
             val next = nextAgentPermissionMode(mobileNativeAgent.safetySettings().permissionMode)
@@ -1951,105 +1924,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun renderAgentState(state: AgentUiState) {
         if (state == lastRenderedAgentState) return
         lastRenderedAgentState = state
-        val isPlanning = state.phase != AgentPhase.OBSERVING
-        val visualScreenReady = ScreenPerceptionState.hasRecentVisualCapture()
-        val screenAccessEnabled = state.currentScreen.isAccessibilityEnabled || visualScreenReady
         val pendingAction = state.pendingAction
-        agentStatusTitle.text = when {
-            !screenAccessEnabled && !isPlanning -> getString(R.string.agent_status_accessibility_needed)
-            visualScreenReady && !state.currentScreen.isAccessibilityEnabled && !isPlanning ->
-                getString(R.string.agent_status_visual_ready)
-            state.phase == AgentPhase.BLOCKED -> getString(R.string.agent_status_blocked)
-            state.phase == AgentPhase.WAITING_CONFIRMATION -> getString(R.string.agent_status_waiting_confirmation)
-            state.phase == AgentPhase.EXECUTING -> getString(R.string.agent_status_executing)
-            state.phase == AgentPhase.VERIFYING -> getString(R.string.agent_status_verifying)
-            state.phase == AgentPhase.WAITING_RESPONSE -> getString(R.string.agent_status_waiting_response)
-            state.phase == AgentPhase.PAUSED -> getString(R.string.agent_status_paused)
-            state.phase == AgentPhase.COMPLETED -> getString(R.string.agent_status_completed)
-            state.phase == AgentPhase.FAILED -> getString(R.string.agent_status_failed)
-            state.phase == AgentPhase.CANCELLED -> getString(R.string.agent_status_cancelled)
-            isPlanning -> getString(R.string.agent_status_planning)
-            else -> getString(R.string.agent_status_observing)
-        }
-        agentStatusSubtitle.text = when {
-            !screenAccessEnabled && !isPlanning -> getString(R.string.agent_status_accessibility_needed_subtitle)
-            visualScreenReady && !state.currentScreen.isAccessibilityEnabled && !isPlanning ->
-                getString(R.string.agent_status_visual_ready_subtitle)
-            state.phase == AgentPhase.BLOCKED -> state.plan?.safetyReview?.reason
-                ?.ifBlank { getString(R.string.agent_status_blocked_subtitle) }
-                ?: getString(R.string.agent_status_blocked_subtitle)
-            state.phase == AgentPhase.PAUSED -> getString(R.string.agent_status_paused_subtitle)
-            state.phase == AgentPhase.CANCELLED -> getString(R.string.agent_status_cancelled_subtitle)
-            state.phase == AgentPhase.COMPLETED -> getString(R.string.agent_status_completed_subtitle)
-            state.phase == AgentPhase.FAILED -> getString(R.string.agent_status_failed_subtitle)
-            state.phase == AgentPhase.WAITING_RESPONSE -> getString(
-                R.string.agent_status_waiting_response_subtitle,
-                state.plan?.route?.targetTitle.orEmpty().ifBlank { state.plan?.selectedAgentOrModel.orEmpty() }
-            )
-            pendingAction != null -> getString(R.string.agent_status_confirm_subtitle, pendingAction.description)
-            isPlanning -> getString(R.string.agent_status_goal_subtitle)
-            else -> getString(R.string.agent_status_default_subtitle)
-        }
-        agentSafetyBadge.text = if (state.phase == AgentPhase.BLOCKED) {
-            getString(R.string.agent_badge_blocked)
-        } else {
-            getString(R.string.agent_badge_safe)
-        }
         renderAgentOutput(state)
-        agentCurrentAppText.text = getString(R.string.agent_current_app_value, state.currentScreen.foregroundApp)
-        agentCallableTargetsText.text = when {
-            state.phase == AgentPhase.BLOCKED -> getString(
-                R.string.agent_blocked_detail_value,
-                state.plan?.safetyReview?.reason.orEmpty().ifBlank { getString(R.string.agent_status_blocked_subtitle) },
-                state.plan?.safetyReview?.deniedPermissions?.joinToString(", ").orEmpty().ifBlank { "-" }
-            )
-            state.lastActionResult != null -> getString(R.string.agent_action_result_value, state.lastActionResult.message)
-            pendingAction != null -> getString(
-                R.string.agent_pending_plan_value,
-                pendingAction.description,
-                state.plan?.expectedResult.orEmpty().ifBlank { pendingAction.description }
-            )
-            screenAccessEnabled -> {
-                getString(
-                    R.string.agent_screen_context_value,
-                state.currentScreen.visibleTextCount,
-                state.currentScreen.clickableNodeCount,
-                state.currentScreen.inputFieldCount
-            )
-            }
-            else -> getString(R.string.agent_accessibility_status_disabled)
-        }
-        agentRunningTasksText.text = if (state.phase == AgentPhase.BLOCKED) {
-            getString(
-                R.string.agent_safety_policy_value,
-                state.plan?.safetyReview?.mode?.name.orEmpty().ifBlank { state.permissionMode.name },
-                state.plan?.safetyReview?.risk?.name?.lowercase(Locale.US).orEmpty().ifBlank { "low" }
-            )
-        } else if (pendingAction != null) {
-            getString(
-                R.string.agent_action_risk_value,
-                pendingAction.risk.name.lowercase(Locale.US),
-                pendingAction.target
-            )
-        } else {
-            getString(
-                R.string.agent_running_tasks_targets_value,
-                state.runningTaskCount,
-                state.runtimeContext.callableCount
-            )
-        }
-        val memorySnapshot = mobileNativeAgent.memorySnapshot()
-        agentMemoryText.text = getString(
-            R.string.agent_memory_value,
-            memorySnapshot.activeCount,
-            memorySnapshot.conflicts.size
-        )
-        agentKnowledgeText.text = getString(
-            R.string.agent_knowledge_value,
-            state.runtimeContext.knowledgeStats.itemCount,
-            state.runtimeContext.knowledgeStats.sourceCount,
-            state.runtimeContext.knowledgeItems.size
-        )
         val safetySettings = mobileNativeAgent.safetySettings()
         agentPermissionModeButton.text = getString(
             R.string.agent_safety_permission_mode_value,
@@ -2082,80 +1958,69 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             else -> "›"
         }
         agentSubmitButton.isEnabled = state.phase != AgentPhase.WAITING_RESPONSE && !agentOperationInFlight
-
-        val statusViews = mapOf(
-            AgentStepKind.OBSERVE_SCREEN to Pair(agentStepObserveNumber, agentStepObserveStatus),
-            AgentStepKind.ANALYZE_GOAL to Pair(agentStepAnalyzeNumber, agentStepAnalyzeStatus),
-            AgentStepKind.BUILD_PLAN to Pair(agentStepPlanNumber, agentStepPlanStatus),
-            AgentStepKind.CONFIRM_AND_ACT to Pair(agentStepActNumber, agentStepActStatus)
-        )
-        state.steps.forEach { step ->
-            val views = statusViews[step.kind] ?: return@forEach
-            val numberView = views.first
-            val statusView = views.second
-            val current = step.status == AgentStepStatus.CURRENT || step.status == AgentStepStatus.DONE
-            numberView.setBackgroundResource(
-                if (current) R.drawable.agent_step_number_background else R.drawable.agent_step_number_outline_background
-            )
-            numberView.setTextColor(
-                if (current) getColorCompat(R.color.white) else getColorCompat(R.color.wechat_green)
-            )
-            statusView.text = when (step.status) {
-                AgentStepStatus.CURRENT -> getString(R.string.agent_step_status_current)
-                AgentStepStatus.DONE -> getString(R.string.agent_step_status_done)
-                AgentStepStatus.WAITING -> getString(R.string.agent_step_status_waiting)
-                AgentStepStatus.SAFE -> getString(R.string.agent_step_status_safe)
-            }
-            statusView.setTextColor(
-                if (step.status == AgentStepStatus.CURRENT || step.status == AgentStepStatus.DONE) {
-                    getColorCompat(R.color.wechat_green)
-                } else {
-                    getColorCompat(R.color.text_secondary)
-                }
-            )
-        }
-        renderAgentToolbox(state)
-        renderAgentActionQueue(state)
-        renderAgentRequirements(state)
-        renderAgentPlanContext(state)
-        renderAgentVerification(state)
-        renderAgentRecentTasks(state)
-        renderAgentAuditTrail(state)
         latestAgentScreenContext = state.currentScreen
-        renderAgentScreenDetails(state.currentScreen)
     }
 
     private fun renderAgentOutput(state: AgentUiState) {
         val pending = state.pendingAction
-        agentOutputTitle.text = getString(
-            when (state.phase) {
-                AgentPhase.BLOCKED -> R.string.agent_output_blocked_title
-                AgentPhase.WAITING_CONFIRMATION -> R.string.agent_output_approval_title
-                AgentPhase.PLANNING, AgentPhase.EXECUTING, AgentPhase.VERIFYING -> R.string.agent_output_working_title
-                AgentPhase.WAITING_RESPONSE -> R.string.agent_output_waiting_title
-                AgentPhase.COMPLETED -> R.string.agent_output_result_title
-                AgentPhase.FAILED, AgentPhase.CANCELLED -> R.string.agent_output_failed_title
-                else -> R.string.agent_output_ready_title
-            }
-        )
-        agentOutputText.text = when {
-            state.phase == AgentPhase.BLOCKED -> state.plan?.safetyReview?.reason
-                ?.ifBlank { getString(R.string.agent_status_blocked_subtitle) }
-                ?: getString(R.string.agent_status_blocked_subtitle)
-            pending != null -> buildString {
-                append(pending.description)
-                state.plan?.expectedResult.orEmpty().takeIf { it.isNotBlank() && it != pending.description }?.let {
-                    append("\n\n").append(it)
-                }
-            }
-            !state.lastActionResult?.message.isNullOrBlank() -> state.lastActionResult?.message
-            state.currentGoal.isNotBlank() -> getString(R.string.agent_output_goal_text, state.currentGoal)
-            else -> getString(R.string.agent_output_ready_text)
-        }
         val route = state.plan?.route?.targetTitle
             .orEmpty()
             .ifBlank { state.plan?.selectedAgentOrModel.orEmpty() }
             .ifBlank { getString(R.string.agent_output_on_device) }
+        agentOutputTitle.text = when (state.phase) {
+            AgentPhase.BLOCKED -> getString(R.string.agent_output_blocked_title)
+            AgentPhase.WAITING_CONFIRMATION -> getString(R.string.agent_output_approval_title)
+            AgentPhase.PLANNING, AgentPhase.EXECUTING, AgentPhase.VERIFYING -> getString(R.string.agent_output_working_title)
+            AgentPhase.WAITING_RESPONSE -> getString(R.string.agent_output_waiting_title)
+            AgentPhase.FAILED, AgentPhase.CANCELLED -> getString(R.string.agent_output_failed_title)
+            else -> ""
+        }
+        agentOutputTitle.visibility = if (agentOutputTitle.text.isNullOrBlank()) View.GONE else View.VISIBLE
+
+        val processDetails = state.auditTrail
+            .asSequence()
+            .mapNotNull { agentExecutionLine(state, it) }
+            .distinct()
+            .toList()
+            .takeLast(8)
+            .toMutableList()
+        pending?.description?.trim()?.takeIf { it.isNotBlank() && !it.contains(':') }?.let { processDetails.add(it) }
+        val finalResult = state.lastActionResult?.message?.trim().orEmpty()
+        if (state.auditTrail.any { it.event == AgentAuditEvent.CONNECTOR_RESPONSE_RECEIVED }) {
+            processDetails.removeAll { line ->
+                line == getString(R.string.agent_trace_request_failed, route) ||
+                    line == getString(R.string.agent_trace_recovery_manual) ||
+                    line == getString(R.string.agent_trace_task_interrupted)
+            }
+        }
+        if (finalResult.isNotBlank()) {
+            pending?.description?.trim()?.let { processDetails.remove(it) }
+        }
+
+        agentOutputText.text = buildString {
+            if (state.currentGoal.isNotBlank()) {
+                append(getString(R.string.agent_goal_display, state.currentGoal))
+            }
+            processDetails.distinct().forEach { detail ->
+                if (isNotEmpty()) append("\n\n")
+                append("• ").append(detail)
+            }
+            if (finalResult.isNotBlank()) {
+                if (isNotEmpty()) append("\n\n")
+                append(finalResult)
+            }
+            if (isEmpty()) {
+                append(
+                    if (state.phase == AgentPhase.BLOCKED) {
+                        state.plan?.safetyReview?.reason.orEmpty().ifBlank {
+                            getString(R.string.agent_status_blocked_subtitle)
+                        }
+                    } else {
+                        getString(R.string.agent_output_ready_text)
+                    }
+                )
+            }
+        }
         val risk = agentRiskLabel(state.plan?.safetyReview?.risk ?: AgentRisk.LOW)
         agentOutputMeta.text = getString(
             R.string.agent_output_meta,
@@ -2163,6 +2028,32 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             risk,
             permissionModeLabel(state.permissionMode)
         )
+    }
+
+    private fun agentExecutionLine(state: AgentUiState, entry: AgentAuditEntry): String? {
+        val route = state.plan?.route?.targetTitle
+            .orEmpty()
+            .ifBlank { state.plan?.selectedAgentOrModel.orEmpty() }
+            .ifBlank { getString(R.string.agent_output_on_device) }
+        return when (entry.event) {
+            AgentAuditEvent.PLAN_REPLANNED,
+            AgentAuditEvent.PLAN_EDITED -> getString(R.string.agent_trace_plan_updated)
+            AgentAuditEvent.TOOL_OUTPUT_HANDOFF -> getString(R.string.agent_trace_tool_result_ready)
+            AgentAuditEvent.ACTION_RECOVERY_STARTED -> getString(R.string.agent_trace_recovery_started)
+            AgentAuditEvent.ACTION_RECOVERY_COMPLETED -> getString(R.string.agent_trace_recovery_completed)
+            AgentAuditEvent.ACTION_RECOVERY_MANUAL_REQUIRED -> getString(R.string.agent_trace_recovery_manual)
+            AgentAuditEvent.CONNECTOR_RESPONSE_RECEIVED -> getString(R.string.agent_trace_response_received, route)
+            AgentAuditEvent.ACTION_EXECUTED -> when {
+                entry.detail.contains("FAILED", ignoreCase = true) -> getString(R.string.agent_trace_request_failed, route)
+                entry.detail.contains("CALL_CONNECTOR", ignoreCase = true) -> getString(R.string.agent_trace_request_sent, route)
+                else -> null
+            }
+            AgentAuditEvent.ACTION_BLOCKED -> getString(R.string.agent_trace_action_blocked)
+            AgentAuditEvent.TASK_PAUSED -> getString(R.string.agent_trace_task_paused)
+            AgentAuditEvent.TASK_RESUMED -> getString(R.string.agent_trace_task_resumed)
+            AgentAuditEvent.TASK_INTERRUPTED -> getString(R.string.agent_trace_task_interrupted)
+            else -> null
+        }
     }
 
     private fun agentRiskLabel(risk: AgentRisk): String = getString(
@@ -2194,6 +2085,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         state.recentTasks.forEachIndexed { index, task ->
             agentRecentTaskList.addView(agentRecentTaskRow(task, index))
+        }
+    }
+
+    private fun showAgentRecentTasksPage() {
+        val state = mobileNativeAgent.snapshot()
+        showFeaturePage(getString(R.string.agent_section_recent_tasks))
+        if (state.recentTasks.isEmpty()) {
+            featureContent.addView(agentRecentEmptyRow())
+            return
+        }
+        state.recentTasks.take(20).forEachIndexed { index, task ->
+            featureContent.addView(agentRecentTaskRow(task, index))
         }
     }
 

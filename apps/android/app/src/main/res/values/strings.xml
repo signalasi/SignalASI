@@ -1043,4 +1043,17 @@
     <string name="cloud_tool_running">Running %1$s · %2$s</string>
     <string name="cloud_tool_completed">Completed %1$s · %2$s</string>
     <string name="cloud_voice_transcript">Transcript: %1$s</string>
+    <string name="agent_goal_display">Goal\n%1$s</string>
+    <string name="agent_trace_plan_updated">Updated the plan</string>
+    <string name="agent_trace_tool_result_ready">Prepared the tool result</string>
+    <string name="agent_trace_recovery_started">Recovering from an interrupted step</string>
+    <string name="agent_trace_recovery_completed">Recovery succeeded</string>
+    <string name="agent_trace_recovery_manual">Waiting for manual confirmation</string>
+    <string name="agent_trace_response_received">Received a response from %1$s</string>
+    <string name="agent_trace_request_sent">Sent the request to %1$s</string>
+    <string name="agent_trace_request_failed">The request to %1$s failed</string>
+    <string name="agent_trace_action_blocked">A protected action needs confirmation</string>
+    <string name="agent_trace_task_paused">Task paused</string>
+    <string name="agent_trace_task_resumed">Task resumed</string>
+    <string name="agent_trace_task_interrupted">Task interrupted</string>
 </resources>
