@@ -300,6 +300,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var voiceCommandLastVoiceAt = 0L
     private var voiceAssistantRestartPending = false
     private var pendingVoiceAgentTranscriptId = 0L
+    private val pendingCloudVoiceRequests = java.util.concurrent.ConcurrentHashMap<Long, PendingCloudVoiceRequest>()
     private var wakeReplyPinnedUntilMs = 0L
     private var lastVoiceRecognitionStartAt = 0L
     private val voiceAssistantScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -1622,6 +1623,43 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val sourceMessageId = payload.optString("source_message_id").toLongOrNull()
             ?: payload.optLong("source_message_id", 0L)
         val transcriptStore = VoiceAgentTranscriptStore(this)
+        val cloudRequest = pendingCloudVoiceRequests.remove(sourceMessageId)
+        if (cloudRequest != null) {
+            val success = payload.optBoolean("transcription_success", false)
+            val transcript = payload.optString("content").trim()
+            runOnUiThread {
+                if (success && transcript.isNotBlank()) {
+                    updateMessageStatus(
+                        cloudRequest.voiceMessageId,
+                        cloudRequest.contact.id,
+                        getString(R.string.voice_status_transcribed)
+                    )
+                    addMessage(ChatMessage(
+                        newMessageId(),
+                        getString(R.string.cloud_voice_transcript, transcript),
+                        false,
+                        CONTACT_SYSTEM,
+                        isSystem = true,
+                        deliveryTrace = mutableListOf(newTraceEvent("cloud_voice_transcribed", cloudRequest.contact.id))
+                    ))
+                    sendOutgoingText(cloudRequest.contact, transcript)
+                } else {
+                    updateMessageStatus(
+                        cloudRequest.voiceMessageId,
+                        cloudRequest.contact.id,
+                        getString(R.string.delivery_status_failed)
+                    )
+                    addMessage(ChatMessage(
+                        newMessageId(),
+                        transcript.ifBlank { getString(R.string.voice_status_transcription_failed) },
+                        false,
+                        CONTACT_SYSTEM,
+                        isSystem = true
+                    ))
+                }
+            }
+            return true
+        }
         val storedRequestId = transcriptStore.pendingRequestId()
         if (sourceMessageId <= 0L ||
             (sourceMessageId != pendingVoiceAgentTranscriptId && sourceMessageId != storedRequestId)
@@ -4639,6 +4677,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun publishInlineVoiceFile(messageId: Long, contact: Contact, file: File) {
+        val rawContact = AppStore.contactById(this, contact.id)
+        if (rawContact?.optString("delivery_mode") == "cloud_api") {
+            requestCloudVoiceTranscription(messageId, contact, file)
+            return
+        }
         val target = AppStore.outgoingTopicForContact(this, contact.id) ?: "signalasichat/android/send"
         Log.i("SignalASIVoice", "Inline voice publish begin target=${contact.id} topic=$target bytes=${file.length()} messageId=$messageId")
         val sent = runCatching {
@@ -4660,6 +4703,41 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         Log.i("SignalASIVoice", "Inline voice publish result=$sent target=${contact.id} bytes=${file.length()} messageId=$messageId")
         updateMessageStatus(messageId, contact.id, if (sent) getString(R.string.delivery_status_mqtt_inline) else getString(R.string.delivery_status_send_failed))
+    }
+
+    private fun requestCloudVoiceTranscription(messageId: Long, cloudContact: Contact, file: File) {
+        val sttContactId = resolveVoiceAssistantSttContactId("")
+        val topic = AppStore.outgoingTopicForContact(this, sttContactId)
+        if (topic == null) {
+            updateMessageStatus(messageId, cloudContact.id, getString(R.string.delivery_status_send_failed))
+            file.delete()
+            return
+        }
+        val requestId = newMessageId()
+        pendingCloudVoiceRequests[requestId] = PendingCloudVoiceRequest(cloudContact, messageId)
+        updateMessageStatus(messageId, cloudContact.id, getString(R.string.delivery_status_requesting))
+        val sent = runCatching {
+            val audioBase64 = Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
+            SignalASIMqttClient.publishInlineAudioMessage(
+                fileName = file.name,
+                size = file.length(),
+                contentType = "audio/mp4",
+                audioBase64 = audioBase64,
+                contactId = sttContactId,
+                topicOverride = topic,
+                audioMode = "transcribe_only",
+                clientMessageId = requestId
+            )
+        }.getOrElse {
+            Log.e("SignalASIVoice", "Cloud voice transcription request failed", it)
+            false
+        }
+        if (!sent) {
+            pendingCloudVoiceRequests.remove(requestId)
+            updateMessageStatus(messageId, cloudContact.id, getString(R.string.delivery_status_send_failed))
+        }
+        file.delete()
+        Log.i("SignalASIVoice", "Cloud voice STT queued=$sent target=${cloudContact.id} stt=$sttContactId requestId=$requestId")
     }
 
     private fun playVoiceMessage(msgId: Long) {
@@ -8684,6 +8762,8 @@ data class DeliveryTraceEvent(
     val at: Long = System.currentTimeMillis(),
     val detail: String = ""
 )
+
+data class PendingCloudVoiceRequest(val contact: Contact, val voiceMessageId: Long)
 
 data class ContactSummary(
     var lastMessage: String = "",
