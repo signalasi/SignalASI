@@ -1,0 +1,128 @@
+package com.signalasi.chat
+
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.time.LocalDate
+
+object CloudWebGrounding {
+    private const val MAX_CONTEXT_CHARS = 6_000
+    private val liveTerms = listOf(
+        "weather", "forecast", "temperature", "news", "latest", "today", "current",
+        "price", "score", "schedule", "traffic", "exchange rate", "stock", "breaking",
+        "realtime", "real-time", "now", "recent",
+        "\u5929\u6c14", "\u6c14\u6e29", "\u9884\u62a5", "\u65b0\u95fb", "\u6700\u65b0", "\u4eca\u5929", "\u5f53\u524d", "\u73b0\u5728", "\u4ef7\u683c", "\u80a1\u4ef7", "\u6c47\u7387", "\u6bd4\u5206", "\u65e5\u7a0b", "\u8def\u51b5"
+    )
+    private val weatherTerms = listOf("weather", "forecast", "temperature", "\u5929\u6c14", "\u6c14\u6e29", "\u9884\u62a5")
+
+    fun enrich(turns: List<ChatMessage>): List<ChatMessage> {
+        val query = turns.lastOrNull { it.isMine && it.content.isNotBlank() }?.content?.trim().orEmpty()
+        if (!needsLiveWeb(query)) return turns
+        val context = runCatching {
+            if (weatherTerms.any { query.contains(it, ignoreCase = true) }) {
+                weatherContext(query).ifBlank { searchContext(query) }
+            } else {
+                searchContext(query)
+            }
+        }.getOrDefault("")
+        if (context.isBlank()) return turns
+        val enriched = turns.toMutableList()
+        val index = enriched.indexOfLast { it.isMine && it.content.isNotBlank() }
+        if (index < 0) return turns
+        val original = enriched[index]
+        enriched[index] = original.copy(content = buildString {
+            append(original.content)
+            append("\n\n[LIVE WEB CONTEXT - retrieved ")
+            append(LocalDate.now())
+            append("]\n")
+            append(context.take(MAX_CONTEXT_CHARS))
+            append("\n\nUse the live context when relevant. Cite the listed source URLs. Clearly state when the context is insufficient or conflicting.")
+        })
+        return enriched
+    }
+
+    private fun needsLiveWeb(query: String): Boolean =
+        query.isNotBlank() && liveTerms.any { query.contains(it, ignoreCase = true) }
+
+    private fun weatherContext(query: String): String {
+        val location = extractWeatherLocation(query)
+        if (location.isBlank()) return ""
+        val geocodeUrl = "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + encode(location)
+        val geocode = JSONObject(get(geocodeUrl))
+        val place = geocode.optJSONArray("results")?.optJSONObject(0) ?: return ""
+        val latitude = place.optDouble("latitude", Double.NaN)
+        val longitude = place.optDouble("longitude", Double.NaN)
+        if (latitude.isNaN() || longitude.isNaN()) return ""
+        val forecastUrl = "https://api.open-meteo.com/v1/forecast" +
+            "?latitude=$latitude&longitude=$longitude&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m" +
+            "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code&forecast_days=3&timezone=auto"
+        val forecast = JSONObject(get(forecastUrl))
+        val current = forecast.optJSONObject("current") ?: JSONObject()
+        val daily = forecast.optJSONObject("daily") ?: JSONObject()
+        val displayName = listOf(place.optString("name"), place.optString("admin1"), place.optString("country"))
+            .filter { it.isNotBlank() }.distinct().joinToString(", ")
+        return buildString {
+            append("Location: $displayName\n")
+            append("Current: ${current.optDouble("temperature_2m")} C; feels like ${current.optDouble("apparent_temperature")} C; ")
+            append("humidity ${current.optInt("relative_humidity_2m")}% ; precipitation ${current.optDouble("precipitation")} mm; ")
+            append("wind ${current.optDouble("wind_speed_10m")} km/h; weather code ${current.optInt("weather_code")}.\n")
+            append("Dates: ${daily.optJSONArray("time")}\n")
+            append("High C: ${daily.optJSONArray("temperature_2m_max")}\n")
+            append("Low C: ${daily.optJSONArray("temperature_2m_min")}\n")
+            append("Max precipitation probability %: ${daily.optJSONArray("precipitation_probability_max")}\n")
+            append("Source: $forecastUrl")
+        }
+    }
+
+    private fun extractWeatherLocation(query: String): String {
+        val cleaned = query
+            .replace(Regex("(?i)what(?:'s| is)?|how(?:'s| is)?|the|weather|forecast|temperature|today|now|current|in|at|for"), " ")
+            .replace(Regex("[?.,!\\u3002\\uff0c\\uff1f\\uff01]"), " ")
+            .replace("\u4eca\u5929", " ").replace("\u73b0\u5728", " ").replace("\u5f53\u524d", " ")
+            .replace("\u7684", " ").replace("\u5929\u6c14", " ").replace("\u6c14\u6e29", " ").replace("\u9884\u62a5", " ")
+            .replace(Regex("\\s+"), " ").trim()
+        return cleaned.take(100)
+    }
+
+    private fun searchContext(query: String): String {
+        val html = get("https://html.duckduckgo.com/html/?q=${encode(query)}")
+        val links = Regex("<a[^>]+class=\"result__a\"[^>]+href=\"([^\"]+)\"[^>]*>(.*?)</a>", RegexOption.IGNORE_CASE)
+            .findAll(html).take(5).toList()
+        if (links.isEmpty()) return ""
+        return links.mapIndexed { index, match ->
+            val url = decodeHtml(match.groupValues[1])
+            val title = stripHtml(match.groupValues[2])
+            val tail = html.substring(match.range.last + 1, minOf(html.length, match.range.last + 1 + 1800))
+            val snippet = Regex("class=\"result__snippet\"[^>]*>(.*?)</", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+                .find(tail)?.groupValues?.get(1)?.let(::stripHtml).orEmpty()
+            "${index + 1}. $title\n$snippet\nSource: $url"
+        }.joinToString("\n\n")
+    }
+
+    private fun get(url: String): String {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 12_000
+            readTimeout = 18_000
+            setRequestProperty("User-Agent", "SignalASI/0.1 Android")
+            setRequestProperty("Accept", "application/json,text/html;q=0.9,*/*;q=0.8")
+        }
+        return try {
+            val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
+            val text = stream?.let { BufferedReader(it.reader(Charsets.UTF_8)).use { reader -> reader.readText() } }.orEmpty()
+            if (connection.responseCode !in 200..299) error("Web grounding HTTP ${connection.responseCode}")
+            text
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
+    private fun stripHtml(value: String): String = decodeHtml(value.replace(Regex("<[^>]+>"), " "))
+        .replace(Regex("\\s+"), " ").trim()
+    private fun decodeHtml(value: String): String = value
+        .replace("&amp;", "&").replace("&quot;", "\"").replace("&#x27;", "'")
+        .replace("&lt;", "<").replace("&gt;", ">")
+}

@@ -33,11 +33,12 @@ object CloudModelClient {
         systemPrompt: String
     ): String {
         validateContact(context, contact)
+        val groundedTurns = CloudWebGrounding.enrich(turns)
         val style = contact.optString("cloud_api_style", "openai")
         return when (style) {
-            "anthropic" -> sendAnthropic(context, contact, turns, systemPrompt)
-            "gemini" -> sendGemini(context, contact, turns, systemPrompt)
-            else -> sendOpenAiCompatible(context, contact, turns, systemPrompt)
+            "anthropic" -> sendAnthropic(context, contact, groundedTurns, systemPrompt)
+            "gemini" -> sendGemini(context, contact, groundedTurns, systemPrompt)
+            else -> sendOpenAiCompatible(context, contact, groundedTurns, systemPrompt)
         }
     }
 
