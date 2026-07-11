@@ -1638,7 +1638,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         newMessageId(),
                         getString(R.string.cloud_voice_transcript, transcript),
                         false,
-                        CONTACT_SYSTEM,
+                        cloudRequest.contact,
                         isSystem = true,
                         deliveryTrace = mutableListOf(newTraceEvent("cloud_voice_transcribed", cloudRequest.contact.id))
                     ))
@@ -1653,7 +1653,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         newMessageId(),
                         transcript.ifBlank { getString(R.string.voice_status_transcription_failed) },
                         false,
-                        CONTACT_SYSTEM,
+                        cloudRequest.contact,
                         isSystem = true
                     ))
                 }
@@ -3708,7 +3708,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             newMessageId(),
                             text,
                             false,
-                            CONTACT_SYSTEM,
+                            contact,
                             isSystem = true,
                             deliveryTrace = mutableListOf(newTraceEvent("cloud_tool_${event.stage}", event.tool))
                         ))
@@ -4862,6 +4862,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         messages.clear()
         summaries.clear()
         var maxId = 0L
+        var removedTransientSystemEvents = false
         val contactIds = mutableSetOf<String>()
         val keys = root.keys()
         while (keys.hasNext()) {
@@ -4877,6 +4878,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 val messageContact = contactById(item.optString("contactId", contactId)) ?: contact
                 val savedContent = item.optString("content")
                 if (contactId == CONTACT_SYSTEM.id && isLegacySystemChatStarter(savedContent)) continue
+                if (contactId == CONTACT_SYSTEM.id && isTransientCloudSystemEvent(item)) {
+                    removedTransientSystemEvents = true
+                    continue
+                }
                 val message = ChatMessage(
                     id = item.optLong("id", newMessageId()),
                     content = savedContent,
@@ -4903,6 +4908,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         nextMessageId = maxOf(nextMessageId, maxId + 1)
         if (messages.isEmpty()) seedWelcomeSystemNotification()
+        else if (removedTransientSystemEvents) saveChatHistory()
     }
 
     private fun reloadChatHistoryIfChanged(force: Boolean = false) {
@@ -4948,6 +4954,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             content.contains(getString(R.string.legacy_chat_started_suffix)) ||
             content.contains("\u5bf9\u8bdd\u5df2\u5f00\u59cb") ||
             content.contains("\u7684\u5bf9\u8bdd\u5df2\u5f00\u59cb")
+    }
+
+    private fun isTransientCloudSystemEvent(item: JSONObject): Boolean {
+        val trace = item.optJSONArray("deliveryTrace") ?: return false
+        for (index in 0 until trace.length()) {
+            val stage = trace.optJSONObject(index)?.optString("stage").orEmpty()
+            if (stage == "cloud_voice_transcribed" || stage.startsWith("cloud_tool_")) return true
+        }
+        return false
     }
 
     private fun parseDeliveryTrace(array: JSONArray?): MutableList<DeliveryTraceEvent> {
