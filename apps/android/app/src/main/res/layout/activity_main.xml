@@ -97,7 +97,9 @@
                     android:layout_height="wrap_content"
                     android:background="@color/page_bg"
                     android:clickable="true"
+                    android:elevation="1dp"
                     android:gravity="center_vertical"
+                    android:outlineProvider="none"
                     android:orientation="horizontal"
                     android:paddingTop="18dp"
                     android:paddingBottom="12dp">
