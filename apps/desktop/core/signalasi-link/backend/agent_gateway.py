@@ -211,6 +211,10 @@ def clean_hermes_output(raw: str) -> str:
         stripped = line.strip()
         if not stripped:
             continue
+        if re.match(r"^[│┊|]?\s*⚡\s*(?:preparing\s+)?mcp_[\w.-]+", stripped, flags=re.IGNORECASE):
+            continue
+        if re.match(r"^(?:preparing|calling|running)\s+(?:mcp_|tool[:\s])", stripped, flags=re.IGNORECASE):
+            continue
         if stripped.startswith(("╭", "╰", "┌", "└")):
             continue
         if re.fullmatch(r"[─━═\-\s]+", stripped):
