@@ -12,8 +12,14 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
+import kotlin.concurrent.thread
 
 object AppStore {
+    @Volatile private var initialized = false
+    private val initializationLock = Any()
+    private val contactsCacheLock = Any()
+    @Volatile private var contactsCacheRaw = ""
+    @Volatile private var contactsCacheById: Map<String, String> = emptyMap()
     private const val PREFS = "signalasi_app_store"
     private const val OLD_PREFS = "hermes_app_store"
     private const val HISTORY_PREFS = "signalasi_chat_history"
@@ -33,7 +39,18 @@ object AppStore {
     private const val GCM_TAG_BITS = 128
 
     fun ensureInitialized(context: Context) {
-        val appContext = context.applicationContext
+        if (initialized) return
+        synchronized(initializationLock) {
+            if (initialized) return
+            initializeOnce(context.applicationContext)
+            initialized = true
+        }
+        thread(name = "signalasi-initial-backup", isDaemon = true) {
+            createInitialPrivateBackup(context.applicationContext)
+        }
+    }
+
+    private fun initializeOnce(appContext: Context) {
         migrateSharedPreferences(appContext, OLD_PREFS, PREFS)
         migrateSharedPreferences(appContext, OLD_HISTORY_PREFS, HISTORY_PREFS)
         migrateSharedPreferences(appContext, OLD_TRUST_PREFS, TRUST_PREFS)
@@ -41,7 +58,7 @@ object AppStore {
         SignalASICrypto.initialize(appContext)
         val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (!prefs.contains(KEY_PROFILE)) {
-            prefs.edit().putString(KEY_PROFILE, defaultProfile(context).toString()).apply()
+            prefs.edit().putString(KEY_PROFILE, defaultProfile(appContext).toString()).apply()
         }
         if (!prefs.contains(KEY_CONTACTS)) {
             prefs.edit().putString(KEY_CONTACTS, JSONArray().toString()).apply()
@@ -49,11 +66,10 @@ object AppStore {
         if (!prefs.contains(KEY_FRIEND_REQUESTS)) {
             prefs.edit().putString(KEY_FRIEND_REQUESTS, JSONArray().toString()).apply()
         }
-        normalizeSignalasiIds(context)
-        removeLegacyDesktopConnectorContacts(context)
-        removeDesktopCloudModelContacts(context)
-        normalizeCloudApiProviderContacts(context)
-        createInitialPrivateBackup(context)
+        normalizeSignalasiIds(appContext)
+        removeLegacyDesktopConnectorContacts(appContext)
+        removeDesktopCloudModelContacts(appContext)
+        normalizeCloudApiProviderContacts(appContext)
     }
 
     fun profile(context: Context): JSONObject {
@@ -250,30 +266,32 @@ object AppStore {
     }
 
     fun canCommunicateWith(context: Context, hermesId: String): Boolean {
-        ensureInitialized(context)
-        val contacts = contacts(context)
-        for (i in 0 until contacts.length()) {
-            val contact = contacts.optJSONObject(i) ?: continue
-            val id = signalasiIdOf(contact)
-            if (id == hermesId || contact.optString("id") == hermesId) {
-                return !contact.optBoolean("deleted", false) &&
-                    contact.optString("trust_state") == "verified"
-            }
-        }
-        return false
+        val contact = contactById(context, hermesId) ?: return false
+        return !contact.optBoolean("deleted", false) &&
+            contact.optString("trust_state") == "verified"
     }
 
     fun contactById(context: Context, hermesId: String): JSONObject? {
         ensureInitialized(context)
-        val contacts = contacts(context)
-        for (i in 0 until contacts.length()) {
-            val contact = contacts.optJSONObject(i) ?: continue
-            val id = signalasiIdOf(contact)
-            if (id == hermesId || contact.optString("id") == hermesId) {
-                return JSONObject(contact.toString())
+        val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_CONTACTS, "[]") ?: "[]"
+        if (raw != contactsCacheRaw) {
+            synchronized(contactsCacheLock) {
+                if (raw != contactsCacheRaw) {
+                    val indexed = LinkedHashMap<String, String>()
+                    val contacts = runCatching { JSONArray(raw) }.getOrDefault(JSONArray())
+                    for (index in 0 until contacts.length()) {
+                        val contact = contacts.optJSONObject(index) ?: continue
+                        val serialized = contact.toString()
+                        signalasiIdOf(contact).takeIf { it.isNotBlank() }?.let { indexed[it] = serialized }
+                        contact.optString("id").takeIf { it.isNotBlank() }?.let { indexed[it] = serialized }
+                    }
+                    contactsCacheById = indexed
+                    contactsCacheRaw = raw
+                }
             }
         }
-        return null
+        return contactsCacheById[hermesId]?.let { JSONObject(it) }
     }
 
     fun updateContactName(context: Context, hermesId: String, name: String): Boolean {
@@ -884,6 +902,9 @@ object AppStore {
     }
 
     fun destroyAllPrivateData(context: Context) {
+        initialized = false
+        contactsCacheRaw = ""
+        contactsCacheById = emptyMap()
         AgentWorkflowScheduler.cancelAll(context)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences(OLD_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
@@ -915,6 +936,7 @@ object AppStore {
         context.filesDir.resolve("backups").deleteRecursively()
         context.filesDir.resolve("tmp").deleteRecursively()
         resetToFreshInstall(context)
+        ensureInitialized(context)
     }
 
     private fun resetToFreshInstall(context: Context) {
@@ -1366,7 +1388,12 @@ object AppStore {
     }
 
     private fun writeArray(context: Context, key: String, value: JSONArray) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(key, value.toString()).apply()
+        val raw = value.toString()
+        if (key == KEY_CONTACTS) {
+            contactsCacheRaw = ""
+            contactsCacheById = emptyMap()
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(key, raw).apply()
     }
 
     private fun writeObject(context: Context, key: String, value: JSONObject) {

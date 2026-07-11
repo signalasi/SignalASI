@@ -243,6 +243,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val historyExecutor = Executors.newSingleThreadExecutor()
     private val cloudExecutor = Executors.newCachedThreadPool()
     private val historySaveSeq = AtomicInteger()
+    private val historySaveRunnable = Runnable { enqueueChatHistorySave() }
     private lateinit var mobileNativeAgent: MobileNativeAgent
     private val agentConnectorResponseListener = AgentConnectorResponseListener { response ->
         runOnUiThread { consumeAgentConnectorResponse(response) }
@@ -281,6 +282,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var secureChannelReady = false
     private var scanMode = "security"
     private var latestAgentScreenContext: ScreenContext? = null
+    private var lastRenderedAgentState: AgentUiState? = null
     private val directoryContacts = mutableListOf<Contact>()
     private var pendingExportPassword: String? = null
     private var pendingExportIncludeMessages = true
@@ -457,6 +459,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         configureInput()
         configureWakePage()
         styleSettingsRows()
+        refreshMePage()
         startMessageService()
         showMainTab(PAGE_AGENT)
 
@@ -1946,6 +1949,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun renderAgentState(state: AgentUiState) {
+        if (state == lastRenderedAgentState) return
+        lastRenderedAgentState = state
         val isPlanning = state.phase != AgentPhase.OBSERVING
         val visualScreenReady = ScreenPerceptionState.hasRecentVisualCapture()
         val screenAccessEnabled = state.currentScreen.isAccessibilityEnabled || visualScreenReady
@@ -3429,6 +3434,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun showMainTab(tab: String) {
         val inactive = getColorCompat(R.color.text_secondary)
+        val previousTab = activeMainTab
         if (tab != PAGE_AGENT && agentVoiceListening) {
             stopAgentVoiceInput()
         }
@@ -3436,9 +3442,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         wakePage.visibility = if (tab == PAGE_VOICE) View.VISIBLE else View.GONE
         chatPage.visibility = View.GONE
         featurePage.visibility = View.GONE
-        if (tab == PAGE_VOICE) {
+        if (tab == PAGE_VOICE && previousTab != PAGE_VOICE) {
             startVoiceAssistant()
-        } else {
+        } else if (previousTab == PAGE_VOICE && tab != PAGE_VOICE) {
             stopVoiceAssistant()
         }
 
@@ -3474,13 +3480,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         setTabSelected(tabMe, tab == PAGE_SETTINGS, inactive)
         setFeatureTabsSelected(tab)
 
-        val activeIds = listOf(PAGE_AGENT, PAGE_MESSAGES, PAGE_CONTACTS, PAGE_DISCOVER, PAGE_SETTINGS)
-        if (tab in activeIds) {
-            if (tab == PAGE_AGENT) renderAgentState(mobileNativeAgent.snapshot())
-            if (tab == PAGE_MESSAGES) refreshContactList()
-            if (tab == PAGE_SETTINGS) refreshMePage()
-            if (tab == PAGE_CONTACTS || tab == PAGE_DISCOVER) refreshDirectoryContacts()
-        }
     }
 
     private fun showAdjacentMainTab(direction: Int) {
@@ -5013,6 +5012,20 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun saveChatHistory(sync: Boolean = false) {
         migrateHistoryPrefs()
+        if (!sync) {
+            handler.removeCallbacks(historySaveRunnable)
+            handler.postDelayed(historySaveRunnable, 120L)
+            return
+        }
+        handler.removeCallbacks(historySaveRunnable)
+        persistChatHistorySnapshot(sync = true)
+    }
+
+    private fun enqueueChatHistorySave() {
+        persistChatHistorySnapshot(sync = false)
+    }
+
+    private fun persistChatHistorySnapshot(sync: Boolean) {
         val snapshot = messages.mapValues { (_, list) ->
             list.takeLast(MAX_SAVED_MESSAGES_PER_CONTACT).map { it.copy() }
         }
@@ -5093,13 +5106,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun buildChatContacts(): List<Contact> {
         val items = storedContacts().toMutableList()
-        messages.keys.forEach { id ->
-            if (id == CONTACT_SYSTEM.id) return@forEach
-            val contact = contactById(id)
-            if (items.none { it.id == contact.id } && AppStore.canCommunicateWith(this, contact.id)) {
-                items.add(contact)
-            }
-        }
         items.sortWith(compareBy<Contact> { contactPriority(it.id) }.thenBy { it.name.lowercase(Locale.getDefault()) })
         items.add(CONTACT_SYSTEM)
         return items
