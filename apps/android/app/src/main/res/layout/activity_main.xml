@@ -90,6 +90,7 @@
                 android:visibility="gone">
 
                 <ScrollView
+                    android:id="@+id/agentOutputScroll"
                     android:layout_width="match_parent"
                     android:layout_height="0dp"
                     android:layout_weight="1"
@@ -250,40 +251,17 @@
                             android:id="@+id/agentOutputCard"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:layout_marginTop="28dp"
+                            android:layout_marginTop="22dp"
                             android:orientation="vertical"
                             android:paddingStart="2dp"
                             android:paddingEnd="2dp">
 
-                            <TextView
-                                android:id="@+id/agentOutputTitle"
+                            <LinearLayout
+                                android:id="@+id/agentOutputList"
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
-                                android:text="@string/agent_output_ready_title"
-                                android:textColor="@color/text_secondary"
-                                android:textSize="13sp"
-                                android:textStyle="bold" />
-
-                            <TextView
-                                android:id="@+id/agentOutputText"
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:layout_marginTop="12dp"
-                                android:lineSpacingExtra="5dp"
                                 android:minHeight="180dp"
-                                android:text="@string/agent_output_ready_text"
-                                android:textColor="@color/text_primary"
-                                android:textIsSelectable="true"
-                                android:textSize="16sp" />
-
-                            <TextView
-                                android:id="@+id/agentOutputMeta"
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:layout_marginTop="16dp"
-                                android:text="@string/agent_output_local_meta"
-                                android:textColor="@color/text_secondary"
-                                android:textSize="11sp" />
+                                android:orientation="vertical" />
                         </LinearLayout>
 
                         <TextView
@@ -726,50 +704,70 @@
 
                 <LinearLayout
                     android:layout_width="match_parent"
-                    android:layout_height="58dp"
+                    android:layout_height="72dp"
                     android:layout_marginBottom="8dp"
-                    android:background="@drawable/message_input_background"
+                    android:background="@drawable/agent_input_shell_background"
                     android:gravity="center_vertical"
                     android:orientation="horizontal"
-                    android:paddingStart="14dp"
-                    android:paddingEnd="6dp">
-
-                    <EditText
-                        android:id="@+id/agentGoalInput"
-                        android:layout_width="0dp"
-                        android:layout_height="match_parent"
-                        android:layout_weight="1"
-                        android:background="@android:color/transparent"
-                        android:hint="@string/agent_goal_hint"
-                        android:inputType="textCapSentences|textMultiLine"
-                        android:maxLines="2"
-                        android:textColor="@color/text_primary"
-                        android:textColorHint="@color/text_secondary"
-                        android:textSize="15sp" />
+                    android:paddingStart="7dp"
+                    android:paddingEnd="7dp">
 
                     <TextView
                         android:id="@+id/agentVoiceButton"
-                        android:layout_width="42dp"
-                        android:layout_height="42dp"
-                        android:layout_marginStart="6dp"
-                        android:background="@drawable/icon_button_background"
+                        android:layout_width="112dp"
+                        android:layout_height="54dp"
+                        android:background="@drawable/agent_voice_button_background"
                         android:gravity="center"
                         android:text="@string/agent_voice_button"
-                        android:textColor="@color/text_primary"
-                        android:textSize="16sp"
+                        android:textColor="@color/white"
+                        android:textSize="15sp"
                         android:textStyle="bold" />
 
-                    <TextView
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="54dp"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/agent_input_field_background"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal"
+                        android:paddingStart="14dp"
+                        android:paddingEnd="4dp">
+
+                        <EditText
+                            android:id="@+id/agentGoalInput"
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1"
+                            android:background="@android:color/transparent"
+                            android:hint="@string/agent_goal_hint"
+                            android:inputType="textCapSentences|textMultiLine"
+                            android:maxLines="2"
+                            android:paddingStart="0dp"
+                            android:paddingEnd="6dp"
+                            android:textColor="@color/text_primary"
+                            android:textColorHint="@color/text_secondary"
+                            android:textSize="15sp" />
+
+                        <ImageButton
+                            android:id="@+id/agentAttachButton"
+                            android:layout_width="42dp"
+                            android:layout_height="42dp"
+                            android:background="@android:color/transparent"
+                            android:contentDescription="@string/agent_knowledge_import"
+                            android:padding="9dp"
+                            android:src="@drawable/ic_agent_attach" />
+                    </LinearLayout>
+
+                    <ImageButton
                         android:id="@+id/agentSubmitButton"
-                        android:layout_width="42dp"
-                        android:layout_height="42dp"
-                        android:layout_marginStart="6dp"
-                        android:background="@drawable/send_button_background"
-                        android:gravity="center"
-                        android:text="›"
-                        android:textColor="@color/white"
-                        android:textSize="24sp"
-                        android:textStyle="bold" />
+                        android:layout_width="54dp"
+                        android:layout_height="54dp"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/agent_send_button_background"
+                        android:contentDescription="@string/common_send"
+                        android:padding="14dp"
+                        android:src="@drawable/ic_agent_arrow_up" />
                 </LinearLayout>
             </LinearLayout>
 

@@ -294,8 +294,9 @@
     <string name="agent_current_app_value">当前 App：%1$s</string>
     <string name="agent_callable_targets_value">可调用对象：%1$d</string>
     <string name="agent_running_tasks_value">运行任务：%1$d</string>
-    <string name="agent_goal_hint">语音或文字输入目标</string>
-    <string name="agent_voice_button">话</string>
+    <string name="agent_goal_hint">输入消息...</string>
+    <string name="agent_voice_button">按住说话</string>
+    <string name="agent_voice_listening">松开发送</string>
     <string name="agent_empty_goal">请输入 SignalASI Agent 的目标</string>
     <string name="agent_voice_not_ready">语音命令绑定将在下一步接入</string>
     <string name="pairing_confirm_title">确认配对</string>
@@ -353,6 +354,7 @@
     <string name="common_edit">编辑</string>
     <string name="common_save">保存</string>
     <string name="common_cancel">取消</string>
+    <string name="common_send">发送</string>
     <string name="common_copy">复制</string>
     <string name="common_delete">删除</string>
     <string name="common_empty">空</string>
@@ -935,8 +937,6 @@
     <string name="agent_output_ready_text">告诉 SignalASI 你想完成什么。它会观察、规划，在受保护操作前请求确认，并在这里完整显示结果。</string>
     <string name="agent_output_goal_text">正在处理：%1$s</string>
     <string name="agent_output_on_device">手机本体智能体</string>
-    <string name="agent_output_local_meta">手机本体智能体 · 低风险 · 安全保护</string>
-    <string name="agent_output_meta">%1$s · %2$s风险 · %3$s</string>
     <string name="agent_status_completed_subtitle">完整结果显示在下方输出区</string>
     <string name="agent_status_failed_subtitle">查看下方输出后重试或调整目标</string>
     <string name="agent_status_waiting_response_subtitle">正在等待 %1$s 回复</string>
@@ -947,14 +947,11 @@
     <string name="cloud_tool_running">正在调用 %1$s · %2$s</string>
     <string name="cloud_tool_completed">%1$s 已完成 · %2$s</string>
     <string name="cloud_voice_transcript">语音转写：%1$s</string>
-    <string name="agent_goal_display">目标\n%1$s</string>
     <string name="agent_trace_plan_updated">已更新执行计划</string>
     <string name="agent_trace_tool_result_ready">工具结果已准备</string>
     <string name="agent_trace_recovery_started">正在恢复中断的步骤</string>
     <string name="agent_trace_recovery_completed">恢复成功</string>
     <string name="agent_trace_recovery_manual">等待手动确认</string>
-    <string name="agent_trace_response_received">已收到 %1$s 的回复</string>
-    <string name="agent_trace_request_sent">已将请求发送给 %1$s</string>
     <string name="agent_trace_request_failed">发送给 %1$s 的请求失败</string>
     <string name="agent_trace_action_blocked">受保护操作需要确认</string>
     <string name="agent_trace_task_paused">任务已暂停</string>

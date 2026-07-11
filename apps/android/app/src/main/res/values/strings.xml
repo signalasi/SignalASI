@@ -359,8 +359,6 @@
     <string name="agent_output_ready_text">Tell SignalASI what you want to accomplish. It will observe, plan, ask before protected actions, and show the complete result here.</string>
     <string name="agent_output_goal_text">Working on: %1$s</string>
     <string name="agent_output_on_device">On-device Agent</string>
-    <string name="agent_output_local_meta">On-device Agent · low risk · protected</string>
-    <string name="agent_output_meta">%1$s · %2$s risk · %3$s</string>
     <string name="agent_status_completed_subtitle">The complete result is shown below</string>
     <string name="agent_status_failed_subtitle">Review the output below, then retry or change the goal</string>
     <string name="agent_status_waiting_response_subtitle">Waiting for %1$s</string>
@@ -529,8 +527,8 @@
     <string name="agent_screen_empty">No matching screen items</string>
     <string name="agent_screen_disabled">Enable screen access to inspect this page</string>
     <string name="agent_screen_bounds">Bounds: %1$s</string>
-    <string name="agent_goal_hint">Voice or text input goal</string>
-    <string name="agent_voice_button">Talk</string>
+    <string name="agent_goal_hint">Enter message...</string>
+    <string name="agent_voice_button">Hold to talk</string>
     <string name="agent_voice_listening">Listening</string>
     <string name="agent_confirm_button">✓</string>
     <string name="agent_cancel_button">×</string>
@@ -596,6 +594,7 @@
     <string name="common_edit">Edit</string>
     <string name="common_save">Save</string>
     <string name="common_cancel">Cancel</string>
+    <string name="common_send">Send</string>
     <string name="common_copy">Copy</string>
     <string name="common_delete">Delete</string>
     <string name="common_empty">Empty</string>
@@ -1043,14 +1042,11 @@
     <string name="cloud_tool_running">Running %1$s · %2$s</string>
     <string name="cloud_tool_completed">Completed %1$s · %2$s</string>
     <string name="cloud_voice_transcript">Transcript: %1$s</string>
-    <string name="agent_goal_display">Goal\n%1$s</string>
     <string name="agent_trace_plan_updated">Updated the plan</string>
     <string name="agent_trace_tool_result_ready">Prepared the tool result</string>
     <string name="agent_trace_recovery_started">Recovering from an interrupted step</string>
     <string name="agent_trace_recovery_completed">Recovery succeeded</string>
     <string name="agent_trace_recovery_manual">Waiting for manual confirmation</string>
-    <string name="agent_trace_response_received">Received a response from %1$s</string>
-    <string name="agent_trace_request_sent">Sent the request to %1$s</string>
     <string name="agent_trace_request_failed">The request to %1$s failed</string>
     <string name="agent_trace_action_blocked">A protected action needs confirmation</string>
     <string name="agent_trace_task_paused">Task paused</string>

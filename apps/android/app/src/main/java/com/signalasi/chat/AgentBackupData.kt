@@ -12,6 +12,7 @@ object AgentBackupData {
     private const val SCHEDULE_PREFS = "signalasi_agent_workflow_schedules"
     private const val TRIGGER_PREFS = "signalasi_agent_workflow_triggers"
     private const val WORKFLOW_EXECUTION_HISTORY_PREFS = "signalasi_agent_workflow_execution_history"
+    private const val TRANSCRIPT_PREFS = AgentTranscriptStore.PREFS
     private const val ITEMS_KEY = "items"
 
     fun export(context: Context): JSONObject {
@@ -21,10 +22,11 @@ object AgentBackupData {
         val homeAssistant = HomeAssistantSettingsStore.load(context)
         val customDevices = CustomDeviceConnectorStore(context).exportJson()
         return JSONObject()
-            .put("version", 9)
+            .put("version", 10)
             .put("memory", readArray(context, MEMORY_PREFS, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS))
             .put("knowledge", readArray(context, KNOWLEDGE_PREFS, MAX_KNOWLEDGE_ITEMS, MAX_KNOWLEDGE_ITEM_CHARACTERS))
             .put("tasks", readArray(context, TASK_PREFS, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS))
+            .put("transcript", readArray(context, TRANSCRIPT_PREFS, MAX_TRANSCRIPT_ITEMS, MAX_TRANSCRIPT_ITEM_CHARACTERS))
             .put("workflows", readArray(context, WORKFLOW_PREFS, MAX_WORKFLOW_ITEMS, MAX_WORKFLOW_ITEM_CHARACTERS))
             .put("workflow_schedules", readArray(context, SCHEDULE_PREFS, MAX_SCHEDULE_ITEMS, MAX_SCHEDULE_ITEM_CHARACTERS))
             .put("workflow_triggers", readArray(context, TRIGGER_PREFS, MAX_TRIGGER_ITEMS, MAX_TRIGGER_ITEM_CHARACTERS))
@@ -103,6 +105,11 @@ object AgentBackupData {
         payload.optJSONArray("tasks")?.let { input ->
             val sanitized = sanitizeArray(input, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS)
             AgentEncryptedPreferences(context, TASK_PREFS).writeString(ITEMS_KEY, sanitized.toString())
+        }
+        payload.optJSONArray("transcript")?.let { input ->
+            val sanitized = sanitizeArray(input, MAX_TRANSCRIPT_ITEMS, MAX_TRANSCRIPT_ITEM_CHARACTERS)
+            AgentEncryptedPreferences(context, TRANSCRIPT_PREFS)
+                .writeString(AgentTranscriptStore.KEY_ITEMS, sanitized.toString())
         }
         payload.optJSONArray("workflows")?.let { input ->
             val sanitized = sanitizeArray(input, MAX_WORKFLOW_ITEMS, MAX_WORKFLOW_ITEM_CHARACTERS)
@@ -226,6 +233,8 @@ object AgentBackupData {
     private const val MAX_KNOWLEDGE_ITEM_CHARACTERS = 20_000
     private const val MAX_TASK_ITEMS = 200
     private const val MAX_TASK_ITEM_CHARACTERS = 12_000
+    private const val MAX_TRANSCRIPT_ITEMS = 300
+    private const val MAX_TRANSCRIPT_ITEM_CHARACTERS = 20_000
     private const val MAX_WORKFLOW_ITEMS = 100
     private const val MAX_WORKFLOW_ITEM_CHARACTERS = 4_000
     private const val MAX_SCHEDULE_ITEMS = 100

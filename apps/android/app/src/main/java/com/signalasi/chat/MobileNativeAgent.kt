@@ -3189,6 +3189,7 @@ class MobileNativeAgent(
 
     private fun clearTaskHistoryCommand(): AgentUiState {
         taskStore.clear()
+        AgentTranscriptStore(appContext).clear()
         val result = "Cleared Agent task history"
         val action = AgentAction(
             id = "clear-task-history",
