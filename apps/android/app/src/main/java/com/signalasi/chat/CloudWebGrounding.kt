@@ -1,5 +1,6 @@
 package com.signalasi.chat
 
+import android.util.Log
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.net.HttpURLConnection
@@ -8,6 +9,7 @@ import java.net.URLEncoder
 import java.time.LocalDate
 
 object CloudWebGrounding {
+    private const val TAG = "CloudWebGrounding"
     private const val MAX_CONTEXT_CHARS = 6_000
     private val liveTerms = listOf(
         "weather", "forecast", "temperature", "news", "latest", "today", "current",
@@ -26,7 +28,9 @@ object CloudWebGrounding {
             } else {
                 searchContext(query)
             }
-        }.getOrDefault("")
+        }.onFailure { Log.w(TAG, "Live grounding failed for query=${query.take(80)}", it) }
+            .getOrDefault("")
+        Log.i(TAG, "Live grounding query=${query.take(80)} contextChars=${context.length}")
         if (context.isBlank()) return turns
         val enriched = turns.toMutableList()
         val index = enriched.indexOfLast { it.isMine && it.content.isNotBlank() }
@@ -47,11 +51,8 @@ object CloudWebGrounding {
         query.isNotBlank() && liveTerms.any { query.contains(it, ignoreCase = true) }
 
     private fun weatherContext(query: String): String {
-        val location = extractWeatherLocation(query)
-        if (location.isBlank()) return ""
-        val geocodeUrl = "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + encode(location)
-        val geocode = JSONObject(get(geocodeUrl))
-        val place = geocode.optJSONArray("results")?.optJSONObject(0) ?: return ""
+        val requestedLocation = extractWeatherLocation(query)
+        val place = geocode(requestedLocation) ?: geolocateByNetwork() ?: return ""
         val latitude = place.optDouble("latitude", Double.NaN)
         val longitude = place.optDouble("longitude", Double.NaN)
         if (latitude.isNaN() || longitude.isNaN()) return ""
@@ -76,12 +77,33 @@ object CloudWebGrounding {
         }
     }
 
+    private fun geocode(location: String): JSONObject? {
+        if (location.isBlank()) return null
+        val url = "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + encode(location)
+        return JSONObject(get(url)).optJSONArray("results")?.optJSONObject(0)
+    }
+
+    private fun geolocateByNetwork(): JSONObject? {
+        val location = JSONObject(get("https://ipwho.is/"))
+        if (!location.optBoolean("success", true)) return null
+        val latitude = location.optDouble("latitude", Double.NaN)
+        val longitude = location.optDouble("longitude", Double.NaN)
+        if (latitude.isNaN() || longitude.isNaN()) return null
+        return JSONObject()
+            .put("name", location.optString("city"))
+            .put("admin1", location.optString("region"))
+            .put("country", location.optString("country"))
+            .put("latitude", latitude)
+            .put("longitude", longitude)
+    }
+
     private fun extractWeatherLocation(query: String): String {
         val cleaned = query
             .replace(Regex("(?i)what(?:'s| is)?|how(?:'s| is)?|the|weather|forecast|temperature|today|now|current|in|at|for"), " ")
             .replace(Regex("[?.,!\\u3002\\uff0c\\uff1f\\uff01]"), " ")
             .replace("\u4eca\u5929", " ").replace("\u73b0\u5728", " ").replace("\u5f53\u524d", " ")
             .replace("\u7684", " ").replace("\u5929\u6c14", " ").replace("\u6c14\u6e29", " ").replace("\u9884\u62a5", " ")
+            .replace("\u60c5\u51b5", " ").replace("\u600e\u4e48\u6837", " ").replace("\u5982\u4f55", " ").replace("\u600e\u6837", " ")
             .replace(Regex("\\s+"), " ").trim()
         return cleaned.take(100)
     }
