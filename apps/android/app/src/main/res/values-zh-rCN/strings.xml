@@ -944,4 +944,6 @@
     <string name="agent_risk_medium">中</string>
     <string name="agent_risk_high">高</string>
     <string name="agent_risk_blocked">已拦截</string>
+    <string name="cloud_tool_running">正在调用 %1$s · %2$s</string>
+    <string name="cloud_tool_completed">%1$s 已完成 · %2$s</string>
 </resources>

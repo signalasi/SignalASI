@@ -17,28 +17,33 @@ object CloudModelClient {
         return send(context, contact, listOf(ChatMessage(0L, prompt, true, Contact("me", context.getString(R.string.chat_me), ""))))
     }
 
-    fun send(context: Context, contact: JSONObject, turns: List<ChatMessage>): String {
-        return send(context, contact, turns, SYSTEM_PROMPT)
+    fun send(
+        context: Context,
+        contact: JSONObject,
+        turns: List<ChatMessage>,
+        onToolEvent: ((CloudToolEvent) -> Unit)? = null
+    ): String {
+        return send(context, contact, turns, SYSTEM_PROMPT, onToolEvent)
     }
 
     fun sendStructured(context: Context, contact: JSONObject, systemPrompt: String, prompt: String): String {
         val turn = ChatMessage(0L, prompt, true, Contact("me", context.getString(R.string.chat_me), ""))
-        return send(context, contact, listOf(turn), systemPrompt.take(4_000))
+        return send(context, contact, listOf(turn), systemPrompt.take(4_000), null)
     }
 
     private fun send(
         context: Context,
         contact: JSONObject,
         turns: List<ChatMessage>,
-        systemPrompt: String
+        systemPrompt: String,
+        onToolEvent: ((CloudToolEvent) -> Unit)?
     ): String {
         validateContact(context, contact)
-        val groundedTurns = CloudWebGrounding.enrich(turns)
         val style = contact.optString("cloud_api_style", "openai")
         return when (style) {
-            "anthropic" -> sendAnthropic(context, contact, groundedTurns, systemPrompt)
-            "gemini" -> sendGemini(context, contact, groundedTurns, systemPrompt)
-            else -> sendOpenAiCompatible(context, contact, groundedTurns, systemPrompt)
+            "anthropic" -> sendAnthropic(context, contact, CloudWebGrounding.enrich(turns), systemPrompt)
+            "gemini" -> sendGemini(context, contact, CloudWebGrounding.enrich(turns), systemPrompt)
+            else -> sendOpenAiCompatible(context, contact, turns, systemPrompt, onToolEvent)
         }
     }
 
@@ -46,22 +51,53 @@ object CloudModelClient {
         context: Context,
         contact: JSONObject,
         turns: List<ChatMessage>,
-        systemPrompt: String
+        systemPrompt: String,
+        onToolEvent: ((CloudToolEvent) -> Unit)?
     ): String {
+        val messages = openAiMessages(context, turns, systemPrompt)
         val body = JSONObject()
             .put("model", contact.getString("cloud_model"))
-            .put("messages", openAiMessages(context, turns, systemPrompt))
+            .put("messages", messages)
             .put("stream", false)
+            .put("tools", CloudWebGrounding.openAiTools())
+            .put("tool_choice", "auto")
             .apply { if (systemPrompt != SYSTEM_PROMPT) put("temperature", 0.1) }
-        val text = postJson(
+        var text = postJson(
             contact.getString("cloud_endpoint"),
             openAiHeaders(contact),
             body
         )
-        val json = JSONObject(text)
-        val choice = json.optJSONArray("choices")
-            ?.optJSONObject(0)
-        val message = choice?.optJSONObject("message")
+        var json = JSONObject(text)
+        var choice = json.optJSONArray("choices")?.optJSONObject(0)
+        var message = choice?.optJSONObject("message")
+        val toolCalls = message?.optJSONArray("tool_calls")
+        if (message != null && toolCalls != null && toolCalls.length() > 0) {
+            messages.put(message)
+            for (index in 0 until minOf(toolCalls.length(), 4)) {
+                val call = toolCalls.optJSONObject(index) ?: continue
+                val function = call.optJSONObject("function") ?: continue
+                val arguments = runCatching { JSONObject(function.optString("arguments")) }.getOrDefault(JSONObject())
+                val toolName = function.optString("name")
+                onToolEvent?.invoke(CloudToolEvent(toolName, "running", arguments.toString().take(240)))
+                val toolResult = CloudWebGrounding.executeTool(toolName, arguments)
+                onToolEvent?.invoke(CloudToolEvent(toolName, "completed", toolResult.take(240)))
+                messages.put(JSONObject()
+                    .put("role", "tool")
+                    .put("tool_call_id", call.optString("id"))
+                    .put("content", toolResult.take(6_000))
+                )
+            }
+            val followUpBody = JSONObject(body.toString()).put("messages", messages)
+            followUpBody.remove("tool_choice")
+            text = postJson(
+                contact.getString("cloud_endpoint"),
+                openAiHeaders(contact),
+                followUpBody
+            )
+            json = JSONObject(text)
+            choice = json.optJSONArray("choices")?.optJSONObject(0)
+            message = choice?.optJSONObject("message")
+        }
         return stringifyContent(message?.opt("content"))
             .ifBlank { choice?.optString("text").orEmpty() }
             .ifBlank { json.optString("output_text") }
@@ -243,6 +279,8 @@ object CloudModelClient {
         }
     }
 }
+
+data class CloudToolEvent(val tool: String, val stage: String, val detail: String)
 
 private fun <T> Sequence<T>.takeLastCompat(count: Int): Sequence<T> =
     toList().takeLast(count).asSequence()

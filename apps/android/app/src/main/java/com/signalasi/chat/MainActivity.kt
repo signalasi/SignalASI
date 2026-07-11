@@ -3655,7 +3655,28 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun requestCloudModelReply(contact: Contact, raw: JSONObject, contextTurns: List<ChatMessage>, outgoingId: Long) {
         cloudExecutor.execute {
-            val result = runCatching { CloudModelClient.send(this@MainActivity, raw, contextTurns) }
+            val result = runCatching {
+                CloudModelClient.send(this@MainActivity, raw, contextTurns) { event ->
+                    runOnUiThread {
+                        val detail = event.detail
+                            .replace(Regex("[\\r\\n]+"), " ")
+                            .take(120)
+                        val text = if (event.stage == "running") {
+                            getString(R.string.cloud_tool_running, event.tool, detail)
+                        } else {
+                            getString(R.string.cloud_tool_completed, event.tool, detail)
+                        }
+                        addMessage(ChatMessage(
+                            newMessageId(),
+                            text,
+                            false,
+                            CONTACT_SYSTEM,
+                            isSystem = true,
+                            deliveryTrace = mutableListOf(newTraceEvent("cloud_tool_${event.stage}", event.tool))
+                        ))
+                    }
+                }
+            }
             runOnUiThread {
                 if (result.isSuccess) {
                     appendDeliveryTrace(outgoingId, contact.id, "cloud_reply", raw.optString("selected_cloud_model"))

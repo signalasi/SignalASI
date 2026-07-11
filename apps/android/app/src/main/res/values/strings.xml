@@ -1040,4 +1040,6 @@
     <string name="agent_knowledge_agent_any">Any paired Agent</string>
     <string name="agent_knowledge_section_audit">RECENT KNOWLEDGE ACCESS</string>
     <string name="agent_knowledge_audit_subtitle">%1$d sources · %2$s · %3$d blocked matches</string>
+    <string name="cloud_tool_running">Running %1$s · %2$s</string>
+    <string name="cloud_tool_completed">Completed %1$s · %2$s</string>
 </resources>

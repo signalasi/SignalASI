@@ -1,6 +1,7 @@
 package com.signalasi.chat
 
 import android.util.Log
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.net.HttpURLConnection
@@ -52,7 +53,22 @@ object CloudWebGrounding {
 
     private fun weatherContext(query: String): String {
         val requestedLocation = extractWeatherLocation(query)
-        val place = geocode(requestedLocation) ?: geolocateByNetwork() ?: return ""
+        if (requestedLocation.isNotBlank()) {
+            val language = if (requestedLocation.any { it.code in 0x3400..0x9fff }) "zh" else "en"
+            return weatherForLocation(requestedLocation, language)
+        }
+        val place = geolocateByNetwork() ?: return ""
+        return forecastForPlace(place)
+    }
+
+    private fun weatherForLocation(location: String, language: String): String {
+        if (location.isBlank()) return "Location is required."
+        val normalizedLanguage = if (language.equals("zh", ignoreCase = true)) "zh" else "en"
+        val place = geocode(location, normalizedLanguage) ?: return "No matching location found for: $location"
+        return forecastForPlace(place)
+    }
+
+    private fun forecastForPlace(place: JSONObject): String {
         val latitude = place.optDouble("latitude", Double.NaN)
         val longitude = place.optDouble("longitude", Double.NaN)
         if (latitude.isNaN() || longitude.isNaN()) return ""
@@ -77,9 +93,10 @@ object CloudWebGrounding {
         }
     }
 
-    private fun geocode(location: String): JSONObject? {
+    private fun geocode(location: String, language: String? = null): JSONObject? {
         if (location.isBlank()) return null
-        val url = "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + encode(location)
+        val selectedLanguage = language ?: if (location.any { it.code in 0x3400..0x9fff }) "zh" else "en"
+        val url = "https://geocoding-api.open-meteo.com/v1/search?count=1&language=$selectedLanguage&format=json&name=" + encode(location)
         return JSONObject(get(url)).optJSONArray("results")?.optJSONObject(0)
     }
 
@@ -147,4 +164,48 @@ object CloudWebGrounding {
     private fun decodeHtml(value: String): String = value
         .replace("&amp;", "&").replace("&quot;", "\"").replace("&#x27;", "'")
         .replace("&lt;", "<").replace("&gt;", ">")
+
+    fun openAiTools(): JSONArray = JSONArray()
+        .put(JSONObject()
+            .put("type", "function")
+            .put("function", JSONObject()
+                .put("name", "get_weather")
+                .put("description", "Get live current weather and a 3-day forecast for a named location.")
+                .put("parameters", JSONObject()
+                    .put("type", "object")
+                    .put("properties", JSONObject()
+                        .put("location", JSONObject().put("type", "string").put("description", "City or place name"))
+                        .put("language", JSONObject().put("type", "string").put("enum", JSONArray().put("en").put("zh")))
+                    )
+                    .put("required", JSONArray().put("location").put("language"))
+                )
+            )
+        )
+        .put(JSONObject()
+            .put("type", "function")
+            .put("function", JSONObject()
+                .put("name", "web_search")
+                .put("description", "Search the live web for recent or changing information and return sources.")
+                .put("parameters", JSONObject()
+                    .put("type", "object")
+                    .put("properties", JSONObject()
+                        .put("query", JSONObject().put("type", "string"))
+                        .put("language", JSONObject().put("type", "string").put("enum", JSONArray().put("en").put("zh")))
+                    )
+                    .put("required", JSONArray().put("query").put("language"))
+                )
+            )
+        )
+
+    fun executeTool(name: String, arguments: JSONObject): String = runCatching {
+        when (name) {
+            "get_weather" -> weatherForLocation(
+                arguments.optString("location"),
+                arguments.optString("language", "en")
+            )
+            "web_search" -> searchContext(arguments.optString("query"))
+            else -> "Unknown tool: $name"
+        }.ifBlank { "No live data was returned by $name." }
+    }.onFailure { Log.w(TAG, "Tool execution failed name=$name", it) }
+        .getOrElse { "Tool $name failed: ${it.message.orEmpty().take(200)}" }
 }
