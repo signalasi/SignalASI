@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import hashlib
 import time
@@ -358,8 +359,13 @@ def _normalize_command(agent_id: str, command: list[str] | None) -> list[str] | 
     if agent_id == "hermes" and not any("{prompt}" in part for part in command):
         if command[-1:] in (["-q"], ["--query"]):
             command = [*command, "{prompt}"]
+    if agent_id == "codex":
+        native_codex = _find_codex_desktop_cli()
+        if native_codex:
+            command[0] = native_codex
+            return command
+        return None
     preferred = {
-        "codex": "codex.cmd",
         "claude": "claude.cmd",
     }.get(agent_id)
     if preferred and command[0].lower() == preferred.removesuffix(".cmd"):
@@ -371,6 +377,18 @@ def _normalize_command(agent_id: str, command: list[str] | None) -> list[str] | 
         if resolved:
             command[0] = resolved
     return command
+
+
+def _find_codex_desktop_cli() -> str:
+    configured = os.environ.get("SIGNALASI_CODEX_CLI", "").strip()
+    if configured and Path(configured).is_file():
+        return configured
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if not local_app_data:
+        return ""
+    root = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
+    candidates = list(root.glob("*/codex.exe")) if root.is_dir() else []
+    return str(max(candidates, key=lambda path: path.stat().st_mtime)) if candidates else ""
 
 
 def _command_available(command: str) -> tuple[bool, str]:
@@ -591,7 +609,24 @@ def _agent_env(spec: AgentSpec) -> dict:
     env = {**os.environ, "SIGNALASI_AGENT_MODE": "1"}
     if spec.id == "hermes":
         env["HERMES_YOLO_MODE"] = "1"
+    if spec.id == "codex":
+        proxy = os.environ.get("SIGNALASI_CODEX_PROXY", "").strip()
+        if not proxy and _tcp_available("127.0.0.1", 7890):
+            proxy = "http://127.0.0.1:7890"
+        if proxy:
+            for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+                env[name] = proxy
+            for name in ("NO_PROXY", "no_proxy"):
+                env[name] = "localhost,127.0.0.1,::1"
     return env
+
+
+def _tcp_available(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.2):
+            return True
+    except OSError:
+        return False
 
 
 def ask_local_model(text: str, timeout: int = 120) -> str:
