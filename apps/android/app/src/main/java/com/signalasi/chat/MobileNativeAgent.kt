@@ -634,7 +634,7 @@ class MobileNativeAgent(
         content: String,
         success: Boolean = true
     ): AgentUiState? {
-        if (sourceMessageId <= 0L || content.isBlank()) return null
+        if (sourceMessageId <= 0L || (success && content.isBlank())) return null
         val pendingResult = lastActionResult ?: return null
         if (phase != AgentPhase.WAITING_RESPONSE) return null
         if (pendingResult.metadata["source_message_id"]?.toLongOrNull() != sourceMessageId) return null
@@ -642,7 +642,21 @@ class MobileNativeAgent(
         if (expectedContactId.isNotBlank() && contactId.isNotBlank() && expectedContactId != contactId) return null
         val plan = currentPlan ?: return null
         val actionId = pendingResult.actionId
-        val response = content.trim().take(MAX_CONNECTOR_RESPONSE_CHARACTERS)
+        val response = content.trim().ifBlank { "The selected resource did not return a usable response." }
+            .take(MAX_CONNECTOR_RESPONSE_CHARACTERS)
+        val resourceId = pendingResult.metadata["resource_id"].orEmpty().ifBlank { contactId }
+        val resourceStartedAt = pendingResult.metadata["resource_started_at"]?.toLongOrNull()
+            ?: System.currentTimeMillis()
+        if (pendingResult.metadata["cloud_health_recorded"] != "true") {
+            AgentResourceHealthStore(appContext).record(
+                id = "target:$resourceId",
+                success = success,
+                latencyMs = (System.currentTimeMillis() - resourceStartedAt).coerceAtLeast(0L)
+            )
+        }
+        if (!success) {
+            continueWithConnectorFallback(plan, pendingResult)?.let { return it }
+        }
         val completedResult = AgentActionResult(
             actionId = actionId,
             success = success,
@@ -705,6 +719,35 @@ class MobileNativeAgent(
         } else {
             snapshot()
         }
+    }
+
+    private fun continueWithConnectorFallback(
+        plan: AgentPlan,
+        failedResult: AgentActionResult
+    ): AgentUiState? {
+        val fallbackIds = failedResult.metadata["remaining_fallback_ids"].orEmpty()
+            .split(',')
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .distinct()
+        if (fallbackIds.isEmpty()) return null
+        val action = plan.actions.firstOrNull { it.id == failedResult.actionId } ?: return null
+        val retryAction = action.copy(
+            parameters = action.parameters + mapOf(
+                "connector_id" to fallbackIds.first(),
+                "routing_fallback_ids" to fallbackIds.drop(1).joinToString(",")
+            )
+        )
+        recordAudit(
+            AgentAuditEvent.INVOCATION_AUDIT,
+            "fallback_after_failure:${failedResult.metadata["resource_id"].orEmpty()}:${fallbackIds.first()}"
+        )
+        val fallbackResult = actionExecutor.execute(retryAction, currentScreen)
+        if (!fallbackResult.success || fallbackResult.metadata["awaiting_response"] != "true") return null
+        lastActionResult = fallbackResult
+        phase = AgentPhase.WAITING_RESPONSE
+        saveTaskRecord()
+        return snapshot()
     }
 
     fun canAcceptConnectorResponse(sourceMessageId: Long, contactId: String): Boolean {
@@ -4612,9 +4655,11 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
     private fun actionFor(request: AgentRequest): AgentAction {
         val goal = request.goal.trim()
         val lower = goal.lowercase()
+        val taskRequirements = AgentTaskRequirementAnalyzer.analyze(goal)
         notificationReplyAction(request)?.let { return it }
         AgentSystemToolPlanner.actionFor(request)?.let { return it }
         installedAppOpenAction(request)?.let { return it }
+        explicitCallableTargetAction(request)?.let { return it }
         return when {
             lower == "back" || lower.contains("go back") -> AgentAction(
                 id = "go-back",
@@ -4730,7 +4775,11 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 lower.contains("gpt") ||
                 lower.contains("deepseek") ||
                 lower.contains("gemini") ||
-                lower.contains("qwen") -> connectorAction(request, "cloud-models", "Send task to cloud model")
+                lower.contains("qwen") -> if (taskRequirements.localOnly) {
+                    informationQueryAction(request) ?: draftPlanAction(request)
+                } else {
+                    connectorAction(request, "cloud-models", "Send task to cloud model")
+                }
             lower.contains("codex") -> connectorAction(request, "codex", "Send task to Codex")
             lower.contains("claude") -> connectorAction(request, "claude-code", "Send task to Claude Code")
             lower.contains("hermes") -> connectorAction(request, "hermes", "Send task to Hermes")
@@ -4747,8 +4796,12 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
     }
 
     private fun informationQueryAction(request: AgentRequest): AgentAction? {
-        val currentInformation = request.goal.lowercase(Locale.US).let { query ->
-            CURRENT_INFORMATION_TERMS.any(query::contains)
+        val routing = context?.let { appContext ->
+            AgentResourceRouter(appContext).route(
+                goal = request.goal,
+                targets = request.targets,
+                tools = request.runtimeContext.systemTools
+            )
         }
         val available = request.targets.filter { target ->
             target.status == AgentConnectorStatus.AVAILABLE &&
@@ -4756,19 +4809,63 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                     AgentCapability.REASONING in target.capabilities ||
                     AgentCapability.RESEARCH in target.capabilities)
         }
-        val target = if (currentInformation) {
-            available.firstOrNull { AgentCapability.RESEARCH in it.capabilities }
-                ?: available.firstOrNull { it.kind == AgentConnectorKind.MODEL }
+        val target = if (routing != null) {
+            val selectedId = routing.primary?.resource?.targetId ?: return null
+            available.firstOrNull { it.id == selectedId } ?: return null
         } else {
             available.firstOrNull { it.id == "local-llm" }
                 ?: available.firstOrNull { it.kind == AgentConnectorKind.MODEL }
                 ?: available.firstOrNull { AgentCapability.RESEARCH in it.capabilities }
-        } ?: return null
+                ?: return null
+        }
+        val currentInformation = routing?.requirements?.liveDataRequired == true
         return connectorAction(
             request,
             target.id,
-            if (currentInformation) "Get current information from ${target.title}" else "Ask ${target.title}"
+            if (currentInformation) "Get current information from ${target.title}" else "Ask ${target.title}",
+            routing
         )
+    }
+
+    private fun explicitCallableTargetAction(request: AgentRequest): AgentAction? {
+        val normalizedGoal = request.goal.lowercase(Locale.US)
+        val target = request.targets
+            .asSequence()
+            .filter { it.status == AgentConnectorStatus.AVAILABLE }
+            .filter { it.kind != AgentConnectorKind.DEVICE }
+            .sortedByDescending { it.title.length }
+            .firstOrNull { candidate ->
+                val aliases = buildList {
+                    add(candidate.id.lowercase(Locale.US))
+                    add(candidate.id.substringAfterLast(':').lowercase(Locale.US))
+                    add(candidate.title.lowercase(Locale.US))
+                }.map(String::trim).filter { it.length >= 3 }.distinct()
+                aliases.any(normalizedGoal::contains)
+            } ?: return null
+        val explicitResource = AgentResourceCatalog.build(
+            request.targets,
+            request.runtimeContext.systemTools
+        ).firstOrNull { it.targetId == target.id }
+        if (AgentTaskRequirementAnalyzer.analyze(request.goal).localOnly &&
+            explicitResource?.location == AgentResourceLocation.CLOUD
+        ) {
+            return draftPlanAction(request)
+        }
+        val routing = context?.let { appContext ->
+            AgentResourceRouter(appContext).route(
+                goal = request.goal,
+                targets = request.targets,
+                tools = request.runtimeContext.systemTools
+            )
+        }?.let { decision ->
+            val ordered = listOfNotNull(decision.primary) + decision.fallbacks
+            val explicit = ordered.firstOrNull { it.resource.targetId == target.id }
+            if (explicit == null) null else decision.copy(
+                primary = explicit,
+                fallbacks = ordered.filterNot { it.resource.targetId == target.id }.take(4)
+            )
+        }
+        return connectorAction(request, target.id, "Send task to ${target.title}", routing)
     }
 
     private fun draftPlanAction(request: AgentRequest): AgentAction = AgentAction(
@@ -4929,7 +5026,12 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         return AgentScreenElementMatcher.resolve(query, elements)
     }
 
-    private fun connectorAction(request: AgentRequest, connectorId: String, description: String): AgentAction {
+    private fun connectorAction(
+        request: AgentRequest,
+        connectorId: String,
+        description: String,
+        routing: AgentRoutingDecision? = null
+    ): AgentAction {
         val target = request.targets.firstOrNull { it.id == connectorId }
         return AgentAction(
             id = "connector-$connectorId",
@@ -4938,10 +5040,19 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             risk = AgentRisk.MEDIUM,
             status = AgentActionStatus.PENDING_CONFIRMATION,
             description = description,
-            parameters = mapOf(
-                "connector_id" to connectorId,
-                "prompt" to request.goal
-            )
+            parameters = buildMap {
+                put("connector_id", connectorId)
+                put("prompt", request.goal)
+                routing?.let { decision ->
+                    put("routing_mode", decision.requirements.mode.name)
+                    put("routing_requires_live_data", decision.requirements.liveDataRequired.toString())
+                    put("routing_local_only", decision.requirements.localOnly.toString())
+                    put("routing_estimated_input_tokens", decision.requirements.estimatedInputTokens.toString())
+                    put("routing_fallback_ids", decision.fallbacks.joinToString(",") { it.resource.targetId })
+                    put("routing_score", decision.primary?.score?.toString().orEmpty())
+                    put("routing_reasons", decision.primary?.reasons?.joinToString("|").orEmpty())
+                }
+            }
         )
     }
 
@@ -5642,6 +5753,7 @@ interface AgentActionExecutor {
 }
 
 class AndroidAgentActionExecutor(private val context: Context) : AgentActionExecutor {
+    private val resourceHealth = AgentResourceHealthStore(context)
     override fun execute(action: AgentAction, screen: ScreenContext): AgentActionResult = when (action.kind) {
         AgentActionKind.READ_SCREEN -> readScreenContext(action, screen)
         AgentActionKind.SAVE_SCREEN_KNOWLEDGE -> saveScreenKnowledge(action, screen)
@@ -6095,22 +6207,46 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
     }
 
     private fun dispatchConnectorTask(action: AgentAction): AgentActionResult {
-        val connectorId = action.parameters["connector_id"].orEmpty()
         val prompt = if (action.id == "knowledge-answer") {
             buildKnowledgeAnswerPrompt(action)
                 ?: return AgentActionResult(action.id, false, "Knowledge evidence is no longer available")
         } else {
             action.parameters["prompt"].orEmpty().ifBlank { action.description }
         }
-        if (connectorAliases("cloud-models").any { it == connectorId }) {
-            return dispatchCloudModelTask(action, prompt)
+        val connectorIds = buildList {
+            add(action.parameters["connector_id"].orEmpty())
+            addAll(action.parameters["routing_fallback_ids"].orEmpty().split(','))
+        }.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        var lastFailure = AgentActionResult(action.id, false, "No callable resource is available")
+        connectorIds.forEachIndexed { index, connectorId ->
+            val startedAt = System.currentTimeMillis()
+            val routedAction = action.copy(
+                parameters = action.parameters + mapOf(
+                    "connector_id" to connectorId,
+                    "routing_fallback_ids" to connectorIds.drop(index + 1).joinToString(",")
+                )
+            )
+            val result = when {
+                connectorAliases("cloud-models").any { it == connectorId } ->
+                    dispatchCloudModelTask(routedAction, prompt)
+                AppStore.isCloudApiContact(context, connectorId) ->
+                    dispatchCloudModelTask(routedAction, prompt, connectorId)
+                else -> {
+                    val contactId = resolveConnectorContactId(connectorId)
+                    if (contactId == null) {
+                        AgentActionResult(action.id, false, "$connectorId is not paired")
+                    } else {
+                        dispatchContactTask(routedAction, contactId, prompt)
+                    }
+                }
+            }
+            if (result.metadata["awaiting_response"] != "true") {
+                resourceHealth.record("target:$connectorId", result.success, System.currentTimeMillis() - startedAt)
+            }
+            if (result.success) return result
+            lastFailure = result
         }
-        if (AppStore.isCloudApiContact(context, connectorId)) {
-            return dispatchCloudModelTask(action, prompt, connectorId)
-        }
-        val contactId = resolveConnectorContactId(connectorId)
-            ?: return AgentActionResult(action.id, false, "${action.target} is not paired")
-        return dispatchContactTask(action, contactId, prompt)
+        return lastFailure
     }
 
     private fun buildKnowledgeAnswerPrompt(action: AgentAction): String? {
@@ -6179,13 +6315,25 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 metadata = response.metadata
             )
         }
+        val startedAt = System.currentTimeMillis()
         val localHomeAssistant = HomeAssistantDeviceClient.control(context, prompt)
         if (localHomeAssistant.handled) {
-            return AgentActionResult(action.id, localHomeAssistant.success, localHomeAssistant.message)
+            resourceHealth.record(
+                "target:home-assistant",
+                localHomeAssistant.success,
+                System.currentTimeMillis() - startedAt
+            )
+            if (localHomeAssistant.success) {
+                return AgentActionResult(action.id, true, localHomeAssistant.message)
+            }
         }
         val contactId = resolveConnectorContactId("home-assistant")
             ?: resolveConnectorContactId("home_hub")
-            ?: return AgentActionResult(action.id, false, "Home Assistant is not configured")
+            ?: return AgentActionResult(
+                action.id,
+                false,
+                if (localHomeAssistant.handled) localHomeAssistant.message else "Home Assistant is not configured"
+            )
         return dispatchContactTask(action, contactId, prompt)
     }
 
@@ -6229,8 +6377,11 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                     "awaiting_response" to "true",
                     "source_message_id" to messageId.toString(),
                     "contact_id" to contactId,
-                    "target" to action.target
-                )
+                "target" to action.target,
+                "resource_id" to action.parameters["connector_id"].orEmpty().ifBlank { contactId },
+                "resource_started_at" to System.currentTimeMillis().toString(),
+                "remaining_fallback_ids" to action.parameters["routing_fallback_ids"].orEmpty()
+            )
             } else {
                 emptyMap()
             }
@@ -6242,10 +6393,19 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         prompt: String,
         preferredContactId: String = ""
     ): AgentActionResult {
-        val contact = resolveCloudModelContact(preferredContactId)
+        val modelCandidates = resolveCloudModelContacts(preferredContactId)
+        val contact = modelCandidates.firstOrNull()
             ?: return AgentActionResult(action.id, false, "No cloud model contact is configured")
         val contactId = contact.optString("id").ifBlank { contact.optString("signalasi_id") }
         val selectedModel = AppStore.selectedCloudModelContact(context, contactId) ?: contact
+        val exhaustedCandidateIds = modelCandidates.map { candidate ->
+            candidate.optString("id").ifBlank { candidate.optString("signalasi_id") }
+        }.filter(String::isNotBlank).toSet()
+        val remainingFallbackIds = action.parameters["routing_fallback_ids"].orEmpty()
+            .split(',')
+            .map(String::trim)
+            .filter { it.isNotBlank() && it !in exhaustedCandidateIds }
+            .distinct()
         val historyPrompt = displayPromptForAction(action, prompt)
         val trace = JSONArray()
             .put(JSONObject()
@@ -6265,21 +6425,45 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         )
         Thread {
             val appContext = context.applicationContext
-            val result = runCatching { CloudModelClient.send(appContext, selectedModel, prompt) }
-            val reply = result.getOrElse { error ->
+            var successfulReply = ""
+            var successfulModel: JSONObject? = null
+            var lastError: Throwable? = null
+            modelCandidates.forEach { candidate ->
+                if (successfulModel != null) return@forEach
+                val candidateId = candidate.optString("id").ifBlank { candidate.optString("signalasi_id") }
+                val model = AppStore.selectedCloudModelContact(appContext, candidateId) ?: candidate
+                val startedAt = System.currentTimeMillis()
+                runCatching { CloudModelClient.send(appContext, model, prompt) }
+                    .onSuccess { reply ->
+                        if (replySatisfiesRoute(action, reply)) {
+                            successfulReply = reply
+                            successfulModel = model
+                            resourceHealth.record("target:$candidateId", true, System.currentTimeMillis() - startedAt)
+                        } else {
+                            lastError = IllegalStateException("Model response did not satisfy the live-data route")
+                            resourceHealth.record("target:$candidateId", false, System.currentTimeMillis() - startedAt)
+                        }
+                    }
+                    .onFailure { error ->
+                        lastError = error
+                        resourceHealth.record("target:$candidateId", false, System.currentTimeMillis() - startedAt)
+                    }
+            }
+            val succeeded = successfulModel != null
+            val reply = successfulReply.ifBlank {
                 appContext.getString(
                     R.string.cloud_request_failed,
-                    error.message?.take(220) ?: appContext.getString(R.string.cloud_unknown_error)
+                    lastError?.message?.take(220) ?: appContext.getString(R.string.cloud_unknown_error)
                 )
             }
             ChatHistoryStore.markOutgoingDelivery(
                 context = appContext,
                 contactId = contactId,
                 messageId = messageId,
-                stage = if (result.isSuccess) "cloud_model_replied" else "cloud_model_failed",
-                detail = selectedModel.optString("cloud_model"),
+                stage = if (succeeded) "cloud_model_replied" else "cloud_model_failed",
+                detail = successfulModel?.optString("cloud_model").orEmpty().ifBlank { selectedModel.optString("cloud_model") },
                 status = appContext.getString(
-                    if (result.isSuccess) R.string.delivery_status_replied else R.string.delivery_status_failed
+                    if (succeeded) R.string.delivery_status_replied else R.string.delivery_status_failed
                 )
             )
             ChatHistoryStore.appendIncoming(
@@ -6297,7 +6481,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                     sourceMessageId = messageId,
                     contactId = contactId,
                     content = reply,
-                    success = result.isSuccess
+                    success = succeeded
                 )
             )
         }.start()
@@ -6309,9 +6493,20 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 "awaiting_response" to "true",
                 "source_message_id" to messageId.toString(),
                 "contact_id" to contactId,
-                "target" to contact.optString("name", contactId)
+                "target" to contact.optString("name", contactId),
+                "resource_id" to preferredContactId.ifBlank { contactId },
+                "resource_started_at" to System.currentTimeMillis().toString(),
+                "remaining_fallback_ids" to remainingFallbackIds.joinToString(","),
+                "cloud_health_recorded" to "true"
             )
         )
+    }
+
+    private fun replySatisfiesRoute(action: AgentAction, reply: String): Boolean {
+        if (reply.isBlank()) return false
+        if (action.parameters["routing_requires_live_data"] != "true") return true
+        val normalized = reply.lowercase(Locale.US)
+        return LIVE_DATA_REFUSAL_TERMS.none(normalized::contains)
     }
 
     private fun displayPromptForAction(action: AgentAction, prompt: String): String =
@@ -6340,14 +6535,15 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         return null
     }
 
-    private fun resolveCloudModelContact(preferredContactId: String = ""): JSONObject? {
+    private fun resolveCloudModelContacts(preferredContactId: String = ""): List<JSONObject> {
+        val results = mutableListOf<JSONObject>()
         if (preferredContactId.isNotBlank()) {
             AppStore.selectedCloudModelContact(context, preferredContactId)?.let { contact ->
                 if (!contact.optBoolean("deleted", false) &&
                     contact.optString("setup_status").ifBlank { "ready" } == "ready" &&
                     contact.optString("cloud_model").isNotBlank()
                 ) {
-                    return contact
+                    results += contact
                 }
             }
         }
@@ -6358,9 +6554,16 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             if (contact.optString("delivery_mode") != "cloud_api") continue
             if (contact.optString("setup_status").ifBlank { "ready" } != "ready") continue
             if (contact.optString("cloud_model").isBlank()) continue
-            return contact
+            val selected = AppStore.selectedCloudModelContact(context, contact.optString("id")) ?: contact
+            if (results.none { existing ->
+                    existing.optString("id") == selected.optString("id") &&
+                        existing.optString("cloud_model") == selected.optString("cloud_model")
+                }
+            ) {
+                results += selected
+            }
         }
-        return null
+        return results
     }
 
     private fun connectorAliases(connectorId: String): Set<String> = when (connectorId) {
@@ -6374,6 +6577,18 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         private const val AGENT_NOTIFICATION_CHANNEL_ID = "signalasi_agent_actions"
         private const val AGENT_NOTIFICATION_ID_BASE = 42000
         private const val MAX_KNOWLEDGE_PROMPT_CHARACTERS = 14_000
+        private val LIVE_DATA_REFUSAL_TERMS = listOf(
+            "don't have access to live",
+            "do not have access to live",
+            "can't access real-time",
+            "cannot access real-time",
+            "unable to access real-time",
+            "no real-time data",
+            "no realtime data",
+            "\u65e0\u6cd5\u8bbf\u95ee\u5b9e\u65f6",
+            "\u6ca1\u6709\u5b9e\u65f6\u6570\u636e",
+            "\u65e0\u6cd5\u83b7\u53d6\u5b9e\u65f6"
+        )
     }
 }
 
@@ -6936,7 +7151,12 @@ class StaticAgentConnectorRegistry : AgentConnectorRegistry {
             title = "Cloud Models",
             kind = AgentConnectorKind.MODEL,
             status = AgentConnectorStatus.AVAILABLE,
-            capabilities = listOf(AgentCapability.CHAT, AgentCapability.REASONING)
+            capabilities = listOf(
+                AgentCapability.CHAT,
+                AgentCapability.REASONING,
+                AgentCapability.LIVE_DATA,
+                AgentCapability.TOOL_USE
+            )
         ),
         AgentCallableTarget(
             id = "local-llm",
@@ -6950,21 +7170,40 @@ class StaticAgentConnectorRegistry : AgentConnectorRegistry {
             title = "Hermes",
             kind = AgentConnectorKind.AGENT,
             status = AgentConnectorStatus.AVAILABLE,
-            capabilities = listOf(AgentCapability.CHAT, AgentCapability.RESEARCH)
+            capabilities = listOf(
+                AgentCapability.CHAT,
+                AgentCapability.RESEARCH,
+                AgentCapability.LIVE_DATA,
+                AgentCapability.TOOL_USE,
+                AgentCapability.MCP,
+                AgentCapability.SKILL
+            )
         ),
         AgentCallableTarget(
             id = "codex",
             title = "Codex",
             kind = AgentConnectorKind.AGENT,
             status = AgentConnectorStatus.AVAILABLE,
-            capabilities = listOf(AgentCapability.CODE, AgentCapability.TASK_EXECUTION)
+            capabilities = listOf(
+                AgentCapability.CODE,
+                AgentCapability.TASK_EXECUTION,
+                AgentCapability.TOOL_USE,
+                AgentCapability.MCP,
+                AgentCapability.SKILL
+            )
         ),
         AgentCallableTarget(
             id = "claude-code",
             title = "Claude Code",
             kind = AgentConnectorKind.AGENT,
             status = AgentConnectorStatus.NEEDS_SETUP,
-            capabilities = listOf(AgentCapability.CODE, AgentCapability.TASK_EXECUTION)
+            capabilities = listOf(
+                AgentCapability.CODE,
+                AgentCapability.TASK_EXECUTION,
+                AgentCapability.TOOL_USE,
+                AgentCapability.MCP,
+                AgentCapability.SKILL
+            )
         ),
         AgentCallableTarget(
             id = "home-assistant",
@@ -6985,6 +7224,7 @@ class AppStoreAgentConnectorRegistry(
     override fun availableTargets(): List<AgentCallableTarget> {
         val builtIn = fallback.availableTargets().map { target -> target.copy(status = statusFor(target)) }
         val cloudProviders = cloudProviderTargets()
+        val desktopExtensions = desktopConnectorTargets()
         val customDevices = CustomDeviceConnectorStore(appContext).list().filter { it.enabled }.map { connector ->
             AgentCallableTarget(
                 id = "custom-device:${connector.id}",
@@ -6994,7 +7234,7 @@ class AppStoreAgentConnectorRegistry(
                 capabilities = listOf(AgentCapability.DEVICE_CONTROL)
             )
         }
-        return (builtIn + cloudProviders + customDevices).distinctBy { it.id }
+        return (builtIn + cloudProviders + desktopExtensions + customDevices).distinctBy { it.id }
     }
 
     private fun cloudProviderTargets(): List<AgentCallableTarget> {
@@ -7011,6 +7251,12 @@ class AppStoreAgentConnectorRegistry(
                     selected.optString("cloud_model").isNotBlank() &&
                     selected.optString("cloud_endpoint").isNotBlank() &&
                     selected.optString("cloud_api_key").isNotBlank()
+                val endpoint = selected.optString("cloud_endpoint")
+                val localEndpoint = endpoint.contains("127.0.0.1") ||
+                    endpoint.contains("localhost") ||
+                    endpoint.contains("192.168.") ||
+                    endpoint.contains("10.") ||
+                    endpoint.contains("172.16.")
                 add(
                     AgentCallableTarget(
                         id = id,
@@ -7020,7 +7266,66 @@ class AppStoreAgentConnectorRegistry(
                             .ifBlank { id },
                         kind = AgentConnectorKind.MODEL,
                         status = if (ready) AgentConnectorStatus.AVAILABLE else AgentConnectorStatus.NEEDS_SETUP,
-                        capabilities = listOf(AgentCapability.CHAT, AgentCapability.REASONING)
+                        capabilities = buildList {
+                            add(AgentCapability.CHAT)
+                            add(AgentCapability.REASONING)
+                            add(AgentCapability.TOOL_USE)
+                            add(AgentCapability.LIVE_DATA)
+                            if (localEndpoint) add(AgentCapability.LOCAL_INFERENCE)
+                        }
+                    )
+                )
+            }
+        }
+    }
+
+    private fun desktopConnectorTargets(): List<AgentCallableTarget> {
+        val contacts = AppStore.contacts(appContext)
+        return buildList {
+            for (index in 0 until contacts.length()) {
+                val contact = contacts.optJSONObject(index) ?: continue
+                if (contact.optBoolean("deleted", false)) continue
+                if (contact.optString("delivery_mode") != "pc_connector") continue
+                val id = contact.optString("id").ifBlank { contact.optString("signalasi_id") }
+                if (id.isBlank()) continue
+                val kindText = contact.optString("agent_kind").lowercase(Locale.US)
+                val search = "$id $kindText ${contact.optString("name")}".lowercase(Locale.US)
+                val kind = when {
+                    "model" in kindText || "llm" in search -> AgentConnectorKind.MODEL
+                    "device" in kindText -> AgentConnectorKind.DEVICE
+                    else -> AgentConnectorKind.AGENT
+                }
+                val capabilities = buildList {
+                    add(AgentCapability.CHAT)
+                    when {
+                        "mcp" in search -> {
+                            add(AgentCapability.MCP)
+                            add(AgentCapability.TOOL_USE)
+                            add(AgentCapability.TASK_EXECUTION)
+                        }
+                        "skill" in search -> {
+                            add(AgentCapability.SKILL)
+                            add(AgentCapability.TASK_EXECUTION)
+                        }
+                        kind == AgentConnectorKind.MODEL -> {
+                            add(AgentCapability.REASONING)
+                            add(AgentCapability.LOCAL_INFERENCE)
+                        }
+                        else -> {
+                            add(AgentCapability.TASK_EXECUTION)
+                            add(AgentCapability.TOOL_USE)
+                        }
+                    }
+                }
+                add(
+                    AgentCallableTarget(
+                        id = id,
+                        title = contact.optString("display_name")
+                            .ifBlank { contact.optString("name") }
+                            .ifBlank { id },
+                        kind = kind,
+                        status = if (contactReady(id)) AgentConnectorStatus.AVAILABLE else AgentConnectorStatus.DISCONNECTED,
+                        capabilities = capabilities
                     )
                 )
             }
@@ -8385,6 +8690,10 @@ enum class AgentRouteKind {
 enum class AgentCapability {
     CHAT,
     REASONING,
+    LIVE_DATA,
+    TOOL_USE,
+    MCP,
+    SKILL,
     LOCAL_INFERENCE,
     RESEARCH,
     CODE,

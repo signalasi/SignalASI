@@ -54,7 +54,14 @@ object CloudModelClient {
         systemPrompt: String,
         onToolEvent: ((CloudToolEvent) -> Unit)?
     ): String {
-        val messages = openAiMessages(context, turns, systemPrompt)
+        val liveDataRequired = CloudWebGrounding.requiresLiveData(turns)
+        val groundedTurns = if (liveDataRequired) CloudWebGrounding.enrich(turns) else turns
+        val effectiveSystemPrompt = if (liveDataRequired) {
+            systemPrompt + " Live data tools and retrieved live context are available. Use them before answering, cite the provided source, and do not claim that live data is unavailable when context was supplied."
+        } else {
+            systemPrompt
+        }
+        val messages = openAiMessages(context, groundedTurns, effectiveSystemPrompt)
         val body = JSONObject()
             .put("model", contact.getString("cloud_model"))
             .put("messages", messages)

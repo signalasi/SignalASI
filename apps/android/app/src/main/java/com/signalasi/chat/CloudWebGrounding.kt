@@ -22,7 +22,7 @@ object CloudWebGrounding {
 
     fun enrich(turns: List<ChatMessage>): List<ChatMessage> {
         val query = turns.lastOrNull { it.isMine && it.content.isNotBlank() }?.content?.trim().orEmpty()
-        if (!needsLiveWeb(query)) return turns
+        if (!requiresLiveData(query)) return turns
         val context = runCatching {
             if (weatherTerms.any { query.contains(it, ignoreCase = true) }) {
                 weatherContext(query).ifBlank { searchContext(query) }
@@ -48,7 +48,10 @@ object CloudWebGrounding {
         return enriched
     }
 
-    private fun needsLiveWeb(query: String): Boolean =
+    fun requiresLiveData(turns: List<ChatMessage>): Boolean =
+        requiresLiveData(turns.lastOrNull { it.isMine && it.content.isNotBlank() }?.content.orEmpty())
+
+    fun requiresLiveData(query: String): Boolean =
         query.isNotBlank() && liveTerms.any { query.contains(it, ignoreCase = true) }
 
     private fun weatherContext(query: String): String {
