@@ -14,7 +14,7 @@ import paho.mqtt.client as mqtt
 
 from api_response import api_error, api_ok
 from agent_gateway import ask_agent_sync, connector_diagnostics
-from pairing_state import is_paired, record_pairing_success, validate_pairing_token
+from pairing_state import is_paired, pairing_status, record_pairing_success, validate_pairing_token
 from signalasi_client import (
     decrypt_signal_envelope,
     desktop_id,
@@ -234,6 +234,9 @@ def on_message(mqttc, userdata, msg):
         if wire_payload.get("type") == "signalasi_pairing_claim":
             handle_pairing_claim(mqttc, wire_payload)
             return
+        if wire_payload.get("type") == "signal_bundle_request":
+            handle_signal_bundle_request(mqttc, wire_payload)
+            return
         if not is_paired() and os.environ.get("SIGNALASI_ALLOW_UNPAIRED_MQTT") != "1":
             log.warning("MQTT message rejected: no paired phone is trusted")
             return
@@ -365,6 +368,50 @@ def handle_pairing_claim(mqttc, payload: dict):
     }
     info = mqttc.publish(TOPIC_RECV, json.dumps(ack_payload, ensure_ascii=False), qos=MQTT_QOS)
     log.info(f"MQTT public pairing confirmation published mid={info.mid} rc={info.rc}")
+
+
+def handle_signal_bundle_request(mqttc, payload: dict):
+    if not is_paired():
+        log.warning("Signal bundle request rejected: no paired phone is trusted")
+        return
+    bundle = get_signal_bundle()
+    fingerprint = str(bundle.get("identityKeySha256") or "")
+    requested_fingerprint = str(payload.get("requested_fingerprint") or "").strip()
+    if requested_fingerprint and requested_fingerprint != fingerprint:
+        log.warning("Signal bundle request rejected: desktop fingerprint mismatch")
+        return
+    requester_fingerprint = str(payload.get("identity_fingerprint") or "").strip()
+    requester_bundle = payload.get("signal_bundle")
+    trusted_fingerprint = str(pairing_status().get("identity_fingerprint") or "").strip()
+    if not requester_fingerprint or requester_fingerprint != trusted_fingerprint:
+        log.warning(
+            "Signal bundle request rejected: requester fingerprint mismatch "
+            f"trusted={trusted_fingerprint[:16]} requester={requester_fingerprint[:16]}"
+        )
+        return
+    if not isinstance(requester_bundle, dict):
+        log.warning("Signal bundle request rejected: requester bundle missing")
+        return
+    replace_peer_signal_bundle(requester_bundle, remote_name="android")
+    reply_topic = str(payload.get("reply_topic") or TOPIC_RECV).strip()
+    if reply_topic != TOPIC_RECV and not reply_topic.startswith(f"signalasichat/{DEVICE_ID}/"):
+        log.warning("Signal bundle request rejected: invalid reply topic")
+        return
+    requested_contact = str(payload.get("to") or "").strip()
+    response = {
+        "version": 1,
+        "type": "signal_bundle_response",
+        "from": requested_contact or desktop_id(),
+        "to": str(payload.get("from") or ""),
+        "desktop_id": desktop_id(),
+        "desktop_name": desktop_name(),
+        "desktop_fingerprint": fingerprint,
+        "signal_bundle": bundle,
+        "session_recovery": True,
+        "time": time.time(),
+    }
+    info = mqttc.publish(reply_topic, json.dumps(response, ensure_ascii=False), qos=MQTT_QOS)
+    log.info(f"Signal bundle response published mid={info.mid} rc={info.rc} to={reply_topic}")
 
 
 def mobile_connector_agents() -> list[dict]:

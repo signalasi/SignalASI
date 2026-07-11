@@ -151,6 +151,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentStatusTitle: TextView
     private lateinit var agentStatusSubtitle: TextView
     private lateinit var agentSafetyBadge: TextView
+    private lateinit var agentOutputTitle: TextView
+    private lateinit var agentOutputText: TextView
+    private lateinit var agentOutputMeta: TextView
     private lateinit var agentQuickUnderstandButton: TextView
     private lateinit var agentQuickSaveScreenButton: TextView
     private lateinit var agentQuickSearchKnowledgeButton: TextView
@@ -361,6 +364,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentStatusTitle = findViewById(R.id.agentStatusTitle)
         agentStatusSubtitle = findViewById(R.id.agentStatusSubtitle)
         agentSafetyBadge = findViewById(R.id.agentSafetyBadge)
+        agentOutputTitle = findViewById(R.id.agentOutputTitle)
+        agentOutputText = findViewById(R.id.agentOutputText)
+        agentOutputMeta = findViewById(R.id.agentOutputMeta)
         agentQuickUnderstandButton = findViewById(R.id.agentQuickUnderstandButton)
         agentQuickSaveScreenButton = findViewById(R.id.agentQuickSaveScreenButton)
         agentQuickSearchKnowledgeButton = findViewById(R.id.agentQuickSearchKnowledgeButton)
@@ -862,10 +868,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             startAgentScreenUnderstanding()
         }
         agentQuickSaveScreenButton.setOnClickListener {
-            prefillAgentGoal("save screen")
+            showAgentMemoryPage()
         }
         agentQuickSearchKnowledgeButton.setOnClickListener {
-            prefillAgentGoal("search knowledge ")
+            showAgentKnowledgePage()
         }
         agentQuickPermissionsButton.setOnClickListener {
             showOnDeviceAgentFeaturePage()
@@ -1931,8 +1937,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 ?: getString(R.string.agent_status_blocked_subtitle)
             state.phase == AgentPhase.PAUSED -> getString(R.string.agent_status_paused_subtitle)
             state.phase == AgentPhase.CANCELLED -> getString(R.string.agent_status_cancelled_subtitle)
+            state.phase == AgentPhase.COMPLETED -> getString(R.string.agent_status_completed_subtitle)
+            state.phase == AgentPhase.FAILED -> getString(R.string.agent_status_failed_subtitle)
+            state.phase == AgentPhase.WAITING_RESPONSE -> getString(
+                R.string.agent_status_waiting_response_subtitle,
+                state.plan?.route?.targetTitle.orEmpty().ifBlank { state.plan?.selectedAgentOrModel.orEmpty() }
+            )
             pendingAction != null -> getString(R.string.agent_status_confirm_subtitle, pendingAction.description)
-            state.lastActionResult != null -> getString(R.string.agent_status_result_subtitle, state.lastActionResult.message)
             isPlanning -> getString(R.string.agent_status_goal_subtitle)
             else -> getString(R.string.agent_status_default_subtitle)
         }
@@ -1941,6 +1952,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         } else {
             getString(R.string.agent_badge_safe)
         }
+        renderAgentOutput(state)
         agentCurrentAppText.text = getString(R.string.agent_current_app_value, state.currentScreen.foregroundApp)
         agentCallableTargetsText.text = when {
             state.phase == AgentPhase.BLOCKED -> getString(
@@ -2069,6 +2081,55 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         latestAgentScreenContext = state.currentScreen
         renderAgentScreenDetails(state.currentScreen)
     }
+
+    private fun renderAgentOutput(state: AgentUiState) {
+        val pending = state.pendingAction
+        agentOutputTitle.text = getString(
+            when (state.phase) {
+                AgentPhase.BLOCKED -> R.string.agent_output_blocked_title
+                AgentPhase.WAITING_CONFIRMATION -> R.string.agent_output_approval_title
+                AgentPhase.PLANNING, AgentPhase.EXECUTING, AgentPhase.VERIFYING -> R.string.agent_output_working_title
+                AgentPhase.WAITING_RESPONSE -> R.string.agent_output_waiting_title
+                AgentPhase.COMPLETED -> R.string.agent_output_result_title
+                AgentPhase.FAILED, AgentPhase.CANCELLED -> R.string.agent_output_failed_title
+                else -> R.string.agent_output_ready_title
+            }
+        )
+        agentOutputText.text = when {
+            state.phase == AgentPhase.BLOCKED -> state.plan?.safetyReview?.reason
+                ?.ifBlank { getString(R.string.agent_status_blocked_subtitle) }
+                ?: getString(R.string.agent_status_blocked_subtitle)
+            pending != null -> buildString {
+                append(pending.description)
+                state.plan?.expectedResult.orEmpty().takeIf { it.isNotBlank() && it != pending.description }?.let {
+                    append("\n\n").append(it)
+                }
+            }
+            !state.lastActionResult?.message.isNullOrBlank() -> state.lastActionResult?.message
+            state.currentGoal.isNotBlank() -> getString(R.string.agent_output_goal_text, state.currentGoal)
+            else -> getString(R.string.agent_output_ready_text)
+        }
+        val route = state.plan?.route?.targetTitle
+            .orEmpty()
+            .ifBlank { state.plan?.selectedAgentOrModel.orEmpty() }
+            .ifBlank { getString(R.string.agent_output_on_device) }
+        val risk = agentRiskLabel(state.plan?.safetyReview?.risk ?: AgentRisk.LOW)
+        agentOutputMeta.text = getString(
+            R.string.agent_output_meta,
+            route,
+            risk,
+            permissionModeLabel(state.permissionMode)
+        )
+    }
+
+    private fun agentRiskLabel(risk: AgentRisk): String = getString(
+        when (risk) {
+            AgentRisk.LOW -> R.string.agent_risk_low
+            AgentRisk.MEDIUM -> R.string.agent_risk_medium
+            AgentRisk.HIGH -> R.string.agent_risk_high
+            AgentRisk.BLOCKED -> R.string.agent_risk_blocked
+        }
+    )
 
     private fun renderAgentToolbox(state: AgentUiState) {
         agentToolboxList.removeAllViews()

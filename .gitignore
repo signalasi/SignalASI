@@ -36,6 +36,7 @@ venv/
 .venv/
 
 # Local data
+.local/
 *.db
 *.sqlite
 *.log

@@ -58,6 +58,20 @@ object SignalASICrypto {
             .getString("verified_desktop_identity_sha256_$desktopId", "")
             .orEmpty()
 
+    @Synchronized
+    fun hasDesktopSession(context: Context, desktopId: String): Boolean {
+        if (desktopId.isBlank()) return false
+        initialize(context.applicationContext)
+        return store.containsSession(SignalProtocolAddress(desktopId, REMOTE_DEVICE_ID))
+    }
+
+    @Synchronized
+    fun hasPeerSession(context: Context, contactId: String): Boolean {
+        if (contactId.isBlank()) return false
+        initialize(context.applicationContext)
+        return store.containsSession(SignalProtocolAddress(contactId, DEFAULT_DEVICE_ID))
+    }
+
     fun debugSetVerifiedPcFingerprint(context: Context, fingerprint: String) {
         initialize(context.applicationContext)
         if ((context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) == 0) {
@@ -198,7 +212,12 @@ object SignalASICrypto {
             .putString("verified_desktop_identity_sha256_${desktopIdFromQr(json)}", computed)
             .apply()
         json.optJSONObject("signal_bundle")?.let { bundle ->
-            processPcBundleForDesktop(desktopIdFromQr(json), bundle, computed)
+            processPcBundleForDesktop(
+                desktopIdFromQr(json),
+                bundle,
+                computed,
+                replaceExisting = true
+            )
         }
         Log.i(TAG, "PC identity verified by QR. sha256=${computed.take(16)}")
         return true
@@ -299,7 +318,12 @@ object SignalASICrypto {
     }
 
     @Synchronized
-    fun processPcBundleForDesktop(desktopId: String, bundleJson: JSONObject, expectedFingerprint: String): Boolean {
+    fun processPcBundleForDesktop(
+        desktopId: String,
+        bundleJson: JSONObject,
+        expectedFingerprint: String,
+        replaceExisting: Boolean = false
+    ): Boolean {
         ensureInitialized()
         if (desktopId.isBlank()) return false
         return try {
@@ -310,6 +334,9 @@ object SignalASICrypto {
             }
             val deviceId = bundleJson.optInt("deviceId", REMOTE_DEVICE_ID)
             val address = SignalProtocolAddress(desktopId, deviceId)
+            if (replaceExisting && store.containsSession(address)) {
+                store.deleteSession(address)
+            }
             if (!store.containsSession(address)) {
                 val bundle = PreKeyBundle(
                     bundleJson.getInt("registrationId"),

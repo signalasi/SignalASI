@@ -235,7 +235,11 @@ const iconPath = path.join(root, "assets", "signalasi.ico");
 if (fs.existsSync(iconPath)) {
   const rcedit = findRceditExecutable();
   if (rcedit) {
-    run(rcedit, [signalExe, "--set-icon", iconPath]);
+    try {
+      run(rcedit, [signalExe, "--set-icon", iconPath]);
+    } catch (error) {
+      console.warn(`Unable to embed the executable icon; continuing with the window icon: ${error.message}`);
+    }
   } else {
     console.warn("rcedit not found; packaged exe will use the window icon but may keep the default file icon.");
   }

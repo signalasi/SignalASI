@@ -1,6 +1,8 @@
 package com.signalasi.chat
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import org.eclipse.paho.client.mqttv3.IMqttActionListener
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
@@ -138,6 +140,10 @@ object SignalASIMqttClient {
                 connecting.set(false)
                 setConnected(true)
                 subscribe()
+                Handler(Looper.getMainLooper()).postDelayed(
+                    { requestMissingSignalSessions(context.applicationContext) },
+                    800L
+                )
             }
 
             override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
@@ -295,6 +301,8 @@ object SignalASIMqttClient {
             .put("to", contactId)
             .put("reply_topic", AppStore.localInboxTopic(context))
             .put("requested_fingerprint", contact.optString("identity_fingerprint"))
+            .put("identity_fingerprint", SignalASICrypto.localIdentitySha256())
+            .put("signal_bundle", SignalASICrypto.localSignalBundleJson())
             .put("time", System.currentTimeMillis())
         return publishPublicJson(topic, request)
     }
@@ -321,7 +329,11 @@ object SignalASIMqttClient {
             }
         } else {
             SignalASICrypto.encryptPayloadForContact(contactId, payload)
-        } ?: return false
+        } ?: run {
+            appContext?.let { requestSignalBundleForContact(it, contactId) }
+            Log.w(TAG, "Encrypted publish deferred: secure session refresh requested for $contactId")
+            return false
+        }
         mqtt.publish(topic, MqttMessage(encrypted.toString().toByteArray(Charsets.UTF_8)).apply {
             qos = MQTT_QOS
             isRetained = false
@@ -426,6 +438,25 @@ object SignalASIMqttClient {
         if (to.isNotBlank() && to != localId) return
         val applied = AppStore.applySignalBundleResponse(context, json)
         Log.i(TAG, "Signal bundle response applied=$applied from=${json.optString("from")}")
+    }
+
+    private fun requestMissingSignalSessions(context: Context) {
+        val contacts = AppStore.contacts(context)
+        val requestedDesktopIds = mutableSetOf<String>()
+        for (index in 0 until contacts.length()) {
+            val contact = contacts.optJSONObject(index) ?: continue
+            if (contact.optBoolean("deleted", false)) continue
+            val contactId = contact.optString("id").ifBlank { contact.optString("signalasi_id") }
+            if (contactId.isBlank() || AppStore.outgoingTopicForContact(context, contactId) == null) continue
+            val sessionReady = if (AppStore.usesPcConnectorTunnel(context, contactId)) {
+                val desktopId = AppStore.desktopIdForContact(context, contactId)
+                if (desktopId.isBlank() || !requestedDesktopIds.add(desktopId)) continue
+                false
+            } else {
+                SignalASICrypto.hasPeerSession(context, contactId)
+            }
+            if (!sessionReady) requestSignalBundleForContact(context, contactId)
+        }
     }
 
     private fun subscribe() {

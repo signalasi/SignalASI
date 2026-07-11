@@ -486,6 +486,34 @@ object AppStore {
         val from = response.optString("from")
         val bundle = response.optJSONObject("signal_bundle") ?: return false
         val contacts = contacts(context)
+        val responseDesktopId = response.optString("desktop_id")
+        if (responseDesktopId.isNotBlank()) {
+            val desktopContacts = buildList {
+                for (index in 0 until contacts.length()) {
+                    val contact = contacts.optJSONObject(index) ?: continue
+                    if (contact.optString("desktop_id") == responseDesktopId) add(contact)
+                }
+            }
+            val expectedFingerprint = desktopContacts.firstNotNullOfOrNull { contact ->
+                contact.optString("desktop_fingerprint").takeIf { it.isNotBlank() }
+            }.orEmpty()
+            if (expectedFingerprint.isNotBlank() &&
+                SignalASICrypto.processPcBundleForDesktop(
+                    responseDesktopId,
+                    bundle,
+                    expectedFingerprint,
+                    replaceExisting = response.optBoolean("session_recovery", false)
+                )
+            ) {
+                desktopContacts.forEach { contact ->
+                    contact.put("signal_session", "pc_tunnel")
+                    contact.put("signal_bundle", bundle)
+                    contact.put("signal_bundle_updated_at", System.currentTimeMillis())
+                }
+                writeArray(context, KEY_CONTACTS, contacts)
+                return true
+            }
+        }
         for (i in 0 until contacts.length()) {
             val contact = contacts.optJSONObject(i) ?: continue
             val contactId = signalasiIdOf(contact)

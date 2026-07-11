@@ -4740,15 +4740,51 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 request.targets.any {
                     it.kind == AgentConnectorKind.DEVICE && request.goal.contains(it.title, ignoreCase = true)
                 } -> deviceAction(request)
-            else -> AgentAction(
-                id = "draft-plan",
-                kind = AgentActionKind.DRAFT_PLAN,
-                target = "local-agent-runtime",
-                risk = riskFor(lower),
-                status = AgentActionStatus.PENDING_CONFIRMATION,
-                description = "Create a safe local task plan"
-            )
+            isInformationQuery(goal) -> informationQueryAction(request)
+                ?: draftPlanAction(request)
+            else -> draftPlanAction(request)
         }
+    }
+
+    private fun informationQueryAction(request: AgentRequest): AgentAction? {
+        val currentInformation = request.goal.lowercase(Locale.US).let { query ->
+            CURRENT_INFORMATION_TERMS.any(query::contains)
+        }
+        val available = request.targets.filter { target ->
+            target.status == AgentConnectorStatus.AVAILABLE &&
+                (AgentCapability.CHAT in target.capabilities ||
+                    AgentCapability.REASONING in target.capabilities ||
+                    AgentCapability.RESEARCH in target.capabilities)
+        }
+        val target = if (currentInformation) {
+            available.firstOrNull { AgentCapability.RESEARCH in it.capabilities }
+                ?: available.firstOrNull { it.kind == AgentConnectorKind.MODEL }
+        } else {
+            available.firstOrNull { it.id == "local-llm" }
+                ?: available.firstOrNull { it.kind == AgentConnectorKind.MODEL }
+                ?: available.firstOrNull { AgentCapability.RESEARCH in it.capabilities }
+        } ?: return null
+        return connectorAction(
+            request,
+            target.id,
+            if (currentInformation) "Get current information from ${target.title}" else "Ask ${target.title}"
+        )
+    }
+
+    private fun draftPlanAction(request: AgentRequest): AgentAction = AgentAction(
+        id = "draft-plan",
+        kind = AgentActionKind.DRAFT_PLAN,
+        target = "local-agent-runtime",
+        risk = riskFor(request.goal.lowercase(Locale.US)),
+        status = AgentActionStatus.PENDING_CONFIRMATION,
+        description = "Create a safe local task plan"
+    )
+
+    private fun isInformationQuery(goal: String): Boolean {
+        val normalized = goal.trim().lowercase(Locale.US)
+        if (normalized.endsWith('?') || normalized.endsWith('\uFF1F')) return true
+        return INFORMATION_QUERY_PREFIXES.any(normalized::startsWith) ||
+            CURRENT_INFORMATION_TERMS.any(normalized::contains)
     }
 
     private fun notificationReplyAction(request: AgentRequest): AgentAction? {
@@ -5042,6 +5078,15 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
     companion object {
         private const val MAX_NOTIFICATION_REPLY_CHARACTERS = 2_000
         private const val CUSTOM_DEVICE_TARGET_PREFIX = "custom-device:"
+        private val INFORMATION_QUERY_PREFIXES = listOf(
+            "what ", "how ", "why ", "who ", "when ", "where ", "which ",
+            "tell me ", "explain ", "compare ", "summarize ", "research ", "find out ",
+            "\u4ec0\u4e48", "\u600e\u4e48", "\u4e3a\u4ec0\u4e48", "\u8c01", "\u4f55\u65f6", "\u54ea\u91cc", "\u8bf7\u95ee", "\u5e2e\u6211\u67e5"
+        )
+        private val CURRENT_INFORMATION_TERMS = listOf(
+            "weather", "forecast", "news", "latest", "current", "today", "now", "live",
+            "\u5929\u6c14", "\u9884\u62a5", "\u65b0\u95fb", "\u6700\u65b0", "\u5f53\u524d", "\u4eca\u5929", "\u73b0\u5728", "\u5b9e\u65f6"
+        )
         private val BLOCKED_GOAL_TERMS = listOf(
             "install app",
             "uninstall app",
@@ -6994,10 +7039,20 @@ class AppStoreAgentConnectorRegistry(
         else -> {
             val contactIds = matchingContactIds(target.id)
             when {
-                contactIds.any { AppStore.outgoingTopicForContact(appContext, it) != null } -> AgentConnectorStatus.AVAILABLE
+                contactIds.any { contactReady(it) } -> AgentConnectorStatus.AVAILABLE
                 contactIds.isNotEmpty() -> AgentConnectorStatus.DISCONNECTED
                 else -> AgentConnectorStatus.NEEDS_SETUP
             }
+        }
+    }
+
+    private fun contactReady(contactId: String): Boolean {
+        if (AppStore.outgoingTopicForContact(appContext, contactId) == null) return false
+        return if (AppStore.usesPcConnectorTunnel(appContext, contactId)) {
+            val desktopId = AppStore.desktopIdForContact(appContext, contactId)
+            desktopId.isNotBlank() && SignalASICrypto.hasDesktopSession(appContext, desktopId)
+        } else {
+            SignalASICrypto.hasPeerSession(appContext, contactId)
         }
     }
 
