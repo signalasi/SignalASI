@@ -595,6 +595,12 @@
     <string name="common_save">Save</string>
     <string name="common_cancel">Cancel</string>
     <string name="common_send">Send</string>
+    <string name="agent_attachment_take_photo">Take photo</string>
+    <string name="agent_attachment_add_file">Add file</string>
+    <string name="agent_attachment_hide_navigation">Hide navigation bar</string>
+    <string name="agent_attachment_show_navigation">Show navigation bar</string>
+    <string name="agent_attachment_camera_unavailable">Camera is unavailable</string>
+    <string name="agent_attachment_photo_marker">[Photo]</string>
     <string name="common_copy">Copy</string>
     <string name="common_delete">Delete</string>
     <string name="common_empty">Empty</string>

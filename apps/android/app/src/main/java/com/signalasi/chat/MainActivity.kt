@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.Dialog
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -23,6 +24,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import android.provider.MediaStore
 import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -95,6 +97,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_PICK_AVATAR = 2005
         private const val REQUEST_IMPORT_KNOWLEDGE = 2006
         private const val REQUEST_AGENT_SCREEN_CAPTURE = 2007
+        private const val REQUEST_AGENT_CAMERA = 2008
+        private const val REQUEST_AGENT_CAMERA_PERMISSION = 2009
+        private const val UI_PREFS = "signalasi_ui_preferences"
+        private const val KEY_BOTTOM_NAV_VISIBLE = "bottom_navigation_visible"
         private const val HISTORY_PREFS = "signalasi_chat_history"
         private const val OLD_HISTORY_PREFS = "hermes_chat_history"
         private const val HISTORY_KEY = "messages"
@@ -226,6 +232,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var featureTabMe: TextView
     private lateinit var featureBottomTabs: LinearLayout
     private lateinit var featureBottomDivider: View
+    private lateinit var bottomTabs: LinearLayout
+    private lateinit var bottomTabsDivider: View
 
     // State
     private val handler = Handler(Looper.getMainLooper())
@@ -280,6 +288,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var pendingExportIncludeMessages = true
     private var pendingImportUri: Uri? = null
     private var agentInputAttachmentPending = false
+    private var pendingAgentCameraUri: Uri? = null
     @Volatile private var fileServerBaseUrl: String? = null
     private var voiceOverlay: Dialog? = null
     private var wakeStatusText: TextView? = null
@@ -430,6 +439,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         featureTabMe = findViewById(R.id.featureTabMe)
         featureBottomTabs = findViewById(R.id.featureBottomTabs)
         featureBottomDivider = findViewById(R.id.featureBottomDivider)
+        bottomTabs = findViewById(R.id.bottomTabs)
+        bottomTabsDivider = findViewById(R.id.bottomTabsDivider)
+        setBottomNavigationVisible(
+            getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
+                .getBoolean(KEY_BOTTOM_NAV_VISIBLE, true),
+            persist = false
+        )
         chatInputBar = findViewById(R.id.chatInputBar)
         messageList = findViewById(R.id.messageList)
         val backButton2 = findViewById<TextView>(R.id.backButton)
@@ -662,6 +678,20 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             return
         }
+        if (requestCode == REQUEST_AGENT_CAMERA) {
+            val uri = pendingAgentCameraUri
+            pendingAgentCameraUri = null
+            if (resultCode == RESULT_OK && uri != null) {
+                val existing = agentGoalInput.text?.toString()?.trim().orEmpty()
+                val marker = getString(R.string.agent_attachment_photo_marker)
+                agentGoalInput.setText(listOf(marker, existing).filter(String::isNotBlank).joinToString(" "))
+                agentGoalInput.setSelection(agentGoalInput.text?.length ?: 0)
+                agentGoalInput.requestFocus()
+            } else if (uri != null) {
+                contentResolver.delete(uri, null, null)
+            }
+            return
+        }
         val scanResult = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
         if (scanResult != null) {
             handleSecurityScan(scanResult.contents)
@@ -702,6 +732,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             Toast.makeText(this, getString(R.string.voice_record_permission_granted), Toast.LENGTH_SHORT).show()
             if (activeMainTab == PAGE_VOICE) startVoiceAssistant()
             if (activeMainTab == PAGE_AGENT) startAgentVoiceInput()
+        }
+        if (requestCode == REQUEST_AGENT_CAMERA_PERMISSION &&
+            grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+        ) {
+            openAgentCamera()
         }
     }
 
@@ -882,10 +917,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         agentMemoryText.setOnClickListener { showAgentMemoryPage() }
         agentKnowledgeText.setOnClickListener { showAgentKnowledgePage() }
-        agentAttachButton.setOnClickListener {
-            agentInputAttachmentPending = true
-            openAgentKnowledgeImportPicker()
-        }
+        agentAttachButton.setOnClickListener { showAgentAttachmentMenu() }
         agentSubmitButton.setOnClickListener { handleAgentPrimaryAction() }
         agentGoalInput.setOnEditorActionListener { _, _, _ ->
             submitAgentGoal()
@@ -8662,6 +8694,99 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun hideKeyboard() {
         getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(messageInput.windowToken, 0)
+    }
+
+    private fun showAgentAttachmentMenu() {
+        val dialog = Dialog(this)
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(8), 0, dp(10))
+            setBackgroundResource(R.drawable.agent_attachment_sheet_background)
+        }
+        fun addRow(label: String, action: () -> Unit) {
+            content.addView(TextView(this).apply {
+                text = label
+                gravity = Gravity.CENTER_VERTICAL
+                setTextColor(getColorCompat(R.color.text_primary))
+                textSize = 17f
+                setPadding(dp(22), 0, dp(22), 0)
+                setOnClickListener {
+                    dialog.dismiss()
+                    action()
+                }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)))
+            content.addView(View(this).apply {
+                setBackgroundColor(getColorCompat(R.color.separator))
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
+        }
+        addRow(getString(R.string.agent_attachment_take_photo)) { openAgentCamera() }
+        addRow(getString(R.string.agent_attachment_add_file)) {
+            agentInputAttachmentPending = true
+            openAgentKnowledgeImportPicker()
+        }
+        val navigationVisible = bottomTabs.visibility == View.VISIBLE
+        addRow(
+            getString(
+                if (navigationVisible) R.string.agent_attachment_hide_navigation
+                else R.string.agent_attachment_show_navigation
+            )
+        ) {
+            setBottomNavigationVisible(!navigationVisible)
+        }
+        if (content.childCount > 0) content.removeViewAt(content.childCount - 1)
+        dialog.setContentView(content)
+        dialog.window?.apply {
+            setBackgroundDrawableResource(android.R.color.transparent)
+            setGravity(Gravity.BOTTOM)
+            addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            attributes = attributes.apply { dimAmount = 0.28f }
+        }
+        dialog.show()
+        dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+    }
+
+    private fun setBottomNavigationVisible(visible: Boolean, persist: Boolean = true) {
+        bottomTabs.visibility = if (visible) View.VISIBLE else View.GONE
+        bottomTabsDivider.visibility = if (visible) View.VISIBLE else View.GONE
+        if (persist) {
+            getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_BOTTOM_NAV_VISIBLE, visible)
+                .apply()
+        }
+    }
+
+    private fun openAgentCamera() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            checkSelfPermission(android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(android.Manifest.permission.CAMERA), REQUEST_AGENT_CAMERA_PERMISSION)
+            return
+        }
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, "signalasi_${System.currentTimeMillis()}.jpg")
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SignalASI")
+            }
+        }
+        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        if (uri == null) {
+            Toast.makeText(this, getString(R.string.agent_attachment_camera_unavailable), Toast.LENGTH_SHORT).show()
+            return
+        }
+        pendingAgentCameraUri = uri
+        val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+            putExtra(MediaStore.EXTRA_OUTPUT, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+        if (intent.resolveActivity(packageManager) == null) {
+            contentResolver.delete(uri, null, null)
+            pendingAgentCameraUri = null
+            Toast.makeText(this, getString(R.string.agent_attachment_camera_unavailable), Toast.LENGTH_SHORT).show()
+            return
+        }
+        startActivityForResult(intent, REQUEST_AGENT_CAMERA)
     }
 
     private fun openAgentKnowledgeImportPicker() {
