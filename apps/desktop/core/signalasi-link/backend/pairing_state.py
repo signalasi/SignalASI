@@ -80,6 +80,8 @@ def _write_state(data: dict) -> None:
 def record_pairing_success(fingerprint: str, remote_name: str = "android", remote_device_id: int = 1) -> dict:
     previous = _read_state()
     now = time.time()
+    previous_fingerprint = str(previous.get("identity_fingerprint", ""))
+    identity_changed = bool(previous.get("paired") and previous_fingerprint and previous_fingerprint != fingerprint)
     data = {
         "paired": True,
         "paired_at": now,
@@ -87,8 +89,8 @@ def record_pairing_success(fingerprint: str, remote_name: str = "android", remot
         "remote_name": remote_name or "android",
         "remote_device_id": remote_device_id,
         "identity_fingerprint": fingerprint or "",
-        "previous_identity_fingerprint": previous.get("identity_fingerprint", ""),
-        "replacement_count": int(previous.get("replacement_count", 0)) + (1 if previous.get("paired") else 0),
+        "previous_identity_fingerprint": previous_fingerprint if identity_changed else previous.get("previous_identity_fingerprint", ""),
+        "replacement_count": int(previous.get("replacement_count", 0)) + (1 if identity_changed else 0),
     }
     _write_state(data)
     return data

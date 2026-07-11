@@ -59,7 +59,10 @@ BASE_AGENTS: dict[str, AgentSpec] = {
         id="codex",
         name="Codex Agent",
         kind="local-cli",
-        command=["codex", "exec", "--skip-git-repo-check", "-"],
+        command=[
+            "codex", "exec", "--skip-git-repo-check", "--ephemeral",
+            "--model", "gpt-5.6-sol", "-c", 'model_reasoning_effort="low"', "-"
+        ],
         timeout=120,
         env_key="SIGNALASI_CODEX_CMD",
         note="Codex CLI wrapped by SignalASI Desktop",

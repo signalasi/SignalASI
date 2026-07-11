@@ -331,6 +331,12 @@ def handle_pairing_claim(mqttc, payload: dict):
         log.warning("MQTT pairing claim rejected: missing signal bundle")
         return
 
+    previous_pairing = pairing_status()
+    identity_changed = bool(
+        previous_pairing.get("paired")
+        and previous_pairing.get("identity_fingerprint")
+        and previous_pairing.get("identity_fingerprint") != fingerprint
+    )
     revoke_payload = {
         "type": "pairing_revoked",
         "content": "This PC has been paired with a new SignalASI device. This device session is no longer valid.",
@@ -342,12 +348,13 @@ def handle_pairing_claim(mqttc, payload: dict):
         "delivery_trace": _desktop_trace(_trace_event("desktop_pairing_revocation_queued", "new_pairing_claim")),
         "time": time.time(),
     }
-    try:
-        encrypted_revoke = encrypt_signal_payload(revoke_payload, remote_name="android")
-        info = mqttc.publish(TOPIC_RECV, json.dumps(encrypted_revoke, ensure_ascii=False), qos=MQTT_QOS)
-        log.info(f"MQTT old pairing revocation published mid={info.mid} rc={info.rc}")
-    except Exception as exc:
-        log.warning(f"MQTT old pairing revocation skipped: {exc}")
+    if identity_changed:
+        try:
+            encrypted_revoke = encrypt_signal_payload(revoke_payload, remote_name="android")
+            info = mqttc.publish(TOPIC_RECV, json.dumps(encrypted_revoke, ensure_ascii=False), qos=MQTT_QOS)
+            log.info(f"MQTT old pairing revocation published mid={info.mid} rc={info.rc}")
+        except Exception as exc:
+            log.warning(f"MQTT old pairing revocation skipped: {exc}")
 
     result = replace_peer_signal_bundle(bundle, remote_name="android")
     record_pairing_success(fingerprint=fingerprint, remote_name="android", remote_device_id=1)

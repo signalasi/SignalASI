@@ -97,7 +97,7 @@ const agentLabels = {
 const CLAUDE_SETUP_URL = "https://code.claude.com/docs/en/setup";
 const DEFAULT_COMMANDS_TEXT = [
   "Hermes: hermes chat -q",
-  "Codex: codex exec --skip-git-repo-check -",
+  "Codex: codex exec --skip-git-repo-check --ephemeral --model gpt-5.6-sol -c model_reasoning_effort=\"low\" -",
   "Claude Code: claude -p",
   "Custom Agent name: Custom Agent",
   "Custom Agent command: python custom_agent_stdio.py -",

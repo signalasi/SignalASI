@@ -248,7 +248,7 @@ if (fs.existsSync(iconPath)) {
 writeJson(path.join(packagedBackendDir, "signalasi_agents.json"), {
   commands: {
     hermes: "hermes chat -q",
-    codex: "codex exec --skip-git-repo-check -",
+    codex: "codex exec --skip-git-repo-check --ephemeral --model gpt-5.6-sol -c model_reasoning_effort=\"low\" -",
     claude: "claude -p",
     "custom-agent": ""
   },

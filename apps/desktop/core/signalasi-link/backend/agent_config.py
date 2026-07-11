@@ -14,7 +14,7 @@ MASK = "********"
 DEFAULT_CONFIG: dict[str, Any] = {
     "commands": {
         "hermes": "hermes chat -q",
-        "codex": "codex exec --skip-git-repo-check -",
+        "codex": "codex exec --skip-git-repo-check --ephemeral --model gpt-5.6-sol -c model_reasoning_effort=\"low\" -",
         "claude": "claude -p",
         "custom-agent": "",
     },
