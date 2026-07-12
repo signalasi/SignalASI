@@ -172,6 +172,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentKnowledgeText: TextView
     @Volatile private var agentOperationInFlight = false
     private val activeAgentTasks = ConcurrentHashMap<Long, MobileNativeAgent>()
+    private val provisionalAgentTasks = ConcurrentHashMap.newKeySet<MobileNativeAgent>()
     private lateinit var agentScreenSearchInput: EditText
     private lateinit var agentScreenDetailList: LinearLayout
     private lateinit var agentActionQueueList: LinearLayout
@@ -561,7 +562,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun consumeAgentConnectorResponse(response: AgentConnectorResponse) {
-        val runtime = activeAgentTasks[response.sourceMessageId] ?: mobileNativeAgent
+        val runtime = runtimeForConnectorResponse(response.sourceMessageId, response.contactId)
         if (!runtime.canAcceptConnectorResponse(response.sourceMessageId, response.contactId)) return
         AgentConnectorResponseStore.remove(this, response)
         thread(name = "signalasi-agent-response-${response.sourceMessageId}") {
@@ -587,6 +588,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         AgentConnectorResponseStore.pending(this).forEach { response ->
             consumeAgentConnectorResponse(response)
         }
+    }
+
+    private fun runtimeForConnectorResponse(sourceMessageId: Long, contactId: String): MobileNativeAgent {
+        activeAgentTasks[sourceMessageId]?.let { return it }
+        provisionalAgentTasks.firstOrNull {
+            it.canAcceptConnectorResponse(sourceMessageId, contactId)
+        }?.let { runtime ->
+            activeAgentTasks[sourceMessageId] = runtime
+            provisionalAgentTasks.remove(runtime)
+            return runtime
+        }
+        return mobileNativeAgent
     }
 
     override fun onBackPressed() {
@@ -710,7 +723,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             reloadChatHistoryIfChanged(force = true)
         }
         val taskId = envelope.optString("task_id")
-        val taskRuntime = activeAgentTasks[sourceMessageId] ?: mobileNativeAgent
+        val taskRuntime = runtimeForConnectorResponse(sourceMessageId, contactId)
         val nativeState = taskRuntime.recordConnectorTaskStatus(
             sourceMessageId = sourceMessageId,
             contactId = contactId,
@@ -1182,6 +1195,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun executeConcurrentAgentGoal(goal: String) {
         thread(name = "signalasi-agent-goal-${System.nanoTime()}") {
             val runtime = MobileNativeAgent(this, sessionStore = InMemoryAgentSessionStore())
+            provisionalAgentTasks.add(runtime)
             val outcome = runCatching {
                 var state = runtime.submitGoal(goal)
                 var approvals = 0
@@ -1197,10 +1211,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 val state = outcome.getOrElse { runtime.snapshot() }
                 state.lastActionResult?.metadata?.get("source_message_id")?.toLongOrNull()?.let { sourceId ->
                     activeAgentTasks[sourceId] = runtime
+                    provisionalAgentTasks.remove(runtime)
                 }
                 renderAgentState(state)
                 consumePendingAgentConnectorResponses()
                 outcome.exceptionOrNull()?.let { error ->
+                    provisionalAgentTasks.remove(runtime)
                     Toast.makeText(this, error.message ?: "Agent operation failed", Toast.LENGTH_LONG).show()
                 }
             }

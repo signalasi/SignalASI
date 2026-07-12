@@ -5786,7 +5786,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             message = if (action.target == "task-complete") {
                 action.description.ifBlank { "Task completed" }
             } else {
-                "Task plan confirmed"
+                ""
             }
         )
         AgentActionKind.OPEN_APP -> openApp(action)
