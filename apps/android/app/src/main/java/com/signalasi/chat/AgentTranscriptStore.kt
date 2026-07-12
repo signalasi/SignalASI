@@ -164,14 +164,24 @@ class AgentTranscriptStore(context: Context) {
     fun context(conversationId: String = activeConversation().id): AgentConversationContext {
         val conversation = conversations(includeArchived = true).firstOrNull { it.id == conversationId }
             ?: activeConversation()
-        val messageLimit = when (conversation.contextPolicy) {
-            "minimal" -> 6
-            "extended" -> 20
-            else -> 14
+        val (turnLimit, characterBudget) = when (conversation.contextPolicy) {
+            "minimal" -> 8 to 12_000
+            "extended" -> 20 to 48_000
+            else -> 14 to 24_000
         }
-        val turns = list(conversation.id)
-            .filter { it.role != AgentTranscriptRole.PROCESS }
-            .takeLast(messageLimit)
+        val dialogue = list(conversation.id).filter { it.role != AgentTranscriptRole.PROCESS }
+        val groupedTurns = dialogue.groupBy { entry ->
+            entry.turnId.ifBlank { "legacy:${entry.id}" }
+        }.entries.toList().takeLast(turnLimit)
+        val selected = ArrayDeque<AgentTranscriptEntry>()
+        var characters = conversation.summary.length
+        for ((_, entries) in groupedTurns.asReversed()) {
+            val turnCharacters = entries.sumOf { it.text.length }
+            if (selected.isNotEmpty() && characters + turnCharacters > characterBudget) break
+            entries.asReversed().forEach { selected.addFirst(it) }
+            characters += turnCharacters
+        }
+        val turns = selected.toList()
         return AgentConversationContext(conversation.id, conversation.summary, turns, conversation.privateMode)
     }
 

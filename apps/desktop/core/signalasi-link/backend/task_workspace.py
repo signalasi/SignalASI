@@ -69,6 +69,34 @@ def cleanup_task_temporary_files(task_ids: list[str] | set[str]) -> list[str]:
     return cleaned
 
 
+def task_artifacts(task_id: str, limit: int = 50) -> list[dict]:
+    safe_id = _safe_component(task_id)
+    if not safe_id:
+        return []
+    tasks_root = (workspace_root() / "tasks").resolve()
+    directory = (tasks_root / safe_id).resolve()
+    if not _is_within(directory, tasks_root) or not directory.exists():
+        return []
+    artifacts: list[dict] = []
+    for category in ("outputs", "downloads", "screenshots"):
+        category_root = (directory / category).resolve()
+        if not _is_within(category_root, directory) or not category_root.exists():
+            continue
+        for file_path in category_root.rglob("*"):
+            if not file_path.is_file() or file_path.is_symlink():
+                continue
+            relative = file_path.relative_to(directory).as_posix()
+            artifacts.append({
+                "name": file_path.name,
+                "relative_path": relative,
+                "category": category,
+                "size": file_path.stat().st_size,
+            })
+            if len(artifacts) >= max(1, min(limit, 100)):
+                return artifacts
+    return artifacts
+
+
 def _safe_component(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip())
     normalized = normalized.strip(".-")[:96]

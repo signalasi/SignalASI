@@ -15,6 +15,7 @@ data class AgentTaskRecord(
     val blocked: Boolean,
     val result: String = "",
     val verification: String = "",
+    val outputFiles: List<String> = emptyList(),
     val createdAtMillis: Long = System.currentTimeMillis(),
     val updatedAtMillis: Long = System.currentTimeMillis()
 )
@@ -22,6 +23,8 @@ data class AgentTaskRecord(
 interface AgentTaskStore {
     fun upsert(record: AgentTaskRecord)
     fun recent(limit: Int = 20): List<AgentTaskRecord>
+    fun forSession(sessionId: String, limit: Int = 50): List<AgentTaskRecord>
+    fun find(taskId: String): AgentTaskRecord?
     fun search(query: String, limit: Int = 10): List<AgentTaskRecord>
     fun delete(taskIds: Set<String>)
     fun clear()
@@ -42,6 +45,15 @@ class SharedPreferencesAgentTaskStore(context: Context) : AgentTaskStore {
 
     override fun recent(limit: Int): List<AgentTaskRecord> =
         loadItems().sortedByDescending { it.updatedAtMillis }.take(limit)
+
+    override fun forSession(sessionId: String, limit: Int): List<AgentTaskRecord> =
+        loadItems()
+            .filter { it.sessionId == sessionId }
+            .sortedByDescending { it.updatedAtMillis }
+            .take(limit)
+
+    override fun find(taskId: String): AgentTaskRecord? =
+        loadItems().firstOrNull { it.taskId == taskId }
 
     override fun search(query: String, limit: Int): List<AgentTaskRecord> {
         val cleanQuery = query.trim()
@@ -70,6 +82,7 @@ class SharedPreferencesAgentTaskStore(context: Context) : AgentTaskStore {
             item.targetTitle,
             item.result,
             item.verification,
+            item.outputFiles.joinToString("\n"),
             item.phase.name,
             item.routeKind.name,
             item.risk.name
@@ -113,6 +126,7 @@ class SharedPreferencesAgentTaskStore(context: Context) : AgentTaskStore {
         .put("blocked", item.blocked)
         .put("result", item.result)
         .put("verification", item.verification)
+        .put("output_files", JSONArray(item.outputFiles))
         .put("created_at_millis", item.createdAtMillis)
         .put("updated_at_millis", item.updatedAtMillis)
 
@@ -131,6 +145,12 @@ class SharedPreferencesAgentTaskStore(context: Context) : AgentTaskStore {
             blocked = json.optBoolean("blocked"),
             result = json.optString("result"),
             verification = json.optString("verification"),
+            outputFiles = buildList {
+                val array = json.optJSONArray("output_files") ?: JSONArray()
+                for (index in 0 until array.length()) {
+                    array.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+                }
+            }.take(100),
             createdAtMillis = json.optLong("created_at_millis", System.currentTimeMillis()),
             updatedAtMillis = json.optLong("updated_at_millis", System.currentTimeMillis())
         )

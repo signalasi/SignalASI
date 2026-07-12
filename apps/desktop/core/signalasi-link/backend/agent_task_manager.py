@@ -37,6 +37,7 @@ class AgentTask:
     thread_id: str = ""
     turn_id: str = ""
     current_step: str = ""
+    output_files: list[dict] = field(default_factory=list)
     process: subprocess.Popen | None = field(default=None, repr=False, compare=False)
     cancel_requested: bool = field(default=False, repr=False, compare=False)
 
@@ -60,6 +61,7 @@ class AgentTask:
             "thread_id": self.thread_id,
             "turn_id": self.turn_id,
             "current_step": self.current_step,
+            "output_files": self.output_files,
             "process_id": self.process.pid if self.process is not None and self.process.poll() is None else 0,
         }
         if include_prompt:
@@ -152,6 +154,7 @@ class AgentTaskManager:
                 task.error = error
             if status in TERMINAL_STATES or status == "interrupted":
                 task.completed_at = now
+                task.output_files = self._task_artifacts(task.task_id)
             self._save_locked()
         self._emit(task, on_event)
         return task
@@ -310,6 +313,7 @@ class AgentTaskManager:
             task.completed_at = now
             task.result = result
             task.error = error
+            task.output_files = self._task_artifacts(task.task_id)
             self._save_locked()
         self._emit(task, on_event)
 
@@ -374,6 +378,7 @@ class AgentTaskManager:
                     thread_id=str(row.get("thread_id") or ""),
                     turn_id=str(row.get("turn_id") or ""),
                     current_step=str(row.get("current_step") or ""),
+                    output_files=list(row.get("output_files") or [])[:100],
                 )
                 self._tasks[task.task_id] = task
                 self._recovered_task_ids.add(task.task_id)
@@ -389,6 +394,14 @@ class AgentTaskManager:
             temporary.replace(TASKS_PATH)
         except Exception:
             pass
+
+    @staticmethod
+    def _task_artifacts(task_id: str) -> list[dict]:
+        try:
+            from task_workspace import task_artifacts
+            return task_artifacts(task_id)
+        except Exception:
+            return []
 
 
 agent_task_manager = AgentTaskManager()

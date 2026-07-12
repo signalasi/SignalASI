@@ -282,6 +282,7 @@ def _agent_task_payload(task: dict, trace: list[dict]) -> dict:
         "turn_id": task.get("turn_id", ""),
         "current_step": task.get("current_step", ""),
         "error": task.get("error", ""),
+        "output_files": task.get("output_files", []),
         "desktop_id": desktop_id(),
         "desktop_name": desktop_name(),
         "sender": "system",

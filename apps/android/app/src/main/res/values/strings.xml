@@ -1125,4 +1125,13 @@
     <string name="agent_task_detail_updated">Updated</string>
     <string name="agent_task_detail_result">Result</string>
     <string name="agent_task_detail_verification">Verification</string>
+    <string name="agent_session_context_preview">Context</string>
+    <string name="agent_session_summary_empty">No summary yet</string>
+    <string name="agent_session_recent_context">Model context preview</string>
+    <string name="agent_session_context_messages">%1$d bounded messages</string>
+    <string name="agent_task_detail_unavailable">Task details are not available on this device</string>
+    <string name="agent_task_detail_files">Output files</string>
+    <string name="agent_session_today">Today</string>
+    <string name="agent_session_yesterday">Yesterday</string>
+    <string name="agent_session_earlier">Earlier</string>
 </resources>

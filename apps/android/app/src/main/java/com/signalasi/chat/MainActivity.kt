@@ -826,6 +826,42 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             turnId = turnId,
             taskId = taskId
         )
+        if (taskId.isNotBlank()) {
+            val taskStore = SharedPreferencesAgentTaskStore(this)
+            val existingTask = taskStore.find(taskId)
+            val outputFiles = buildList {
+                val files = envelope.optJSONArray("output_files") ?: org.json.JSONArray()
+                for (index in 0 until files.length()) {
+                    val item = files.optJSONObject(index) ?: continue
+                    item.optString("relative_path").takeIf { it.isNotBlank() }?.let(::add)
+                }
+            }
+            val sourceGoal = agentTranscriptStore.list(conversationId)
+                .lastOrNull { it.turnId == turnId && it.role == AgentTranscriptRole.USER }
+                ?.text.orEmpty()
+            taskStore.upsert(AgentTaskRecord(
+                taskId = taskId,
+                sessionId = conversationId,
+                goal = existingTask?.goal ?: sourceGoal.ifBlank { targetName },
+                phase = when (status) {
+                    "completed" -> AgentPhase.COMPLETED
+                    "failed", "timed_out", "not_found" -> AgentPhase.FAILED
+                    "cancelled" -> AgentPhase.CANCELLED
+                    "waiting_input", "waiting_approval" -> AgentPhase.PAUSED
+                    else -> AgentPhase.EXECUTING
+                },
+                routeKind = existingTask?.routeKind ?: AgentRouteKind.DESKTOP_AGENT,
+                targetTitle = targetName,
+                risk = existingTask?.risk ?: AgentRisk.LOW,
+                blocked = status == "waiting_approval",
+                result = envelope.optString("error").ifBlank { existingTask?.result.orEmpty() },
+                verification = existingTask?.verification.orEmpty(),
+                outputFiles = if (outputFiles.isNotEmpty()) outputFiles else existingTask?.outputFiles.orEmpty(),
+                createdAtMillis = existingTask?.createdAtMillis
+                    ?: envelope.optLong("created_at", System.currentTimeMillis()),
+                updatedAtMillis = envelope.optLong("updated_at", System.currentTimeMillis())
+            ))
+        }
         if (conversationId == agentTranscriptStore.activeConversation().id) {
             renderAgentTranscript(agentTranscriptStore.list(conversationId))
         }
@@ -1422,7 +1458,33 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 return
             }
             val activeId = agentTranscriptStore.activeConversation().id
-            filtered.forEach { conversation ->
+            val startOfToday = java.util.Calendar.getInstance().apply {
+                set(java.util.Calendar.HOUR_OF_DAY, 0)
+                set(java.util.Calendar.MINUTE, 0)
+                set(java.util.Calendar.SECOND, 0)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }.timeInMillis
+            val groups = if (showArchived) {
+                listOf(getString(R.string.agent_session_archived) to filtered)
+            } else {
+                listOf(
+                    getString(R.string.agent_session_today) to filtered.filter { it.updatedAt >= startOfToday },
+                    getString(R.string.agent_session_yesterday) to filtered.filter {
+                        it.updatedAt in (startOfToday - 86_400_000L) until startOfToday
+                    },
+                    getString(R.string.agent_session_earlier) to filtered.filter {
+                        it.updatedAt < startOfToday - 86_400_000L
+                    }
+                ).filter { it.second.isNotEmpty() }
+            }
+            groups.forEach { (groupTitle, conversations) ->
+                rows.addView(TextView(this@MainActivity).apply {
+                    text = groupTitle
+                    setTextColor(getColorCompat(R.color.text_secondary))
+                    textSize = 12f
+                    setPadding(dp(4), dp(12), 0, dp(7))
+                })
+                conversations.forEach { conversation ->
             val messages = agentTranscriptStore.list(conversation.id)
             rows.addView(featureRow(
                 if (conversation.pinned) "● ${conversation.title}" else conversation.title,
@@ -1450,6 +1512,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     true
                 }
             })
+                }
             }
         }
         searchInput.addTextChangedListener(object : TextWatcher {
@@ -1541,6 +1604,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun showAgentConversationDetails(conversation: AgentConversation) {
         val metrics = agentTranscriptStore.metrics(conversation.id)
+        val contextPreview = agentTranscriptStore.context(conversation.id)
+        val sessionTasks = SharedPreferencesAgentTaskStore(this).forSession(conversation.id)
         showFeaturePage(getString(R.string.agent_session_details))
         featureBackButton.setOnClickListener { showAgentSessionsPage() }
         featureContent.addView(featureHeroCard(
@@ -1569,6 +1634,47 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             getString(R.string.agent_session_cost), "", R.drawable.ic_security_shield,
             getString(R.string.agent_session_cost_unavailable)
         ))
+        addSectionTitle(getString(R.string.agent_session_context_preview))
+        featureContent.addView(featureRow(
+            getString(R.string.agent_session_summary),
+            conversation.summary.ifBlank { getString(R.string.agent_session_summary_empty) },
+            R.drawable.ic_agent_memory,
+            "›"
+        ).apply {
+            setOnClickListener {
+            showTextSettingDialog(getString(R.string.agent_session_summary), conversation.summary) {
+                agentTranscriptStore.updateSummary(conversation.id, it)
+                showAgentConversationDetails(
+                    agentTranscriptStore.conversations(includeArchived = true)
+                    .firstOrNull { item -> item.id == conversation.id } ?: conversation
+                )
+            }
+            }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.agent_session_recent_context),
+            getString(R.string.agent_session_context_messages, contextPreview.turns.size),
+            R.drawable.ic_protocol_link,
+            "›"
+        ).apply {
+            setOnClickListener {
+            android.app.AlertDialog.Builder(this@MainActivity)
+                .setTitle(getString(R.string.agent_session_recent_context))
+                .setMessage(contextPreview.asPromptBlock())
+                .setPositiveButton(android.R.string.ok, null)
+                .show()
+            }
+        })
+        addSectionTitle(getString(R.string.agent_session_tasks))
+        if (sessionTasks.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.agent_recent_empty), "", R.drawable.ic_agent_history, ""
+            ))
+        } else {
+            sessionTasks.forEachIndexed { index, task ->
+                featureContent.addView(agentRecentTaskRow(task, index))
+            }
+        }
     }
 
     private fun startAgentVoiceInput() {
@@ -2598,11 +2704,26 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
         }
         AgentTranscriptRole.PROCESS -> TextView(this).apply {
-            text = entry.text
+            text = if (entry.taskId.isNotBlank()) "${entry.text}  ›" else entry.text
             setTextColor(getColorCompat(R.color.text_secondary))
             textSize = 13f
             setLineSpacing(dp(3).toFloat(), 1f)
-            setTextIsSelectable(true)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            if (entry.taskId.isNotBlank()) {
+                isClickable = true
+                isFocusable = true
+                setPadding(0, dp(6), 0, dp(6))
+                setOnClickListener {
+                    SharedPreferencesAgentTaskStore(this@MainActivity).find(entry.taskId)
+                        ?.let(::showAgentTaskDetails)
+                        ?: Toast.makeText(
+                            this@MainActivity,
+                            getString(R.string.agent_task_detail_unavailable),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                }
+            }
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -3196,6 +3317,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 appendLine()
                 appendLine(getString(R.string.agent_task_detail_verification))
                 append(task.verification)
+            }
+            if (task.outputFiles.isNotEmpty()) {
+                appendLine()
+                appendLine(getString(R.string.agent_task_detail_files))
+                append(task.outputFiles.joinToString("\n"))
             }
         }.trim()
         android.app.AlertDialog.Builder(this)

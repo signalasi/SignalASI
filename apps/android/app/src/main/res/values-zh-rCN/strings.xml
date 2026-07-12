@@ -1030,4 +1030,13 @@
     <string name="agent_task_detail_updated">更新时间</string>
     <string name="agent_task_detail_result">结果</string>
     <string name="agent_task_detail_verification">验证</string>
+    <string name="agent_session_context_preview">上下文</string>
+    <string name="agent_session_summary_empty">暂无摘要</string>
+    <string name="agent_session_recent_context">模型上下文预览</string>
+    <string name="agent_session_context_messages">%1$d 条有界消息</string>
+    <string name="agent_task_detail_unavailable">此设备上暂无任务详情</string>
+    <string name="agent_task_detail_files">产出文件</string>
+    <string name="agent_session_today">今天</string>
+    <string name="agent_session_yesterday">昨天</string>
+    <string name="agent_session_earlier">更早</string>
 </resources>
