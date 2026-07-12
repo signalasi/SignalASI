@@ -399,9 +399,11 @@
     <string name="delivery_status_notified">已通知</string>
     <string name="agent_task_status_accepted">已接受</string>
     <string name="agent_task_status_queued">排队中</string>
+    <string name="agent_task_status_starting">正在启动</string>
     <string name="agent_task_status_running">运行中</string>
     <string name="agent_task_status_running_elapsed">运行中 · %1$d 秒</string>
     <string name="agent_task_status_waiting_input">等待输入</string>
+    <string name="agent_task_status_waiting_approval">等待审批</string>
     <string name="agent_task_status_completed">已完成</string>
     <string name="agent_task_status_failed">执行失败</string>
     <string name="agent_task_status_cancelled">已取消</string>

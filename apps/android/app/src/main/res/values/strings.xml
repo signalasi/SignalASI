@@ -639,9 +639,11 @@
     <string name="delivery_status_notified">Notified</string>
     <string name="agent_task_status_accepted">Accepted</string>
     <string name="agent_task_status_queued">Queued</string>
+    <string name="agent_task_status_starting">Starting</string>
     <string name="agent_task_status_running">Running</string>
     <string name="agent_task_status_running_elapsed">Running · %1$d s</string>
     <string name="agent_task_status_waiting_input">Waiting for input</string>
+    <string name="agent_task_status_waiting_approval">Waiting for approval</string>
     <string name="agent_task_status_completed">Completed</string>
     <string name="agent_task_status_failed">Failed</string>
     <string name="agent_task_status_cancelled">Cancelled</string>

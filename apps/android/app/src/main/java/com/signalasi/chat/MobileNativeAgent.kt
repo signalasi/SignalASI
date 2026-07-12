@@ -758,6 +758,28 @@ class MobileNativeAgent(
         return expectedContactId.isBlank() || contactId.isBlank() || expectedContactId == contactId
     }
 
+    fun recordConnectorTaskStatus(
+        sourceMessageId: Long,
+        contactId: String,
+        taskId: String,
+        taskStatus: String,
+        statusSeq: Long
+    ): AgentUiState? {
+        if (!canAcceptConnectorResponse(sourceMessageId, contactId) || taskId.isBlank()) return null
+        val pendingResult = lastActionResult ?: return null
+        val previousSeq = pendingResult.metadata["remote_task_status_seq"]?.toLongOrNull() ?: -1L
+        if (statusSeq > 0L && statusSeq < previousSeq) return snapshot()
+        lastActionResult = pendingResult.copy(
+            metadata = pendingResult.metadata + mapOf(
+                "remote_task_id" to taskId,
+                "remote_task_status" to taskStatus,
+                "remote_task_status_seq" to maxOf(previousSeq, statusSeq).toString()
+            )
+        )
+        saveTaskRecord()
+        return snapshot()
+    }
+
     private fun captureVerificationScreen(
         action: AgentAction,
         beforeAction: ScreenContext,

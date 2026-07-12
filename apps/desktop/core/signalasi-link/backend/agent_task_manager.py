@@ -33,6 +33,9 @@ class AgentTask:
     error: str = ""
     exit_code: int | None = None
     status_seq: int = 0
+    thread_id: str = ""
+    turn_id: str = ""
+    current_step: str = ""
     process: subprocess.Popen | None = field(default=None, repr=False, compare=False)
     cancel_requested: bool = field(default=False, repr=False, compare=False)
 
@@ -52,6 +55,9 @@ class AgentTask:
             "error": self.error,
             "exit_code": self.exit_code,
             "status_seq": self.status_seq,
+            "thread_id": self.thread_id,
+            "turn_id": self.turn_id,
+            "current_step": self.current_step,
             "process_id": self.process.pid if self.process is not None and self.process.poll() is None else 0,
         }
         if include_prompt:
@@ -94,6 +100,55 @@ class AgentTaskManager:
         self._emit(task, on_event)
         self._set_status(task, "queued", on_event)
         threading.Thread(target=self._run, args=(task, runner, on_event, on_result), daemon=True).start()
+        return task
+
+    def create_external(
+        self, agent_id: str, contact_id: str, source_message_id: str, prompt: str,
+        on_event: EventCallback, task_id: str = "",
+    ) -> AgentTask:
+        task = AgentTask(
+            task_id=task_id.strip() or str(uuid.uuid4()), agent_id=agent_id,
+            contact_id=contact_id, source_message_id=source_message_id, prompt=prompt,
+        )
+        with self._lock:
+            if task.task_id in self._tasks:
+                task.task_id = str(uuid.uuid4())
+            self._tasks[task.task_id] = task
+            self._save_locked()
+        self._emit(task, on_event)
+        self.update(task.task_id, "queued", on_event=on_event)
+        return task
+
+    def update(
+        self, task_id: str, status: str, on_event: EventCallback | None = None,
+        *, thread_id: str | None = None, turn_id: str | None = None,
+        current_step: str | None = None, result: str | None = None,
+        error: str | None = None,
+    ) -> AgentTask | None:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or (task.status in TERMINAL_STATES and status not in TERMINAL_STATES):
+                return task
+            now = int(time.time() * 1000)
+            task.status = status
+            task.updated_at = now
+            task.status_seq += 1
+            if not task.started_at and status not in {"accepted", "queued"}:
+                task.started_at = now
+            if thread_id is not None:
+                task.thread_id = thread_id
+            if turn_id is not None:
+                task.turn_id = turn_id
+            if current_step is not None:
+                task.current_step = current_step
+            if result is not None:
+                task.result = result
+            if error is not None:
+                task.error = error
+            if status in TERMINAL_STATES or status == "interrupted":
+                task.completed_at = now
+            self._save_locked()
+        self._emit(task, on_event)
         return task
 
     def _run(
@@ -174,10 +229,18 @@ class AgentTaskManager:
     def cancel(self, task_id: str, on_event: EventCallback | None = None) -> AgentTask | None:
         with self._lock:
             task = self._tasks.get(task_id)
-            if task is None or task.status in TERMINAL_STATES:
+            if task is None:
                 return task
-            task.cancel_requested = True
-            process = task.process
+            if task.status in TERMINAL_STATES:
+                terminal_task = task
+                process = None
+            else:
+                terminal_task = None
+                task.cancel_requested = True
+                process = task.process
+        if terminal_task is not None:
+            self._emit(terminal_task, on_event)
+            return terminal_task
         if process is not None:
             self._terminate(process)
         self._finish(task, "cancelled", on_event)
@@ -284,6 +347,9 @@ class AgentTaskManager:
                     error=str(row.get("error") or ""),
                     exit_code=row.get("exit_code"),
                     status_seq=int(row.get("status_seq") or 0),
+                    thread_id=str(row.get("thread_id") or ""),
+                    turn_id=str(row.get("turn_id") or ""),
+                    current_step=str(row.get("current_step") or ""),
                 )
                 self._tasks[task.task_id] = task
                 self._recovered_task_ids.add(task.task_id)

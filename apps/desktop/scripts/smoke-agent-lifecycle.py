@@ -46,6 +46,10 @@ with tempfile.TemporaryDirectory(prefix="signalasi-task-smoke-") as temporary_ho
         raise SystemExit(f"unexpected lifecycle: {statuses}")
     if manager.get(completed.task_id).result != "Task complete":
         raise SystemExit("completed result was not persisted")
+    terminal_replay: list[dict] = []
+    manager.cancel(completed.task_id, lambda event: terminal_replay.append(dict(event)))
+    if not terminal_replay or terminal_replay[-1]["status"] != "completed":
+        raise SystemExit("cancelling a settled task did not replay its authoritative terminal state")
     sequences = [event["status_seq"] for event in events]
     if sequences != sorted(sequences) or len(sequences) != len(set(sequences)):
         raise SystemExit(f"task status sequence is not monotonic: {sequences}")
@@ -125,6 +129,26 @@ with tempfile.TemporaryDirectory(prefix="signalasi-task-smoke-") as temporary_ho
     if interrupted_task.task_id not in {row["task_id"] for row in recovered_manager.drain_recovered()}:
         raise SystemExit("recovered task was not queued for status replay")
     recovery_gate.set()
+    recovery_deadline = time.time() + 5
+    while time.time() < recovery_deadline and manager.get(interrupted_task.task_id).status not in lifecycle.TERMINAL_STATES:
+        time.sleep(0.05)
+
+    external_events: list[dict] = []
+    external = manager.create_external(
+        agent_id="codex", contact_id="codex-app-server", source_message_id="104",
+        prompt="app server smoke", on_event=lambda event: external_events.append(dict(event)),
+    )
+    manager.update(
+        external.task_id, "running", on_event=lambda event: external_events.append(dict(event)),
+        thread_id="thread-smoke", turn_id="turn-smoke", current_step="Running command",
+    )
+    manager.update(
+        external.task_id, "completed", on_event=lambda event: external_events.append(dict(event)),
+        result="App Server complete", current_step="",
+    )
+    external_row = manager.get(external.task_id)
+    if not external_row or external_row.thread_id != "thread-smoke" or external_row.result != "App Server complete":
+        raise SystemExit("external App Server lifecycle was not persisted")
 
     rows = manager.list()
     task_ids = {row["task_id"] for row in rows}

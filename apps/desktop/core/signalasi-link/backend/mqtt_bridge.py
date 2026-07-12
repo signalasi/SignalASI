@@ -9,12 +9,14 @@ import threading
 import time
 import logging
 from pathlib import Path
+from typing import Callable
 
 import paho.mqtt.client as mqtt
 
 from api_response import api_error, api_ok
 from agent_gateway import ask_agent_sync, connector_diagnostics
 from agent_task_manager import agent_task_manager
+from codex_app_server import CodexAppServer
 from pairing_state import is_paired, pairing_status, record_pairing_success, validate_pairing_token
 from signalasi_client import (
     decrypt_signal_envelope,
@@ -40,8 +42,29 @@ MOBILE_HIDDEN_AGENT_IDS = {"cloud-model"}
 
 client = None
 running = False
+codex_app_server: CodexAppServer | None = None
+codex_task_callbacks: dict[str, Callable[[str, dict], None]] = {}
+codex_task_callbacks_lock = threading.Lock()
 pending_delivery_acks: dict[int, dict] = {}
 pending_delivery_acks_lock = threading.Lock()
+
+
+def _dispatch_codex_event(task_id: str, event: dict) -> None:
+    with codex_task_callbacks_lock:
+        callback = codex_task_callbacks.get(task_id)
+    if callback:
+        callback(task_id, event)
+    if str(event.get("status") or "") in {"completed", "failed", "cancelled"}:
+        with codex_task_callbacks_lock:
+            codex_task_callbacks.pop(task_id, None)
+
+
+def _codex_server(executable: str, env: dict) -> CodexAppServer:
+    global codex_app_server
+    with codex_task_callbacks_lock:
+        if codex_app_server is None or codex_app_server.executable != executable:
+            codex_app_server = CodexAppServer(executable, env, _dispatch_codex_event)
+    return codex_app_server
 phone_publish_lock = threading.RLock()
 pending_task_events: dict[str, tuple[dict, dict]] = {}
 pending_task_events_lock = threading.Lock()
@@ -254,6 +277,9 @@ def _agent_task_payload(task: dict, trace: list[dict]) -> dict:
         "elapsed_ms": task.get("elapsed_ms", 0),
         "status_seq": task.get("status_seq", 0),
         "process_id": task.get("process_id", 0),
+        "thread_id": task.get("thread_id", ""),
+        "turn_id": task.get("turn_id", ""),
+        "current_step": task.get("current_step", ""),
         "error": task.get("error", ""),
         "desktop_id": desktop_id(),
         "desktop_name": desktop_name(),
@@ -331,6 +357,36 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         }
         _publish_phone_payload(mqttc, wire_payload, reply_payload)
 
+    if agent_id == "codex":
+        from agent_gateway import BASE_AGENTS, _agent_env, _find_codex_desktop_cli
+        task = agent_task_manager.create_external(
+            agent_id=agent_id, contact_id=contact_id, source_message_id=source_message_id,
+            prompt=content, on_event=publish_event, task_id=str(payload.get("task_id") or ""),
+        )
+
+        def app_event(task_id: str, event: dict) -> None:
+            updated = agent_task_manager.update(
+                task_id, str(event.get("status") or "running"), on_event=publish_event,
+                thread_id=event.get("thread_id"), turn_id=event.get("turn_id"),
+                current_step=event.get("current_step"), result=event.get("result"),
+                error=event.get("error"),
+            )
+            if updated and updated.status == "completed" and updated.result:
+                publish_result(updated.public())
+
+        def start_codex() -> None:
+            try:
+                executable = _find_codex_desktop_cli() or "codex"
+                with codex_task_callbacks_lock:
+                    codex_task_callbacks[task.task_id] = app_event
+                server = _codex_server(executable, _agent_env(BASE_AGENTS["codex"]))
+                server.start_task(task.task_id, content, os.getcwd())
+            except Exception as exc:
+                agent_task_manager.update(task.task_id, "failed", on_event=publish_event, error=str(exc)[:500])
+
+        threading.Thread(target=start_codex, daemon=True).start()
+        return
+
     agent_task_manager.create(
         agent_id=agent_id,
         contact_id=contact_id,
@@ -384,6 +440,11 @@ def on_message(mqttc, userdata, msg):
             source_message_id = str(payload.get("source_message_id") or "")
             if task_matches and source_message_id and existing_task.source_message_id:
                 task_matches = source_message_id == existing_task.source_message_id
+            if task_matches and existing_task.agent_id == "codex" and codex_app_server is not None:
+                try:
+                    codex_app_server.interrupt(task_id)
+                except Exception as exc:
+                    log.warning(f"Codex turn interrupt failed task_id={task_id}: {exc}")
             task = agent_task_manager.cancel(
                 task_id,
                 lambda event: _publish_or_queue_task_event(mqttc, wire_payload, event, trace),

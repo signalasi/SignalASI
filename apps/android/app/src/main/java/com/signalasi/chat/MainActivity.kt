@@ -679,8 +679,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val baseStatusLabel = when (status) {
             "accepted" -> getString(R.string.agent_task_status_accepted)
             "queued" -> getString(R.string.agent_task_status_queued)
+            "starting" -> getString(R.string.agent_task_status_starting)
             "running" -> getString(R.string.agent_task_status_running)
             "waiting_input" -> getString(R.string.agent_task_status_waiting_input)
+            "waiting_approval" -> getString(R.string.agent_task_status_waiting_approval)
             "completed" -> getString(R.string.agent_task_status_completed)
             "failed" -> getString(R.string.agent_task_status_failed)
             "cancelled" -> getString(R.string.agent_task_status_cancelled)
@@ -688,7 +690,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             else -> status
         }
         val elapsedSeconds = envelope.optLong("elapsed_ms", 0L) / 1000L
-        val statusLabel = if (status == "running" && elapsedSeconds > 0L) {
+        val currentStep = envelope.optString("current_step").trim()
+        val statusLabel = if (currentStep.isNotBlank() && status in setOf("starting", "running", "waiting_input", "waiting_approval")) {
+            currentStep
+        } else if (status == "running" && elapsedSeconds > 0L) {
             getString(R.string.agent_task_status_running_elapsed, elapsedSeconds)
         } else baseStatusLabel
         existingMessage?.let { message ->
@@ -696,7 +701,42 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             message.taskStatus = status
             message.taskStatusSeq = maxOf(message.taskStatusSeq, statusSeq)
         }
-        mergeDeliveryTrace(sourceMessageId, contactId, incomingDeliveryTrace(envelope), statusLabel)
+        if (existingMessage != null) {
+            mergeDeliveryTrace(sourceMessageId, contactId, incomingDeliveryTrace(envelope), statusLabel)
+        } else {
+            ChatHistoryStore.applyAgentTaskEvent(this, envelope)
+            reloadChatHistoryIfChanged(force = true)
+        }
+        val taskId = envelope.optString("task_id")
+        val nativeState = mobileNativeAgent.recordConnectorTaskStatus(
+            sourceMessageId = sourceMessageId,
+            contactId = contactId,
+            taskId = taskId,
+            taskStatus = status,
+            statusSeq = statusSeq
+        )
+        if (nativeState != null) {
+            val targetName = contactById(contactId).name
+            agentTranscriptStore.upsert(
+                AgentTranscriptRole.PROCESS,
+                "$targetName · $statusLabel",
+                dedupeKey = "remote-task:$taskId",
+                timestampMillis = envelope.optLong("updated_at", System.currentTimeMillis())
+            )
+            renderAgentState(nativeState)
+            when (status) {
+                "cancelled" -> renderAgentState(mobileNativeAgent.cancelCurrentTask())
+                "failed", "timed_out", "not_found" -> AgentConnectorResponseBus.publish(
+                    this,
+                    AgentConnectorResponse(
+                        sourceMessageId = sourceMessageId,
+                        contactId = contactId,
+                        content = envelope.optString("error").ifBlank { statusLabel },
+                        success = false
+                    )
+                )
+            }
+        }
         return true
     }
 
@@ -994,7 +1034,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             if (state.phase == AgentPhase.PAUSED) {
                 renderAgentState(mobileNativeAgent.resumeCurrentTask())
             } else if (state.phase == AgentPhase.WAITING_RESPONSE) {
-                renderAgentState(mobileNativeAgent.cancelCurrentTask())
+                cancelRemoteAgentTask(state)
             } else if (state.pendingAction != null) {
                 renderAgentState(mobileNativeAgent.cancelCurrentTask())
             } else if (agentVoiceListening) {
@@ -1002,6 +1042,33 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             } else {
                 startAgentVoiceInput()
             }
+        }
+    }
+
+    private fun cancelRemoteAgentTask(state: AgentUiState) {
+        val result = state.lastActionResult
+        val taskId = result?.metadata?.get("remote_task_id").orEmpty()
+        val contactId = result?.metadata?.get("contact_id").orEmpty()
+        val sourceMessageId = result?.metadata?.get("source_message_id")?.toLongOrNull() ?: 0L
+        if (taskId.isBlank() || contactId.isBlank() || sourceMessageId <= 0L) {
+            renderAgentState(mobileNativeAgent.cancelCurrentTask())
+            return
+        }
+        val sent = SignalASIMqttClient.publishAgentTaskCancel(
+            taskId = taskId,
+            contactId = contactId,
+            sourceMessageId = sourceMessageId,
+            topicOverride = AppStore.outgoingTopicForContact(this, contactId)
+        )
+        if (sent) {
+            agentTranscriptStore.upsert(
+                AgentTranscriptRole.PROCESS,
+                "${contactById(contactId).name} · ${getString(R.string.agent_task_status_cancelling)}",
+                dedupeKey = "remote-task:$taskId"
+            )
+            renderAgentTranscript(agentTranscriptStore.list())
+        } else {
+            Toast.makeText(this, getString(R.string.delivery_status_send_failed), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -5108,7 +5175,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "notified" -> getString(R.string.delivery_status_notified)
             else -> json.optString("delivery_status").ifBlank { getString(R.string.delivery_status_confirmed) }
         }
-        mergeDeliveryTrace(messageId, contactId, trace, status)
+        val taskBound = messages[contactId]?.firstOrNull { it.id == messageId }?.taskId?.isNotBlank() == true
+        mergeDeliveryTrace(messageId, contactId, trace, if (taskBound) null else status)
     }
 
     private fun deliveryTraceJson(trace: List<DeliveryTraceEvent>): JSONArray {

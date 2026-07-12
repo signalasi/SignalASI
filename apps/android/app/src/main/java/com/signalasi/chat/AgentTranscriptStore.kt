@@ -44,6 +44,40 @@ class AgentTranscriptStore(context: Context) {
         return true
     }
 
+    @Synchronized
+    fun upsert(
+        role: AgentTranscriptRole,
+        text: String,
+        dedupeKey: String,
+        timestampMillis: Long = System.currentTimeMillis()
+    ): Boolean {
+        val cleanText = text.trim().take(MAX_TEXT_CHARACTERS)
+        val cleanKey = dedupeKey.trim().take(MAX_DEDUPE_KEY_CHARACTERS)
+        if (cleanText.isBlank() || cleanKey.isBlank()) return false
+        val current = list().toMutableList()
+        val index = current.indexOfFirst { it.dedupeKey == cleanKey }
+        if (index >= 0) {
+            val previous = current[index]
+            if (previous.text == cleanText && previous.role == role) return false
+            current[index] = previous.copy(
+                id = UUID.randomUUID().toString(),
+                role = role,
+                text = cleanText,
+                timestampMillis = timestampMillis
+            )
+        } else {
+            current += AgentTranscriptEntry(
+                id = UUID.randomUUID().toString(),
+                role = role,
+                text = cleanText,
+                timestampMillis = timestampMillis,
+                dedupeKey = cleanKey
+            )
+        }
+        save(current.takeLast(MAX_ITEMS))
+        return true
+    }
+
     fun clear() = preferences.clear()
 
     private fun save(items: List<AgentTranscriptEntry>) {
