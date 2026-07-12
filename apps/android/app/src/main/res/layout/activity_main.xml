@@ -734,41 +734,72 @@
                         android:textSize="15sp"
                         android:textStyle="bold" />
 
-                    <LinearLayout
+                    <FrameLayout
                         android:layout_width="0dp"
                         android:layout_height="54dp"
                         android:layout_marginStart="4dp"
                         android:layout_weight="1"
                         android:background="@android:color/transparent"
-                        android:gravity="center_vertical"
-                        android:orientation="horizontal"
-                        android:paddingStart="12dp"
-                        android:paddingEnd="0dp">
+                        android:paddingStart="12dp">
 
-                        <EditText
-                            android:id="@+id/agentGoalInput"
-                            android:layout_width="0dp"
+                        <LinearLayout
+                            android:id="@+id/agentInputContent"
+                            android:layout_width="match_parent"
                             android:layout_height="match_parent"
-                            android:layout_weight="1"
-                            android:background="@android:color/transparent"
-                            android:hint="@string/agent_goal_hint"
-                            android:inputType="textCapSentences|textMultiLine"
-                            android:maxLines="2"
-                            android:paddingStart="0dp"
-                            android:paddingEnd="6dp"
-                            android:textColor="@color/text_primary"
-                            android:textColorHint="@color/text_secondary"
-                            android:textSize="15sp" />
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
 
-                        <ImageButton
-                            android:id="@+id/agentAttachButton"
-                            android:layout_width="42dp"
-                            android:layout_height="42dp"
-                            android:background="@android:color/transparent"
-                            android:contentDescription="@string/agent_knowledge_import"
-                            android:padding="9dp"
-                            android:src="@drawable/ic_agent_attach" />
-                    </LinearLayout>
+                            <EditText
+                                android:id="@+id/agentGoalInput"
+                                android:layout_width="0dp"
+                                android:layout_height="match_parent"
+                                android:layout_weight="1"
+                                android:background="@android:color/transparent"
+                                android:hint="@string/agent_goal_hint"
+                                android:inputType="textCapSentences|textMultiLine"
+                                android:maxLines="2"
+                                android:paddingStart="0dp"
+                                android:paddingEnd="6dp"
+                                android:textColor="@color/text_primary"
+                                android:textColorHint="@color/text_secondary"
+                                android:textSize="15sp" />
+
+                            <ImageButton
+                                android:id="@+id/agentAttachButton"
+                                android:layout_width="42dp"
+                                android:layout_height="42dp"
+                                android:background="@android:color/transparent"
+                                android:contentDescription="@string/agent_knowledge_import"
+                                android:padding="9dp"
+                                android:src="@drawable/ic_agent_attach" />
+                        </LinearLayout>
+
+                        <LinearLayout
+                            android:id="@+id/agentRecordingCenter"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal"
+                            android:paddingEnd="8dp"
+                            android:visibility="gone">
+
+                            <com.signalasi.chat.ui.VoiceWaveformView
+                                android:id="@+id/agentRecordingWaveform"
+                                android:layout_width="0dp"
+                                android:layout_height="28dp"
+                                android:layout_weight="1" />
+
+                            <TextView
+                                android:id="@+id/agentRecordingTimer"
+                                android:layout_width="48dp"
+                                android:layout_height="match_parent"
+                                android:gravity="center"
+                                android:includeFontPadding="false"
+                                android:text="00:00"
+                                android:textColor="@color/text_secondary"
+                                android:textSize="13sp" />
+                        </LinearLayout>
+                    </FrameLayout>
 
                     <ImageButton
                         android:id="@+id/agentSubmitButton"
@@ -2125,6 +2156,36 @@
                     android:textSize="16sp"
                     android:textStyle="bold"
                     android:visibility="gone" />
+
+                <LinearLayout
+                    android:id="@+id/chatRecordingCenter"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:layout_gravity="center_vertical"
+                    android:background="@drawable/message_input_background"
+                    android:clickable="false"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="10dp"
+                    android:visibility="gone">
+
+                    <com.signalasi.chat.ui.VoiceWaveformView
+                        android:id="@+id/chatRecordingWaveform"
+                        android:layout_width="0dp"
+                        android:layout_height="25dp"
+                        android:layout_weight="1" />
+
+                    <TextView
+                        android:id="@+id/chatRecordingTimer"
+                        android:layout_width="46dp"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:includeFontPadding="false"
+                        android:text="00:00"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="12sp" />
+                </LinearLayout>
             </FrameLayout>
 
             <ImageButton

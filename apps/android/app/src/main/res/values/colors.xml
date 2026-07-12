@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <color name="apple_voice_cancel">#FF3B30</color>
     <color name="signalasi_dark">#0B1110</color>
     <color name="signalasi_green">#14C66A</color>
     <color name="signalasi_blue">#5B6CFF</color>

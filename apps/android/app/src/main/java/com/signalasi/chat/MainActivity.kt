@@ -59,6 +59,8 @@ import com.rementia.openwakeword.lib.WakeWordEngine
 import com.rementia.openwakeword.lib.model.DetectionMode
 import com.rementia.openwakeword.lib.model.WakeWordModel
 import com.signalasi.chat.SignalASIMqttClient.Listener
+import com.signalasi.chat.ui.AppleHoldToTalkController
+import com.signalasi.chat.ui.VoiceWaveformView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -183,6 +185,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentRecentTaskList: LinearLayout
     private lateinit var agentGoalInput: EditText
     private lateinit var agentVoiceButton: TextView
+    private lateinit var agentInputContent: LinearLayout
+    private lateinit var agentRecordingCenter: LinearLayout
+    private lateinit var agentRecordingWaveform: VoiceWaveformView
+    private lateinit var agentRecordingTimer: TextView
+    private lateinit var agentHoldToTalkController: AppleHoldToTalkController
     private lateinit var agentAttachButton: ImageButton
     private lateinit var agentSubmitButton: ImageButton
     private lateinit var contactPage: LinearLayout
@@ -214,6 +221,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var imageButton: ImageButton
     private lateinit var voiceButton: ImageButton
     private lateinit var pressToTalkButton: TextView
+    private lateinit var chatRecordingCenter: LinearLayout
+    private lateinit var chatRecordingWaveform: VoiceWaveformView
+    private lateinit var chatRecordingTimer: TextView
+    private lateinit var holdToTalkController: AppleHoldToTalkController
     private lateinit var emojiButton: ImageButton
     private lateinit var emojiPanel: HorizontalScrollView
     private lateinit var emojiContainer: LinearLayout
@@ -278,6 +289,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var recorder: MediaRecorder? = null
     private var recordingFile: File? = null
     private var recordingStartedAt = 0L
+    private var recordingPurpose = ""
     private var player: android.media.MediaPlayer? = null
     private var voiceMode = false
     private var secureChannelReady = false
@@ -307,6 +319,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var voiceCommandLastVoiceAt = 0L
     private var voiceAssistantRestartPending = false
     private var pendingVoiceAgentTranscriptId = 0L
+    private var pendingAgentInputTranscriptId = 0L
     private val pendingCloudVoiceRequests = java.util.concurrent.ConcurrentHashMap<Long, PendingCloudVoiceRequest>()
     private var wakeReplyPinnedUntilMs = 0L
     private var lastVoiceRecognitionStartAt = 0L
@@ -397,6 +410,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentRecentTaskList = findViewById(R.id.agentRecentTaskList)
         agentGoalInput = findViewById(R.id.agentGoalInput)
         agentVoiceButton = findViewById(R.id.agentVoiceButton)
+        agentInputContent = findViewById(R.id.agentInputContent)
+        agentRecordingCenter = findViewById(R.id.agentRecordingCenter)
+        agentRecordingWaveform = findViewById(R.id.agentRecordingWaveform)
+        agentRecordingTimer = findViewById(R.id.agentRecordingTimer)
         agentAttachButton = findViewById(R.id.agentAttachButton)
         agentSubmitButton = findViewById(R.id.agentSubmitButton)
         contactPage = findViewById(R.id.contactPage)
@@ -417,6 +434,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         imageButton = findViewById(R.id.imageButton)
         voiceButton = findViewById(R.id.voiceButton)
         pressToTalkButton = findViewById(R.id.pressToTalkButton)
+        chatRecordingCenter = findViewById(R.id.chatRecordingCenter)
+        chatRecordingWaveform = findViewById(R.id.chatRecordingWaveform)
+        chatRecordingTimer = findViewById(R.id.chatRecordingTimer)
         emojiButton = findViewById(R.id.emojiButton)
         emojiPanel = findViewById(R.id.emojiPanel)
         emojiContainer = findViewById(R.id.emojiContainer)
@@ -514,6 +534,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         microsoftTts.shutdown()
         androidTts?.stop()
         androidTts?.shutdown()
+        if (::holdToTalkController.isInitialized) holdToTalkController.release()
+        if (::agentHoldToTalkController.isInitialized) agentHoldToTalkController.release()
         stopRecording(send = false)
         saveChatHistory(sync = true)
         SignalASIMqttClient.removeListener(this)
@@ -733,14 +755,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             taskStatus = status,
             statusSeq = statusSeq
         )
+        val targetName = contactById(contactId).name
+        agentTranscriptStore.upsert(
+            AgentTranscriptRole.PROCESS,
+            "$targetName · $statusLabel",
+            dedupeKey = "remote-task:$taskId",
+            timestampMillis = envelope.optLong("updated_at", System.currentTimeMillis())
+        )
+        renderAgentTranscript(agentTranscriptStore.list())
         if (nativeState != null) {
-            val targetName = contactById(contactId).name
-            agentTranscriptStore.upsert(
-                AgentTranscriptRole.PROCESS,
-                "$targetName · $statusLabel",
-                dedupeKey = "remote-task:$taskId",
-                timestampMillis = envelope.optLong("updated_at", System.currentTimeMillis())
-            )
             renderAgentState(nativeState)
             when (status) {
                 "cancelled" -> {
@@ -1050,30 +1073,24 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             override fun afterTextChanged(s: Editable?) = Unit
         })
-        agentVoiceButton.setOnTouchListener { _, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    startAgentVoiceInput()
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    if (agentVoiceListening) runCatching { speechRecognizer?.stopListening() }
-                    true
-                }
-                MotionEvent.ACTION_CANCEL -> {
-                    stopAgentVoiceInput()
-                    true
-                }
-                else -> true
-            }
-        }
-        agentVoiceButton.setOnClickListener {
-            if (agentVoiceListening) {
-                stopAgentVoiceInput()
-            } else {
-                startAgentVoiceInput()
-            }
-        }
+        agentHoldToTalkController = AppleHoldToTalkController(
+            activity = this,
+            pressButton = agentVoiceButton,
+            idleContent = agentInputContent,
+            recordingGroup = agentRecordingCenter,
+            waveform = agentRecordingWaveform,
+            timer = agentRecordingTimer,
+            hasPermission = {
+                checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            },
+            requestPermission = {
+                requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_RECORD_AUDIO)
+            },
+            startRecording = { startRecording("agent_input") },
+            currentAmplitude = { recorder?.maxAmplitude ?: 0 },
+            finishRecording = { send -> stopAgentInputRecording(send) }
+        )
+        agentVoiceButton.setOnTouchListener(agentHoldToTalkController)
     }
 
     private fun cancelRemoteAgentTask(state: AgentUiState) {
@@ -1879,6 +1896,25 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             return true
         }
         val storedRequestId = transcriptStore.pendingRequestId()
+        if (sourceMessageId > 0L && sourceMessageId == pendingAgentInputTranscriptId) {
+            pendingAgentInputTranscriptId = 0L
+            val success = payload.optBoolean("transcription_success", false)
+            val transcript = payload.optString("content").trim()
+            runOnUiThread {
+                if (success && transcript.isNotBlank()) {
+                    agentGoalInput.setText(transcript)
+                    agentGoalInput.setSelection(agentGoalInput.text?.length ?: 0)
+                    submitAgentGoal()
+                } else {
+                    Toast.makeText(
+                        this,
+                        transcript.ifBlank { getString(R.string.voice_status_transcription_failed) },
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+            return true
+        }
         if (sourceMessageId <= 0L ||
             (sourceMessageId != pendingVoiceAgentTranscriptId && sourceMessageId != storedRequestId)
         ) return true
@@ -3760,33 +3796,23 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         voiceButton.setOnClickListener {
             setVoiceMode(!voiceMode)
         }
-        pressToTalkButton.setOnTouchListener { _, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                        requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_RECORD_AUDIO)
-                        return@setOnTouchListener true
-                    }
-                    pressToTalkButton.text = getString(R.string.input_press_to_talk)
-                    pressToTalkButton.alpha = 0.72f
-                    startRecording()
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    pressToTalkButton.text = getString(R.string.input_press_to_talk)
-                    pressToTalkButton.alpha = 1f
-                    stopRecording(send = true)
-                    true
-                }
-                MotionEvent.ACTION_CANCEL -> {
-                    pressToTalkButton.text = getString(R.string.input_press_to_talk)
-                    pressToTalkButton.alpha = 1f
-                    stopRecording(send = false)
-                    true
-                }
-                else -> true
-            }
-        }
+        holdToTalkController = AppleHoldToTalkController(
+            activity = this,
+            pressButton = pressToTalkButton,
+            recordingGroup = chatRecordingCenter,
+            waveform = chatRecordingWaveform,
+            timer = chatRecordingTimer,
+            hasPermission = {
+                checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            },
+            requestPermission = {
+                requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_RECORD_AUDIO)
+            },
+            startRecording = { startRecording("chat_message") },
+            currentAmplitude = { recorder?.maxAmplitude ?: 0 },
+            finishRecording = { send -> stopRecording(send) }
+        )
+        pressToTalkButton.setOnTouchListener(holdToTalkController)
         updateInputActions()
     }
 
@@ -4761,20 +4787,37 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     // ===== Recording =====
-    private fun startRecording() {
+    private fun startRecording(purpose: String): Boolean {
+        if (recorder != null) return false
         val file = File(cacheDir, "voice_${System.currentTimeMillis()}.m4a")
-        recordingFile = file
-        recordingStartedAt = System.currentTimeMillis()
-        recorder = MediaRecorder().apply {
-            setAudioSource(MediaRecorder.AudioSource.MIC)
-            setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            setOutputFile(file.absolutePath)
-            prepare()
-            start()
+        var candidate: MediaRecorder? = null
+        return runCatching {
+            candidate = createRecorder().apply {
+                setAudioSource(MediaRecorder.AudioSource.MIC)
+                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                setAudioEncodingBitRate(96_000)
+                setAudioSamplingRate(44_100)
+                setOutputFile(file.absolutePath)
+                prepare()
+                start()
+            }
+            recorder = candidate
+            recordingFile = file
+            recordingStartedAt = System.currentTimeMillis()
+            recordingPurpose = purpose
+            Log.i("SignalASIVoice", "Recording started purpose=$purpose file=${file.name}")
+            true
+        }.getOrElse {
+            runCatching { candidate?.reset() }
+            runCatching { candidate?.release() }
+            recorder = null
+            recordingFile = null
+            recordingPurpose = ""
+            file.delete()
+            Log.e("SignalASIVoice", "Chat recording start failed", it)
+            false
         }
-        voiceButton.alpha = 0.55f
-        showVoiceOverlay()
     }
 
     private fun showVoiceOverlay() {
@@ -4822,15 +4865,22 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun stopRecording(send: Boolean) {
+        if (recordingPurpose == "agent_input") {
+            stopAgentInputRecording(send)
+            return
+        }
         val activeRecorder = recorder ?: return
         recorder = null
-        voiceButton.alpha = 1f
-        hideVoiceOverlay()
-        runCatching { activeRecorder.stop() }
-        activeRecorder.release()
+        val stoppedCleanly = runCatching {
+            activeRecorder.stop()
+            true
+        }.getOrDefault(false)
+        runCatching { activeRecorder.reset() }
+        runCatching { activeRecorder.release() }
         val file = recordingFile
         recordingFile = null
-        if (!send || file == null || !file.exists()) {
+        recordingPurpose = ""
+        if (!send || !stoppedCleanly || file == null || !file.exists() || file.length() <= 0L) {
             file?.delete()
             return
         }
@@ -4843,6 +4893,62 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             label = "${getString(R.string.message_voice_prefix)} ${seconds}s",
             source = "chat_hold_to_talk"
         )
+    }
+
+    private fun stopAgentInputRecording(send: Boolean) {
+        val activeRecorder = recorder ?: return
+        val purpose = recordingPurpose
+        recorder = null
+        val stoppedCleanly = runCatching {
+            activeRecorder.stop()
+            true
+        }.getOrDefault(false)
+        runCatching { activeRecorder.reset() }
+        runCatching { activeRecorder.release() }
+        val file = recordingFile
+        recordingFile = null
+        recordingPurpose = ""
+        Log.i("SignalASIVoice", "Agent input recording stopped purpose=$purpose send=$send clean=$stoppedCleanly bytes=${file?.length() ?: 0L}")
+        if (!send || !stoppedCleanly || file == null || !file.exists() || file.length() <= 0L) {
+            file?.delete()
+            return
+        }
+        requestAgentInputTranscription(file)
+    }
+
+    private fun requestAgentInputTranscription(sourceFile: File): Boolean {
+        val sttContactId = resolveVoiceAssistantSttContactId("")
+        val topic = AppStore.outgoingTopicForContact(this, sttContactId)
+        if (topic == null) {
+            sourceFile.delete()
+            Toast.makeText(this, R.string.voice_status_asr_unavailable, Toast.LENGTH_LONG).show()
+            return false
+        }
+        val requestId = newMessageId()
+        pendingAgentInputTranscriptId = requestId
+        Log.i("SignalASIVoice", "Agent input transcription publishing requestId=$requestId target=$sttContactId bytes=${sourceFile.length()}")
+        val sent = runCatching {
+            SignalASIMqttClient.publishInlineAudioMessage(
+                fileName = sourceFile.name,
+                size = sourceFile.length(),
+                contentType = "audio/mp4",
+                audioBase64 = Base64.encodeToString(sourceFile.readBytes(), Base64.NO_WRAP),
+                contactId = sttContactId,
+                topicOverride = topic,
+                audioMode = "transcribe_only",
+                clientMessageId = requestId
+            )
+        }.getOrElse {
+            Log.e("SignalASIVoice", "Agent input transcription request failed", it)
+            false
+        }
+        sourceFile.delete()
+        if (!sent) {
+            pendingAgentInputTranscriptId = 0L
+            Toast.makeText(this, R.string.delivery_status_send_failed, Toast.LENGTH_LONG).show()
+        }
+        Log.i("SignalASIVoice", "Agent input transcription published requestId=$requestId sent=$sent")
+        return sent
     }
 
     private fun sendVoiceRecordingThroughPipeline(

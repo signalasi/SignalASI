@@ -1073,4 +1073,8 @@
     <string name="agent_trace_task_paused">Task paused</string>
     <string name="agent_trace_task_resumed">Task resumed</string>
     <string name="agent_trace_task_interrupted">Task interrupted</string>
+    <string name="voice_release_to_send">Release to send</string>
+    <string name="voice_release_to_cancel">Release to cancel</string>
+    <string name="voice_too_short">Recording is too short</string>
+    <string name="voice_cancelled">Recording cancelled</string>
 </resources>

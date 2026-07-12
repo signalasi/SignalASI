@@ -978,4 +978,8 @@
     <string name="agent_trace_task_paused">任务已暂停</string>
     <string name="agent_trace_task_resumed">任务已继续</string>
     <string name="agent_trace_task_interrupted">任务已中断</string>
+    <string name="voice_release_to_send">松开发送</string>
+    <string name="voice_release_to_cancel">松开取消</string>
+    <string name="voice_too_short">说话时间太短</string>
+    <string name="voice_cancelled">已取消</string>
 </resources>

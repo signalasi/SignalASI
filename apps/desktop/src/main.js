@@ -21,6 +21,11 @@ if (UI_SMOKE) {
 let mainWindow;
 let backendProcess;
 
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1120,
@@ -197,13 +202,18 @@ function findPython() {
 
 async function backendStatus() {
   try {
-    const response = await fetch(`${BACKEND_ORIGIN}/signalasi/verify`, { method: "GET" });
+    const response = await fetch(`${BACKEND_ORIGIN}/api/agents/diagnostics`, { method: "GET" });
+    const payload = response.ok ? await response.json() : null;
+    const identityMatches = payload?.protocol === "SignalASI Link Protocol"
+      && payload?.connector === "SignalASI Desktop";
     return {
-      running: response.ok,
+      running: response.ok && identityMatches,
       status: response.status,
+      identityMatches,
       origin: BACKEND_ORIGIN,
       pairingUrl: PAIRING_URL,
-      backendDir: BACKEND_DIR
+      backendDir: BACKEND_DIR,
+      error: response.ok && !identityMatches ? "Port 8765 is owned by another service." : undefined
     };
   } catch (error) {
     return {
@@ -217,9 +227,43 @@ async function backendStatus() {
   }
 }
 
+function reclaimLegacyBackendPort() {
+  if (process.platform !== "win32") return Promise.resolve({ reclaimed: false });
+  const script = `
+$owner = Get-NetTCPConnection -LocalPort ${BACKEND_PORT} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $owner) { exit 3 }
+$process = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $owner.OwningProcess) -ErrorAction SilentlyContinue
+$combined = ""
+$cursor = $process
+for ($depth = 0; $cursor -and $depth -lt 8; $depth++) {
+  $combined += " " + [string]$cursor.CommandLine
+  if (-not $cursor.ParentProcessId) { break }
+  $cursor = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $cursor.ParentProcessId) -ErrorAction SilentlyContinue
+}
+$combined = $combined.ToLowerInvariant().Replace('\\', '/')
+$legacy = $combined.Contains('/hermesworkspace/signalasi-desktop-win/') -or $combined.Contains('/hermesworkspace/hermeschat/backend')
+if (-not $legacy) { exit 2 }
+Stop-Process -Id $owner.OwningProcess -Force -ErrorAction Stop
+exit 0
+`;
+  return new Promise((resolve) => {
+    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, timeout: 5000 }, (error) => {
+      resolve({ reclaimed: !error, code: error?.code ?? 0 });
+    });
+  });
+}
+
 async function startBackend() {
-  const current = await backendStatus();
+  let current = await backendStatus();
   if (current.running) return current;
+  if (current.status > 0 && current.identityMatches === false) {
+    const reclaim = await reclaimLegacyBackendPort();
+    if (!reclaim.reclaimed) {
+      return { ...current, portConflict: true };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    current = await backendStatus();
+  }
   if (!fs.existsSync(path.join(BACKEND_DIR, "main.py"))) {
     return { ...current, error: `Backend not found: ${BACKEND_DIR}` };
   }
@@ -531,8 +575,16 @@ ipcMain.handle("clipboard:write", (_event, text) => {
 });
 
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return;
   createWindow();
   startBackend();
+});
+
+app.on("second-instance", () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
 });
 
 app.on("window-all-closed", () => {
