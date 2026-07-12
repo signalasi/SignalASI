@@ -821,7 +821,8 @@ def start():
         return
 
     running = True
-    client_id = f"signalasi-pc-{DEVICE_ID}"
+    stable_desktop_id = re.sub(r"[^a-zA-Z0-9_-]", "-", desktop_id())[-48:]
+    client_id = f"signalasi-pc-{stable_desktop_id}"
     callback_api_version = getattr(mqtt, "CallbackAPIVersion", None)
     if callback_api_version is not None:
         mqttc = mqtt.Client(callback_api_version=callback_api_version.VERSION2, client_id=client_id, clean_session=False)

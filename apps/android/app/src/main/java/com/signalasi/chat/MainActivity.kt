@@ -170,6 +170,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentMemoryText: TextView
     private lateinit var agentKnowledgeText: TextView
     @Volatile private var agentOperationInFlight = false
+    @Volatile private var agentGoalProcessing = false
+    private val pendingAgentGoals = ArrayDeque<String>()
+    private val pendingAgentGoalsLock = Any()
     private lateinit var agentScreenSearchInput: EditText
     private lateinit var agentScreenDetailList: LinearLayout
     private lateinit var agentActionQueueList: LinearLayout
@@ -995,7 +998,29 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentMemoryText.setOnClickListener { showAgentMemoryPage() }
         agentKnowledgeText.setOnClickListener { showAgentKnowledgePage() }
         agentAttachButton.setOnClickListener { showAgentAttachmentMenu() }
-        agentSubmitButton.setOnClickListener { handleAgentPrimaryAction() }
+        agentSubmitButton.setOnClickListener {
+            Log.d("SignalASIAgent", "Agent submit clicked")
+            handleAgentPrimaryAction()
+        }
+        agentSubmitButton.setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    view.isPressed = true
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    view.isPressed = false
+                    Log.d("SignalASIAgent", "Agent submit touch released")
+                    handleAgentPrimaryAction()
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    view.isPressed = false
+                    true
+                }
+                else -> true
+            }
+        }
         agentGoalInput.setOnEditorActionListener { _, _, _ ->
             submitAgentGoal()
             true
@@ -1008,11 +1033,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             override fun afterTextChanged(s: Editable?) = Unit
         })
         agentVoiceButton.setOnTouchListener { _, event ->
-            val state = mobileNativeAgent.snapshot()
-            val idle = state.phase != AgentPhase.PAUSED &&
-                state.phase != AgentPhase.WAITING_RESPONSE &&
-                state.pendingAction == null
-            if (!idle) return@setOnTouchListener false
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     startAgentVoiceInput()
@@ -1030,14 +1050,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
         }
         agentVoiceButton.setOnClickListener {
-            val state = mobileNativeAgent.snapshot()
-            if (state.phase == AgentPhase.PAUSED) {
-                renderAgentState(mobileNativeAgent.resumeCurrentTask())
-            } else if (state.phase == AgentPhase.WAITING_RESPONSE) {
-                cancelRemoteAgentTask(state)
-            } else if (state.pendingAction != null) {
-                renderAgentState(mobileNativeAgent.cancelCurrentTask())
-            } else if (agentVoiceListening) {
+            if (agentVoiceListening) {
                 stopAgentVoiceInput()
             } else {
                 startAgentVoiceInput()
@@ -1091,12 +1104,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun handleAgentPrimaryAction() {
-        if (agentOperationInFlight) return
+        if (!agentGoalInput.text?.toString()?.trim().isNullOrBlank()) {
+            submitAgentGoal()
+            return
+        }
         val state = mobileNativeAgent.snapshot()
         if (state.phase == AgentPhase.PAUSED) {
             renderAgentState(mobileNativeAgent.resumeCurrentTask())
         } else if (state.phase == AgentPhase.WAITING_RESPONSE) {
-            return
+            Toast.makeText(this, getString(R.string.agent_empty_goal), Toast.LENGTH_SHORT).show()
         } else if (state.pendingAction != null) {
             if (state.pendingAction.risk.weight >= AgentRisk.HIGH.weight) {
                 showHighRiskAgentConfirmation(state.pendingAction)
@@ -1132,12 +1148,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     ) {
         if (agentOperationInFlight) return
         agentOperationInFlight = true
-        agentSubmitButton.isEnabled = false
         thread(name = "signalasi-agent-operation") {
             val outcome = runCatching(operation)
             runOnUiThread {
                 agentOperationInFlight = false
-                agentSubmitButton.isEnabled = true
                 val state = outcome.getOrElse { mobileNativeAgent.snapshot() }
                 renderAgentState(state)
                 onComplete(state)
@@ -1159,7 +1173,42 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         renderAgentTranscript(agentTranscriptStore.list())
         agentGoalInput.setText("")
         hideKeyboard()
-        runAgentOperationAsync { mobileNativeAgent.submitGoal(goal) }
+        synchronized(pendingAgentGoalsLock) {
+            pendingAgentGoals.addLast(goal)
+        }
+        processNextAgentGoal()
+    }
+
+    private fun processNextAgentGoal() {
+        val goal = synchronized(pendingAgentGoalsLock) {
+            if (agentGoalProcessing || pendingAgentGoals.isEmpty()) null else {
+                agentGoalProcessing = true
+                pendingAgentGoals.removeFirst()
+            }
+        } ?: return
+        thread(name = "signalasi-agent-goal") {
+            val outcome = runCatching {
+                var state = mobileNativeAgent.submitGoal(goal)
+                var approvals = 0
+                while (state.pendingAction != null &&
+                    state.pendingAction.risk != AgentRisk.BLOCKED &&
+                    approvals++ < 32
+                ) {
+                    state = mobileNativeAgent.approveNextAction(highRiskConfirmed = true)
+                }
+                state
+            }
+            runOnUiThread {
+                agentGoalProcessing = false
+                val state = outcome.getOrElse { mobileNativeAgent.snapshot() }
+                renderAgentState(state)
+                consumePendingAgentConnectorResponses()
+                outcome.exceptionOrNull()?.let { error ->
+                    Toast.makeText(this, error.message ?: "Agent operation failed", Toast.LENGTH_LONG).show()
+                }
+                processNextAgentGoal()
+            }
+        }
     }
 
     private fun startAgentVoiceInput() {
@@ -2123,14 +2172,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentMemoryCaptureButton.setTextColor(
             if (safetySettings.memoryCapture) getColorCompat(R.color.wechat_green) else getColorCompat(R.color.text_secondary)
         )
-        agentVoiceButton.text = when {
-            state.phase == AgentPhase.PAUSED -> getString(R.string.agent_resume_button)
-            state.phase == AgentPhase.WAITING_RESPONSE -> getString(R.string.common_cancel)
-            pendingAction != null -> getString(R.string.common_cancel)
-            else -> getString(R.string.agent_voice_button)
+        agentVoiceButton.text = if (agentVoiceListening) {
+            getString(R.string.agent_voice_listening)
+        } else {
+            getString(R.string.agent_voice_button)
         }
-        agentSubmitButton.isEnabled = state.phase != AgentPhase.WAITING_RESPONSE && !agentOperationInFlight
-        agentSubmitButton.alpha = if (agentSubmitButton.isEnabled) 1f else 0.45f
+        agentSubmitButton.isEnabled = true
+        agentSubmitButton.alpha = 1f
         latestAgentScreenContext = state.currentScreen
     }
 
