@@ -1200,6 +1200,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 var state = runtime.submitGoal(goal)
                 var approvals = 0
                 while (state.pendingAction != null &&
+                    state.phase != AgentPhase.WAITING_RESPONSE &&
                     state.pendingAction.risk != AgentRisk.BLOCKED &&
                     approvals++ < 32
                 ) {
