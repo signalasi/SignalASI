@@ -64,12 +64,12 @@ object VoiceAssistantSettings {
                 ?: DEFAULT_WAKE_MODEL,
             wakeThreshold = prefs.getFloat(KEY_WAKE_THRESHOLD, 0.5f).coerceIn(0.01f, 0.99f),
             asrProvider = ASR_PROVIDER_LOCAL_WHISPER,
-            asrModel = prefs.getString(KEY_ASR_MODEL, "base").orEmpty()
+            asrModel = prefs.getString(KEY_ASR_MODEL, "tiny").orEmpty()
                 .takeIf { candidate ->
                     WhisperModelManager.models.firstOrNull { it.id == candidate }
                         ?.let { WhisperModelManager.isAvailable(context, it) } == true
                 }
-                ?: "base",
+                ?: "tiny",
             asrLanguage = prefs.getString(KEY_ASR_LANGUAGE, "zh-CN").orEmpty().ifBlank { "zh-CN" },
             ttsProvider = prefs.getString(KEY_TTS_PROVIDER, PROVIDER_MICROSOFT_EDGE).orEmpty()
                 .ifBlank { PROVIDER_MICROSOFT_EDGE },
@@ -117,7 +117,7 @@ object VoiceAssistantSettings {
     }
 
     fun setAsrModel(context: Context, value: String) {
-        val model = value.takeIf { candidate -> WhisperModelManager.models.any { it.id == candidate } } ?: "base"
+        val model = value.takeIf { candidate -> WhisperModelManager.models.any { it.id == candidate } } ?: "tiny"
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_ASR_MODEL, model).apply()
     }
 

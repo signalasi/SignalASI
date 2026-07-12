@@ -4,7 +4,9 @@ import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.os.Build
 import android.util.Log
+import android.icu.text.Transliterator
 import com.whispercpp.whisper.WhisperContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -40,9 +42,19 @@ object LocalWhisperAsr {
             loadedModelId = selected.id
         }
         val normalizedLanguage = language.substringBefore('-').lowercase().takeIf { it in setOf("zh", "en") } ?: "auto"
-        val text = model.transcribeData(samples, normalizedLanguage, printTimestamp = false).trim()
+        val rawText = model.transcribeData(samples, normalizedLanguage, printTimestamp = false).trim()
+        val text = normalizeChineseScript(rawText, language)
         Log.i(TAG, "Local transcription completed model=${selected.id} samples=${samples.size} language=$normalizedLanguage elapsed=${System.currentTimeMillis() - startedAt}ms")
         text
+    }
+
+    private fun normalizeChineseScript(text: String, language: String): String {
+        if (!language.equals("zh-CN", ignoreCase = true) || text.isBlank()) return text
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            Transliterator.getInstance("Traditional-Simplified").transliterate(text)
+        } else {
+            text
+        }
     }
 
     private fun decodeTo16kMono(file: File): FloatArray {

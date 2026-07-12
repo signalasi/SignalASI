@@ -11,4 +11,4 @@
 *.jar binary
 *.aar binary
 *.onnx binary
-apps/android/app/src/main/assets/ggml-base.bin filter=lfs diff=lfs merge=lfs -text
+apps/android/app/src/main/assets/ggml-tiny.bin filter=lfs diff=lfs merge=lfs -text

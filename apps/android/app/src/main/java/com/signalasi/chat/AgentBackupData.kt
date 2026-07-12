@@ -190,7 +190,7 @@ object AgentBackupData {
             VoiceAssistantSettings.setWakeModel(context, json.optString("wake_model"))
             VoiceAssistantSettings.setWakeThreshold(context, json.optDouble("wake_threshold", 0.5).toFloat())
             VoiceAssistantSettings.setAsrProvider(context, json.optString("asr_provider"))
-            VoiceAssistantSettings.setAsrModel(context, json.optString("asr_model", "base"))
+            VoiceAssistantSettings.setAsrModel(context, json.optString("asr_model", "tiny"))
             VoiceAssistantSettings.setAsrLanguage(context, json.optString("asr_language"))
             VoiceAssistantSettings.setTtsProvider(context, json.optString("tts_provider"))
             VoiceAssistantSettings.setMicrosoftVoice(context, json.optString("microsoft_voice"))

@@ -25,14 +25,14 @@ object WhisperModelManager {
     private const val MIRROR_ROOT = "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main"
 
     val models = listOf(
-        WhisperModel("tiny", "Tiny", "ggml-tiny.bin", "75 MB"),
-        WhisperModel("base", "Base", "ggml-base.bin", "142 MB", bundled = true),
+        WhisperModel("tiny", "Tiny", "ggml-tiny.bin", "75 MB", bundled = true),
+        WhisperModel("base", "Base", "ggml-base.bin", "142 MB"),
         WhisperModel("small", "Small", "ggml-small.bin", "466 MB"),
         WhisperModel("medium", "Medium", "ggml-medium.bin", "1.5 GB"),
         WhisperModel("large", "Large", "ggml-large-v3.bin", "3.1 GB")
     )
 
-    fun model(id: String): WhisperModel = models.firstOrNull { it.id == id } ?: models[1]
+    fun model(id: String): WhisperModel = models.firstOrNull { it.id == id } ?: models[0]
 
     fun downloadedFile(context: Context, model: WhisperModel): File = File(
         context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
