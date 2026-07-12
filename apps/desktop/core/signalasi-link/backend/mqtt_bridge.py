@@ -377,10 +377,12 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         def start_codex() -> None:
             try:
                 executable = _find_codex_desktop_cli() or "codex"
+                from task_workspace import task_workspace
+
                 with codex_task_callbacks_lock:
                     codex_task_callbacks[task.task_id] = app_event
                 server = _codex_server(executable, _agent_env(BASE_AGENTS["codex"]))
-                server.start_task(task.task_id, content, os.getcwd())
+                server.start_task(task.task_id, content, str(task_workspace(task.task_id, agent_id)))
             except Exception as exc:
                 agent_task_manager.update(task.task_id, "failed", on_event=publish_event, error=str(exc)[:500])
 

@@ -589,13 +589,26 @@ def ask_cli_agent(spec: AgentSpec, text: str, task_id: str = "") -> str:
     if not command:
         return f"[{spec.name}] \u672a\u914d\u7f6e\u542f\u52a8\u547d\u4ee4"
     try:
+        from task_workspace import task_workspace
+
         args, stdin_text = _apply_prompt(command, text)
+        working_directory = task_workspace(task_id, spec.id)
+        agent_env = _agent_env(spec)
+        agent_env.update(
+            {
+                "SIGNALASI_TASK_ID": task_id or working_directory.name,
+                "SIGNALASI_TASK_WORKSPACE": str(working_directory),
+                "SIGNALASI_OUTPUT_DIR": str(working_directory / "outputs"),
+                "SIGNALASI_TEMP_DIR": str(working_directory / "temp"),
+            }
+        )
         process = subprocess.Popen(
             args,
             stdin=subprocess.PIPE if stdin_text is not None else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=_agent_env(spec),
+            env=agent_env,
+            cwd=str(working_directory),
         )
         if task_id:
             from agent_task_manager import agent_task_manager

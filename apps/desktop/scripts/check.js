@@ -102,6 +102,7 @@ const backendTaskManager = fs.readFileSync(path.join(backendDir, "agent_task_man
 const backendAgentConfig = fs.readFileSync(path.join(backendDir, "agent_config.py"), "utf8");
 const backendCustomAgent = fs.readFileSync(path.join(backendDir, "custom_agent_stdio.py"), "utf8");
 const backendMcpWrapper = fs.readFileSync(path.join(backendDir, "mcp_agent_wrapper.py"), "utf8");
+const backendTaskWorkspace = fs.readFileSync(path.join(backendDir, "task_workspace.py"), "utf8");
 const backendPushAuth = fs.readFileSync(path.join(backendDir, "push_auth.py"), "utf8");
 const backendSignalasiNotify = fs.readFileSync(path.join(backendDir, "signalasi_notify.py"), "utf8");
 const backendApiResponse = fs.readFileSync(path.join(backendDir, "api_response.py"), "utf8");
@@ -120,6 +121,8 @@ const androidAppStore = fs.readFileSync(path.join(workspaceRoot, "android", "app
 const androidCrypto = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "SignalASICrypto.kt"), "utf8");
 const androidMqtt = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "SignalASIMqttClient.kt"), "utf8");
 const androidVoiceSettings = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "VoiceAssistantSettings.kt"), "utf8");
+const androidLocalWhisper = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "LocalWhisperAsr.kt"), "utf8");
+const androidWhisperModels = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "WhisperModelManager.kt"), "utf8");
 const androidCloudModelClient = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "CloudModelClient.kt"), "utf8");
 const androidStringsZh = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "res", "values-zh-rCN", "strings.xml"), "utf8");
 const androidStringsEn = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "res", "values", "strings.xml"), "utf8");
@@ -617,15 +620,32 @@ for (const requiredAndroidSignalasiText of [
 
 for (const requiredVoicePipelineText of [
   "sendVoiceRecordingThroughPipeline",
-  "ASR_PROVIDER_PC_STT",
+  "ASR_PROVIDER_LOCAL_WHISPER",
+  "LocalWhisperAsr.transcribe",
+  "WhisperModelManager",
   "voice_asr_provider",
-  "PC faster-whisper",
   "SUPPORTED_WAKE_MODELS",
   "DEFAULT_WAKE_MODEL"
 ]) {
-  if (![androidMainActivity, androidVoiceSettings, androidStringsZh, androidStringsEn].some((content) => content.includes(requiredVoicePipelineText))) {
+  if (![androidMainActivity, androidVoiceSettings, androidLocalWhisper, androidWhisperModels, androidStringsZh, androidStringsEn].some((content) => content.includes(requiredVoicePipelineText))) {
     throw new Error(`Android voice pipeline missing: ${requiredVoicePipelineText}`);
   }
+}
+
+for (const requiredWorkspaceText of [
+  "SignalASIWorkspace",
+  "task_workspace(task_id, spec.id)",
+  "cwd=str(working_directory)",
+  "SIGNALASI_OUTPUT_DIR",
+  "task_workspace(task.task_id, agent_id)"
+]) {
+  if (![backendTaskWorkspace, backendGateway, backendMqtt].some((content) => content.includes(requiredWorkspaceText))) {
+    throw new Error(`Agent task workspace isolation missing: ${requiredWorkspaceText}`);
+  }
+}
+
+if (backendMqtt.includes("server.start_task(task.task_id, content, os.getcwd())")) {
+  throw new Error("Codex tasks must not run in the backend source directory");
 }
 
 if ([androidMainActivity, androidVoiceSettings].some((content) => content.includes("signalasi.onnx"))) {

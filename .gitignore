@@ -51,6 +51,11 @@ uploads/
 downloads/
 stt_probe.wav
 
+# User Agent task workspaces must live outside the source repository.
+SignalASIWorkspace/
+tasks/
+task-workspaces/
+
 # SignalASI sidecar local build cache
 apps/desktop/core/signalasi-link/backend/signal_sidecar/.gradle/
 apps/desktop/core/signalasi-link/backend/signal_sidecar/build/
