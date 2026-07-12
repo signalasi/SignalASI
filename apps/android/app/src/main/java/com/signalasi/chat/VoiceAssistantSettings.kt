@@ -38,8 +38,7 @@ object VoiceAssistantSettings {
     const val PROVIDER_ANDROID = "android"
     const val WAKE_PROVIDER_OPEN_WAKE_WORD = "openwakeword"
     const val WAKE_PROVIDER_ANDROID_ASR = "android_asr"
-    const val ASR_PROVIDER_ANDROID = "android_asr"
-    const val ASR_PROVIDER_PC_STT = "pc_stt"
+    const val ASR_PROVIDER_LOCAL_WHISPER = "local_whisper_cpp"
     const val ROUTING_MODE_NATIVE_AGENT = "native_agent"
     const val ROUTING_MODE_CONTACT = "contact"
     const val DEFAULT_WAKE_MODEL = "hello_world.onnx"
@@ -62,8 +61,7 @@ object VoiceAssistantSettings {
                 .takeIf { it in SUPPORTED_WAKE_MODELS }
                 ?: DEFAULT_WAKE_MODEL,
             wakeThreshold = prefs.getFloat(KEY_WAKE_THRESHOLD, 0.5f).coerceIn(0.01f, 0.99f),
-            asrProvider = prefs.getString(KEY_ASR_PROVIDER, ASR_PROVIDER_PC_STT).orEmpty()
-                .ifBlank { ASR_PROVIDER_PC_STT },
+            asrProvider = ASR_PROVIDER_LOCAL_WHISPER,
             asrLanguage = prefs.getString(KEY_ASR_LANGUAGE, "zh-CN").orEmpty().ifBlank { "zh-CN" },
             ttsProvider = prefs.getString(KEY_TTS_PROVIDER, PROVIDER_MICROSOFT_EDGE).orEmpty()
                 .ifBlank { PROVIDER_MICROSOFT_EDGE },
@@ -101,7 +99,9 @@ object VoiceAssistantSettings {
     }
 
     fun setAsrProvider(context: Context, value: String) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_ASR_PROVIDER, value).apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_ASR_PROVIDER, ASR_PROVIDER_LOCAL_WHISPER)
+            .apply()
     }
 
     fun setAsrLanguage(context: Context, value: String) {

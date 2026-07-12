@@ -287,30 +287,6 @@ object SignalASIMqttClient {
             .put("time", System.currentTimeMillis()), topicOverride ?: SEND_TOPIC, contactId)
     }
 
-    fun publishInlineAudioMessage(
-        fileName: String,
-        size: Long,
-        contentType: String,
-        audioBase64: String,
-        contactId: String = "hermes",
-        topicOverride: String? = null,
-        audioMode: String = "agent_reply",
-        clientMessageId: Long? = null
-    ): Boolean {
-        val payload = JSONObject()
-            .put("type", "audio")
-            .put("file_id", fileName)
-            .put("name", fileName)
-            .put("size", size)
-            .put("content_type", contentType)
-            .put("audio_data_b64", audioBase64)
-            .put("audio_mode", audioMode)
-            .put("contact_id", contactId)
-            .put("time", System.currentTimeMillis())
-        clientMessageId?.let { payload.put("client_message_id", it) }
-        return publishJson(payload, topicOverride ?: SEND_TOPIC, contactId)
-    }
-
     fun requestSignalBundleForContact(context: Context, contactId: String): Boolean {
         appContext = context.applicationContext
         val contact = AppStore.contactById(context, contactId) ?: return false

@@ -52,10 +52,6 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
     override fun onMessage(payload: String) {
         if (AppForegroundTracker.isForeground()) return
         val envelope = runCatching { JSONObject(payload) }.getOrNull()
-        if (envelope != null && envelope.optString("type") == "voice_transcript") {
-            VoiceAgentTranscriptStore(this).saveResponse(envelope)
-            return
-        }
         if (envelope != null && ChatHistoryStore.applyAgentTaskEvent(this, envelope)) return
         val stored = ChatHistoryStore.appendIncoming(this, payload) ?: return
         if (envelope?.optString("type").orEmpty().ifBlank { "text" } == "text") {

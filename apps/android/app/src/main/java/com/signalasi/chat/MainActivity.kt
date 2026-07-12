@@ -318,9 +318,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var voiceCommandSpeechDetected = false
     private var voiceCommandLastVoiceAt = 0L
     private var voiceAssistantRestartPending = false
-    private var pendingVoiceAgentTranscriptId = 0L
-    private var pendingAgentInputTranscriptId = 0L
-    private val pendingCloudVoiceRequests = java.util.concurrent.ConcurrentHashMap<Long, PendingCloudVoiceRequest>()
     private var wakeReplyPinnedUntilMs = 0L
     private var lastVoiceRecognitionStartAt = 0L
     private val voiceAssistantScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -682,7 +679,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     override fun onMessage(payload: String) {
         runOnUiThread {
             val envelope = runCatching { JSONObject(payload) }.getOrNull()
-            if (handleVoiceAgentTranscript(envelope)) return@runOnUiThread
             if (handleAgentTaskEvent(envelope)) return@runOnUiThread
             val msg = parseIncomingMessage(payload)
             if (msg.content.isBlank()) return@runOnUiThread
@@ -1371,23 +1367,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             updateWakeVoiceUi(getString(R.string.voice_status_disabled), getString(R.string.voice_status_disabled_detail))
             return
         }
-        if (config.routingMode == VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT) {
-            val transcriptStore = VoiceAgentTranscriptStore(this)
-            transcriptStore.consume()?.let { transcript ->
-                voiceAssistantAwake = true
-                processVoiceAgentTranscript(transcript.success, transcript.content)
-                return
-            }
-            pendingVoiceAgentTranscriptId = transcriptStore.pendingRequestId()
-            if (pendingVoiceAgentTranscriptId > 0L) {
-                voiceAssistantAwake = true
-                updateWakeVoiceUi(
-                    getString(R.string.voice_status_transcribing),
-                    getString(R.string.voice_status_waiting_transcript, voiceAssistantTargetContact(config).name)
-                )
-                return
-            }
-        }
         if (!ensureRecordPermission()) {
             updateWakeVoiceUi(getString(R.string.voice_status_permission_required), getString(R.string.voice_status_permission_detail))
             return
@@ -1413,7 +1392,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         voiceAssistantListening = false
         voiceAssistantAwake = false
         voiceAssistantSpeaking = false
-        pendingVoiceAgentTranscriptId = 0L
         if (voiceAssistantRecordingCommand) stopVoiceCommandRecording(send = false)
         voiceCommandSpeechDetected = false
         voiceCommandLastVoiceAt = 0L
@@ -1543,19 +1521,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun startCommandListening() {
         if (activeMainTab != PAGE_VOICE || wakePage.visibility != View.VISIBLE || voiceAssistantSpeaking) return
-        val config = VoiceAssistantSettings.get(this)
-        if (config.asrProvider == VoiceAssistantSettings.ASR_PROVIDER_PC_STT) {
-            startVoiceCommandRecording()
-            return
-        }
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            updateWakeVoiceUi(getString(R.string.voice_status_asr_unavailable), getString(R.string.voice_status_switch_pc_stt))
-            scheduleVoiceRestart(1200L)
-            return
-        }
-        voiceAssistantAwake = true
-        updateWakeVoiceUi(getString(R.string.voice_status_awake_listening), getString(R.string.voice_status_say_task))
-        startVoiceRecognition()
+        startVoiceCommandRecording()
     }
 
     private fun startVoiceCommandRecording() {
@@ -1850,85 +1816,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         } else if (!waitingForRemoteAgent) {
             scheduleVoiceRestart(900L)
         }
-    }
-
-    private fun handleVoiceAgentTranscript(envelope: JSONObject?): Boolean {
-        val payload = envelope ?: return false
-        if (payload.optString("type") != "voice_transcript") return false
-        val sourceMessageId = payload.optString("source_message_id").toLongOrNull()
-            ?: payload.optLong("source_message_id", 0L)
-        val transcriptStore = VoiceAgentTranscriptStore(this)
-        val cloudRequest = pendingCloudVoiceRequests.remove(sourceMessageId)
-        if (cloudRequest != null) {
-            val success = payload.optBoolean("transcription_success", false)
-            val transcript = payload.optString("content").trim()
-            runOnUiThread {
-                if (success && transcript.isNotBlank()) {
-                    updateMessageStatus(
-                        cloudRequest.voiceMessageId,
-                        cloudRequest.contact.id,
-                        getString(R.string.voice_status_transcribed)
-                    )
-                    addMessage(ChatMessage(
-                        newMessageId(),
-                        getString(R.string.cloud_voice_transcript, transcript),
-                        false,
-                        cloudRequest.contact,
-                        isSystem = true,
-                        deliveryTrace = mutableListOf(newTraceEvent("cloud_voice_transcribed", cloudRequest.contact.id))
-                    ))
-                    sendOutgoingText(cloudRequest.contact, transcript)
-                } else {
-                    updateMessageStatus(
-                        cloudRequest.voiceMessageId,
-                        cloudRequest.contact.id,
-                        getString(R.string.delivery_status_failed)
-                    )
-                    addMessage(ChatMessage(
-                        newMessageId(),
-                        transcript.ifBlank { getString(R.string.voice_status_transcription_failed) },
-                        false,
-                        cloudRequest.contact,
-                        isSystem = true
-                    ))
-                }
-            }
-            return true
-        }
-        val storedRequestId = transcriptStore.pendingRequestId()
-        if (sourceMessageId > 0L && sourceMessageId == pendingAgentInputTranscriptId) {
-            pendingAgentInputTranscriptId = 0L
-            val success = payload.optBoolean("transcription_success", false)
-            val transcript = payload.optString("content").trim()
-            runOnUiThread {
-                if (success && transcript.isNotBlank()) {
-                    agentGoalInput.setText(transcript)
-                    agentGoalInput.setSelection(agentGoalInput.text?.length ?: 0)
-                    submitAgentGoal()
-                } else {
-                    Toast.makeText(
-                        this,
-                        transcript.ifBlank { getString(R.string.voice_status_transcription_failed) },
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-            }
-            return true
-        }
-        if (sourceMessageId <= 0L ||
-            (sourceMessageId != pendingVoiceAgentTranscriptId && sourceMessageId != storedRequestId)
-        ) return true
-        if (activeMainTab != PAGE_VOICE || wakePage.visibility != View.VISIBLE) {
-            transcriptStore.saveResponse(payload)
-            return true
-        }
-        pendingVoiceAgentTranscriptId = 0L
-        transcriptStore.clear()
-        processVoiceAgentTranscript(
-            payload.optBoolean("transcription_success", false),
-            payload.optString("content")
-        )
-        return true
     }
 
     private fun processVoiceAgentTranscript(success: Boolean, content: String) {
@@ -4485,7 +4372,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             VoiceAssistantSettings.setWakeWords(this, "SignalASI,voice smoke,$token")
             VoiceAssistantSettings.setWakeModel(this, VoiceAssistantSettings.DEFAULT_WAKE_MODEL)
             VoiceAssistantSettings.setWakeThreshold(this, 0.73f)
-            VoiceAssistantSettings.setAsrProvider(this, VoiceAssistantSettings.ASR_PROVIDER_ANDROID)
+            VoiceAssistantSettings.setAsrProvider(this, VoiceAssistantSettings.ASR_PROVIDER_LOCAL_WHISPER)
             VoiceAssistantSettings.setAsrLanguage(this, "en-US")
             VoiceAssistantSettings.setTtsProvider(this, VoiceAssistantSettings.PROVIDER_ANDROID)
             VoiceAssistantSettings.setMicrosoftVoice(this, "zh-CN-XiaoxiaoNeural")
@@ -4500,7 +4387,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 config.wakeWords.contains("voice smoke") &&
                 config.wakeModel == VoiceAssistantSettings.DEFAULT_WAKE_MODEL &&
                 kotlin.math.abs(config.wakeThreshold - 0.73f) < 0.001f &&
-                config.asrProvider == VoiceAssistantSettings.ASR_PROVIDER_ANDROID &&
+                config.asrProvider == VoiceAssistantSettings.ASR_PROVIDER_LOCAL_WHISPER &&
                 config.asrLanguage == "en-US" &&
                 config.ttsProvider == VoiceAssistantSettings.PROVIDER_ANDROID &&
                 config.microsoftVoice == "zh-CN-XiaoxiaoNeural" &&
@@ -4924,38 +4811,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun requestAgentInputTranscription(sourceFile: File): Boolean {
-        val sttContactId = resolveVoiceAssistantSttContactId("")
-        val topic = AppStore.outgoingTopicForContact(this, sttContactId)
-        if (topic == null) {
-            sourceFile.delete()
-            Toast.makeText(this, R.string.voice_status_asr_unavailable, Toast.LENGTH_LONG).show()
-            return false
-        }
-        val requestId = newMessageId()
-        pendingAgentInputTranscriptId = requestId
-        Log.i("SignalASIVoice", "Agent input transcription publishing requestId=$requestId target=$sttContactId bytes=${sourceFile.length()}")
-        val sent = runCatching {
-            SignalASIMqttClient.publishInlineAudioMessage(
-                fileName = sourceFile.name,
-                size = sourceFile.length(),
-                contentType = "audio/mp4",
-                audioBase64 = Base64.encodeToString(sourceFile.readBytes(), Base64.NO_WRAP),
-                contactId = sttContactId,
-                topicOverride = topic,
-                audioMode = "transcribe_only",
-                clientMessageId = requestId
-            )
-        }.getOrElse {
-            Log.e("SignalASIVoice", "Agent input transcription request failed", it)
-            false
-        }
-        sourceFile.delete()
-        if (!sent) {
-            pendingAgentInputTranscriptId = 0L
-            Toast.makeText(this, R.string.delivery_status_send_failed, Toast.LENGTH_LONG).show()
-        }
-        Log.i("SignalASIVoice", "Agent input transcription published requestId=$requestId sent=$sent")
-        return sent
+        transcribeLocally(sourceFile, onSuccess = { transcript ->
+            agentGoalInput.setText(transcript)
+            agentGoalInput.setSelection(agentGoalInput.text?.length ?: 0)
+            submitAgentGoal()
+        })
+        return true
     }
 
     private fun sendVoiceRecordingThroughPipeline(
@@ -4981,97 +4842,44 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun requestVoiceAgentTranscription(sourceFile: File, contact: Contact): Boolean {
         if (!sourceFile.exists()) return false
-        val topic = AppStore.outgoingTopicForContact(this, contact.id) ?: return false
-        val requestId = newMessageId()
-        val transcriptStore = VoiceAgentTranscriptStore(this)
-        pendingVoiceAgentTranscriptId = requestId
-        transcriptStore.begin(requestId)
-        val sent = runCatching {
-            val audioBase64 = Base64.encodeToString(sourceFile.readBytes(), Base64.NO_WRAP)
-            SignalASIMqttClient.publishInlineAudioMessage(
-                fileName = sourceFile.name,
-                size = sourceFile.length(),
-                contentType = "audio/mp4",
-                audioBase64 = audioBase64,
-                contactId = contact.id,
-                topicOverride = topic,
-                audioMode = "transcribe_only",
-                clientMessageId = requestId
-            )
-        }.getOrElse {
-            Log.e("SignalASIVoice", "Voice Agent transcription request failed", it)
-            false
-        }
-        if (!sent) {
-            pendingVoiceAgentTranscriptId = 0L
-            transcriptStore.clear()
-        }
-        sourceFile.delete()
-        return sent
+        transcribeLocally(sourceFile, onSuccess = { transcript -> submitVoiceAgentGoal(transcript) })
+        return true
     }
 
     private fun publishInlineVoiceFile(messageId: Long, contact: Contact, file: File) {
-        val rawContact = AppStore.contactById(this, contact.id)
-        if (rawContact?.optString("delivery_mode") == "cloud_api") {
-            requestCloudVoiceTranscription(messageId, contact, file)
-            return
-        }
-        val target = AppStore.outgoingTopicForContact(this, contact.id) ?: "signalasichat/android/send"
-        Log.i("SignalASIVoice", "Inline voice publish begin target=${contact.id} topic=$target bytes=${file.length()} messageId=$messageId")
-        val sent = runCatching {
-            Log.i("SignalASIVoice", "Inline voice read begin file=${file.name}")
-            val audioBase64 = Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
-            Log.i("SignalASIVoice", "Inline voice read done b64=${audioBase64.length}")
-            Log.i("SignalASIVoice", "Inline voice mqtt publish begin")
-            SignalASIMqttClient.publishInlineAudioMessage(
-                fileName = file.name,
-                size = file.length(),
-                contentType = "audio/mp4",
-                audioBase64 = audioBase64,
-                contactId = contact.id,
-                topicOverride = target
-            ).also { Log.i("SignalASIVoice", "Inline voice mqtt publish returned=$it") }
-        }.getOrElse {
-            Log.e("SignalASIVoice", "Inline voice publish failed", it)
-            false
-        }
-        Log.i("SignalASIVoice", "Inline voice publish result=$sent target=${contact.id} bytes=${file.length()} messageId=$messageId")
-        updateMessageStatus(messageId, contact.id, if (sent) getString(R.string.delivery_status_mqtt_inline) else getString(R.string.delivery_status_send_failed))
+        updateMessageStatus(messageId, contact.id, getString(R.string.voice_status_transcribing))
+        transcribeLocally(file, onSuccess = { transcript ->
+            updateMessageStatus(messageId, contact.id, getString(R.string.voice_status_transcribed))
+            sendOutgoingText(contact, transcript)
+        }, onFailure = {
+            updateMessageStatus(messageId, contact.id, getString(R.string.delivery_status_failed))
+        })
     }
 
-    private fun requestCloudVoiceTranscription(messageId: Long, cloudContact: Contact, file: File) {
-        val sttContactId = resolveVoiceAssistantSttContactId("")
-        val topic = AppStore.outgoingTopicForContact(this, sttContactId)
-        if (topic == null) {
-            updateMessageStatus(messageId, cloudContact.id, getString(R.string.delivery_status_send_failed))
-            file.delete()
-            return
+    private fun transcribeLocally(
+        sourceFile: File,
+        onSuccess: (String) -> Unit,
+        onFailure: () -> Unit = {}
+    ) {
+        val language = VoiceAssistantSettings.get(this).asrLanguage
+        voiceAssistantScope.launch {
+            val result = runCatching { LocalWhisperAsr.transcribe(this@MainActivity, sourceFile, language) }
+            sourceFile.delete()
+            runOnUiThread {
+                val transcript = result.getOrNull().orEmpty().trim()
+                if (transcript.isNotBlank()) {
+                    onSuccess(transcript)
+                } else {
+                    Log.e("SignalASILocalASR", "Local transcription failed", result.exceptionOrNull())
+                    Toast.makeText(
+                        this@MainActivity,
+                        result.exceptionOrNull()?.message ?: getString(R.string.voice_status_transcription_failed),
+                        Toast.LENGTH_LONG
+                    ).show()
+                    onFailure()
+                }
+            }
         }
-        val requestId = newMessageId()
-        pendingCloudVoiceRequests[requestId] = PendingCloudVoiceRequest(cloudContact, messageId)
-        updateMessageStatus(messageId, cloudContact.id, getString(R.string.delivery_status_requesting))
-        val sent = runCatching {
-            val audioBase64 = Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
-            SignalASIMqttClient.publishInlineAudioMessage(
-                fileName = file.name,
-                size = file.length(),
-                contentType = "audio/mp4",
-                audioBase64 = audioBase64,
-                contactId = sttContactId,
-                topicOverride = topic,
-                audioMode = "transcribe_only",
-                clientMessageId = requestId
-            )
-        }.getOrElse {
-            Log.e("SignalASIVoice", "Cloud voice transcription request failed", it)
-            false
-        }
-        if (!sent) {
-            pendingCloudVoiceRequests.remove(requestId)
-            updateMessageStatus(messageId, cloudContact.id, getString(R.string.delivery_status_send_failed))
-        }
-        file.delete()
-        Log.i("SignalASIVoice", "Cloud voice STT queued=$sent target=${cloudContact.id} stt=$sttContactId requestId=$requestId")
     }
 
     private fun playVoiceMessage(msgId: Long) {
@@ -7031,21 +6839,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
         })
         addSectionTitle(getString(R.string.voice_section_asr))
-        featureContent.addView(featureRow(getString(R.string.voice_asr_provider), asrProviderLabel(config.asrProvider), R.drawable.ic_agent_node, getString(R.string.common_select)).apply {
-            setOnClickListener {
-                val pcStt = getString(R.string.voice_asr_provider_pc)
-                val androidAsr = getString(R.string.voice_asr_provider_android)
-                showChoiceDialog(getString(R.string.voice_asr_provider), listOf(pcStt, androidAsr), asrProviderLabel(config.asrProvider)) {
-                    val provider = if (it == pcStt) {
-                        VoiceAssistantSettings.ASR_PROVIDER_PC_STT
-                    } else {
-                        VoiceAssistantSettings.ASR_PROVIDER_ANDROID
-                    }
-                    VoiceAssistantSettings.setAsrProvider(this@MainActivity, provider)
-                    showVoiceAssistantSettingsPage()
-                }
-            }
-        })
+        featureContent.addView(featureRow(
+            getString(R.string.voice_asr_provider),
+            getString(R.string.voice_asr_provider_local_whisper),
+            R.drawable.ic_agent_node,
+            getString(R.string.common_on)
+        ))
         featureContent.addView(featureRow(getString(R.string.voice_asr_language), config.asrLanguage, R.drawable.ic_protocol_link, getString(R.string.common_select)).apply {
             setOnClickListener {
                 showChoiceDialog(getString(R.string.voice_asr_language), listOf("zh-CN", "en-US", "zh-HK", "zh-TW"), config.asrLanguage) {
@@ -7149,7 +6948,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (provider == VoiceAssistantSettings.WAKE_PROVIDER_ANDROID_ASR) getString(R.string.voice_wake_engine_android_asr) else getString(R.string.voice_wake_engine_openwakeword)
 
     private fun asrProviderLabel(provider: String): String =
-        if (provider == VoiceAssistantSettings.ASR_PROVIDER_ANDROID) getString(R.string.voice_asr_provider_android) else getString(R.string.voice_asr_provider_pc)
+        getString(R.string.voice_asr_provider_local_whisper)
 
     private fun ttsProviderLabel(provider: String): String =
         if (provider == VoiceAssistantSettings.PROVIDER_ANDROID) getString(R.string.voice_tts_android) else getString(R.string.voice_tts_microsoft)
@@ -9250,7 +9049,6 @@ data class DeliveryTraceEvent(
     val detail: String = ""
 )
 
-data class PendingCloudVoiceRequest(val contact: Contact, val voiceMessageId: Long)
 
 data class ContactSummary(
     var lastMessage: String = "",

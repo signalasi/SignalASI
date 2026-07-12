@@ -17,6 +17,23 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
+        externalNativeBuild {
+            cmake {
+                cppFlags += listOf("-std=c++17")
+            }
+        }
+    }
+
+    ndkVersion = "25.2.9519653"
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    androidResources {
+        noCompress += "bin"
     }
 
     compileOptions {

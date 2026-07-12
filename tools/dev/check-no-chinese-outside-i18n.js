@@ -8,6 +8,7 @@ const ignoredDirs = new Set([
   ".git",
   ".gradle",
   ".gradle-dist",
+  ".cxx",
   ".kotlin",
   "build",
   "dist",
@@ -33,6 +34,7 @@ const ignoredExtensions = new Set([
   ".jar",
   ".onnx",
   ".tflite",
+  ".bin",
   ".db",
   ".sqlite"
 ]);

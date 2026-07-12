@@ -536,7 +536,7 @@
     <string name="voice_wake_threshold">唤醒阈值</string>
     <string name="voice_section_asr">ASR</string>
     <string name="voice_asr_provider">ASR 提供方</string>
-    <string name="voice_asr_provider_pc">PC faster-whisper</string>
+    <string name="voice_asr_provider_local_whisper">本机 whisper.cpp · base</string>
     <string name="voice_asr_provider_android">Android 系统 ASR</string>
     <string name="voice_asr_language">ASR 语言</string>
     <string name="voice_section_tts">TTS</string>
@@ -553,7 +553,7 @@
     <string name="voice_routing_mode_subtitle">选择语音目标进入本体 Agent，或直接发送给聊天联系人</string>
     <string name="voice_routing_native_agent">本体 Agent</string>
     <string name="voice_routing_contact">聊天联系人</string>
-    <string name="voice_stt_target">Desktop STT 连接器</string>
+    <string name="voice_stt_target">Agent 目标</string>
     <string name="voice_status_transcribing">正在 Desktop 本地转写</string>
     <string name="voice_status_waiting_transcript">等待 %1$s 返回加密转写文本</string>
     <string name="voice_status_transcribed">语音目标已转写</string>
@@ -584,7 +584,6 @@
     <string name="voice_status_local_wake_detail">openWakeWord 离线运行，不依赖网络</string>
     <string name="voice_status_local_wake_failed">本地唤醒启动失败</string>
     <string name="voice_status_check_model_permission">检查模型文件和录音权限</string>
-    <string name="voice_status_switch_pc_stt">可在设置中切换到 PC faster-whisper</string>
     <string name="voice_status_awake_listening">已唤醒，正在听</string>
     <string name="voice_status_say_task">请说出你的问题或任务</string>
     <string name="voice_status_awake_auto_recording">已唤醒，正在聆听</string>
@@ -967,7 +966,6 @@
     <string name="agent_risk_blocked">已拦截</string>
     <string name="cloud_tool_running">正在调用 %1$s · %2$s</string>
     <string name="cloud_tool_completed">%1$s 已完成 · %2$s</string>
-    <string name="cloud_voice_transcript">语音转写：%1$s</string>
     <string name="agent_trace_plan_updated">已更新执行计划</string>
     <string name="agent_trace_tool_result_ready">工具结果已准备</string>
     <string name="agent_trace_recovery_started">正在恢复中断的步骤</string>
