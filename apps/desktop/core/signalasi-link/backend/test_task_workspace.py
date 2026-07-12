@@ -33,6 +33,20 @@ class TaskWorkspaceTests(unittest.TestCase):
         self.assertEqual(root, task_workspace.DEFAULT_WORKSPACE_ROOT.resolve())
         self.assertFalse(root.is_relative_to(task_workspace.BACKEND_DIR))
 
+    def test_cleanup_removes_only_temporary_directories(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "SignalASIWorkspace"
+            with patch.dict(os.environ, {"SIGNALASI_WORKSPACE_ROOT": str(root)}):
+                directory = task_workspace.task_workspace("task-clean", "codex")
+                (directory / "temp" / "scratch.txt").write_text("temp", encoding="utf-8")
+                (directory / "logs" / "run.txt").write_text("log", encoding="utf-8")
+                (directory / "outputs" / "result.txt").write_text("keep", encoding="utf-8")
+                cleaned = task_workspace.cleanup_task_temporary_files({"task-clean"})
+            self.assertEqual(cleaned, ["task-clean"])
+            self.assertFalse((directory / "temp").exists())
+            self.assertFalse((directory / "logs").exists())
+            self.assertEqual((directory / "outputs" / "result.txt").read_text(encoding="utf-8"), "keep")
+
 
 if __name__ == "__main__":
     unittest.main()

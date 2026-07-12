@@ -22,11 +22,17 @@ object AgentBackupData {
         val homeAssistant = HomeAssistantSettingsStore.load(context)
         val customDevices = CustomDeviceConnectorStore(context).exportJson()
         return JSONObject()
-            .put("version", 10)
+            .put("version", 11)
             .put("memory", readArray(context, MEMORY_PREFS, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS))
             .put("knowledge", readArray(context, KNOWLEDGE_PREFS, MAX_KNOWLEDGE_ITEMS, MAX_KNOWLEDGE_ITEM_CHARACTERS))
             .put("tasks", readArray(context, TASK_PREFS, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS))
             .put("transcript", readArray(context, TRANSCRIPT_PREFS, MAX_TRANSCRIPT_ITEMS, MAX_TRANSCRIPT_ITEM_CHARACTERS))
+            .put("agent_conversations", readAgentConversationArray(context))
+            .put(
+                "active_agent_conversation",
+                AgentEncryptedPreferences(context, TRANSCRIPT_PREFS)
+                    .readString(AgentTranscriptStore.KEY_ACTIVE_CONVERSATION, "")
+            )
             .put("workflows", readArray(context, WORKFLOW_PREFS, MAX_WORKFLOW_ITEMS, MAX_WORKFLOW_ITEM_CHARACTERS))
             .put("workflow_schedules", readArray(context, SCHEDULE_PREFS, MAX_SCHEDULE_ITEMS, MAX_SCHEDULE_ITEM_CHARACTERS))
             .put("workflow_triggers", readArray(context, TRIGGER_PREFS, MAX_TRIGGER_ITEMS, MAX_TRIGGER_ITEM_CHARACTERS))
@@ -111,6 +117,15 @@ object AgentBackupData {
             val sanitized = sanitizeArray(input, MAX_TRANSCRIPT_ITEMS, MAX_TRANSCRIPT_ITEM_CHARACTERS)
             AgentEncryptedPreferences(context, TRANSCRIPT_PREFS)
                 .writeString(AgentTranscriptStore.KEY_ITEMS, sanitized.toString())
+        }
+        payload.optJSONArray("agent_conversations")?.let { input ->
+            val sanitized = sanitizeArray(input, 100, 20_000)
+            AgentEncryptedPreferences(context, TRANSCRIPT_PREFS)
+                .writeString(AgentTranscriptStore.KEY_CONVERSATIONS, sanitized.toString())
+        }
+        payload.optString("active_agent_conversation").takeIf { it.isNotBlank() }?.let { activeId ->
+            AgentEncryptedPreferences(context, TRANSCRIPT_PREFS)
+                .writeString(AgentTranscriptStore.KEY_ACTIVE_CONVERSATION, activeId.take(120))
         }
         payload.optJSONArray("workflows")?.let { input ->
             val sanitized = sanitizeArray(input, MAX_WORKFLOW_ITEMS, MAX_WORKFLOW_ITEM_CHARACTERS)
@@ -214,6 +229,12 @@ object AgentBackupData {
         val raw = AgentEncryptedPreferences(context, preferencesName).readString(ITEMS_KEY, "[]")
         val array = runCatching { JSONArray(raw) }.getOrDefault(JSONArray())
         return sanitizeArray(array, maxItems, maxItemCharacters)
+    }
+
+    private fun readAgentConversationArray(context: Context): JSONArray {
+        val raw = AgentEncryptedPreferences(context, TRANSCRIPT_PREFS)
+            .readString(AgentTranscriptStore.KEY_CONVERSATIONS, "[]")
+        return sanitizeArray(runCatching { JSONArray(raw) }.getOrDefault(JSONArray()), 100, 20_000)
     }
 
     private fun sanitizeArray(input: JSONArray, maxItems: Int, maxItemCharacters: Int): JSONArray {

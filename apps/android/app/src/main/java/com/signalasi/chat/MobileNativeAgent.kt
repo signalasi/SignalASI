@@ -25,9 +25,13 @@ import android.provider.ContactsContract
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
-import java.util.UUID
 import java.util.Date
 import java.text.SimpleDateFormat
+import java.util.UUID
+
+private const val INTERNAL_CONVERSATION_ID = "_signalasi_conversation_id"
+private const val INTERNAL_CONVERSATION_CONTEXT = "_signalasi_conversation_context"
+private const val INTERNAL_TURN_ID = "_signalasi_turn_id"
 
 private val SENSITIVE_MEMORY_TERMS = listOf(
     "password",
@@ -78,6 +82,8 @@ class MobileNativeAgent(
 ) {
     private val appContext = context.applicationContext
     private var sessionId: String = UUID.randomUUID().toString()
+    private var activeConversationContext: AgentConversationContext = AgentConversationContext("", "", emptyList(), false)
+    private var activeConversationTurnId: String = ""
     private var phase: AgentPhase = AgentPhase.OBSERVING
     private var currentGoal: String = ""
     private var currentScreen: ScreenContext = captureScreen()
@@ -203,8 +209,14 @@ class MobileNativeAgent(
         return snapshot()
     }
 
-    fun submitGoal(goal: String): AgentUiState {
+    fun submitGoal(
+        goal: String,
+        conversationContext: AgentConversationContext = AgentConversationContext("", "", emptyList(), false),
+        turnId: String = ""
+    ): AgentUiState {
         val requestedGoal = goal.trim()
+        activeConversationContext = conversationContext
+        activeConversationTurnId = turnId
         when {
             retryTaskCommand(requestedGoal) -> return retryFailedAction()
             approveTaskCommand(requestedGoal) -> return approveNextAction()
@@ -389,7 +401,7 @@ class MobileNativeAgent(
             return searchKnowledgeCommand(query)
         }
         val targets = connectorRegistry.availableTargets()
-        val memories = memoryStore.recall(currentGoal)
+        val memories = if (activeConversationContext.privateMode) emptyList() else memoryStore.recall(currentGoal)
         val knowledgeItems = knowledgeStore.search(currentGoal)
         val context = buildRuntimeContext(
             goal = currentGoal,
@@ -399,14 +411,25 @@ class MobileNativeAgent(
             knowledgeItems = knowledgeItems,
             knowledgeStats = knowledgeStore.stats()
         )
-        val draftPlan = planner.plan(
+        val planned = planner.plan(
             request = AgentRequest(
                 goal = currentGoal,
                 screen = currentScreen,
                 targets = targets,
                 memories = memories,
-                runtimeContext = context
+                runtimeContext = context,
+                conversationContext = activeConversationContext
             )
+        )
+        val conversationPrompt = activeConversationContext.asPromptBlock().take(12_000)
+        val draftPlan = planned.copy(
+            actions = planned.actions.map { action ->
+                action.copy(parameters = action.parameters + mapOf(
+                    INTERNAL_CONVERSATION_ID to activeConversationContext.conversationId,
+                    INTERNAL_CONVERSATION_CONTEXT to conversationPrompt,
+                    INTERNAL_TURN_ID to activeConversationTurnId
+                ))
+            }
         )
         val safetyReview = safetyPolicy.review(draftPlan)
         currentPlan = draftPlan.withSafetyReview(safetyReview)
@@ -420,7 +443,9 @@ class MobileNativeAgent(
             else -> AgentPhase.PLANNING
         }
         lastActionResult = null
-        val memoryBlockReason = if (isPrivateCommunicationGoal(currentGoal)) {
+        val memoryBlockReason = if (activeConversationContext.privateMode) {
+            "Private session is excluded from long-term memory"
+        } else if (isPrivateCommunicationGoal(currentGoal)) {
             "Private communication is excluded from long-term memory"
         } else {
             memoryBlockReason(currentGoal, currentScreen)
@@ -4407,7 +4432,7 @@ class MobileNativeAgent(
         taskStore.upsert(
             AgentTaskRecord(
                 taskId = plan.planId,
-                sessionId = sessionId,
+                sessionId = activeConversationContext.conversationId.ifBlank { sessionId },
                 goal = if (sensitiveMemoryReason(currentGoal, currentScreen) == null) currentGoal else "Sensitive goal withheld",
                 phase = phase,
                 routeKind = plan.route.kind,
@@ -6387,11 +6412,13 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             deliveryTrace = trace
         )
         val published = SignalASIMqttClient.publishUserMessage(
-            content = prompt,
+            content = promptWithConversationContext(action, prompt),
             contactId = contactId,
             topicOverride = topic,
             clientMessageId = messageId.takeIf { it > 0L },
-            deliveryTrace = trace
+            deliveryTrace = trace,
+            conversationId = action.parameters[INTERNAL_CONVERSATION_ID].orEmpty(),
+            turnId = action.parameters[INTERNAL_TURN_ID].orEmpty()
         )
         ChatHistoryStore.markOutgoingDelivery(
             context = context,
@@ -6466,7 +6493,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 val candidateId = candidate.optString("id").ifBlank { candidate.optString("signalasi_id") }
                 val model = AppStore.selectedCloudModelContact(appContext, candidateId) ?: candidate
                 val startedAt = System.currentTimeMillis()
-                runCatching { CloudModelClient.send(appContext, model, prompt) }
+                runCatching { CloudModelClient.send(appContext, model, promptWithConversationContext(action, prompt)) }
                     .onSuccess { reply ->
                         if (replySatisfiesRoute(action, reply)) {
                             successfulReply = reply
@@ -6533,6 +6560,16 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 "cloud_health_recorded" to "true"
             )
         )
+    }
+
+    private fun promptWithConversationContext(action: AgentAction, prompt: String): String {
+        val contextBlock = action.parameters[INTERNAL_CONVERSATION_CONTEXT].orEmpty()
+        if (contextBlock.isBlank()) return prompt
+        return buildString {
+            append(contextBlock)
+            append("\n\nCurrent user request:\n")
+            append(prompt)
+        }.take(24_000)
     }
 
     private fun replySatisfiesRoute(action: AgentAction, reply: String): Boolean {
@@ -8183,6 +8220,7 @@ data class AgentRequest(
     val targets: List<AgentCallableTarget>,
     val memories: List<AgentMemoryItem>,
     val runtimeContext: AgentRuntimeContext,
+    val conversationContext: AgentConversationContext = AgentConversationContext("", "", emptyList(), false),
     val executionHistory: List<AgentAction> = emptyList(),
     val replanReason: String = ""
 )

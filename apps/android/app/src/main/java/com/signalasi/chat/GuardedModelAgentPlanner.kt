@@ -126,6 +126,9 @@ private object AgentModelPlanningPrompt {
             append("Do not use depends_on or use_outputs_from.\n")
         }
         append("User goal: ").append(request.goal.take(2_000)).append("\n")
+        if (request.conversationContext.turns.isNotEmpty() || request.conversationContext.summary.isNotBlank()) {
+            append(request.conversationContext.asPromptBlock().take(8_000)).append("\n")
+        }
         if (request.replanReason.isNotBlank()) {
             append("Replan reason: ").append(request.replanReason.take(500)).append("\n")
             append("Continue from the current state. Do not repeat completed actions unless the screen proves they were undone.\n")

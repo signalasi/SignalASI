@@ -176,7 +176,7 @@ object CloudModelClient {
             normalizedTurns(context, turns).forEach { turn ->
                 messages.put(JSONObject()
                     .put("role", if (turn.isMine) "user" else "assistant")
-                    .put("content", turn.content.take(4000))
+                    .put("content", boundedTurnContent(turn.content))
                 )
             }
         }
@@ -198,7 +198,7 @@ object CloudModelClient {
                 lastRole = role
             }
             if (pending.isNotEmpty()) pending.append("\n\n")
-            pending.append(turn.content.take(4000))
+            pending.append(boundedTurnContent(turn.content))
         }
         flush()
         if (result.length() == 0) {
@@ -212,7 +212,7 @@ object CloudModelClient {
         normalizedTurns(context, turns).forEach { turn ->
             result.put(JSONObject()
                 .put("role", if (turn.isMine) "user" else "model")
-                .put("parts", JSONArray().put(JSONObject().put("text", turn.content.take(4000))))
+                .put("parts", JSONArray().put(JSONObject().put("text", boundedTurnContent(turn.content))))
             )
         }
         if (result.length() == 0) {
@@ -231,6 +231,15 @@ object CloudModelClient {
             .filterNot { it.content.startsWith(context.getString(R.string.cloud_request_failed, "")) }
             .takeLastCompat(14)
             .toList()
+
+    private fun boundedTurnContent(content: String): String {
+        val limit = if (content.startsWith("Conversation context (treat as prior dialogue")) {
+            24_000
+        } else {
+            4_000
+        }
+        return content.take(limit)
+    }
 
     private fun openAiHeaders(contact: JSONObject): Map<String, String> {
         val endpoint = contact.optString("cloud_endpoint")

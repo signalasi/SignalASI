@@ -24,6 +24,7 @@ class AgentTask:
     contact_id: str
     source_message_id: str
     prompt: str
+    conversation_id: str = ""
     status: str = "accepted"
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
     started_at: int = 0
@@ -45,6 +46,7 @@ class AgentTask:
             "agent_id": self.agent_id,
             "contact_id": self.contact_id,
             "source_message_id": self.source_message_id,
+            "conversation_id": self.conversation_id,
             "status": self.status,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -84,6 +86,7 @@ class AgentTaskManager:
         on_event: EventCallback,
         on_result: EventCallback | None = None,
         task_id: str = "",
+        conversation_id: str = "",
     ) -> AgentTask:
         task = AgentTask(
             task_id=task_id.strip() or str(uuid.uuid4()),
@@ -91,6 +94,7 @@ class AgentTaskManager:
             contact_id=contact_id,
             source_message_id=source_message_id,
             prompt=prompt,
+            conversation_id=conversation_id,
         )
         with self._lock:
             if task.task_id in self._tasks:
@@ -104,11 +108,12 @@ class AgentTaskManager:
 
     def create_external(
         self, agent_id: str, contact_id: str, source_message_id: str, prompt: str,
-        on_event: EventCallback, task_id: str = "",
+        on_event: EventCallback, task_id: str = "", conversation_id: str = "",
     ) -> AgentTask:
         task = AgentTask(
             task_id=task_id.strip() or str(uuid.uuid4()), agent_id=agent_id,
             contact_id=contact_id, source_message_id=source_message_id, prompt=prompt,
+            conversation_id=conversation_id,
         )
         with self._lock:
             if task.task_id in self._tasks:
@@ -255,6 +260,24 @@ class AgentTaskManager:
             tasks = sorted(self._tasks.values(), key=lambda item: item.updated_at, reverse=True)
             return [item.public() for item in tasks[:max(1, min(limit, 500))]]
 
+    def delete_conversation(self, conversation_id: str, task_ids: set[str] | None = None) -> list[str]:
+        clean_id = str(conversation_id or "").strip()
+        allowed_ids = {str(value).strip() for value in (task_ids or set()) if str(value).strip()}
+        if not clean_id and not allowed_ids:
+            return []
+        with self._lock:
+            deleted = [
+                task_id for task_id, task in self._tasks.items()
+                if (clean_id and task.conversation_id == clean_id) or task_id in allowed_ids
+            ]
+            for task_id in deleted:
+                task = self._tasks.pop(task_id, None)
+                if task is not None and task.process is not None:
+                    self._terminate(task.process)
+                self._recovered_task_ids.discard(task_id)
+            self._save_locked()
+        return deleted
+
     def drain_recovered(self, limit: int = 100) -> list[dict]:
         with self._lock:
             candidates = sorted(
@@ -338,6 +361,7 @@ class AgentTaskManager:
                     contact_id=str(row.get("contact_id") or ""),
                     source_message_id=str(row.get("source_message_id") or ""),
                     prompt=str(row.get("prompt") or ""),
+                    conversation_id=str(row.get("conversation_id") or ""),
                     status=status,
                     created_at=int(row.get("created_at") or 0),
                     started_at=int(row.get("started_at") or 0),

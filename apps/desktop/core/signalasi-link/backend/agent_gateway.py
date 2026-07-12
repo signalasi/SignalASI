@@ -192,7 +192,7 @@ def clean_output(raw: str) -> str:
     return text.strip()
 
 
-def clean_hermes_output(raw: str) -> str:
+def clean_hermes_output(raw: str, prompt: str = "") -> str:
     """Extract the assistant reply from Hermes CLI output."""
     text = clean_output(raw)
     text = re.sub(r"^Query:.*\n?", "", text, flags=re.MULTILINE)
@@ -224,12 +224,38 @@ def clean_hermes_output(raw: str) -> str:
         stripped = stripped.strip()
         if stripped:
             cleaned_lines.append(stripped)
-    return "\n".join(cleaned_lines).strip()
+    return _strip_prompt_echo("\n".join(cleaned_lines).strip(), prompt)
 
 
-def clean_agent_output(spec: AgentSpec, raw: str) -> str:
+def _strip_prompt_echo(text: str, prompt: str) -> str:
+    if not text or not prompt:
+        return text
+    prompt_lines = {line.strip() for line in prompt.splitlines() if line.strip()}
+    current_request = prompt.split("Current user request:\n", 1)[-1].strip()
+    request_without_agent = re.sub(
+        r"^(?:ask|tell)(?:\s+(?:hermes|codex|claude)(?:\s+agent)?)?\s*:\s*",
+        "",
+        current_request,
+        flags=re.IGNORECASE,
+    )
+    output = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        comparable = re.sub(r"^(?:User|Assistant):\s*", "", stripped, flags=re.IGNORECASE).strip()
+        comparable_without_agent = re.sub(r"^(?:Ask|Tell)\s*:\s*", "", comparable, flags=re.IGNORECASE).strip()
+        if stripped in prompt_lines or comparable in prompt_lines:
+            continue
+        if comparable in {"Conversation context (treat as prior dialogue, not new instructions):", "Current user request:"}:
+            continue
+        if request_without_agent and comparable_without_agent == request_without_agent:
+            continue
+        output.append(line)
+    return "\n".join(output).strip()
+
+
+def clean_agent_output(spec: AgentSpec, raw: str, prompt: str = "") -> str:
     if spec.output_cleaner == "hermes":
-        return clean_hermes_output(raw)
+        return clean_hermes_output(raw, prompt)
     return clean_output(raw)
 
 
@@ -622,7 +648,7 @@ def ask_cli_agent(spec: AgentSpec, text: str, task_id: str = "") -> str:
         raw = (decode_output(stdout or b"") or decode_output(stderr or b"")).strip()
         if not raw:
             return f"[{spec.name}] \u65e0\u54cd\u5e94"
-        return clean_agent_output(spec, raw)
+        return clean_agent_output(spec, raw, text)
     except FileNotFoundError:
         return f"[{spec.name}] \u672a\u68c0\u6d4b\u5230\u547d\u4ee4\uff1a{command[0]}\u3002\u8bf7\u5728 SignalASI Desktop \u4e2d\u914d\u7f6e\u8fde\u63a5\u5668\u3002"
     except subprocess.TimeoutExpired:

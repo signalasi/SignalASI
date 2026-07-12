@@ -23,6 +23,7 @@ interface AgentTaskStore {
     fun upsert(record: AgentTaskRecord)
     fun recent(limit: Int = 20): List<AgentTaskRecord>
     fun search(query: String, limit: Int = 10): List<AgentTaskRecord>
+    fun delete(taskIds: Set<String>)
     fun clear()
 }
 
@@ -56,6 +57,11 @@ class SharedPreferencesAgentTaskStore(context: Context) : AgentTaskStore {
 
     override fun clear() {
         prefs.clear()
+    }
+
+    override fun delete(taskIds: Set<String>) {
+        if (taskIds.isEmpty()) return
+        saveItems(loadItems().filterNot { it.taskId in taskIds || it.sessionId in taskIds })
     }
 
     private fun score(item: AgentTaskRecord, query: String, tokens: List<String>): Int {

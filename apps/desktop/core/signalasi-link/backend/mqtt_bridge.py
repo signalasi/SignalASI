@@ -270,6 +270,7 @@ def _agent_task_payload(task: dict, trace: list[dict]) -> dict:
         "contact_id": task.get("contact_id", ""),
         "agent_id": task.get("agent_id", ""),
         "source_message_id": task.get("source_message_id", ""),
+        "conversation_id": task.get("conversation_id", ""),
         "created_at": task.get("created_at", 0),
         "started_at": task.get("started_at", 0),
         "updated_at": task.get("updated_at", 0),
@@ -347,6 +348,8 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             "desktop_id": desktop_id(),
             "desktop_name": desktop_name(),
             "source_message_id": source_message_id,
+            "conversation_id": task.get("conversation_id", ""),
+            "turn_id": task.get("turn_id", ""),
             "delivery_trace": _delivery_trace(
                 {"delivery_trace": trace},
                 _trace_event("agent_replied", f"{agent_id} chars={len(reply)}"),
@@ -362,6 +365,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         task = agent_task_manager.create_external(
             agent_id=agent_id, contact_id=contact_id, source_message_id=source_message_id,
             prompt=content, on_event=publish_event, task_id=str(payload.get("task_id") or ""),
+            conversation_id=str(payload.get("conversation_id") or ""),
         )
 
         def app_event(task_id: str, event: dict) -> None:
@@ -382,7 +386,12 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                 with codex_task_callbacks_lock:
                     codex_task_callbacks[task.task_id] = app_event
                 server = _codex_server(executable, _agent_env(BASE_AGENTS["codex"]))
-                server.start_task(task.task_id, content, str(task_workspace(task.task_id, agent_id)))
+                server.start_task(
+                    task.task_id,
+                    content,
+                    str(task_workspace(task.task_id, agent_id)),
+                    conversation_id=str(payload.get("conversation_id") or ""),
+                )
             except Exception as exc:
                 agent_task_manager.update(task.task_id, "failed", on_event=publish_event, error=str(exc)[:500])
 
@@ -398,6 +407,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         on_event=publish_event,
         on_result=publish_result,
         task_id=str(payload.get("task_id") or ""),
+        conversation_id=str(payload.get("conversation_id") or ""),
     )
 
 
@@ -464,6 +474,23 @@ def on_message(mqttc, userdata, msg):
                     "time": time.time(),
                     "delivery_trace": _delivery_trace({"delivery_trace": trace}, _trace_event("agent_not_found", task_id)),
                 })
+            return
+
+        if msg_type == "agent_conversation_delete":
+            conversation_id = str(payload.get("conversation_id") or "").strip()
+            requested_ids = {
+                str(value).strip() for value in (payload.get("task_ids") or [])
+                if str(value).strip()
+            }
+            deleted_ids = agent_task_manager.delete_conversation(conversation_id, requested_ids)
+            if codex_app_server is not None:
+                codex_app_server.delete_conversation(conversation_id)
+            from task_workspace import cleanup_task_temporary_files
+            cleaned_ids = cleanup_task_temporary_files(deleted_ids or requested_ids)
+            log.info(
+                "Agent conversation cleanup conversation_id=%s tasks=%d temporary=%d",
+                conversation_id, len(deleted_ids), len(cleaned_ids),
+            )
             return
 
         if msg_type in {"audio", "voice"}:

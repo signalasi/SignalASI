@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -48,6 +49,24 @@ def task_workspace(task_id: str = "", agent_id: str = "") -> Path:
             encoding="utf-8",
         )
     return directory
+
+
+def cleanup_task_temporary_files(task_ids: list[str] | set[str]) -> list[str]:
+    tasks_root = (workspace_root() / "tasks").resolve()
+    cleaned: list[str] = []
+    for task_id in task_ids:
+        safe_id = _safe_component(task_id)
+        if not safe_id:
+            continue
+        directory = (tasks_root / safe_id).resolve()
+        if not _is_within(directory, tasks_root) or not directory.exists():
+            continue
+        for name in ("temp", "logs"):
+            target = (directory / name).resolve()
+            if _is_within(target, directory) and target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+        cleaned.append(safe_id)
+    return cleaned
 
 
 def _safe_component(value: str) -> str:

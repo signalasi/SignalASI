@@ -7,10 +7,12 @@ import queue
 import subprocess
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 
 TaskEvent = Callable[[str, dict], None]
+CONVERSATION_THREADS_PATH = Path.home() / ".signalasi" / "codex_conversation_threads.json"
 
 
 @dataclass
@@ -33,16 +35,29 @@ class CodexAppServer:
         self._pending: dict[int, queue.Queue] = {}
         self._runs: dict[str, CodexRun] = {}
         self._turn_tasks: dict[str, str] = {}
+        self._conversation_threads: dict[str, str] = self._load_conversation_threads()
 
-    def start_task(self, task_id: str, prompt: str, cwd: str, model: str = "gpt-5.6-sol") -> CodexRun:
+    def start_task(
+        self,
+        task_id: str,
+        prompt: str,
+        cwd: str,
+        model: str = "gpt-5.6-sol",
+        conversation_id: str = "",
+    ) -> CodexRun:
         self._ensure_started()
         run = CodexRun(task_id=task_id)
         self._runs[task_id] = run
-        response = self._request("thread/start", {
-            "cwd": os.path.abspath(cwd), "model": model, "ephemeral": False,
-            "approvalPolicy": "on-request", "sandbox": "workspace-write",
-        }, timeout=30)
-        run.thread_id = str((response.get("thread") or {}).get("id") or "")
+        run.thread_id = self._conversation_threads.get(conversation_id, "") if conversation_id else ""
+        if not run.thread_id:
+            response = self._request("thread/start", {
+                "cwd": os.path.abspath(cwd), "model": model, "ephemeral": False,
+                "approvalPolicy": "on-request", "sandbox": "workspace-write",
+            }, timeout=30)
+            run.thread_id = str((response.get("thread") or {}).get("id") or "")
+            if conversation_id and run.thread_id:
+                self._conversation_threads[conversation_id] = run.thread_id
+                self._save_conversation_threads()
         if not run.thread_id:
             raise RuntimeError("Codex App Server did not return a thread id")
         self.on_event(task_id, {"status": "starting", "thread_id": run.thread_id, "current_step": "Starting Codex turn"})
@@ -55,6 +70,36 @@ class CodexAppServer:
         if run.turn_id:
             self._turn_tasks[run.turn_id] = task_id
         return run
+
+    def _load_conversation_threads(self) -> dict[str, str]:
+        try:
+            data = json.loads(CONVERSATION_THREADS_PATH.read_text(encoding="utf-8"))
+            return {
+                str(key)[:120]: str(value)[:160]
+                for key, value in data.items()
+                if str(key).strip() and str(value).strip()
+            }
+        except Exception:
+            return {}
+
+    def _save_conversation_threads(self) -> None:
+        try:
+            CONVERSATION_THREADS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            temporary = CONVERSATION_THREADS_PATH.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self._conversation_threads, ensure_ascii=True), encoding="utf-8")
+            temporary.replace(CONVERSATION_THREADS_PATH)
+        except Exception:
+            pass
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        clean_id = str(conversation_id or "").strip()
+        if not clean_id:
+            return False
+        with self._lock:
+            removed = self._conversation_threads.pop(clean_id, None)
+            if removed is not None:
+                self._save_conversation_threads()
+            return removed is not None
 
     def interrupt(self, task_id: str) -> bool:
         run = self._runs.get(task_id)

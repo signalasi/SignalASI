@@ -169,7 +169,9 @@ object SignalASIMqttClient {
         contactId: String = "hermes",
         topicOverride: String? = null,
         clientMessageId: Long? = null,
-        deliveryTrace: org.json.JSONArray? = null
+        deliveryTrace: org.json.JSONArray? = null,
+        conversationId: String = "",
+        turnId: String = ""
     ): Boolean {
         val context = appContext
         val payload = JSONObject()
@@ -178,6 +180,8 @@ object SignalASIMqttClient {
             .put("contact_id", contactId)
             .put("time", System.currentTimeMillis())
         clientMessageId?.let { payload.put("client_message_id", it) }
+        if (conversationId.isNotBlank()) payload.put("conversation_id", conversationId)
+        if (turnId.isNotBlank()) payload.put("turn_id", turnId)
         deliveryTrace?.let { payload.put("delivery_trace", it) }
         if (context != null) {
             AppStore.contactById(context, contactId)?.let { contact ->
@@ -211,6 +215,17 @@ object SignalASIMqttClient {
             }
         }
         return publishJson(payload, topicOverride ?: SEND_TOPIC, contactId)
+    }
+
+    fun publishAgentConversationDelete(conversationId: String, taskIds: Set<String>): Boolean {
+        if (conversationId.isBlank()) return false
+        val payload = JSONObject()
+            .put("type", "agent_conversation_delete")
+            .put("conversation_id", conversationId)
+            .put("task_ids", org.json.JSONArray(taskIds.toList()))
+            .put("cleanup_scope", "records_and_temporary_files")
+            .put("time", System.currentTimeMillis())
+        return publishJson(payload, SEND_TOPIC, "hermes")
     }
 
     fun publishProfileUpdate(contactId: String, topicOverride: String? = null): Boolean {

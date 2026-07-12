@@ -119,6 +119,21 @@
                             android:textStyle="bold" />
 
                         <TextView
+                            android:id="@+id/agentSessionTitle"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:background="?android:attr/selectableItemBackground"
+                            android:clickable="true"
+                            android:ellipsize="end"
+                            android:focusable="true"
+                            android:maxLines="1"
+                            android:text="@string/agent_session_new"
+                            android:textColor="@color/text_primary"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
                             android:id="@+id/agentSubtitleText"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
@@ -142,7 +157,8 @@
                             android:contentDescription="@string/agent_quick_understand"
                             android:padding="7dp"
                             android:src="@drawable/ic_agent_screen"
-                            android:tint="@color/text_primary" />
+                            android:tint="@color/text_primary"
+                            android:visibility="gone" />
 
                         <ImageButton
                             android:id="@+id/agentQuickSaveScreenButton"
@@ -152,7 +168,8 @@
                             android:contentDescription="@string/agent_quick_save_screen"
                             android:padding="7dp"
                             android:src="@drawable/ic_agent_memory"
-                            android:tint="@color/text_primary" />
+                            android:tint="@color/text_primary"
+                            android:visibility="gone" />
 
                         <ImageButton
                             android:id="@+id/agentQuickSearchKnowledgeButton"
@@ -162,7 +179,8 @@
                             android:contentDescription="@string/agent_quick_search_knowledge"
                             android:padding="7dp"
                             android:src="@drawable/ic_agent_knowledge"
-                            android:tint="@color/text_primary" />
+                            android:tint="@color/text_primary"
+                            android:visibility="gone" />
 
                         <ImageButton
                             android:id="@+id/agentQuickPermissionsButton"
@@ -172,6 +190,27 @@
                             android:contentDescription="@string/agent_quick_permissions"
                             android:padding="7dp"
                             android:src="@drawable/ic_agent_control"
+                            android:tint="@color/text_primary"
+                            android:visibility="gone" />
+
+                        <ImageButton
+                            android:id="@+id/agentToolsMenuButton"
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="@android:color/transparent"
+                            android:contentDescription="@string/agent_toolbox_title"
+                            android:padding="7dp"
+                            android:src="@drawable/ic_agent_control"
+                            android:tint="@color/text_primary" />
+
+                        <ImageButton
+                            android:id="@+id/agentNewSessionButton"
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="@android:color/transparent"
+                            android:contentDescription="@string/agent_session_new"
+                            android:padding="7dp"
+                            android:src="@drawable/ic_input_plus"
                             android:tint="@color/text_primary" />
 
                         <ImageButton
