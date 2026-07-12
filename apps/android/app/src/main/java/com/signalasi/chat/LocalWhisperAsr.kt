@@ -15,22 +15,33 @@ import kotlin.math.floor
 
 object LocalWhisperAsr {
     private const val TAG = "SignalASILocalASR"
-    private const val MODEL_ASSET = "ggml-base.bin"
     private const val TARGET_SAMPLE_RATE = 16_000
     private val mutex = Mutex()
     @Volatile private var whisperContext: WhisperContext? = null
+    @Volatile private var loadedModelId: String? = null
 
     suspend fun transcribe(context: Context, audioFile: File, language: String = "auto"): String = mutex.withLock {
         val startedAt = System.currentTimeMillis()
         val samples = decodeTo16kMono(audioFile)
         require(samples.isNotEmpty()) { "Decoded audio is empty" }
-        val model = whisperContext ?: WhisperContext.createContextFromAsset(
-            context.applicationContext.assets,
-            MODEL_ASSET
-        ).also { whisperContext = it }
+        val selected = WhisperModelManager.model(VoiceAssistantSettings.get(context).asrModel)
+        require(WhisperModelManager.isAvailable(context, selected)) { "ASR model ${selected.displayName} is not downloaded" }
+        if (loadedModelId != selected.id) {
+            whisperContext?.release()
+            whisperContext = null
+            loadedModelId = null
+        }
+        val model = whisperContext ?: if (selected.bundled) {
+            WhisperContext.createContextFromAsset(context.applicationContext.assets, selected.fileName)
+        } else {
+            WhisperContext.createContextFromFile(WhisperModelManager.downloadedFile(context, selected).absolutePath)
+        }.also {
+            whisperContext = it
+            loadedModelId = selected.id
+        }
         val normalizedLanguage = language.substringBefore('-').lowercase().takeIf { it in setOf("zh", "en") } ?: "auto"
         val text = model.transcribeData(samples, normalizedLanguage, printTimestamp = false).trim()
-        Log.i(TAG, "Local transcription completed samples=${samples.size} language=$normalizedLanguage elapsed=${System.currentTimeMillis() - startedAt}ms")
+        Log.i(TAG, "Local transcription completed model=${selected.id} samples=${samples.size} language=$normalizedLanguage elapsed=${System.currentTimeMillis() - startedAt}ms")
         text
     }
 

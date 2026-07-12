@@ -9,6 +9,7 @@ data class VoiceAssistantConfig(
     val wakeModel: String,
     val wakeThreshold: Float,
     val asrProvider: String,
+    val asrModel: String,
     val asrLanguage: String,
     val ttsProvider: String,
     val microsoftVoice: String,
@@ -26,6 +27,7 @@ object VoiceAssistantSettings {
     private const val KEY_WAKE_MODEL = "wake_model"
     private const val KEY_WAKE_THRESHOLD = "wake_threshold"
     private const val KEY_ASR_PROVIDER = "asr_provider"
+    private const val KEY_ASR_MODEL = "asr_model"
     private const val KEY_ASR_LANGUAGE = "asr_language"
     private const val KEY_TTS_PROVIDER = "tts_provider"
     private const val KEY_MICROSOFT_VOICE = "microsoft_voice"
@@ -62,6 +64,12 @@ object VoiceAssistantSettings {
                 ?: DEFAULT_WAKE_MODEL,
             wakeThreshold = prefs.getFloat(KEY_WAKE_THRESHOLD, 0.5f).coerceIn(0.01f, 0.99f),
             asrProvider = ASR_PROVIDER_LOCAL_WHISPER,
+            asrModel = prefs.getString(KEY_ASR_MODEL, "base").orEmpty()
+                .takeIf { candidate ->
+                    WhisperModelManager.models.firstOrNull { it.id == candidate }
+                        ?.let { WhisperModelManager.isAvailable(context, it) } == true
+                }
+                ?: "base",
             asrLanguage = prefs.getString(KEY_ASR_LANGUAGE, "zh-CN").orEmpty().ifBlank { "zh-CN" },
             ttsProvider = prefs.getString(KEY_TTS_PROVIDER, PROVIDER_MICROSOFT_EDGE).orEmpty()
                 .ifBlank { PROVIDER_MICROSOFT_EDGE },
@@ -106,6 +114,11 @@ object VoiceAssistantSettings {
 
     fun setAsrLanguage(context: Context, value: String) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_ASR_LANGUAGE, value).apply()
+    }
+
+    fun setAsrModel(context: Context, value: String) {
+        val model = value.takeIf { candidate -> WhisperModelManager.models.any { it.id == candidate } } ?: "base"
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_ASR_MODEL, model).apply()
     }
 
     fun setTtsProvider(context: Context, value: String) {

@@ -1,6 +1,7 @@
 ﻿package com.signalasi.chat
 
 import android.app.Activity
+import android.app.DownloadManager
 import android.app.Dialog
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -331,6 +332,33 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var mainSwipeHandled = false
     private var lastDebugSendKey: String? = null
     private var lastHistoryLoadedAt = 0L
+    private var pendingAsrModelSelection: String? = null
+    private val asrModelDownloadPoll = object : Runnable {
+        override fun run() {
+            val pendingId = pendingAsrModelSelection ?: return
+            val model = WhisperModelManager.model(pendingId)
+            val state = WhisperModelManager.downloadState(this@MainActivity, model)
+            when (state.status) {
+                DownloadManager.STATUS_SUCCESSFUL -> {
+                    VoiceAssistantSettings.setAsrModel(this@MainActivity, model.id)
+                    pendingAsrModelSelection = null
+                    Toast.makeText(this@MainActivity, getString(R.string.voice_asr_model_ready, model.displayName), Toast.LENGTH_SHORT).show()
+                    if (featurePage.visibility == View.VISIBLE) showAsrProviderPage()
+                }
+                DownloadManager.STATUS_FAILED -> {
+                    pendingAsrModelSelection = null
+                    Toast.makeText(this@MainActivity, getString(R.string.voice_asr_model_download_failed), Toast.LENGTH_LONG).show()
+                    if (featurePage.visibility == View.VISIBLE) showAsrProviderPage()
+                }
+                else -> {
+                    if (featurePage.visibility == View.VISIBLE && featureTitle.text == getString(R.string.voice_asr_provider)) {
+                        showAsrProviderPage()
+                    }
+                    handler.postDelayed(this, 1_000L)
+                }
+            }
+        }
+    }
 
     private val currentMessages: MutableList<ChatMessage>
         get() {
@@ -526,6 +554,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(asrModelDownloadPoll)
         stopVoiceAssistant()
         voiceAssistantScope.cancel()
         microsoftTts.shutdown()
@@ -6841,10 +6870,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         addSectionTitle(getString(R.string.voice_section_asr))
         featureContent.addView(featureRow(
             getString(R.string.voice_asr_provider),
-            getString(R.string.voice_asr_provider_local_whisper),
+            getString(R.string.voice_asr_provider_local_whisper, WhisperModelManager.model(config.asrModel).displayName),
             R.drawable.ic_agent_node,
-            getString(R.string.common_on)
-        ))
+            getString(R.string.common_select)
+        ).apply {
+            setOnClickListener { showAsrProviderPage() }
+        })
         featureContent.addView(featureRow(getString(R.string.voice_asr_language), config.asrLanguage, R.drawable.ic_protocol_link, getString(R.string.common_select)).apply {
             setOnClickListener {
                 showChoiceDialog(getString(R.string.voice_asr_language), listOf("zh-CN", "en-US", "zh-HK", "zh-TW"), config.asrLanguage) {
@@ -6944,11 +6975,74 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         })
     }
 
+    private fun showAsrProviderPage() {
+        handler.removeCallbacks(asrModelDownloadPoll)
+        val config = VoiceAssistantSettings.get(this)
+        val selected = WhisperModelManager.model(config.asrModel)
+        showFeaturePage(getString(R.string.voice_asr_provider))
+        featureBackButton.setOnClickListener { showVoiceAssistantSettingsPage() }
+        featureContent.addView(featureHeroCard(
+            getString(R.string.voice_asr_local_title),
+            getString(R.string.voice_asr_local_subtitle),
+            R.drawable.ic_agent_node,
+            "#14C66A",
+            selected.displayName
+        ))
+        addSectionTitle(getString(R.string.voice_asr_model_section))
+        var hasActiveDownload = false
+        WhisperModelManager.models.forEach { model ->
+            val state = WhisperModelManager.downloadState(this, model)
+            val available = WhisperModelManager.isAvailable(this, model)
+            val isSelected = selected.id == model.id
+            val isDownloading = state.status == DownloadManager.STATUS_PENDING ||
+                state.status == DownloadManager.STATUS_RUNNING ||
+                state.status == DownloadManager.STATUS_PAUSED
+            if (isDownloading && pendingAsrModelSelection == null) pendingAsrModelSelection = model.id
+            hasActiveDownload = hasActiveDownload || isDownloading
+            val subtitle = if (model.bundled) {
+                getString(R.string.voice_asr_model_bundled, model.sizeLabel)
+            } else {
+                getString(R.string.voice_asr_model_download_size, model.sizeLabel)
+            }
+            val action = when {
+                isSelected -> getString(R.string.section_current)
+                available -> getString(R.string.settings_language_use)
+                isDownloading -> if (state.progress > 0) "${state.progress}%" else getString(R.string.voice_asr_model_waiting)
+                state.status == DownloadManager.STATUS_FAILED -> getString(R.string.common_retry)
+                else -> getString(R.string.voice_asr_model_download)
+            }
+            featureContent.addView(featureRow(model.displayName, subtitle, R.drawable.ic_local_model, action).apply {
+                isClickable = !isSelected && !isDownloading
+                isFocusable = isClickable
+                setOnClickListener(if (!isSelected && !isDownloading) View.OnClickListener {
+                    if (available) {
+                        VoiceAssistantSettings.setAsrModel(this@MainActivity, model.id)
+                        showAsrProviderPage()
+                    } else {
+                        runCatching { WhisperModelManager.enqueue(this@MainActivity, model) }
+                            .onSuccess {
+                                pendingAsrModelSelection = model.id
+                                Toast.makeText(this@MainActivity, getString(R.string.voice_asr_model_download_started, model.displayName), Toast.LENGTH_SHORT).show()
+                                handler.post(asrModelDownloadPoll)
+                            }
+                            .onFailure {
+                                Toast.makeText(this@MainActivity, getString(R.string.voice_asr_model_download_failed), Toast.LENGTH_LONG).show()
+                            }
+                    }
+                } else null)
+            })
+        }
+        featureContent.addView(TextView(this).apply {
+            text = getString(R.string.voice_asr_model_mirror_note)
+            setTextColor(getColorCompat(R.color.text_secondary))
+            textSize = 12f
+            setPadding(dp(4), dp(4), dp(4), dp(18))
+        })
+        if (hasActiveDownload) handler.postDelayed(asrModelDownloadPoll, 1_000L)
+    }
+
     private fun wakeProviderLabel(provider: String): String =
         if (provider == VoiceAssistantSettings.WAKE_PROVIDER_ANDROID_ASR) getString(R.string.voice_wake_engine_android_asr) else getString(R.string.voice_wake_engine_openwakeword)
-
-    private fun asrProviderLabel(provider: String): String =
-        getString(R.string.voice_asr_provider_local_whisper)
 
     private fun ttsProviderLabel(provider: String): String =
         if (provider == VoiceAssistantSettings.PROVIDER_ANDROID) getString(R.string.voice_tts_android) else getString(R.string.voice_tts_microsoft)
