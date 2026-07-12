@@ -599,7 +599,7 @@
     <string name="agent_sessions_title">Sessions</string>
     <string name="agent_session_new">New session</string>
     <string name="agent_session_context_count">%1$s · %2$d context messages</string>
-    <string name="agent_session_message_count">%1$d messages · %2$s</string>
+    <string name="agent_session_message_count">%1$s · %2$d messages · %3$s</string>
     <string name="agent_session_rename">Rename</string>
     <string name="agent_session_pin">Pin</string>
     <string name="agent_session_unpin">Unpin</string>
@@ -1134,4 +1134,8 @@
     <string name="agent_session_today">Today</string>
     <string name="agent_session_yesterday">Yesterday</string>
     <string name="agent_session_earlier">Earlier</string>
+    <string name="agent_task_detail_timeline">Execution timeline</string>
+    <string name="agent_session_input_tokens">Cloud input tokens</string>
+    <string name="agent_session_output_tokens">Cloud output tokens</string>
+    <string name="agent_session_context_compacted">Older context summarized</string>
 </resources>

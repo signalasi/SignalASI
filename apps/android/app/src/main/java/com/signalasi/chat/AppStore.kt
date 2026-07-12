@@ -861,7 +861,7 @@ object AppStore {
             .put("includes_contacts", includeContacts)
             .put("includes_messages", includeMessages)
             .put("includes_agent_data", true)
-            .put("agent_data", AgentBackupData.export(context))
+            .put("agent_data", AgentBackupData.export(context, includeSessionHistory = includeMessages))
         if (includeContacts) {
             payload.put("contacts", contacts(context))
             payload.put("friend_requests", friendRequests(context))
@@ -920,6 +920,7 @@ object AppStore {
         context.getSharedPreferences("signalasi_agent_knowledge_audit", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_tasks", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences(AgentTranscriptStore.PREFS, Context.MODE_PRIVATE).edit().clear().commit()
+        AgentEncryptedDatabase(context, AgentTranscriptStore.PREFS).clear()
         context.getSharedPreferences("signalasi_ui_preferences", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_safety", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_workflows", Context.MODE_PRIVATE).edit().clear().commit()

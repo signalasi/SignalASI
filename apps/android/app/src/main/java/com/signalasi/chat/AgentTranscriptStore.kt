@@ -29,7 +29,10 @@ data class AgentConversation(
     val summary: String = "",
     val status: AgentConversationStatus = AgentConversationStatus.ACTIVE,
     val pinned: Boolean = false,
-    val privateMode: Boolean = false
+    val privateMode: Boolean = false,
+    val inputTokens: Long = 0L,
+    val outputTokens: Long = 0L,
+    val costMicros: Long = 0L
 )
 
 data class AgentConversationContext(
@@ -53,11 +56,14 @@ data class AgentConversationMetrics(
     val turnCount: Int,
     val taskCount: Int,
     val estimatedContextTokens: Int,
-    val lastResponseLatencyMillis: Long
+    val lastResponseLatencyMillis: Long,
+    val inputTokens: Long,
+    val outputTokens: Long,
+    val costMicros: Long
 )
 
 class AgentTranscriptStore(context: Context) {
-    private val preferences = AgentEncryptedPreferences(context.applicationContext, PREFS)
+    private val preferences = AgentEncryptedDatabase(context.applicationContext, PREFS)
 
     @Synchronized
     fun conversations(includeArchived: Boolean = false): List<AgentConversation> {
@@ -128,6 +134,18 @@ class AgentTranscriptStore(context: Context) {
     @Synchronized
     fun updateSummary(conversationId: String, summary: String): Boolean =
         updateConversation(conversationId) { it.copy(summary = summary.trim().take(MAX_SUMMARY_CHARACTERS)) }
+
+    @Synchronized
+    fun recordUsage(conversationId: String, inputTokens: Long, outputTokens: Long, costMicros: Long = 0L): Boolean {
+        if (inputTokens <= 0L && outputTokens <= 0L && costMicros <= 0L) return false
+        return updateConversation(conversationId) {
+            it.copy(
+                inputTokens = (it.inputTokens + inputTokens.coerceAtLeast(0L)).coerceAtMost(Long.MAX_VALUE / 2),
+                outputTokens = (it.outputTokens + outputTokens.coerceAtLeast(0L)).coerceAtMost(Long.MAX_VALUE / 2),
+                costMicros = (it.costMicros + costMicros.coerceAtLeast(0L)).coerceAtMost(Long.MAX_VALUE / 2)
+            )
+        }
+    }
 
     @Synchronized
     fun archiveConversation(conversationId: String): Boolean {
@@ -201,7 +219,10 @@ class AgentTranscriptStore(context: Context) {
             turnCount = dialogue.map { it.turnId }.filter(String::isNotBlank).distinct().size,
             taskCount = messages.map { it.taskId }.filter(String::isNotBlank).distinct().size,
             estimatedContextTokens = (contextCharacters / 4.0).toInt(),
-            lastResponseLatencyMillis = if (assistantAt >= userAt && userAt > 0L) assistantAt - userAt else 0L
+            lastResponseLatencyMillis = if (assistantAt >= userAt && userAt > 0L) assistantAt - userAt else 0L,
+            inputTokens = conversations(includeArchived = true).firstOrNull { it.id == conversationId }?.inputTokens ?: 0L,
+            outputTokens = conversations(includeArchived = true).firstOrNull { it.id == conversationId }?.outputTokens ?: 0L,
+            costMicros = conversations(includeArchived = true).firstOrNull { it.id == conversationId }?.costMicros ?: 0L
         )
     }
 
@@ -377,7 +398,10 @@ class AgentTranscriptStore(context: Context) {
                 .put("selected_model_or_agent", conversation.selectedModelOrAgent)
                 .put("context_policy", conversation.contextPolicy).put("summary", conversation.summary)
                 .put("status", conversation.status.name).put("pinned", conversation.pinned)
-                .put("private_mode", conversation.privateMode))
+                .put("private_mode", conversation.privateMode)
+                .put("input_tokens", conversation.inputTokens)
+                .put("output_tokens", conversation.outputTokens)
+                .put("cost_micros", conversation.costMicros))
         }
         preferences.writeString(KEY_CONVERSATIONS, array.toString())
     }
@@ -417,7 +441,10 @@ class AgentTranscriptStore(context: Context) {
                     summary = item.optString("summary").take(MAX_SUMMARY_CHARACTERS),
                     status = runCatching { AgentConversationStatus.valueOf(item.optString("status")) }
                         .getOrDefault(AgentConversationStatus.ACTIVE),
-                    pinned = item.optBoolean("pinned"), privateMode = item.optBoolean("private_mode")
+                    pinned = item.optBoolean("pinned"), privateMode = item.optBoolean("private_mode"),
+                    inputTokens = item.optLong("input_tokens", 0L),
+                    outputTokens = item.optLong("output_tokens", 0L),
+                    costMicros = item.optLong("cost_micros", 0L)
                 ))
             }
         }

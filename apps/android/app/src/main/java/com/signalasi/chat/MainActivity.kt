@@ -264,6 +264,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val historySaveRunnable = Runnable { enqueueChatHistorySave() }
     private lateinit var mobileNativeAgent: MobileNativeAgent
     private lateinit var agentTranscriptStore: AgentTranscriptStore
+    private var agentSessionsDialog: android.app.Dialog? = null
     private val agentConnectorResponseListener = AgentConnectorResponseListener { response ->
         runOnUiThread { consumeAgentConnectorResponse(response) }
     }
@@ -637,6 +638,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 val conversationId = agentRuntimeConversationIds[runtime]
                     ?: agentTranscriptStore.activeConversation().id
                 val turnId = agentRuntimeTurnIds[runtime].orEmpty()
+                agentTranscriptStore.recordUsage(
+                    conversationId, response.inputTokens, response.outputTokens, response.costMicros
+                )
                 renderAgentState(state, conversationId, turnId)
                 agentRuntimeConversationIds.remove(runtime)
                 agentRuntimeTurnIds.remove(runtime)
@@ -839,6 +843,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             val sourceGoal = agentTranscriptStore.list(conversationId)
                 .lastOrNull { it.turnId == turnId && it.role == AgentTranscriptRole.USER }
                 ?.text.orEmpty()
+            val eventTime = listTime(envelope.optLong("updated_at", System.currentTimeMillis()))
+            val eventLine = "$eventTime · $targetName · $statusLabel"
+            val executionLog = (existingTask?.executionLog.orEmpty() + eventLine)
+                .distinct()
+                .takeLast(60)
             taskStore.upsert(AgentTaskRecord(
                 taskId = taskId,
                 sessionId = conversationId,
@@ -857,6 +866,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 result = envelope.optString("error").ifBlank { existingTask?.result.orEmpty() },
                 verification = existingTask?.verification.orEmpty(),
                 outputFiles = if (outputFiles.isNotEmpty()) outputFiles else existingTask?.outputFiles.orEmpty(),
+                executionLog = executionLog,
                 createdAtMillis = existingTask?.createdAtMillis
                     ?: envelope.optLong("created_at", System.currentTimeMillis()),
                 updatedAtMillis = envelope.optLong("updated_at", System.currentTimeMillis())
@@ -1387,11 +1397,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val conversation = agentTranscriptStore.activeConversation()
         val contextCount = agentTranscriptStore.context(conversation.id).turns.size
         agentSessionTitle.text = "${conversation.title}  ⌄"
-        agentSubtitleText.text = getString(
+        val baseSubtitle = getString(
             R.string.agent_session_context_count,
             conversation.selectedModelOrAgent,
             contextCount
         )
+        agentSubtitleText.text = if (conversation.summary.isNotBlank()) {
+            "$baseSubtitle · ${getString(R.string.agent_session_context_compacted)}"
+        } else baseSubtitle
     }
 
     private fun createAgentConversation() {
@@ -1404,27 +1417,55 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun showAgentSessionsPage(showArchived: Boolean = false) {
-        showFeaturePage(getString(R.string.agent_sessions_title))
+        agentSessionsDialog?.dismiss()
+        val dialog = android.app.Dialog(this)
+        agentSessionsDialog = dialog
+        val sessionContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(20))
+            background = getDrawable(R.drawable.glass_card_background)
+        }
+        val scrollContent = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        sessionContent.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                text = getString(R.string.agent_sessions_title)
+                textSize = 20f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setTextColor(getColorCompat(R.color.text_primary))
+            }, LinearLayout.LayoutParams(0, dp(48), 1f))
+            addView(ImageButton(this@MainActivity).apply {
+                setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
+                contentDescription = getString(android.R.string.cancel)
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                setOnClickListener { dialog.dismiss() }
+            }, LinearLayout.LayoutParams(dp(48), dp(48)))
+        })
+        sessionContent.addView(android.widget.ScrollView(this).apply {
+            isFillViewport = true
+            addView(scrollContent)
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         val allConversations = agentTranscriptStore.conversations(includeArchived = true)
-        featureContent.addView(featureHeroCard(
+        scrollContent.addView(featureHeroCard(
             getString(R.string.agent_sessions_title),
             getString(R.string.agent_tab_subtitle),
             R.drawable.ic_agent_history,
             "#14C66A",
             allConversations.size.toString()
         ))
-        featureContent.addView(featureRow(
+        scrollContent.addView(featureRow(
             getString(R.string.agent_session_new),
             "",
             R.drawable.ic_input_plus,
             "+"
-        ).apply { setOnClickListener { createAgentConversation() } })
-        featureContent.addView(featureRow(
+        ).apply { setOnClickListener { dialog.dismiss(); createAgentConversation() } })
+        scrollContent.addView(featureRow(
             getString(R.string.agent_session_archived),
             allConversations.count { it.status == AgentConversationStatus.ARCHIVED }.toString(),
             R.drawable.ic_agent_history,
             getString(R.string.common_view)
-        ).apply { setOnClickListener { showAgentSessionsPage(showArchived = true) } })
+        ).apply { setOnClickListener { dialog.dismiss(); showAgentSessionsPage(showArchived = true) } })
         val searchInput = EditText(this).apply {
             hint = getString(R.string.agent_session_search)
             setSingleLine(true)
@@ -1433,13 +1474,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             setPadding(dp(16), 0, dp(16), 0)
             background = getDrawable(R.drawable.glass_card_background)
         }
-        featureContent.addView(searchInput, LinearLayout.LayoutParams(
+        scrollContent.addView(searchInput, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             dp(48)
         ).apply { bottomMargin = dp(12) })
-        addSectionTitle(if (showArchived) getString(R.string.agent_session_archived) else getString(R.string.agent_sessions_title))
+        scrollContent.addView(TextView(this).apply {
+            text = if (showArchived) getString(R.string.agent_session_archived) else getString(R.string.agent_sessions_title)
+            setTextColor(getColorCompat(R.color.text_secondary))
+            textSize = 12f
+            setPadding(dp(4), dp(12), 0, dp(7))
+        })
         val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        featureContent.addView(rows)
+        scrollContent.addView(rows)
         fun renderRows(query: String) {
             rows.removeAllViews()
             val normalizedQuery = query.trim().lowercase(Locale.US)
@@ -1488,7 +1534,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             val messages = agentTranscriptStore.list(conversation.id)
             rows.addView(featureRow(
                 if (conversation.pinned) "● ${conversation.title}" else conversation.title,
-                getString(R.string.agent_session_message_count, messages.size, listTime(conversation.updatedAt)),
+                getString(
+                    R.string.agent_session_message_count,
+                    conversation.selectedModelOrAgent,
+                    messages.size,
+                    listTime(conversation.updatedAt)
+                ),
                 R.drawable.ic_agent_history,
                 when {
                     conversation.status == AgentConversationStatus.ARCHIVED -> getString(R.string.agent_session_restore)
@@ -1505,7 +1556,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     agentOutputList.removeAllViews()
                     refreshAgentConversationHeader()
                     renderAgentTranscript(agentTranscriptStore.list())
-                    hideFeaturePage()
+                    dialog.dismiss()
                 }
                 setOnLongClickListener {
                     showAgentConversationActions(conversation)
@@ -1521,6 +1572,20 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             override fun afterTextChanged(s: Editable?) = Unit
         })
         renderRows("")
+        dialog.setContentView(sessionContent)
+        dialog.setOnDismissListener { if (agentSessionsDialog === dialog) agentSessionsDialog = null }
+        dialog.window?.apply {
+            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
+            setDimAmount(0.32f)
+            addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setGravity(Gravity.BOTTOM)
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.86f).toInt())
+        }
+        dialog.show()
+        dialog.window?.setLayout(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            (resources.displayMetrics.heightPixels * 0.86f).toInt()
+        )
     }
 
     private fun showAgentConversationActions(conversation: AgentConversation) {
@@ -1627,12 +1692,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             metrics.estimatedContextTokens.toString()
         ))
         featureContent.addView(featureValueRow(
+            getString(R.string.agent_session_input_tokens), "", R.drawable.ic_protocol_link,
+            metrics.inputTokens.takeIf { it > 0L }?.toString() ?: "-"
+        ))
+        featureContent.addView(featureValueRow(
+            getString(R.string.agent_session_output_tokens), "", R.drawable.ic_protocol_link,
+            metrics.outputTokens.takeIf { it > 0L }?.toString() ?: "-"
+        ))
+        featureContent.addView(featureValueRow(
             getString(R.string.agent_session_latency), "", R.drawable.ic_protocol_link,
             if (metrics.lastResponseLatencyMillis > 0L) "${metrics.lastResponseLatencyMillis / 1000.0}s" else "-"
         ))
         featureContent.addView(featureValueRow(
             getString(R.string.agent_session_cost), "", R.drawable.ic_security_shield,
-            getString(R.string.agent_session_cost_unavailable)
+            if (metrics.costMicros > 0L) String.format(Locale.US, "$%.6f", metrics.costMicros / 1_000_000.0)
+            else getString(R.string.agent_session_cost_unavailable)
         ))
         addSectionTitle(getString(R.string.agent_session_context_preview))
         featureContent.addView(featureRow(
@@ -3322,6 +3396,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 appendLine()
                 appendLine(getString(R.string.agent_task_detail_files))
                 append(task.outputFiles.joinToString("\n"))
+            }
+            if (task.executionLog.isNotEmpty()) {
+                appendLine()
+                appendLine(getString(R.string.agent_task_detail_timeline))
+                append(task.executionLog.joinToString("\n"))
             }
         }.trim()
         android.app.AlertDialog.Builder(this)

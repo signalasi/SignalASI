@@ -10,6 +10,9 @@ data class AgentConnectorResponse(
     val contactId: String,
     val content: String,
     val success: Boolean = true,
+    val inputTokens: Long = 0L,
+    val outputTokens: Long = 0L,
+    val costMicros: Long = 0L,
     val receivedAtMillis: Long = System.currentTimeMillis()
 )
 
@@ -69,6 +72,9 @@ object AgentConnectorResponseStore {
                             contactId = item.optString("contact_id"),
                             content = content,
                             success = item.optBoolean("success", true),
+                            inputTokens = item.optLong("input_tokens", 0L),
+                            outputTokens = item.optLong("output_tokens", 0L),
+                            costMicros = item.optLong("cost_micros", 0L),
                             receivedAtMillis = receivedAt
                         )
                     )
@@ -101,6 +107,9 @@ object AgentConnectorResponseStore {
                     .put("contact_id", response.contactId)
                     .put("content", response.content.take(24_000))
                     .put("success", response.success)
+                    .put("input_tokens", response.inputTokens)
+                    .put("output_tokens", response.outputTokens)
+                    .put("cost_micros", response.costMicros)
                     .put("received_at", response.receivedAtMillis)
             )
         }

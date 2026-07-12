@@ -15,3 +15,12 @@ SignalASI Link payload. Desktop connectors bind task lifecycle events to the
 originating turn. Codex App Server integrations reuse one Codex thread for each
 SignalASI conversation while other connectors receive a bounded conversation
 summary and recent dialogue.
+
+Task lifecycle events may include bounded `output_files` metadata using paths
+relative to the isolated task workspace. Provider-reported `input_tokens`,
+`output_tokens`, and `cost_micros` are retained when available.
+
+Deleting a conversation sends `type: agent_conversation_delete` with its
+`conversation_id` and known `task_ids`. The paired Desktop removes matching task
+records, Codex thread mappings, and temporary/log directories while preserving
+saved output files to prevent accidental data loss.

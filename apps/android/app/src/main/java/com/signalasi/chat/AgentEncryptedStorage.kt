@@ -2,6 +2,9 @@ package com.signalasi.chat
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.content.ContentValues
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteOpenHelper
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -44,6 +47,73 @@ class AgentEncryptedPreferences(context: Context, private val preferencesName: S
     }
 
     private fun associatedData(key: String): ByteArray = "$preferencesName:$key".toByteArray(Charsets.UTF_8)
+}
+
+class AgentEncryptedDatabase(
+    context: Context,
+    private val databaseName: String,
+    private val legacyPreferencesName: String = databaseName
+) : SQLiteOpenHelper(context.applicationContext, "$databaseName.db", null, 1) {
+    private val legacy = AgentEncryptedPreferences(context.applicationContext, legacyPreferencesName)
+
+    override fun onCreate(db: SQLiteDatabase) {
+        db.execSQL("CREATE TABLE encrypted_values (storage_key TEXT PRIMARY KEY NOT NULL, encrypted_value TEXT NOT NULL)")
+    }
+
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+
+    @Synchronized
+    fun readString(key: String, defaultValue: String): String {
+        readableDatabase.query(
+            "encrypted_values", arrayOf("encrypted_value"), "storage_key = ?", arrayOf(key),
+            null, null, null, "1"
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                return AgentStorageCipher.decrypt(cursor.getString(0), associatedData(key)) ?: defaultValue
+            }
+        }
+        if (legacy.contains(key)) {
+            val migrated = legacy.readString(key, defaultValue)
+            writeString(key, migrated)
+            legacy.remove(key)
+            return migrated
+        }
+        return defaultValue
+    }
+
+    @Synchronized
+    fun writeString(key: String, value: String) {
+        val encrypted = AgentStorageCipher.encrypt(value, associatedData(key))
+        val values = ContentValues().apply {
+            put("storage_key", key)
+            put("encrypted_value", encrypted)
+        }
+        check(writableDatabase.insertWithOnConflict(
+            "encrypted_values", null, values, SQLiteDatabase.CONFLICT_REPLACE
+        ) != -1L) { "Agent encrypted database write failed" }
+    }
+
+    @Synchronized
+    fun remove(key: String) {
+        writableDatabase.delete("encrypted_values", "storage_key = ?", arrayOf(key))
+        legacy.remove(key)
+    }
+
+    @Synchronized
+    fun clear() {
+        writableDatabase.delete("encrypted_values", null, null)
+        legacy.clear()
+    }
+
+    fun contains(key: String): Boolean {
+        readableDatabase.rawQuery(
+            "SELECT 1 FROM encrypted_values WHERE storage_key = ? LIMIT 1", arrayOf(key)
+        ).use { if (it.moveToFirst()) return true }
+        return legacy.contains(key)
+    }
+
+    private fun associatedData(key: String): ByteArray =
+        "database:$databaseName:$key".toByteArray(Charsets.UTF_8)
 }
 
 object AgentStorageCipher {

@@ -17,6 +17,17 @@ object CloudModelClient {
         return send(context, contact, listOf(ChatMessage(0L, prompt, true, Contact("me", context.getString(R.string.chat_me), ""))))
     }
 
+    fun sendWithUsage(context: Context, contact: JSONObject, prompt: String): CloudModelResponse {
+        validateContact(context, contact)
+        val turn = ChatMessage(0L, prompt, true, Contact("me", context.getString(R.string.chat_me), ""))
+        val style = contact.optString("cloud_api_style", "openai")
+        return when (style) {
+            "anthropic" -> sendAnthropicWithUsage(context, contact, CloudWebGrounding.enrich(listOf(turn)), SYSTEM_PROMPT)
+            "gemini" -> sendGeminiWithUsage(context, contact, CloudWebGrounding.enrich(listOf(turn)), SYSTEM_PROMPT)
+            else -> sendOpenAiCompatibleWithUsage(context, contact, listOf(turn), SYSTEM_PROMPT, null)
+        }
+    }
+
     fun send(
         context: Context,
         contact: JSONObject,
@@ -41,19 +52,19 @@ object CloudModelClient {
         validateContact(context, contact)
         val style = contact.optString("cloud_api_style", "openai")
         return when (style) {
-            "anthropic" -> sendAnthropic(context, contact, CloudWebGrounding.enrich(turns), systemPrompt)
-            "gemini" -> sendGemini(context, contact, CloudWebGrounding.enrich(turns), systemPrompt)
-            else -> sendOpenAiCompatible(context, contact, turns, systemPrompt, onToolEvent)
+            "anthropic" -> sendAnthropicWithUsage(context, contact, CloudWebGrounding.enrich(turns), systemPrompt).text
+            "gemini" -> sendGeminiWithUsage(context, contact, CloudWebGrounding.enrich(turns), systemPrompt).text
+            else -> sendOpenAiCompatibleWithUsage(context, contact, turns, systemPrompt, onToolEvent).text
         }
     }
 
-    private fun sendOpenAiCompatible(
+    private fun sendOpenAiCompatibleWithUsage(
         context: Context,
         contact: JSONObject,
         turns: List<ChatMessage>,
         systemPrompt: String,
         onToolEvent: ((CloudToolEvent) -> Unit)?
-    ): String {
+    ): CloudModelResponse {
         val liveDataRequired = CloudWebGrounding.requiresLiveData(turns)
         val groundedTurns = if (liveDataRequired) CloudWebGrounding.enrich(turns) else turns
         val effectiveSystemPrompt = if (liveDataRequired) {
@@ -75,6 +86,7 @@ object CloudModelClient {
             body
         )
         var json = JSONObject(text)
+        var usage = openAiUsage(json)
         var choice = json.optJSONArray("choices")?.optJSONObject(0)
         var message = choice?.optJSONObject("message")
         val toolCalls = message?.optJSONArray("tool_calls")
@@ -102,21 +114,23 @@ object CloudModelClient {
                 followUpBody
             )
             json = JSONObject(text)
+            usage += openAiUsage(json)
             choice = json.optJSONArray("choices")?.optJSONObject(0)
             message = choice?.optJSONObject("message")
         }
-        return stringifyContent(message?.opt("content"))
+        val reply = stringifyContent(message?.opt("content"))
             .ifBlank { choice?.optString("text").orEmpty() }
             .ifBlank { json.optString("output_text") }
             .ifBlank { text.take(1200) }
+        return CloudModelResponse(reply, usage.inputTokens, usage.outputTokens, usage.costMicros)
     }
 
-    private fun sendAnthropic(
+    private fun sendAnthropicWithUsage(
         context: Context,
         contact: JSONObject,
         turns: List<ChatMessage>,
         systemPrompt: String
-    ): String {
+    ): CloudModelResponse {
         val body = JSONObject()
             .put("model", contact.getString("cloud_model"))
             .put("system", systemPrompt)
@@ -132,15 +146,20 @@ object CloudModelClient {
             body
         )
         val json = JSONObject(text)
-        return textBlocks(json.optJSONArray("content")).ifBlank { text.take(1200) }
+        val usage = json.optJSONObject("usage")
+        return CloudModelResponse(
+            textBlocks(json.optJSONArray("content")).ifBlank { text.take(1200) },
+            usage?.optLong("input_tokens", 0L) ?: 0L,
+            usage?.optLong("output_tokens", 0L) ?: 0L
+        )
     }
 
-    private fun sendGemini(
+    private fun sendGeminiWithUsage(
         context: Context,
         contact: JSONObject,
         turns: List<ChatMessage>,
         systemPrompt: String
-    ): String {
+    ): CloudModelResponse {
         val endpoint = contact.getString("cloud_endpoint")
         val separator = if (endpoint.contains("?")) "&" else "?"
         val url = endpoint + separator + "key=" + URLEncoder.encode(contact.getString("cloud_api_key"), "UTF-8")
@@ -159,7 +178,21 @@ object CloudModelClient {
             ?.optJSONObject(0)
             ?.optJSONObject("content")
             ?.optJSONArray("parts")
-        return textBlocks(parts).ifBlank { text.take(1200) }
+        val usage = json.optJSONObject("usageMetadata")
+        return CloudModelResponse(
+            textBlocks(parts).ifBlank { text.take(1200) },
+            usage?.optLong("promptTokenCount", 0L) ?: 0L,
+            usage?.optLong("candidatesTokenCount", 0L) ?: 0L
+        )
+    }
+
+    private fun openAiUsage(json: JSONObject): CloudModelUsage {
+        val usage = json.optJSONObject("usage") ?: return CloudModelUsage()
+        return CloudModelUsage(
+            inputTokens = usage.optLong("prompt_tokens", usage.optLong("input_tokens", 0L)),
+            outputTokens = usage.optLong("completion_tokens", usage.optLong("output_tokens", 0L)),
+            costMicros = (usage.optDouble("cost", 0.0).coerceAtLeast(0.0) * 1_000_000.0).toLong()
+        )
     }
 
     private fun validateContact(context: Context, contact: JSONObject) {
@@ -297,6 +330,25 @@ object CloudModelClient {
 }
 
 data class CloudToolEvent(val tool: String, val stage: String, val detail: String)
+
+data class CloudModelUsage(
+    val inputTokens: Long = 0L,
+    val outputTokens: Long = 0L,
+    val costMicros: Long = 0L
+) {
+    operator fun plus(other: CloudModelUsage): CloudModelUsage = CloudModelUsage(
+        inputTokens + other.inputTokens,
+        outputTokens + other.outputTokens,
+        costMicros + other.costMicros
+    )
+}
+
+data class CloudModelResponse(
+    val text: String,
+    val inputTokens: Long = 0L,
+    val outputTokens: Long = 0L,
+    val costMicros: Long = 0L
+)
 
 private fun <T> Sequence<T>.takeLastCompat(count: Int): Sequence<T> =
     toList().takeLast(count).asSequence()

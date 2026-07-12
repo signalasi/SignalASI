@@ -359,7 +359,7 @@
     <string name="agent_sessions_title">会话</string>
     <string name="agent_session_new">新会话</string>
     <string name="agent_session_context_count">%1$s · %2$d 条上下文</string>
-    <string name="agent_session_message_count">%1$d 条消息 · %2$s</string>
+    <string name="agent_session_message_count">%1$s · %2$d 条消息 · %3$s</string>
     <string name="agent_session_rename">重命名</string>
     <string name="agent_session_pin">置顶</string>
     <string name="agent_session_unpin">取消置顶</string>
@@ -1039,4 +1039,8 @@
     <string name="agent_session_today">今天</string>
     <string name="agent_session_yesterday">昨天</string>
     <string name="agent_session_earlier">更早</string>
+    <string name="agent_task_detail_timeline">执行时间线</string>
+    <string name="agent_session_input_tokens">云模型输入 Token</string>
+    <string name="agent_session_output_tokens">云模型输出 Token</string>
+    <string name="agent_session_context_compacted">较早上下文已整理</string>
 </resources>

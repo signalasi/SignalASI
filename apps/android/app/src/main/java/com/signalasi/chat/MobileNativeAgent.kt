@@ -32,6 +32,10 @@ import java.util.UUID
 private const val INTERNAL_CONVERSATION_ID = "_signalasi_conversation_id"
 private const val INTERNAL_CONVERSATION_CONTEXT = "_signalasi_conversation_context"
 private const val INTERNAL_TURN_ID = "_signalasi_turn_id"
+private const val INTERNAL_MEMORY_CONTEXT = "_signalasi_memory_context"
+private const val INTERNAL_CLOUD_KNOWLEDGE_CONTEXT = "_signalasi_cloud_knowledge_context"
+private const val INTERNAL_AGENT_KNOWLEDGE_CONTEXT = "_signalasi_agent_knowledge_context"
+private const val INTERNAL_SCREEN_CONTEXT = "_signalasi_screen_context"
 
 private val SENSITIVE_MEMORY_TERMS = listOf(
     "password",
@@ -422,12 +426,52 @@ class MobileNativeAgent(
             )
         )
         val conversationPrompt = activeConversationContext.asPromptBlock().take(12_000)
+        val memoryPrompt = memories.take(5).joinToString("\n") { "- ${it.value.take(600)}" }
+        val cloudKnowledgePrompt = knowledgeItems
+            .filter { it.cloudAccess != AgentKnowledgeCloudAccess.DENY }
+            .take(5)
+            .joinToString("\n") { item ->
+                val value = if (item.cloudAccess == AgentKnowledgeCloudAccess.FULL) item.content else item.summary
+                "- ${item.title}: ${value.take(1_200)}"
+            }
+        val agentKnowledgePrompt = knowledgeItems
+            .filter { it.agentAccess == AgentKnowledgeAgentAccess.ANY_PAIRED_AGENT }
+            .take(5)
+            .joinToString("\n") { "- ${it.title}: ${it.summary.ifBlank { it.content }.take(1_200)}" }
+        val screenPrompt = if (
+            modelPlannerSettings().shareScreenText && currentScreen.sensitiveFlagCount == 0
+        ) {
+            buildString {
+                append("App: ").append(currentScreen.foregroundApp).append('\n')
+                append("Page: ").append(currentScreen.pageTitle).append('\n')
+                append(currentScreen.visibleTexts.take(20).joinToString("\n") { "- ${it.take(300)}" })
+            }.take(6_000)
+        } else ""
         val draftPlan = planned.copy(
             actions = planned.actions.map { action ->
+                val targetIds = setOf(
+                    action.parameters["connector_id"].orEmpty(),
+                    action.parameters["contact_id"].orEmpty(),
+                    action.target
+                ).filter(String::isNotBlank)
+                val selectedKnowledgePrompt = knowledgeItems
+                    .filter { item ->
+                        item.agentAccess == AgentKnowledgeAgentAccess.SELECTED_AGENTS &&
+                            item.allowedAgentIds.any { allowed ->
+                                targetIds.any { target -> target.equals(allowed, ignoreCase = true) }
+                            }
+                    }
+                    .take(5)
+                    .joinToString("\n") { "- ${it.title}: ${it.summary.ifBlank { it.content }.take(1_200)}" }
                 action.copy(parameters = action.parameters + mapOf(
                     INTERNAL_CONVERSATION_ID to activeConversationContext.conversationId,
                     INTERNAL_CONVERSATION_CONTEXT to conversationPrompt,
-                    INTERNAL_TURN_ID to activeConversationTurnId
+                    INTERNAL_TURN_ID to activeConversationTurnId,
+                    INTERNAL_MEMORY_CONTEXT to memoryPrompt,
+                    INTERNAL_CLOUD_KNOWLEDGE_CONTEXT to cloudKnowledgePrompt,
+                    INTERNAL_AGENT_KNOWLEDGE_CONTEXT to listOf(agentKnowledgePrompt, selectedKnowledgePrompt)
+                        .filter(String::isNotBlank).joinToString("\n"),
+                    INTERNAL_SCREEN_CONTEXT to screenPrompt
                 ))
             }
         )
@@ -6486,6 +6530,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         Thread {
             val appContext = context.applicationContext
             var successfulReply = ""
+            var successfulUsage = CloudModelUsage()
             var successfulModel: JSONObject? = null
             var lastError: Throwable? = null
             modelCandidates.forEach { candidate ->
@@ -6493,10 +6538,11 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 val candidateId = candidate.optString("id").ifBlank { candidate.optString("signalasi_id") }
                 val model = AppStore.selectedCloudModelContact(appContext, candidateId) ?: candidate
                 val startedAt = System.currentTimeMillis()
-                runCatching { CloudModelClient.send(appContext, model, promptWithConversationContext(action, prompt)) }
-                    .onSuccess { reply ->
-                        if (replySatisfiesRoute(action, reply)) {
-                            successfulReply = reply
+                runCatching { CloudModelClient.sendWithUsage(appContext, model, promptWithConversationContext(action, prompt, cloud = true)) }
+                    .onSuccess { response ->
+                        if (replySatisfiesRoute(action, response.text)) {
+                            successfulReply = response.text
+                            successfulUsage = CloudModelUsage(response.inputTokens, response.outputTokens, response.costMicros)
                             successfulModel = model
                             resourceHealth.record("target:$candidateId", true, System.currentTimeMillis() - startedAt)
                         } else {
@@ -6541,7 +6587,10 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                     sourceMessageId = messageId,
                     contactId = contactId,
                     content = reply,
-                    success = succeeded
+                    success = succeeded,
+                    inputTokens = successfulUsage.inputTokens,
+                    outputTokens = successfulUsage.outputTokens,
+                    costMicros = successfulUsage.costMicros
                 )
             )
         }.start()
@@ -6562,11 +6611,22 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         )
     }
 
-    private fun promptWithConversationContext(action: AgentAction, prompt: String): String {
+    private fun promptWithConversationContext(action: AgentAction, prompt: String, cloud: Boolean = false): String {
         val contextBlock = action.parameters[INTERNAL_CONVERSATION_CONTEXT].orEmpty()
-        if (contextBlock.isBlank()) return prompt
+        val memoryBlock = action.parameters[INTERNAL_MEMORY_CONTEXT].orEmpty()
+        val knowledgeBlock = action.parameters[
+            if (cloud) {
+                INTERNAL_CLOUD_KNOWLEDGE_CONTEXT
+            } else {
+                INTERNAL_AGENT_KNOWLEDGE_CONTEXT
+            }
+        ].orEmpty()
+        val screenBlock = action.parameters[INTERNAL_SCREEN_CONTEXT].orEmpty()
         return buildString {
-            append(contextBlock)
+            if (contextBlock.isNotBlank()) append(contextBlock).append("\n\n")
+            if (memoryBlock.isNotBlank()) append("Relevant personal memory:\n").append(memoryBlock).append("\n\n")
+            if (knowledgeBlock.isNotBlank()) append("Authorized knowledge results:\n").append(knowledgeBlock).append("\n\n")
+            if (screenBlock.isNotBlank()) append("Authorized current screen context:\n").append(screenBlock).append("\n\n")
             append("\n\nCurrent user request:\n")
             append(prompt)
         }.take(24_000)

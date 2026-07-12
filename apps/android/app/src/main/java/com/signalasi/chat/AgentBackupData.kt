@@ -15,7 +15,7 @@ object AgentBackupData {
     private const val TRANSCRIPT_PREFS = AgentTranscriptStore.PREFS
     private const val ITEMS_KEY = "items"
 
-    fun export(context: Context): JSONObject {
+    fun export(context: Context, includeSessionHistory: Boolean = true): JSONObject {
         val safety = SharedPreferencesAgentSafetySettingsStore(context).load()
         val modelPlanner = AgentModelPlannerSettingsStore(context).load()
         val voiceAssistant = VoiceAssistantSettings.get(context)
@@ -25,13 +25,15 @@ object AgentBackupData {
             .put("version", 11)
             .put("memory", readArray(context, MEMORY_PREFS, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS))
             .put("knowledge", readArray(context, KNOWLEDGE_PREFS, MAX_KNOWLEDGE_ITEMS, MAX_KNOWLEDGE_ITEM_CHARACTERS))
-            .put("tasks", readArray(context, TASK_PREFS, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS))
-            .put("transcript", readArray(context, TRANSCRIPT_PREFS, MAX_TRANSCRIPT_ITEMS, MAX_TRANSCRIPT_ITEM_CHARACTERS))
-            .put("agent_conversations", readAgentConversationArray(context))
+            .put("tasks", if (includeSessionHistory) readArray(context, TASK_PREFS, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS) else JSONArray())
+            .put("transcript", if (includeSessionHistory) readAgentTranscriptArray(context) else JSONArray())
+            .put("agent_conversations", if (includeSessionHistory) readAgentConversationArray(context) else JSONArray())
             .put(
                 "active_agent_conversation",
-                AgentEncryptedPreferences(context, TRANSCRIPT_PREFS)
-                    .readString(AgentTranscriptStore.KEY_ACTIVE_CONVERSATION, "")
+                if (includeSessionHistory) {
+                    AgentEncryptedDatabase(context, TRANSCRIPT_PREFS)
+                        .readString(AgentTranscriptStore.KEY_ACTIVE_CONVERSATION, "")
+                } else ""
             )
             .put("workflows", readArray(context, WORKFLOW_PREFS, MAX_WORKFLOW_ITEMS, MAX_WORKFLOW_ITEM_CHARACTERS))
             .put("workflow_schedules", readArray(context, SCHEDULE_PREFS, MAX_SCHEDULE_ITEMS, MAX_SCHEDULE_ITEM_CHARACTERS))
@@ -115,16 +117,16 @@ object AgentBackupData {
         }
         payload.optJSONArray("transcript")?.let { input ->
             val sanitized = sanitizeArray(input, MAX_TRANSCRIPT_ITEMS, MAX_TRANSCRIPT_ITEM_CHARACTERS)
-            AgentEncryptedPreferences(context, TRANSCRIPT_PREFS)
+            AgentEncryptedDatabase(context, TRANSCRIPT_PREFS)
                 .writeString(AgentTranscriptStore.KEY_ITEMS, sanitized.toString())
         }
         payload.optJSONArray("agent_conversations")?.let { input ->
             val sanitized = sanitizeArray(input, 100, 20_000)
-            AgentEncryptedPreferences(context, TRANSCRIPT_PREFS)
+            AgentEncryptedDatabase(context, TRANSCRIPT_PREFS)
                 .writeString(AgentTranscriptStore.KEY_CONVERSATIONS, sanitized.toString())
         }
         payload.optString("active_agent_conversation").takeIf { it.isNotBlank() }?.let { activeId ->
-            AgentEncryptedPreferences(context, TRANSCRIPT_PREFS)
+            AgentEncryptedDatabase(context, TRANSCRIPT_PREFS)
                 .writeString(AgentTranscriptStore.KEY_ACTIVE_CONVERSATION, activeId.take(120))
         }
         payload.optJSONArray("workflows")?.let { input ->
@@ -232,9 +234,19 @@ object AgentBackupData {
     }
 
     private fun readAgentConversationArray(context: Context): JSONArray {
-        val raw = AgentEncryptedPreferences(context, TRANSCRIPT_PREFS)
+        val raw = AgentEncryptedDatabase(context, TRANSCRIPT_PREFS)
             .readString(AgentTranscriptStore.KEY_CONVERSATIONS, "[]")
         return sanitizeArray(runCatching { JSONArray(raw) }.getOrDefault(JSONArray()), 100, 20_000)
+    }
+
+    private fun readAgentTranscriptArray(context: Context): JSONArray {
+        val raw = AgentEncryptedDatabase(context, TRANSCRIPT_PREFS)
+            .readString(AgentTranscriptStore.KEY_ITEMS, "[]")
+        return sanitizeArray(
+            runCatching { JSONArray(raw) }.getOrDefault(JSONArray()),
+            MAX_TRANSCRIPT_ITEMS,
+            MAX_TRANSCRIPT_ITEM_CHARACTERS
+        )
     }
 
     private fun sanitizeArray(input: JSONArray, maxItems: Int, maxItemCharacters: Int): JSONArray {
