@@ -7424,6 +7424,13 @@ interface AgentSessionStore {
     fun clear()
 }
 
+class InMemoryAgentSessionStore : AgentSessionStore {
+    @Volatile private var snapshot: AgentSessionSnapshot? = null
+    override fun load(): AgentSessionSnapshot? = snapshot
+    override fun save(snapshot: AgentSessionSnapshot) { this.snapshot = snapshot }
+    override fun clear() { snapshot = null }
+}
+
 class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
     private val prefs = AgentEncryptedPreferences(context, PREFS)
 

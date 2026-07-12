@@ -76,6 +76,7 @@ import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlin.math.abs
@@ -170,9 +171,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentMemoryText: TextView
     private lateinit var agentKnowledgeText: TextView
     @Volatile private var agentOperationInFlight = false
-    @Volatile private var agentGoalProcessing = false
-    private val pendingAgentGoals = ArrayDeque<String>()
-    private val pendingAgentGoalsLock = Any()
+    private val activeAgentTasks = ConcurrentHashMap<Long, MobileNativeAgent>()
     private lateinit var agentScreenSearchInput: EditText
     private lateinit var agentScreenDetailList: LinearLayout
     private lateinit var agentActionQueueList: LinearLayout
@@ -562,26 +561,26 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun consumeAgentConnectorResponse(response: AgentConnectorResponse) {
-        if (agentOperationInFlight) return
-        if (!mobileNativeAgent.canAcceptConnectorResponse(response.sourceMessageId, response.contactId)) return
+        val runtime = activeAgentTasks[response.sourceMessageId] ?: mobileNativeAgent
+        if (!runtime.canAcceptConnectorResponse(response.sourceMessageId, response.contactId)) return
         AgentConnectorResponseStore.remove(this, response)
-        runAgentOperationAsync(
-            operation = {
-                mobileNativeAgent.acceptConnectorResponse(
+        thread(name = "signalasi-agent-response-${response.sourceMessageId}") {
+            val state = runtime.acceptConnectorResponse(
                     sourceMessageId = response.sourceMessageId,
                     contactId = response.contactId,
                     content = response.content,
                     success = response.success
-                ) ?: mobileNativeAgent.snapshot()
-            },
-            onComplete = { state ->
+                ) ?: runtime.snapshot()
+            activeAgentTasks.remove(response.sourceMessageId)
+            runOnUiThread {
+                renderAgentState(state)
                 if (VoiceAssistantSettings.get(this).routingMode == VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT &&
                     voiceAssistantAwake
                 ) {
                     presentVoiceAgentState(state)
                 }
             }
-        )
+        }
     }
 
     private fun consumePendingAgentConnectorResponses() {
@@ -711,7 +710,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             reloadChatHistoryIfChanged(force = true)
         }
         val taskId = envelope.optString("task_id")
-        val nativeState = mobileNativeAgent.recordConnectorTaskStatus(
+        val taskRuntime = activeAgentTasks[sourceMessageId] ?: mobileNativeAgent
+        val nativeState = taskRuntime.recordConnectorTaskStatus(
             sourceMessageId = sourceMessageId,
             contactId = contactId,
             taskId = taskId,
@@ -728,7 +728,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             )
             renderAgentState(nativeState)
             when (status) {
-                "cancelled" -> renderAgentState(mobileNativeAgent.cancelCurrentTask())
+                "cancelled" -> {
+                    activeAgentTasks.remove(sourceMessageId)
+                    renderAgentState(taskRuntime.cancelCurrentTask())
+                }
                 "failed", "timed_out", "not_found" -> AgentConnectorResponseBus.publish(
                     this,
                     AgentConnectorResponse(
@@ -1173,40 +1176,33 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         renderAgentTranscript(agentTranscriptStore.list())
         agentGoalInput.setText("")
         hideKeyboard()
-        synchronized(pendingAgentGoalsLock) {
-            pendingAgentGoals.addLast(goal)
-        }
-        processNextAgentGoal()
+        executeConcurrentAgentGoal(goal)
     }
 
-    private fun processNextAgentGoal() {
-        val goal = synchronized(pendingAgentGoalsLock) {
-            if (agentGoalProcessing || pendingAgentGoals.isEmpty()) null else {
-                agentGoalProcessing = true
-                pendingAgentGoals.removeFirst()
-            }
-        } ?: return
-        thread(name = "signalasi-agent-goal") {
+    private fun executeConcurrentAgentGoal(goal: String) {
+        thread(name = "signalasi-agent-goal-${System.nanoTime()}") {
+            val runtime = MobileNativeAgent(this, sessionStore = InMemoryAgentSessionStore())
             val outcome = runCatching {
-                var state = mobileNativeAgent.submitGoal(goal)
+                var state = runtime.submitGoal(goal)
                 var approvals = 0
                 while (state.pendingAction != null &&
                     state.pendingAction.risk != AgentRisk.BLOCKED &&
                     approvals++ < 32
                 ) {
-                    state = mobileNativeAgent.approveNextAction(highRiskConfirmed = true)
+                    state = runtime.approveNextAction(highRiskConfirmed = true)
                 }
                 state
             }
             runOnUiThread {
-                agentGoalProcessing = false
-                val state = outcome.getOrElse { mobileNativeAgent.snapshot() }
+                val state = outcome.getOrElse { runtime.snapshot() }
+                state.lastActionResult?.metadata?.get("source_message_id")?.toLongOrNull()?.let { sourceId ->
+                    activeAgentTasks[sourceId] = runtime
+                }
                 renderAgentState(state)
                 consumePendingAgentConnectorResponses()
                 outcome.exceptionOrNull()?.let { error ->
                     Toast.makeText(this, error.message ?: "Agent operation failed", Toast.LENGTH_LONG).show()
                 }
-                processNextAgentGoal()
             }
         }
     }
