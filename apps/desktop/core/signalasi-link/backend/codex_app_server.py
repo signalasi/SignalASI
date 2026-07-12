@@ -153,7 +153,6 @@ class CodexAppServer:
             item = params.get("item") or {}
             if item.get("type") == "agentMessage" and item.get("text"):
                 run.final_text = str(item["text"])
-            self.on_event(task_id, {**common, "status": "running", "current_step": self._item_label(item, completed=True)})
         elif method == "turn/completed":
             status = str((params.get("turn") or {}).get("status") or "completed")
             mapped = {"completed": "completed", "failed": "failed", "interrupted": "cancelled"}.get(status, status)

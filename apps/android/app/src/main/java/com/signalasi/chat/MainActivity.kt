@@ -346,6 +346,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         AppStore.ensureInitialized(this)
         mobileNativeAgent = MobileNativeAgent(this)
         agentTranscriptStore = AgentTranscriptStore(this)
+        agentTranscriptStore.removeExactText("Create a safe local task plan")
+        agentTranscriptStore.removeExactText("Task plan confirmed")
         microsoftTts = MicrosoftEdgeTts(applicationContext)
         androidTts = TextToSpeech(this) { status ->
             androidTtsReady = status == TextToSpeech.SUCCESS
@@ -2222,7 +2224,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         state.pendingAction?.let { pending ->
             val description = pending.description.trim()
-            if (description.isNotBlank() && !description.contains(':')) {
+            if (description.isNotBlank() &&
+                description != "Create a safe local task plan" &&
+                !description.contains(':')
+            ) {
                 agentTranscriptStore.append(
                     AgentTranscriptRole.PROCESS,
                     description,

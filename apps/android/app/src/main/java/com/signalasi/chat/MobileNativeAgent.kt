@@ -555,10 +555,13 @@ class MobileNativeAgent(
             AgentAuditEvent.CHECKPOINT_SAVED,
             "checkpoint=${checkpoint.id}; action=${hardenedAction.id}; rollback=${checkpoint.rollbackAction != null}"
         )
-        val executionAction = currentPlan?.materializeToolInput(
+        val materializedAction = currentPlan?.materializeToolInput(
             action = hardenedAction,
             allowOutputHandoff = AgentModelPlannerSettingsStore(appContext).load().multiAgentCoordination
         ) ?: hardenedAction
+        val executionAction = materializedAction.copy(
+            parameters = materializedAction.parameters + mapOf("original_goal" to currentGoal)
+        )
         if (executionAction.parameters["prompt"] != hardenedAction.parameters["prompt"]) {
             recordAudit(
                 AgentAuditEvent.TOOL_OUTPUT_HANDOFF,
@@ -6234,7 +6237,9 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             buildKnowledgeAnswerPrompt(action)
                 ?: return AgentActionResult(action.id, false, "Knowledge evidence is no longer available")
         } else {
-            action.parameters["prompt"].orEmpty().ifBlank { action.description }
+            action.parameters["original_goal"].orEmpty().ifBlank {
+                action.parameters["prompt"].orEmpty().ifBlank { action.description }
+            }
         }
         val connectorIds = buildList {
             add(action.parameters["connector_id"].orEmpty())

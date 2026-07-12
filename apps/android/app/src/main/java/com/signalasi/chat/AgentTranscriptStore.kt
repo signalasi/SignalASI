@@ -80,6 +80,14 @@ class AgentTranscriptStore(context: Context) {
 
     fun clear() = preferences.clear()
 
+    @Synchronized
+    fun removeExactText(text: String): Int {
+        val current = list()
+        val filtered = current.filterNot { it.text == text }
+        if (filtered.size != current.size) save(filtered)
+        return current.size - filtered.size
+    }
+
     private fun save(items: List<AgentTranscriptEntry>) {
         val array = JSONArray()
         items.forEach { entry ->
