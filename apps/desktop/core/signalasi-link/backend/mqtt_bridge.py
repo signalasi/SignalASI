@@ -834,12 +834,15 @@ def start():
     mqttc.on_message = on_message
     mqttc.on_publish = on_publish
 
-    try:
-        mqttc.connect(BROKER, PORT, keepalive=60)
-        mqttc.loop_forever()
-    except Exception as e:
-        log.error(f"MQTT start failed: {e}")
-        running = False
+    mqttc.reconnect_delay_set(min_delay=1, max_delay=30)
+    while running:
+        try:
+            mqttc.connect(BROKER, PORT, keepalive=60)
+            mqttc.loop_forever(retry_first_connection=True)
+        except Exception as e:
+            log.error(f"MQTT connection failed; retrying in 3 seconds: {e}")
+        if running:
+            time.sleep(3)
 
 
 def start_background():

@@ -235,15 +235,18 @@ async function startBackend() {
   const python = findPython();
   const signalasiDataDir = path.join(app.getPath("userData"), "runtime");
   fs.mkdirSync(signalasiDataDir, { recursive: true });
+  const backendLogPath = path.join(app.getPath("userData"), "backend.log");
+  const backendLog = fs.openSync(backendLogPath, "a");
   try {
     backendProcess = spawn(python, ["-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", String(BACKEND_PORT)], {
       cwd: BACKEND_DIR,
       env: {
         ...process.env,
-        SIGNALASI_DATA_DIR: signalasiDataDir
+        SIGNALASI_DATA_DIR: signalasiDataDir,
+        PYTHONUNBUFFERED: "1"
       },
       windowsHide: true,
-      stdio: "ignore",
+      stdio: ["ignore", backendLog, backendLog],
       detached: false
     });
   } catch (error) {
