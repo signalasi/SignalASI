@@ -982,4 +982,5 @@
     <string name="voice_release_to_cancel">松开取消</string>
     <string name="voice_too_short">说话时间太短</string>
     <string name="voice_cancelled">已取消</string>
+    <string name="agent_voice_message_label">语音 %1$d秒</string>
 </resources>

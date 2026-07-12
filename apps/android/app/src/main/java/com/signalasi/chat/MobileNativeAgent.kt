@@ -4041,16 +4041,20 @@ class MobileNativeAgent(
 
     private fun prepareKnowledgeAnswerCommand(query: String): AgentUiState {
         val targets = connectorRegistry.availableTargets()
-        val target = targets.firstOrNull { it.id == "local-llm" && it.status == AgentConnectorStatus.AVAILABLE }
-            ?: targets.firstOrNull { it.id == "cloud-models" && it.status == AgentConnectorStatus.AVAILABLE }
-            ?: targets.firstOrNull { it.id == "hermes" && it.status == AgentConnectorStatus.AVAILABLE }
+        val target = listOf("codex", "hermes", "local-llm", "cloud-models")
+            .firstNotNullOfOrNull { preferredId ->
+                targets.firstOrNull { target ->
+                    target.status == AgentConnectorStatus.AVAILABLE &&
+                        (target.id == preferredId || target.id.endsWith(":$preferredId"))
+                }
+            }
         if (target == null) {
             val localHits = knowledgeStore.search(query, limit = 6)
             return completePersonalDataOverviewCommand(
                 actionId = "knowledge-answer-unavailable",
                 target = "Agent Knowledge",
                 description = "Prepare knowledge evidence without an available model",
-                result = "No local model, cloud model, or paired Hermes Agent is available.\n${knowledgeHitsSummary(query, localHits)}",
+                result = "No Codex, Hermes, local model, or cloud model is available.\n${knowledgeHitsSummary(query, localHits)}",
                 parameters = mapOf("query" to query, "source_count" to localHits.size.toString())
             )
         }
@@ -4817,7 +4821,8 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 } -> deviceAction(request)
             isInformationQuery(goal) -> informationQueryAction(request)
                 ?: draftPlanAction(request)
-            else -> draftPlanAction(request)
+            else -> informationQueryAction(request)
+                ?: draftPlanAction(request)
         }
     }
 

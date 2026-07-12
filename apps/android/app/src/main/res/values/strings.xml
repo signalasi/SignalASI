@@ -1077,4 +1077,5 @@
     <string name="voice_release_to_cancel">Release to cancel</string>
     <string name="voice_too_short">Recording is too short</string>
     <string name="voice_cancelled">Recording cancelled</string>
+    <string name="agent_voice_message_label">Voice %1$ds</string>
 </resources>

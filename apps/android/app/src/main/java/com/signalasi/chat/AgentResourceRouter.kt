@@ -257,19 +257,52 @@ class AgentResourceRouter(context: Context) {
 
     fun route(goal: String, targets: List<AgentCallableTarget>, tools: List<AgentSystemTool>): AgentRoutingDecision {
         val requirements = AgentTaskRequirementAnalyzer.analyze(goal)
+        val preferredTargets = preferredTargetOrder(requirements)
         val candidates = AgentResourceCatalog.build(targets, tools)
             .asSequence()
             .filter { it.targetId.isNotBlank() }
             .map { resource -> score(resource, requirements) }
             .filter { it.score > -1_000 }
-            .sortedByDescending { it.score }
+            .sortedWith(
+                compareBy<AgentResourceCandidate> { preferredRank(it.resource.targetId, preferredTargets) }
+                    .thenByDescending { it.score }
+            )
             .toList()
-        val fallbackLimit = when (requirements.mode) {
-            AgentRoutingMode.FAST, AgentRoutingMode.ECONOMY -> 2
-            AgentRoutingMode.PRIVATE, AgentRoutingMode.BALANCED -> 3
-            AgentRoutingMode.QUALITY -> 4
-        }
+        val fallbackLimit = 6
         return AgentRoutingDecision(requirements, candidates.firstOrNull(), candidates.drop(1).take(fallbackLimit))
+    }
+
+    private fun preferredTargetOrder(requirements: AgentTaskRequirements): List<String> {
+        val remainder = when {
+            AgentCapability.CODE in requirements.capabilities -> listOf("claude-code")
+            AgentCapability.KNOWLEDGE_SEARCH in requirements.capabilities -> listOf("local-llm", "cloud-models")
+            requirements.liveDataRequired -> listOf("cloud-models")
+            requirements.mode == AgentRoutingMode.QUALITY -> listOf("cloud-models")
+            requirements.mode == AgentRoutingMode.FAST -> listOf("local-llm")
+            requirements.mode == AgentRoutingMode.ECONOMY -> listOf("local-llm", "claude-code", "cloud-models")
+            requirements.mode == AgentRoutingMode.PRIVATE -> listOf("local-llm")
+            else -> listOf("local-llm", "cloud-models")
+        }
+        return (listOf("codex", "hermes") + remainder)
+            .map(::canonicalTargetId)
+            .distinct()
+    }
+
+    private fun preferredRank(targetId: String, preferredTargets: List<String>): Int {
+        val index = preferredTargets.indexOf(canonicalTargetId(targetId))
+        return if (index >= 0) index else preferredTargets.size + 1
+    }
+
+    private fun canonicalTargetId(targetId: String): String {
+        val id = targetId.lowercase(Locale.US)
+        return when {
+            id == "claude" || id == "claude-code" -> "claude-code"
+            id == "cloud-models" || id.startsWith("cloud-model:") -> "cloud-models"
+            id.contains(":codex") || id == "codex" -> "codex"
+            id.contains(":hermes") || id == "hermes" -> "hermes"
+            id.contains(":local-llm") || id == "local-llm" -> "local-llm"
+            else -> id
+        }
     }
 
     private fun score(resource: AgentResourceDescriptor, requirements: AgentTaskRequirements): AgentResourceCandidate {

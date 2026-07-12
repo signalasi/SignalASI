@@ -4913,6 +4913,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             file?.delete()
             return
         }
+        val durationMs = (System.currentTimeMillis() - recordingStartedAt).coerceAtLeast(1L)
+        val seconds = ((durationMs + 999L) / 1000L).coerceAtLeast(1L)
+        agentTranscriptStore.append(
+            AgentTranscriptRole.USER,
+            getString(R.string.agent_voice_message_label, seconds)
+        )
+        renderAgentTranscript(agentTranscriptStore.list())
         requestAgentInputTranscription(file)
     }
 
