@@ -644,6 +644,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         runOnUiThread {
             val envelope = runCatching { JSONObject(payload) }.getOrNull()
             if (handleVoiceAgentTranscript(envelope)) return@runOnUiThread
+            if (handleAgentTaskEvent(envelope)) return@runOnUiThread
             val msg = parseIncomingMessage(payload)
             if (msg.content.isBlank()) return@runOnUiThread
             msg.deliveryTrace.add(newTraceEvent("received", "MQTT inbound"))
@@ -661,6 +662,42 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 maybeSpeakIncomingReply(msg)
             }
         }
+    }
+
+    private fun handleAgentTaskEvent(envelope: JSONObject?): Boolean {
+        if (envelope?.optString("type") != "agent_task_event") return false
+        val sourceMessageId = envelope.optString("source_message_id").toLongOrNull()
+            ?: envelope.optLong("source_message_id", 0L).takeIf { it > 0L }
+            ?: return true
+        val contactId = envelope.optString("contact_id").takeIf { it.isNotBlank() }
+            ?: selectedContact?.id
+            ?: return true
+        val status = envelope.optString("task_status")
+        val statusSeq = envelope.optLong("status_seq", 0L)
+        val existingMessage = messages[contactId]?.firstOrNull { it.id == sourceMessageId }
+        if (existingMessage != null && statusSeq > 0L && statusSeq < existingMessage.taskStatusSeq) return true
+        val baseStatusLabel = when (status) {
+            "accepted" -> getString(R.string.agent_task_status_accepted)
+            "queued" -> getString(R.string.agent_task_status_queued)
+            "running" -> getString(R.string.agent_task_status_running)
+            "waiting_input" -> getString(R.string.agent_task_status_waiting_input)
+            "completed" -> getString(R.string.agent_task_status_completed)
+            "failed" -> getString(R.string.agent_task_status_failed)
+            "cancelled" -> getString(R.string.agent_task_status_cancelled)
+            "timed_out" -> getString(R.string.agent_task_status_timed_out)
+            else -> status
+        }
+        val elapsedSeconds = envelope.optLong("elapsed_ms", 0L) / 1000L
+        val statusLabel = if (status == "running" && elapsedSeconds > 0L) {
+            getString(R.string.agent_task_status_running_elapsed, elapsedSeconds)
+        } else baseStatusLabel
+        existingMessage?.let { message ->
+            message.taskId = envelope.optString("task_id")
+            message.taskStatus = status
+            message.taskStatusSeq = maxOf(message.taskStatusSeq, statusSeq)
+        }
+        mergeDeliveryTrace(sourceMessageId, contactId, incomingDeliveryTrace(envelope), statusLabel)
+        return true
     }
 
     override fun onPcInfo(ip: String, port: Int) {
@@ -4431,6 +4468,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val message = list[index]
         val existing = message.deliveryTrace.map { "${it.stage}|${it.at}|${it.detail}" }.toMutableSet()
         trace.forEach { event ->
+            if (event.stage == "agent_running") {
+                val runningIndex = message.deliveryTrace.indexOfLast { it.stage == event.stage }
+                if (runningIndex >= 0) {
+                    message.deliveryTrace[runningIndex] = event
+                    return@forEach
+                }
+            }
             val key = "${event.stage}|${event.at}|${event.detail}"
             if (existing.add(key)) {
                 message.deliveryTrace.add(event)
@@ -4498,6 +4542,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         "desktop_decrypted" -> getString(R.string.delivery_trace_desktop_decrypted)
         "agent_started" -> getString(R.string.delivery_trace_agent_started)
         "agent_replied" -> getString(R.string.delivery_trace_agent_replied)
+        "agent_accepted" -> getString(R.string.agent_task_status_accepted)
+        "agent_queued" -> getString(R.string.agent_task_status_queued)
+        "agent_running" -> getString(R.string.agent_task_status_running)
+        "agent_waiting_input" -> getString(R.string.agent_task_status_waiting_input)
+        "agent_completed" -> getString(R.string.agent_task_status_completed)
+        "agent_failed" -> getString(R.string.agent_task_status_failed)
+        "agent_cancelled" -> getString(R.string.agent_task_status_cancelled)
+        "agent_timed_out" -> getString(R.string.agent_task_status_timed_out)
         "desktop_reply_publish_queued" -> getString(R.string.delivery_trace_desktop_reply_queued)
         "desktop_reply_broker_ack" -> getString(R.string.delivery_trace_desktop_reply_ack)
         "desktop_broker_ack" -> getString(R.string.delivery_trace_desktop_broker_ack)
@@ -4564,7 +4616,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val sender = json?.optString("sender", "hermes") ?: "hermes"
         val contactId = json?.optString("contact_id", CONTACT_HERMES.id)?.takeIf { it.isNotBlank() } ?: CONTACT_HERMES.id
         val contact = contactById(if (sender == "system") CONTACT_SYSTEM.id else contactId)
-        return ChatMessage(newMessageId(), content, sender == "self", contact, deliveryTrace = incomingTrace)
+        return ChatMessage(
+            newMessageId(),
+            content,
+            sender == "self",
+            contact,
+            deliveryTrace = incomingTrace,
+            taskId = json?.optString("task_id").orEmpty(),
+            taskStatus = json?.optString("task_status").orEmpty()
+        )
     }
 
     // ===== Recording =====
@@ -4849,6 +4909,23 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 showChatPage(contact)
             }
         })
+        if (message.taskId.isNotBlank() && message.taskStatus in setOf("accepted", "queued", "running", "waiting_input")) {
+            featureContent.addView(featureRow(getString(R.string.agent_task_cancel_title), getString(R.string.agent_task_cancel_subtitle), R.drawable.ic_delete, getString(R.string.common_cancel)).apply {
+                setOnClickListener {
+                    val sent = SignalASIMqttClient.publishAgentTaskCancel(
+                        taskId = message.taskId,
+                        contactId = contact.id,
+                        sourceMessageId = message.id,
+                        topicOverride = AppStore.outgoingTopicForContact(this@MainActivity, contact.id)
+                    )
+                    if (sent) {
+                        message.deliveryStatus = getString(R.string.agent_task_status_cancelling)
+                        saveChatHistory()
+                    }
+                    showChatPage(contact)
+                }
+            })
+        }
         featureContent.addView(featureRow(getString(R.string.message_delete_title), getString(R.string.message_delete_subtitle), R.drawable.ic_delete, getString(R.string.common_delete)).apply {
             setOnClickListener {
                 deleteMessageAt(contact.id, position)
@@ -4858,6 +4935,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         })
         addSectionTitle(getString(R.string.section_details))
         featureContent.addView(featureRow(getString(R.string.message_sent_time), bubbleTime(message.timestamp), R.drawable.ic_protocol_link, ""))
+        if (message.taskId.isNotBlank()) {
+            featureContent.addView(featureRow(getString(R.string.agent_task_details_title), message.taskId, R.drawable.ic_protocol_link, message.deliveryStatus.orEmpty()))
+        }
         featureContent.addView(featureRow(getString(R.string.message_security_status), getString(R.string.message_security_status_subtitle), R.drawable.ic_security_shield, ""))
         featureContent.addView(featureRow(getString(R.string.message_delivery_trace), deliveryTraceText(message), R.drawable.ic_protocol_link, ""))
     }
@@ -4918,6 +4998,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     isSystem = item.optBoolean("isSystem"),
                     timestamp = item.optLong("timestamp", System.currentTimeMillis()),
                     deliveryStatus = item.optString("deliveryStatus").takeIf { it.isNotBlank() },
+                    taskId = item.optString("taskId"),
+                    taskStatus = item.optString("taskStatus"),
+                    taskStatusSeq = item.optLong("taskStatusSeq", 0L),
                     deliveryTrace = parseDeliveryTrace(item.optJSONArray("deliveryTrace"))
                 )
                 if (message.content.isBlank()) continue
@@ -5072,6 +5155,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         .put("isSystem", message.isSystem)
                         .put("timestamp", message.timestamp)
                         .put("deliveryStatus", message.deliveryStatus ?: "")
+                        .put("taskId", message.taskId)
+                        .put("taskStatus", message.taskStatus)
+                        .put("taskStatusSeq", message.taskStatusSeq)
                         .put("deliveryTrace", deliveryTraceJson(message.deliveryTrace)))
                 }
                 root.put(contactId, array)
@@ -8905,7 +8991,10 @@ data class ChatMessage(
     val isSystem: Boolean = false,
     val timestamp: Long = System.currentTimeMillis(),
     var deliveryStatus: String? = null,
-    val deliveryTrace: MutableList<DeliveryTraceEvent> = mutableListOf()
+    val deliveryTrace: MutableList<DeliveryTraceEvent> = mutableListOf(),
+    var taskId: String = "",
+    var taskStatus: String = "",
+    var taskStatusSeq: Long = 0L
 )
 
 data class DeliveryTraceEvent(
@@ -9283,4 +9372,3 @@ private fun dayDivider(timestamp: Long): String {
 }
 
 private fun dateKey(timestamp: Long): String = SimpleDateFormat("yyyyMMdd", Locale.CHINA).format(Date(timestamp))
-

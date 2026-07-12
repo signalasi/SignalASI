@@ -185,4 +185,18 @@
   "development": "开发版",
   "{done}/{total} setup steps complete": "已完成 {done}/{total} 个设置步骤",
   "Detecting": "检测中"
+, "Remote Agent tasks": "远程 Agent 任务"
+, "Live lifecycle state for Codex, Hermes, Claude Code, local models, and custom agents.": "显示 Codex、Hermes、Claude Code、本地模型和自定义 Agent 的实时生命周期状态。"
+, "Refresh tasks": "刷新任务"
+, "Waiting for Agent tasks": "正在等待 Agent 任务"
+, "No remote Agent tasks yet.": "暂无远程 Agent 任务。"
+, "Agent task status unavailable": "Agent 任务状态不可用"
+, "accepted": "已接受"
+, "queued": "排队中"
+, "running": "运行中"
+, "waiting_input": "等待输入"
+, "completed": "已完成"
+, "failed": "执行失败"
+, "cancelled": "已取消"
+, "timed_out": "已超时"
 }

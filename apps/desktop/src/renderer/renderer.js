@@ -33,10 +33,12 @@ const refreshRuntimeButton = document.getElementById("refreshRuntime");
 const refreshStatusMatrixButton = document.getElementById("refreshStatusMatrix");
 const refreshSetupGuideButton = document.getElementById("refreshSetupGuide");
 const refreshExecutionLogButton = document.getElementById("refreshExecutionLog");
+const refreshAgentTasksButton = document.getElementById("refreshAgentTasks");
 const testResult = document.getElementById("testResult");
 const diagnosticsResult = document.getElementById("diagnosticsResult");
 const runtimeResult = document.getElementById("runtimeResult");
 const executionLog = document.getElementById("executionLog");
+const agentTasks = document.getElementById("agentTasks");
 const connectorMatrixRows = document.getElementById("connectorMatrixRows");
 const statusSummary = document.getElementById("statusSummary");
 const setupChecklist = document.getElementById("setupChecklist");
@@ -577,6 +579,37 @@ async function refreshExecutionLog() {
   }
 }
 
+function renderAgentTasks(data) {
+  const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+  agentTasks.innerHTML = "";
+  if (!tasks.length) {
+    agentTasks.textContent = t("No remote Agent tasks yet.");
+    return;
+  }
+  for (const task of tasks) {
+    const row = document.createElement("div");
+    const terminalOk = task.status === "completed";
+    const terminalWarning = ["failed", "cancelled", "timed_out"].includes(task.status);
+    row.className = `audit-entry ${terminalOk ? "ok" : terminalWarning ? "warn" : ""}`;
+    const elapsed = Math.max(0, Number(task.elapsed_ms || 0));
+    const detail = String(task.error || task.result || "").slice(0, 160);
+    row.innerHTML = `
+      <div><strong>${escapeHtml(task.agent_id || "Agent")}</strong><span>${escapeHtml(t(task.status || "unknown"))}</span></div>
+      <div><strong>${escapeHtml(task.contact_id || "unknown")}</strong><span>${Math.round(elapsed / 1000)} s</span></div>
+      <div><strong>${escapeHtml(task.task_id || "")}</strong><span>${escapeHtml(detail)}</span></div>
+    `;
+    agentTasks.appendChild(row);
+  }
+}
+
+async function refreshAgentTasks() {
+  try {
+    renderAgentTasks(await window.signalasi.getAgentTasks(50));
+  } catch (error) {
+    agentTasks.textContent = `${t("Agent task status unavailable")}: ${error.message || String(error)}`;
+  }
+}
+
 async function saveConfig(button = saveConfigButton) {
   button.disabled = true;
   button.textContent = t("Saving");
@@ -861,6 +894,7 @@ refreshDiagnosticsButton.addEventListener("click", refreshDiagnostics);
 refreshStatusMatrixButton.addEventListener("click", refreshDiagnostics);
 refreshSetupGuideButton.addEventListener("click", refreshDiagnostics);
 refreshExecutionLogButton.addEventListener("click", refreshExecutionLog);
+refreshAgentTasksButton.addEventListener("click", refreshAgentTasks);
 refreshRuntimeButton.addEventListener("click", refreshRuntimeDiagnostics);
 setupChecklist.addEventListener("click", (event) => {
   const button = event.target.closest("[data-setup-action]");
@@ -881,6 +915,7 @@ async function initialize() {
     refreshAgents,
     refreshConfig,
     refreshExecutionLog,
+    refreshAgentTasks,
     refreshRuntimeDiagnostics
   ];
   const results = await Promise.allSettled(tasks.map((task) => task()));
@@ -899,4 +934,8 @@ async function bootstrap() {
 bootstrap().catch((error) => {
   testResult.textContent = error.message || String(error);
 });
+
+setInterval(() => {
+  if (!document.hidden) refreshAgentTasks();
+}, 2000);
 

@@ -25,6 +25,7 @@ Product scope is defined in `docs/product/PRODUCT_REQUIREMENTS.md`.
 | Desktop connector smoke | `npm run smoke:desktop` | Desktop backend starts, pairing endpoints respond, connector diagnostics are structured, default agents are discoverable, and basic agent/mobile APIs respond. |
 | Desktop pairing smoke | `npm run smoke:desktop:pairing` | QR pairing, phone claim handling, pairing status, pairing revocation, and unpaired access guards are enforced. |
 | Desktop agent push smoke | `npm run smoke:desktop:agent-push` | Long-running agents and scripts can call the local push API with token validation and publish messages to the paired phone path. |
+| Desktop Agent lifecycle smoke | `npm run smoke:desktop:agent-lifecycle` | Shared Agent tasks emit ordered lifecycle states, persist completion results, expose registry entries, and terminate registered CLI processes when cancelled. |
 | Desktop voice STT smoke | `npm run smoke:desktop:voice-stt` | Inline phone voice payloads are saved, routed through the Desktop STT bridge, and cleaned before Agent reply handling. |
 | Desktop MQTT persistence smoke | `npm run smoke:desktop:mqtt-persistence` | Desktop and Android MQTT topics use persistent client identity and QoS settings required for delayed delivery. |
 | Desktop UI smoke | `npm run smoke:desktop:ui` | Electron renderer loads, connector panels are visible, Desktop defaults to English, Simplified Chinese switching works, and Desktop UI screenshots can be captured. |

@@ -56,6 +56,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
             VoiceAgentTranscriptStore(this).saveResponse(envelope)
             return
         }
+        if (envelope != null && ChatHistoryStore.applyAgentTaskEvent(this, envelope)) return
         val stored = ChatHistoryStore.appendIncoming(this, payload) ?: return
         if (envelope?.optString("type").orEmpty().ifBlank { "text" } == "text") {
             val sourceMessageId = envelope?.optString("source_message_id")?.toLongOrNull()

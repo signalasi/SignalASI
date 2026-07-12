@@ -198,6 +198,17 @@
         <article class="panel audit">
           <div class="panel-head">
             <div>
+              <h3>Remote Agent tasks</h3>
+              <p>Live lifecycle state for Codex, Hermes, Claude Code, local models, and custom agents.</p>
+            </div>
+            <button id="refreshAgentTasks">Refresh tasks</button>
+          </div>
+          <div id="agentTasks" class="audit-log">Waiting for Agent tasks</div>
+        </article>
+
+        <article class="panel audit">
+          <div class="panel-head">
+            <div>
               <h3>Agent permissions and execution log</h3>
               <p>Every local Agent call is recorded without storing the full prompt text.</p>
             </div>

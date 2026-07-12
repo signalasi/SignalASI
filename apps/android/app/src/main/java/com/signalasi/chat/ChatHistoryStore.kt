@@ -119,6 +119,73 @@ object ChatHistoryStore {
         markMessageTrace(context, contactId, messageId, stage, detail, status)
     }
 
+    @Synchronized
+    fun applyAgentTaskEvent(context: Context, payload: JSONObject): Boolean {
+        if (payload.optString("type") != "agent_task_event") return false
+        val contactId = payload.optString("contact_id")
+        val messageId = payload.optString("source_message_id").toLongOrNull()
+            ?: payload.optLong("source_message_id", 0L).takeIf { it > 0L }
+            ?: return true
+        if (contactId.isBlank()) return true
+        val status = payload.optString("task_status")
+        val statusSeq = payload.optLong("status_seq", 0L)
+        val baseLabel = when (status) {
+            "accepted" -> context.getString(R.string.agent_task_status_accepted)
+            "queued" -> context.getString(R.string.agent_task_status_queued)
+            "running" -> context.getString(R.string.agent_task_status_running)
+            "waiting_input" -> context.getString(R.string.agent_task_status_waiting_input)
+            "completed" -> context.getString(R.string.agent_task_status_completed)
+            "failed" -> context.getString(R.string.agent_task_status_failed)
+            "cancelled" -> context.getString(R.string.agent_task_status_cancelled)
+            "timed_out" -> context.getString(R.string.agent_task_status_timed_out)
+            else -> status
+        }
+        val elapsedSeconds = payload.optLong("elapsed_ms", 0L) / 1000L
+        val label = if (status == "running" && elapsedSeconds > 0L) {
+            context.getString(R.string.agent_task_status_running_elapsed, elapsedSeconds)
+        } else baseLabel
+        val trace = parseDeliveryTrace(payload)
+        if (trace.length() == 0) {
+            appendTrace(trace, "agent_$status", payload.optString("agent_id"))
+        }
+        mergeMessageTaskState(context, contactId, messageId, payload.optString("task_id"), status, statusSeq, label, trace)
+        return true
+    }
+
+    private fun mergeMessageTaskState(
+        context: Context,
+        contactId: String,
+        messageId: Long,
+        taskId: String,
+        taskStatus: String,
+        taskStatusSeq: Long,
+        statusLabel: String,
+        incomingTrace: JSONArray
+    ) {
+        val prefs = context.applicationContext.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
+        val root = runCatching { JSONObject(prefs.getString(HISTORY_KEY, null).orEmpty()) }.getOrElse { JSONObject() }
+        val messages = root.optJSONArray(contactId) ?: return
+        for (index in 0 until messages.length()) {
+            val item = messages.optJSONObject(index) ?: continue
+            if (item.optLong("id", -1L) != messageId) continue
+            if (taskStatusSeq > 0L && taskStatusSeq < item.optLong("taskStatusSeq", 0L)) return
+            val trace = item.optJSONArray("deliveryTrace") ?: JSONArray()
+            for (traceIndex in 0 until incomingTrace.length()) {
+                val event = incomingTrace.optJSONObject(traceIndex) ?: continue
+                if (!hasTraceStage(trace, event.optString("stage"))) trace.put(event)
+            }
+            item.put("deliveryTrace", trace)
+                .put("deliveryStatus", statusLabel)
+                .put("taskId", taskId)
+                .put("taskStatus", taskStatus)
+                .put("taskStatusSeq", taskStatusSeq)
+            break
+        }
+        root.put(contactId, messages)
+        prefs.edit().putString(HISTORY_KEY, root.toString())
+            .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis()).apply()
+    }
+
     private fun markMessageTrace(context: Context, contactId: String, messageId: Long, stage: String, detail: String, status: String) {
         if (contactId.isBlank() || messageId <= 0L) return
         val appContext = context.applicationContext

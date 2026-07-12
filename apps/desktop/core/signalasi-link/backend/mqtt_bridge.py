@@ -14,6 +14,7 @@ import paho.mqtt.client as mqtt
 
 from api_response import api_error, api_ok
 from agent_gateway import ask_agent_sync, connector_diagnostics
+from agent_task_manager import agent_task_manager
 from pairing_state import is_paired, pairing_status, record_pairing_success, validate_pairing_token
 from signalasi_client import (
     decrypt_signal_envelope,
@@ -41,6 +42,9 @@ client = None
 running = False
 pending_delivery_acks: dict[int, dict] = {}
 pending_delivery_acks_lock = threading.Lock()
+phone_publish_lock = threading.RLock()
+pending_task_events: dict[str, tuple[dict, dict]] = {}
+pending_task_events_lock = threading.Lock()
 
 
 def _trace_event(stage: str, detail: object = "") -> dict:
@@ -91,6 +95,9 @@ def on_connect(mqttc, userdata, flags, reason_code, properties=None):
         local_ip = get_lan_ip()
         pc_info = {"ip": local_ip, "port": 18765, "signal": get_signal_bundle()}
         mqttc.publish(TOPIC_PC, json.dumps(pc_info, ensure_ascii=False), qos=MQTT_QOS, retain=True)
+        for recovered_task in agent_task_manager.drain_recovered():
+            _publish_or_queue_task_event(mqttc, {"scheme": "signal", "from": "android"}, recovered_task, [])
+        flush_pending_task_events(mqttc)
     else:
         log.warning(f"MQTT connection failed rc={reason_code}")
 
@@ -216,16 +223,124 @@ def clean_audio_reply(reply: str) -> str:
     return "\n\n".join(parts).strip()
 
 
-def _publish_phone_payload(mqttc, wire_payload: dict, reply_payload: dict) -> None:
-    if wire_payload.get("scheme") == "signal":
-        encrypted_reply = encrypt_signal_payload(reply_payload, remote_name=wire_payload.get("from", "android"))
-        info = mqttc.publish(TOPIC_RECV, json.dumps(encrypted_reply, ensure_ascii=False), qos=MQTT_QOS)
-        track_delivery_ack(info.mid, reply_payload, "desktop_reply_broker_ack", TOPIC_RECV)
-        log.info(f"MQTT encrypted reply published mid={info.mid} rc={info.rc}")
-    else:
-        info = mqttc.publish(TOPIC_RECV, json.dumps(reply_payload, ensure_ascii=False), qos=MQTT_QOS)
-        track_delivery_ack(info.mid, reply_payload, "desktop_reply_broker_ack", TOPIC_RECV)
-        log.info(f"MQTT plain reply published mid={info.mid} rc={info.rc}")
+def _publish_phone_payload(mqttc, wire_payload: dict, reply_payload: dict) -> bool:
+    with phone_publish_lock:
+        if wire_payload.get("scheme") == "signal":
+            encrypted_reply = encrypt_signal_payload(reply_payload, remote_name=wire_payload.get("from", "android"))
+            info = mqttc.publish(TOPIC_RECV, json.dumps(encrypted_reply, ensure_ascii=False), qos=MQTT_QOS)
+            track_delivery_ack(info.mid, reply_payload, "desktop_reply_broker_ack", TOPIC_RECV)
+            log.info(f"MQTT encrypted reply published mid={info.mid} rc={info.rc}")
+        else:
+            info = mqttc.publish(TOPIC_RECV, json.dumps(reply_payload, ensure_ascii=False), qos=MQTT_QOS)
+            track_delivery_ack(info.mid, reply_payload, "desktop_reply_broker_ack", TOPIC_RECV)
+            log.info(f"MQTT plain reply published mid={info.mid} rc={info.rc}")
+        return info.rc == mqtt.MQTT_ERR_SUCCESS
+
+
+def _agent_task_payload(task: dict, trace: list[dict]) -> dict:
+    status = str(task.get("status") or "")
+    stage = f"agent_{status}"
+    return {
+        "type": "agent_task_event",
+        "task_id": task.get("task_id", ""),
+        "task_status": status,
+        "contact_id": task.get("contact_id", ""),
+        "agent_id": task.get("agent_id", ""),
+        "source_message_id": task.get("source_message_id", ""),
+        "created_at": task.get("created_at", 0),
+        "started_at": task.get("started_at", 0),
+        "updated_at": task.get("updated_at", 0),
+        "completed_at": task.get("completed_at", 0),
+        "elapsed_ms": task.get("elapsed_ms", 0),
+        "status_seq": task.get("status_seq", 0),
+        "process_id": task.get("process_id", 0),
+        "error": task.get("error", ""),
+        "desktop_id": desktop_id(),
+        "desktop_name": desktop_name(),
+        "sender": "system",
+        "time": time.time(),
+        "delivery_trace": _delivery_trace({"delivery_trace": trace}, _trace_event(stage, task.get("agent_id", ""))),
+    }
+
+
+def _publish_or_queue_task_event(mqttc, wire_payload: dict, task: dict, trace: list[dict]) -> bool:
+    payload = _agent_task_payload(task, trace)
+    task_id = str(task.get("task_id") or "")
+    try:
+        published = bool(mqttc is not None and mqttc.is_connected() and _publish_phone_payload(mqttc, wire_payload, payload))
+    except Exception as exc:
+        log.warning(f"Agent task event queued task_id={task_id}: {exc}")
+        published = False
+    with pending_task_events_lock:
+        if published:
+            pending_task_events.pop(task_id, None)
+        elif task_id:
+            pending_task_events[task_id] = (dict(wire_payload), payload)
+    return published
+
+
+def flush_pending_task_events(mqttc) -> None:
+    with pending_task_events_lock:
+        queued = list(pending_task_events.items())
+    for task_id, (wire_payload, payload) in queued:
+        try:
+            if _publish_phone_payload(mqttc, wire_payload, payload):
+                with pending_task_events_lock:
+                    pending_task_events.pop(task_id, None)
+        except Exception as exc:
+            log.warning(f"Agent task event replay deferred task_id={task_id}: {exc}")
+
+
+def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: list[dict], content: str, msg_type: str) -> None:
+    contact_id = str(payload.get("contact_id") or "hermes")
+    agent_id = _agent_id_from_contact(contact_id, payload.get("agent_id"))
+    source_message_id = str(payload.get("client_message_id") or payload.get("message_id") or "")
+
+    def publish_event(task: dict) -> None:
+        _publish_or_queue_task_event(mqttc, wire_payload, task, trace)
+
+    def run_task(task) -> str:
+        log.info(f"Agent task running task_id={task.task_id} contact_id={contact_id} agent_id={agent_id}")
+        reply = ask_agent_sync(agent_id, content, task_id=task.task_id)
+        if msg_type in {"audio", "voice"}:
+            marker = "Voice message received."
+            if marker in reply:
+                reply = reply[reply.index(marker):].strip()
+            reply = clean_audio_reply(reply)
+        return reply
+
+    def publish_result(task: dict) -> None:
+        reply = str(task.get("result") or "")
+        reply_payload = {
+            "type": "text",
+            "content": reply,
+            "task_id": task.get("task_id", ""),
+            "task_status": task.get("status", ""),
+            "contact_id": contact_id,
+            "agent_id": agent_id,
+            "desktop_id": desktop_id(),
+            "desktop_name": desktop_name(),
+            "source_message_id": source_message_id,
+            "delivery_trace": _delivery_trace(
+                {"delivery_trace": trace},
+                _trace_event("agent_replied", f"{agent_id} chars={len(reply)}"),
+                _trace_event("desktop_reply_publish_queued", TOPIC_RECV),
+            ),
+            "sender": "other",
+            "time": time.time(),
+        }
+        _publish_phone_payload(mqttc, wire_payload, reply_payload)
+
+    agent_task_manager.create(
+        agent_id=agent_id,
+        contact_id=contact_id,
+        source_message_id=source_message_id,
+        prompt=content,
+        runner=run_task,
+        on_event=publish_event,
+        on_result=publish_result,
+        task_id=str(payload.get("task_id") or ""),
+    )
 
 
 def on_message(mqttc, userdata, msg):
@@ -262,6 +377,32 @@ def on_message(mqttc, userdata, msg):
 
         log.info(f"MQTT received: [{msg_type}] {content[:50]}")
 
+        if msg_type == "agent_task_cancel":
+            task_id = str(payload.get("task_id") or "").strip()
+            existing_task = agent_task_manager.get(task_id)
+            task_matches = existing_task is not None and existing_task.contact_id == str(contact_id)
+            source_message_id = str(payload.get("source_message_id") or "")
+            if task_matches and source_message_id and existing_task.source_message_id:
+                task_matches = source_message_id == existing_task.source_message_id
+            task = agent_task_manager.cancel(
+                task_id,
+                lambda event: _publish_or_queue_task_event(mqttc, wire_payload, event, trace),
+            ) if task_matches else None
+            if task is None:
+                _publish_phone_payload(mqttc, wire_payload, {
+                    "type": "agent_task_event",
+                    "task_id": task_id,
+                    "task_status": "not_found",
+                    "contact_id": contact_id,
+                    "agent_id": agent_id,
+                    "source_message_id": payload.get("source_message_id") or "",
+                    "error": "Task was not found",
+                    "sender": "system",
+                    "time": time.time(),
+                    "delivery_trace": _delivery_trace({"delivery_trace": trace}, _trace_event("agent_not_found", task_id)),
+                })
+            return
+
         if msg_type in {"audio", "voice"}:
             content = _content_from_audio(file_id, caption, str(payload.get("audio_data_b64") or ""))
         elif not str(content).strip() and msg_type in {"image", "file_notify"}:
@@ -293,29 +434,8 @@ def on_message(mqttc, userdata, msg):
             return
 
         if contact_id not in {"system", "me"} and content.strip():
-            log.info(f"MQTT preparing Agent reply contact_id={contact_id} agent_id={agent_id}")
-            trace.append(_trace_event("agent_started", agent_id))
-            reply = ask_agent_sync(agent_id, content)
-            trace.append(_trace_event("agent_replied", f"{agent_id} chars={len(reply)}"))
-            log.info(f"MQTT Agent reply ready contact_id={contact_id} agent_id={agent_id} chars={len(reply)}")
-            if msg_type in {"audio", "voice"}:
-                marker = "Voice message received."
-                if marker in reply:
-                    reply = reply[reply.index(marker):].strip()
-                reply = clean_audio_reply(reply)
-            reply_payload = {
-                "type": "text",
-                "content": reply,
-                "contact_id": contact_id,
-                "agent_id": agent_id,
-                "desktop_id": desktop_id(),
-                "desktop_name": desktop_name(),
-                "source_message_id": payload.get("client_message_id") or payload.get("message_id") or "",
-                "delivery_trace": _delivery_trace({"delivery_trace": trace}, _trace_event("desktop_reply_publish_queued", TOPIC_RECV)),
-                "sender": "other",
-                "time": time.time(),
-            }
-            _publish_phone_payload(mqttc, wire_payload, reply_payload)
+            log.info(f"MQTT accepted Agent task contact_id={contact_id} agent_id={agent_id}")
+            _start_remote_agent_task(mqttc, wire_payload, payload, trace, content, msg_type)
     except Exception as e:
         log.error(f"MQTT message handling error: {e}")
 
@@ -593,6 +713,44 @@ def publish_agent_push_message(contact_id: str, content: str, source: str = "age
     if info.rc == mqtt.MQTT_ERR_SUCCESS:
         return api_ok("agent_push_published", mid=info.mid, rc=info.rc, contact_id=cleaned_contact_id, source=payload["source"], params=params)
     return api_error("publish_failed", f"MQTT publish failed rc={info.rc}", mid=info.mid, rc=info.rc, contact_id=cleaned_contact_id, source=payload["source"], params=params)
+
+
+def publish_agent_task_event(task: dict) -> bool:
+    if not is_paired():
+        return False
+    return _publish_or_queue_task_event(client, {"scheme": "signal", "from": "android"}, task, [])
+
+
+def start_agent_task(contact_id: str, prompt: str, source_message_id: str = "", task_id: str = "") -> dict:
+    cleaned_contact_id = str(contact_id or "").strip()
+    cleaned_prompt = str(prompt or "").strip()
+    if not cleaned_contact_id:
+        return api_error("contact_id_required")
+    if not cleaned_prompt:
+        return api_error("content_required", contact_id=cleaned_contact_id)
+    agent_id = _agent_id_from_contact(cleaned_contact_id)
+
+    def run_task(task) -> str:
+        return ask_agent_sync(agent_id, cleaned_prompt, task_id=task.task_id)
+
+    def publish_result(task: dict) -> None:
+        publish_agent_push_message(
+            cleaned_contact_id,
+            str(task.get("result") or ""),
+            source=f"agent-task:{task.get('task_id', '')}",
+        )
+
+    task = agent_task_manager.create(
+        agent_id=agent_id,
+        contact_id=cleaned_contact_id,
+        source_message_id=str(source_message_id or ""),
+        prompt=cleaned_prompt,
+        runner=run_task,
+        on_event=publish_agent_task_event,
+        on_result=publish_result,
+        task_id=str(task_id or ""),
+    )
+    return api_ok("agent_task_accepted", task=task.public())
 
 
 def start():

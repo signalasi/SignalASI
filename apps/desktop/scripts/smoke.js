@@ -186,7 +186,7 @@ async function smoke() {
 
   log("checking backend Python syntax");
   const python = findPython();
-  run(python, ["-m", "py_compile", "agent_gateway.py", "main.py", "mqtt_bridge.py", "agent_config.py"], { cwd: backendDir });
+  run(python, ["-m", "py_compile", "agent_gateway.py", "agent_task_manager.py", "main.py", "mqtt_bridge.py", "agent_config.py"], { cwd: backendDir });
 
   log("starting or reusing backend");
   const startedBackend = await startBackendIfNeeded();

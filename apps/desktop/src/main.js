@@ -449,6 +449,11 @@ async function getAgentExecutionLog(limit = 50) {
   return fetchJson(`/api/agents/execution-log?limit=${encodeURIComponent(limit)}`);
 }
 
+async function getAgentTasks(limit = 100) {
+  await startBackend();
+  return fetchJson(`/api/agent/tasks?limit=${encodeURIComponent(limit)}`);
+}
+
 async function getPairingStatus() {
   await startBackend();
   return fetchJson("/api/pairing/status");
@@ -507,6 +512,7 @@ ipcMain.handle("pairing:clear", clearPairing);
 ipcMain.handle("agents:detect", detectAgents);
 ipcMain.handle("agents:diagnostics", getAgentDiagnostics);
 ipcMain.handle("agents:execution-log", (_event, limit) => getAgentExecutionLog(limit));
+ipcMain.handle("agents:tasks", (_event, limit) => getAgentTasks(limit));
 ipcMain.handle("agents:self-test", (_event, options) => runAgentSelfTest(options));
 ipcMain.handle("agents:config:get", getAgentConfig);
 ipcMain.handle("agents:config:save", (_event, config) => saveAgentConfig(config));

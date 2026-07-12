@@ -190,6 +190,29 @@ object SignalASIMqttClient {
         return publishJson(payload, topicOverride ?: SEND_TOPIC, contactId)
     }
 
+    fun publishAgentTaskCancel(
+        taskId: String,
+        contactId: String,
+        sourceMessageId: Long,
+        topicOverride: String? = null
+    ): Boolean {
+        if (taskId.isBlank()) return false
+        val payload = JSONObject()
+            .put("type", "agent_task_cancel")
+            .put("task_id", taskId)
+            .put("contact_id", contactId)
+            .put("source_message_id", sourceMessageId)
+            .put("time", System.currentTimeMillis())
+        appContext?.let { context ->
+            AppStore.contactById(context, contactId)?.let { contact ->
+                payload
+                    .put("agent_id", contact.optString("agent_id").ifBlank { AppStore.agentIdForContact(context, contactId) })
+                    .put("desktop_id", contact.optString("desktop_id"))
+            }
+        }
+        return publishJson(payload, topicOverride ?: SEND_TOPIC, contactId)
+    }
+
     fun publishProfileUpdate(contactId: String, topicOverride: String? = null): Boolean {
         val context = appContext ?: return false
         val profile = AppStore.profile(context)

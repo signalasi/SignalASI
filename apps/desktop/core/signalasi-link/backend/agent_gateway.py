@@ -488,11 +488,11 @@ def _cloud_model_available() -> tuple[bool, str]:
 
 # Keep user-facing Chinese strings as Unicode escapes so this gateway remains
 # stable across Windows console/codepage changes.
-def ask_agent_sync(contact_id: str, text: str) -> str:
+def ask_agent_sync(contact_id: str, text: str, task_id: str = "") -> str:
     spec = all_agent_specs().get(contact_id)
     start = time.perf_counter()
     try:
-        reply = _ask_agent_sync_inner(contact_id, text, spec)
+        reply = _ask_agent_sync_inner(contact_id, text, spec, task_id=task_id)
         _append_execution_log(
             spec=spec,
             contact_id=contact_id,
@@ -515,14 +515,14 @@ def ask_agent_sync(contact_id: str, text: str) -> str:
         raise
 
 
-def _ask_agent_sync_inner(contact_id: str, text: str, spec: AgentSpec | None) -> str:
+def _ask_agent_sync_inner(contact_id: str, text: str, spec: AgentSpec | None, task_id: str = "") -> str:
     if spec is None:
         return f"[SignalASI] \u672a\u77e5 Agent: {contact_id}"
     if spec.id == "local-llm":
         return ask_local_model(text, timeout=spec.timeout)
     if spec.id == "cloud-model":
         return ask_cloud_model(text, timeout=spec.timeout)
-    return ask_cli_agent(spec, text)
+    return ask_cli_agent(spec, text, task_id=task_id)
 
 
 def _agent_permission(spec: AgentSpec | None) -> str:
@@ -584,26 +584,40 @@ def recent_agent_execution_log(limit: int = 50) -> dict:
         return {"path": str(EXECUTION_LOG_PATH), "entries": [], "error": str(exc)[:200]}
 
 
-def ask_cli_agent(spec: AgentSpec, text: str) -> str:
+def ask_cli_agent(spec: AgentSpec, text: str, task_id: str = "") -> str:
     command = _command_for(spec)
     if not command:
         return f"[{spec.name}] \u672a\u914d\u7f6e\u542f\u52a8\u547d\u4ee4"
     try:
         args, stdin_text = _apply_prompt(command, text)
-        result = subprocess.run(
+        process = subprocess.Popen(
             args,
-            input=stdin_text.encode("utf-8") if stdin_text is not None else None,
-            capture_output=True,
-            timeout=spec.timeout,
+            stdin=subprocess.PIPE if stdin_text is not None else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=_agent_env(spec),
         )
-        raw = (decode_output(result.stdout or b"") or decode_output(result.stderr or b"")).strip()
+        if task_id:
+            from agent_task_manager import agent_task_manager
+            agent_task_manager.register_process(task_id, process)
+        stdout, stderr = process.communicate(
+            input=stdin_text.encode("utf-8") if stdin_text is not None else None,
+            timeout=spec.timeout,
+        )
+        if task_id:
+            agent_task_manager.record_exit_code(task_id, process.returncode)
+        raw = (decode_output(stdout or b"") or decode_output(stderr or b"")).strip()
         if not raw:
             return f"[{spec.name}] \u65e0\u54cd\u5e94"
-        return clean_agent_output(spec, raw)[:1200]
+        return clean_agent_output(spec, raw)
     except FileNotFoundError:
         return f"[{spec.name}] \u672a\u68c0\u6d4b\u5230\u547d\u4ee4\uff1a{command[0]}\u3002\u8bf7\u5728 SignalASI Desktop \u4e2d\u914d\u7f6e\u8fde\u63a5\u5668\u3002"
     except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+            process.communicate(timeout=3)
+        except Exception:
+            pass
         return f"[{spec.name}] \u8d85\u65f6"
     except Exception as exc:
         return f"[{spec.name}] \u8c03\u7528\u5931\u8d25\uff1a{str(exc)[:200]}"
@@ -651,14 +665,14 @@ def ask_local_model(text: str, timeout: int = 120) -> str:
             }
             headers = {"Authorization": f"Bearer {cfg['api_key']}"} if cfg["api_key"] else None
             data = _post_json(ollama_url, payload, timeout=min(timeout, 30), headers=headers)
-            return _extract_chat_completion(data, "Local LLM")[:1200]
+            return _extract_chat_completion(data, "Local LLM")
         payload = {
             "model": model,
             "prompt": text,
             "stream": False,
         }
         data = _post_json(ollama_url, payload, timeout=min(timeout, 30))
-        return str(data.get("response") or data.get("message") or "[Local LLM] \u65e0\u54cd\u5e94")[:1200]
+        return str(data.get("response") or data.get("message") or "[Local LLM] \u65e0\u54cd\u5e94")
     except Exception as exc:
         return f"[Local LLM] \u672a\u8fde\u63a5\u672c\u5730\u6a21\u578b\u3002\u8bf7\u5b89\u88c5 Ollama\uff0c\u6216\u914d\u7f6e SIGNALASI_OLLAMA_URL / SIGNALASI_OLLAMA_MODEL\u3002\u8be6\u60c5\uff1a{str(exc)[:160]}"
 
@@ -676,7 +690,7 @@ def ask_cloud_model(text: str, timeout: int = 120) -> str:
     }
     try:
         data = _post_json(url, payload, timeout=timeout, headers={"Authorization": f"Bearer {api_key}"})
-        return _extract_chat_completion(data, "Cloud Model")[:1200]
+        return _extract_chat_completion(data, "Cloud Model")
     except Exception as exc:
         return f"[Cloud Model] \u8c03\u7528\u5931\u8d25\uff1a{str(exc)[:200]}"
 

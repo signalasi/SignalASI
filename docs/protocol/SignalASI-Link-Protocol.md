@@ -127,6 +127,45 @@ Clients keep the latest trace entries and display them as delivery evidence. Com
 
 Delivery acknowledgements use `type: delivery_ack` and include the source message ID plus the updated delivery trace.
 
+## Remote Agent Task Lifecycle
+
+Desktop assigns every remote Agent request a UUID `task_id`. The lifecycle is shared by Codex, Hermes, Claude Code, Local LLM, Custom Agent, MCP-backed connectors, and future Agent types.
+
+Desktop publishes encrypted `agent_task_event` control payloads without inserting them as chat messages:
+
+```json
+{
+  "type": "agent_task_event",
+  "task_id": "6afcbf54-2daa-4c82-8805-16d88102e149",
+  "task_status": "running",
+  "contact_id": "codex-workstation",
+  "agent_id": "codex",
+  "source_message_id": "148",
+  "created_at": 1720000000000,
+  "started_at": 1720000000200,
+  "updated_at": 1720000005200,
+  "completed_at": 0,
+  "elapsed_ms": 5000,
+  "status_seq": 4,
+  "error": ""
+}
+```
+
+Defined states are `accepted`, `queued`, `running`, `waiting_input`, `completed`, `failed`, `cancelled`, and `timed_out`. A running task emits a heartbeat every five seconds. Clients order updates by `status_seq`, persist the task binding on the originating message, and do not expose model chain-of-thought.
+
+Clients cancel an active task with an encrypted command:
+
+```json
+{
+  "type": "agent_task_cancel",
+  "task_id": "6afcbf54-2daa-4c82-8805-16d88102e149",
+  "contact_id": "codex-workstation",
+  "source_message_id": "148"
+}
+```
+
+Desktop persists the most recent task records locally. Non-terminal records become failed after a Desktop restart so clients never remain indefinitely in a false running state. The local API exposes task list, task detail, authenticated task creation, and authenticated cancellation routes under `/api/agent/tasks`.
+
 ## Agent Contact Metadata
 
 Connector status messages may include `connector_agents`, where each agent has:

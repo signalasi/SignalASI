@@ -14,6 +14,7 @@ from models import init_db, get_session, Contact, Message, ContactType, MessageT
 from agent_gateway import ask_agent_sync, connector_diagnostics, connector_self_test, list_agents, recent_agent_execution_log
 from agent_config import load_config, save_config
 from api_response import api_error
+from agent_task_manager import agent_task_manager
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("signalasi")
@@ -207,6 +208,42 @@ def api_agent_push(req: AgentPushReq, x_signalasi_token: str = Header(default=""
             detail=api_error("agent_push_token_invalid", "Invalid SignalASI Agent push token."),
         )
     return publish_agent_push_message(req.contact_id, req.content, req.source)
+
+class AgentTaskStartReq(BaseModel):
+    contact_id: str
+    prompt: str
+    source_message_id: str = ""
+    task_id: str = ""
+
+@app.post("/api/agent/tasks")
+def api_start_agent_task(req: AgentTaskStartReq, x_signalasi_token: str = Header(default="")):
+    from push_auth import verify_agent_push_token
+    from mqtt_bridge import start_agent_task
+    if not verify_agent_push_token(x_signalasi_token):
+        raise HTTPException(status_code=401, detail=api_error("agent_push_token_invalid", "Invalid SignalASI Agent push token."))
+    return start_agent_task(req.contact_id, req.prompt, req.source_message_id, req.task_id)
+
+@app.get("/api/agent/tasks")
+def api_list_agent_tasks(limit: int = Query(100)):
+    return {"tasks": agent_task_manager.list(limit=limit)}
+
+@app.get("/api/agent/tasks/{task_id}")
+def api_get_agent_task(task_id: str):
+    task = agent_task_manager.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=api_error("agent_task_not_found"))
+    return task.public()
+
+@app.post("/api/agent/tasks/{task_id}/cancel")
+def api_cancel_agent_task(task_id: str, x_signalasi_token: str = Header(default="")):
+    from push_auth import verify_agent_push_token
+    from mqtt_bridge import publish_agent_task_event
+    if not verify_agent_push_token(x_signalasi_token):
+        raise HTTPException(status_code=401, detail=api_error("agent_push_token_invalid", "Invalid SignalASI Agent push token."))
+    task = agent_task_manager.cancel(task_id, publish_agent_task_event)
+    if task is None:
+        raise HTTPException(status_code=404, detail=api_error("agent_task_not_found"))
+    return {"task": task.public()}
 
 @app.get("/api/messages/{contact_id}")
 def get_messages(contact_id: str, limit: int = Query(50), offset: int = Query(0),

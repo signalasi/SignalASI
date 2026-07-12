@@ -29,6 +29,7 @@ SignalASI is a private superintelligence interface for trusted communication bet
 | Destructive reset | Clear All Data rotates local identity, clears contacts and trust state, and recreates the welcome system notification. | `npm run smoke:android:reset` |
 | Background delivery | MQTT identity, QoS 1 behavior, background history, and local notification history survive app restart. | `npm run smoke:android:background` |
 | Agent reply preservation | Hermes and Codex replies stay complete after contact switching and UI refresh, with delivery trace evidence persisted. | `npm run smoke:android:agent-replies` |
+| Remote Agent task status | Messages sent to Desktop Agents retain their task ID and show ordered, localized accepted, queued, running with elapsed time, completed, failed, timed-out, or cancelled state without adding control events to chat or system notifications. Active CLI tasks can be cancelled from message actions. | `npm run smoke:desktop:agent-lifecycle`, `npm run check:android` |
 | Voice reply preservation | Long Agent replies stay visible on the Voice page response panel and persist into Hermes chat history with delivery trace evidence. | `npm run smoke:android:voice-reply` |
 
 ## Desktop Requirements
@@ -38,6 +39,7 @@ SignalASI is a private superintelligence interface for trusted communication bet
 | Pairing server | Desktop exposes `/signalasi/verify`, pairing status, pairing clear, and revocation APIs. | `npm run smoke:desktop:pairing` |
 | Agent contacts | Hermes, Codex, Claude Code, Local LLM, Custom Agent, and additional custom agents are discoverable as contacts. | `npm run smoke:desktop` |
 | Agent execution | Desktop can call local CLI agents, stdin custom agents, MCP wrappers, and local model endpoints. | `npm run smoke:desktop:e2e` |
+| Remote Agent lifecycle | Every Codex, Hermes, Claude Code, Local LLM, and Custom Agent request runs as a persistent task with a unique ID, live accepted/queued/running/terminal events, elapsed time, final result delivery, restart recovery, query APIs, and cancellation where the connector exposes a process. | `npm run smoke:desktop:agent-lifecycle`, `npm run check:android` |
 | Agent push | Long-running agents can call the local push API with `X-SignalASI-Token` and publish results to the paired phone route. | `npm run smoke:desktop:agent-push` |
 | Diagnostics | Desktop reports structured status, setup guidance, pairing state, execution logs, and runtime requirements. | `npm run smoke:desktop`, `npm run smoke:desktop:e2e` |
 | Language | Desktop defaults to English and can switch between English and Simplified Chinese without using a browser. | `npm run smoke:desktop:ui` |
@@ -51,6 +53,7 @@ SignalASI is a private superintelligence interface for trusted communication bet
 | Naming | Public protocol routes and payloads use SignalASI naming only; old Hermes pairing route names are rejected. | `npm run check`, `npm run smoke:desktop:pairing` |
 | Trust model | First contact requires QR pairing, identity bundle exchange, fingerprint display, and explicit approval. | `npm run smoke:desktop:pairing`, `npm run smoke:android:ui` |
 | Message protection | SignalASI Link messaging tracks client message IDs, delivery acknowledgements, and delivery trace events. | `npm run check`, `npm run smoke:desktop:e2e` |
+| Task event protection | Agent task lifecycle events and cancellation commands use the paired SignalASI Link encrypted route and bind task IDs to the originating message, contact, Agent, and Desktop. | `npm run smoke:desktop:agent-lifecycle`, `npm run check` |
 | Pairing replacement | A newly paired app invalidates the previous paired app through revocation/pairing-state updates. | `npm run smoke:desktop:pairing` |
 | Unpaired guard | Desktop refuses phone delivery APIs when no trusted phone is paired. | `npm run smoke:desktop:pairing` |
 

@@ -32,6 +32,7 @@ const backendFiles = [
   "api_response.py",
   "agent_config.py",
   "agent_gateway.py",
+  "agent_task_manager.py",
   "custom_agent_stdio.py",
   "file_server.py",
   "main.py",

@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("signalasi", {
   detectAgents: () => ipcRenderer.invoke("agents:detect"),
   getAgentDiagnostics: () => ipcRenderer.invoke("agents:diagnostics"),
   getAgentExecutionLog: (limit) => ipcRenderer.invoke("agents:execution-log", limit),
+  getAgentTasks: (limit) => ipcRenderer.invoke("agents:tasks", limit),
   runAgentSelfTest: (options) => ipcRenderer.invoke("agents:self-test", options),
   getAgentConfig: () => ipcRenderer.invoke("agents:config:get"),
   saveAgentConfig: (config) => ipcRenderer.invoke("agents:config:save", config),
