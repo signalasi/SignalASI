@@ -290,6 +290,7 @@
     <string name="common_cancel">取消</string>
     <string name="common_send">发送</string>
     <string name="agent_attachment_take_photo">拍照</string>
+    <string name="agent_attachment_new_task">新建任务</string>
     <string name="agent_sessions_title">会话</string>
     <string name="agent_session_new">新会话</string>
     <string name="agent_session_context_count">%1$s · %2$d 条上下文</string>

@@ -159,7 +159,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentPage: LinearLayout
     private lateinit var agentSessionTitle: TextView
     private lateinit var agentSubtitleText: TextView
-    private lateinit var agentNewSessionButton: ImageButton
     private lateinit var agentOutputScroll: ScrollView
     private lateinit var agentOutputList: LinearLayout
     private lateinit var agentQuickUnderstandButton: ImageButton
@@ -418,7 +417,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentPage = findViewById(R.id.agentPage)
         agentSessionTitle = findViewById(R.id.agentSessionTitle)
         agentSubtitleText = findViewById(R.id.agentSubtitleText)
-        agentNewSessionButton = findViewById(R.id.agentNewSessionButton)
         agentOutputScroll = findViewById(R.id.agentOutputScroll)
         agentOutputList = findViewById(R.id.agentOutputList)
         agentQuickUnderstandButton = findViewById(R.id.agentQuickUnderstandButton)
@@ -1123,7 +1121,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         renderAgentTranscript(agentTranscriptStore.list())
         refreshAgentConversationHeader()
         agentSessionTitle.setOnClickListener { showAgentSessionsPage() }
-        agentNewSessionButton.setOnClickListener { createAgentConversation() }
         agentQuickUnderstandButton.setOnClickListener {
             startAgentScreenUnderstanding()
         }
@@ -9505,6 +9502,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 setBackgroundColor(getColorCompat(R.color.separator))
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
         }
+        addRow(getString(R.string.agent_attachment_new_task)) { createAgentConversation() }
         addRow(getString(R.string.agent_attachment_take_photo)) { openAgentCamera() }
         addRow(getString(R.string.agent_attachment_add_file)) {
             agentInputAttachmentPending = true

@@ -596,6 +596,7 @@
     <string name="common_cancel">Cancel</string>
     <string name="common_send">Send</string>
     <string name="agent_attachment_take_photo">Take photo</string>
+    <string name="agent_attachment_new_task">New task</string>
     <string name="agent_sessions_title">Sessions</string>
     <string name="agent_session_new">New session</string>
     <string name="agent_session_context_count">%1$s · %2$d context messages</string>
