@@ -11,6 +11,7 @@
     <color name="search_bg">#E5E5EA</color>
     <color name="text_primary">#111111</color>
     <color name="text_secondary">#8E8E93</color>
+    <color name="agent_session_title">#505052</color>
     <color name="accent_green">#14C66A</color>
     <color name="sent_bubble">#95EC69</color>
     <color name="button_soft">#E9EAEC</color>

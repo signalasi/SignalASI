@@ -7,6 +7,7 @@
     <color name="search_bg">#2B3038</color>
     <color name="text_primary">#F2F4F7</color>
     <color name="text_secondary">#A5ABB6</color>
+    <color name="agent_session_title">#CCD0D7</color>
     <color name="accent_green">#19D36B</color>
     <color name="sent_bubble">#2E8B57</color>
     <color name="button_soft">#363B44</color>

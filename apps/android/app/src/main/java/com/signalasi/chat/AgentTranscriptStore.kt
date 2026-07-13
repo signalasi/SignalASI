@@ -167,10 +167,11 @@ class AgentTranscriptStore(context: Context) {
     fun deleteConversation(conversationId: String): Boolean {
         val all = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]"))
         if (all.none { it.id == conversationId }) return false
+        val retainedEntries = allEntries().filterNot { it.conversationId == conversationId }
+        saveEntries(retainedEntries)
         saveConversations(all.filterNot { it.id == conversationId })
-        saveEntries(allEntries().filterNot { it.conversationId == conversationId })
         if (preferences.readString(KEY_ACTIVE_CONVERSATION, "") == conversationId) {
-            preferences.writeString(KEY_ACTIVE_CONVERSATION, "")
+            preferences.remove(KEY_ACTIVE_CONVERSATION)
             activeConversation()
         }
         return true
@@ -179,6 +180,14 @@ class AgentTranscriptStore(context: Context) {
     @Synchronized
     fun list(conversationId: String = activeConversation().id): List<AgentTranscriptEntry> =
         allEntries().filter { it.conversationId == conversationId }.takeLast(MAX_ITEMS_PER_CONVERSATION)
+
+    @Synchronized
+    fun deleteEntry(entryId: String): Boolean {
+        val current = allEntries()
+        if (current.none { it.id == entryId }) return false
+        saveEntries(current.filterNot { it.id == entryId })
+        return true
+    }
 
     @Synchronized
     fun context(conversationId: String = activeConversation().id): AgentConversationContext {
@@ -371,13 +380,32 @@ class AgentTranscriptStore(context: Context) {
     private fun touchConversation(id: String, role: AgentTranscriptRole, text: String, timestamp: Long) {
         val currentMessages = list(id)
         updateConversation(id) { conversation ->
+            val titledUserMessages = currentMessages.filter { entry ->
+                entry.role == AgentTranscriptRole.USER &&
+                    !entry.dedupeKey.startsWith("agent-voice-pending:")
+            }
             val autoTitle = role == AgentTranscriptRole.USER &&
-                (conversation.title == "New session" || currentMessages.count { it.role == AgentTranscriptRole.USER } == 1)
+                conversation.title == "New session" &&
+                titledUserMessages.size == 1 &&
+                titledUserMessages.first().text == text
             conversation.copy(
-                title = if (autoTitle) text.replace('\n', ' ').take(MAX_TITLE_CHARACTERS) else conversation.title,
+                title = if (autoTitle) conversationTitleFromUserText(text) else conversation.title,
                 updatedAt = timestamp
             )
         }
+    }
+
+    private fun conversationTitleFromUserText(text: String): String {
+        val singleLine = text.replace(Regex("\\s+"), " ").trim()
+        val attachment = Regex("^\\[([^]]+)]\\s*(.*)$").matchEntire(singleLine)
+        val title = if (attachment != null) {
+            val attachmentName = attachment.groupValues[1].trim()
+            val userTopic = attachment.groupValues[2].trim()
+            userTopic.ifBlank { attachmentName }
+        } else {
+            singleLine
+        }
+        return title.take(MAX_TITLE_CHARACTERS).ifBlank { "New session" }
     }
 
     private fun compactContextIfNeeded(conversationId: String) {
