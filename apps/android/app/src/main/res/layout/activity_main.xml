@@ -123,10 +123,10 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
-                            android:background="?android:attr/selectableItemBackground"
-                            android:clickable="true"
+                            android:background="@android:color/transparent"
+                            android:clickable="false"
                             android:ellipsize="end"
-                            android:focusable="true"
+                            android:focusable="false"
                             android:maxLines="1"
                             android:text="@string/agent_session_new"
                             android:textColor="@color/text_primary"
@@ -150,53 +150,13 @@
                         android:orientation="horizontal">
 
                         <ImageButton
-                            android:id="@+id/agentQuickUnderstandButton"
+                            android:id="@+id/agentSettingsButton"
                             android:layout_width="36dp"
                             android:layout_height="36dp"
                             android:background="@android:color/transparent"
-                            android:contentDescription="@string/agent_quick_understand"
+                            android:contentDescription="@string/tab_settings"
                             android:padding="7dp"
-                            android:src="@drawable/ic_agent_screen"
-                            android:tint="@color/text_primary" />
-
-                        <ImageButton
-                            android:id="@+id/agentQuickSaveScreenButton"
-                            android:layout_width="36dp"
-                            android:layout_height="36dp"
-                            android:background="@android:color/transparent"
-                            android:contentDescription="@string/agent_quick_save_screen"
-                            android:padding="7dp"
-                            android:src="@drawable/ic_agent_memory"
-                            android:tint="@color/text_primary" />
-
-                        <ImageButton
-                            android:id="@+id/agentQuickSearchKnowledgeButton"
-                            android:layout_width="36dp"
-                            android:layout_height="36dp"
-                            android:background="@android:color/transparent"
-                            android:contentDescription="@string/agent_quick_search_knowledge"
-                            android:padding="7dp"
-                            android:src="@drawable/ic_agent_knowledge"
-                            android:tint="@color/text_primary" />
-
-                        <ImageButton
-                            android:id="@+id/agentQuickPermissionsButton"
-                            android:layout_width="36dp"
-                            android:layout_height="36dp"
-                            android:background="@android:color/transparent"
-                            android:contentDescription="@string/agent_quick_permissions"
-                            android:padding="7dp"
-                            android:src="@drawable/ic_agent_control"
-                            android:tint="@color/text_primary" />
-
-                        <ImageButton
-                            android:id="@+id/agentRecentTasksButton"
-                            android:layout_width="36dp"
-                            android:layout_height="36dp"
-                            android:background="@android:color/transparent"
-                            android:contentDescription="@string/agent_section_recent_tasks"
-                            android:padding="7dp"
-                            android:src="@drawable/ic_agent_history"
+                            android:src="@drawable/ic_tab_settings"
                             android:tint="@color/text_primary" />
                     </LinearLayout>
                 </LinearLayout>
@@ -1409,6 +1369,114 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="14dp"
                         android:paddingStart="4dp"
+                        android:text="@string/settings_pages"
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:background="@drawable/settings_card_background"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/settingsConversationsButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:drawableStart="@drawable/ic_agent_history"
+                            android:drawableEnd="@drawable/ic_arrow_right"
+                            android:drawablePadding="12dp"
+                            android:gravity="center_vertical"
+                            android:paddingStart="16dp"
+                            android:paddingEnd="16dp"
+                            android:text="@string/agent_sessions_title"
+                            android:textColor="@color/text_primary"
+                            android:textSize="15sp" />
+
+                        <View android:layout_width="match_parent" android:layout_height="0.5dp" android:layout_marginStart="56dp" android:background="@color/separator" />
+
+                        <TextView
+                            android:id="@+id/settingsMessagesButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:drawableStart="@drawable/ic_tab_chat"
+                            android:drawableEnd="@drawable/ic_arrow_right"
+                            android:drawablePadding="12dp"
+                            android:gravity="center_vertical"
+                            android:paddingStart="16dp"
+                            android:paddingEnd="16dp"
+                            android:text="@string/tab_messages"
+                            android:textColor="@color/text_primary"
+                            android:textSize="15sp" />
+
+                        <View android:layout_width="match_parent" android:layout_height="0.5dp" android:layout_marginStart="56dp" android:background="@color/separator" />
+
+                        <TextView
+                            android:id="@+id/settingsContactsButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:drawableStart="@drawable/ic_tab_contacts_outline"
+                            android:drawableEnd="@drawable/ic_arrow_right"
+                            android:drawablePadding="12dp"
+                            android:gravity="center_vertical"
+                            android:paddingStart="16dp"
+                            android:paddingEnd="16dp"
+                            android:text="@string/tab_contacts"
+                            android:textColor="@color/text_primary"
+                            android:textSize="15sp" />
+
+                        <View android:layout_width="match_parent" android:layout_height="0.5dp" android:layout_marginStart="56dp" android:background="@color/separator" />
+
+                        <TextView
+                            android:id="@+id/settingsDiscoverButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:drawableStart="@drawable/ic_tab_discover"
+                            android:drawableEnd="@drawable/ic_arrow_right"
+                            android:drawablePadding="12dp"
+                            android:gravity="center_vertical"
+                            android:paddingStart="16dp"
+                            android:paddingEnd="16dp"
+                            android:text="@string/tab_discover"
+                            android:textColor="@color/text_primary"
+                            android:textSize="15sp" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14dp"
+                        android:paddingStart="4dp"
+                        android:text="@string/settings_agent_tools"
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:background="@drawable/settings_card_background"
+                        android:orientation="vertical">
+
+                        <TextView android:id="@+id/settingsUnderstandScreenButton" android:layout_width="match_parent" android:layout_height="48dp" android:drawableStart="@drawable/ic_agent_screen" android:drawableEnd="@drawable/ic_arrow_right" android:drawablePadding="12dp" android:gravity="center_vertical" android:paddingStart="16dp" android:paddingEnd="16dp" android:text="@string/agent_quick_understand" android:textColor="@color/text_primary" android:textSize="15sp" />
+                        <View android:layout_width="match_parent" android:layout_height="0.5dp" android:layout_marginStart="56dp" android:background="@color/separator" />
+                        <TextView android:id="@+id/settingsAgentMemoryButton" android:layout_width="match_parent" android:layout_height="48dp" android:drawableStart="@drawable/ic_agent_memory" android:drawableEnd="@drawable/ic_arrow_right" android:drawablePadding="12dp" android:gravity="center_vertical" android:paddingStart="16dp" android:paddingEnd="16dp" android:text="@string/agent_quick_save_screen" android:textColor="@color/text_primary" android:textSize="15sp" />
+                        <View android:layout_width="match_parent" android:layout_height="0.5dp" android:layout_marginStart="56dp" android:background="@color/separator" />
+                        <TextView android:id="@+id/settingsAgentKnowledgeButton" android:layout_width="match_parent" android:layout_height="48dp" android:drawableStart="@drawable/ic_agent_knowledge" android:drawableEnd="@drawable/ic_arrow_right" android:drawablePadding="12dp" android:gravity="center_vertical" android:paddingStart="16dp" android:paddingEnd="16dp" android:text="@string/agent_quick_search_knowledge" android:textColor="@color/text_primary" android:textSize="15sp" />
+                        <View android:layout_width="match_parent" android:layout_height="0.5dp" android:layout_marginStart="56dp" android:background="@color/separator" />
+                        <TextView android:id="@+id/settingsAgentControlButton" android:layout_width="match_parent" android:layout_height="48dp" android:drawableStart="@drawable/ic_agent_control" android:drawableEnd="@drawable/ic_arrow_right" android:drawablePadding="12dp" android:gravity="center_vertical" android:paddingStart="16dp" android:paddingEnd="16dp" android:text="@string/agent_quick_permissions" android:textColor="@color/text_primary" android:textSize="15sp" />
+                        <View android:layout_width="match_parent" android:layout_height="0.5dp" android:layout_marginStart="56dp" android:background="@color/separator" />
+                        <TextView android:id="@+id/settingsRecentTasksButton" android:layout_width="match_parent" android:layout_height="48dp" android:drawableStart="@drawable/ic_agent_history" android:drawableEnd="@drawable/ic_arrow_right" android:drawablePadding="12dp" android:gravity="center_vertical" android:paddingStart="16dp" android:paddingEnd="16dp" android:text="@string/agent_section_recent_tasks" android:textColor="@color/text_primary" android:textSize="15sp" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14dp"
+                        android:paddingStart="4dp"
                         android:text="@string/settings_general"
                         android:textColor="@color/text_primary"
                         android:textSize="13sp"
@@ -1697,87 +1765,6 @@
             </ScrollView>
         </FrameLayout>
 
-        <View
-            android:id="@+id/bottomTabsDivider"
-            android:layout_width="match_parent"
-            android:layout_height="0.5dp"
-            android:background="@color/separator" />
-
-        <LinearLayout
-            android:id="@+id/bottomTabs"
-            android:layout_width="match_parent"
-            android:layout_height="64dp"
-            android:background="@color/bar_bg"
-            android:gravity="center"
-            android:orientation="horizontal"
-            android:paddingTop="5dp"
-            android:paddingBottom="5dp">
-
-            <TextView
-                android:id="@+id/tabAgent"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:drawablePadding="0dp"
-                android:drawableTop="@drawable/ic_tab_agent"
-                android:gravity="center"
-                android:includeFontPadding="false"
-                android:text="@string/tab_agent"
-                android:textColor="@color/text_primary"
-                android:textSize="12sp" />
-
-            <TextView
-                android:id="@+id/tabMessages"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:drawablePadding="0dp"
-                android:drawableTop="@drawable/ic_tab_chat"
-                android:gravity="center"
-                android:includeFontPadding="false"
-                android:text="@string/tab_messages"
-                android:textColor="@color/text_primary"
-                android:textSize="12sp" />
-
-            <TextView
-                android:id="@+id/tabContacts"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:drawablePadding="0dp"
-                android:drawableTop="@drawable/ic_tab_contacts"
-                android:gravity="center"
-                android:includeFontPadding="false"
-                android:text="@string/tab_contacts"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
-
-            <TextView
-                android:id="@+id/tabDiscover"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:drawablePadding="0dp"
-                android:drawableTop="@drawable/ic_tab_discover"
-                android:gravity="center"
-                android:includeFontPadding="false"
-                android:text="@string/tab_discover"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
-
-            <TextView
-                android:id="@+id/tabMe"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:drawablePadding="0dp"
-                android:drawableTop="@drawable/ic_tab_settings"
-                android:gravity="center"
-                android:includeFontPadding="false"
-                android:text="@string/tab_settings"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
-        </LinearLayout>
     </LinearLayout>
 
     <LinearLayout
@@ -1842,87 +1829,6 @@
                 android:paddingBottom="24dp" />
         </ScrollView>
 
-        <View
-            android:id="@+id/featureBottomDivider"
-            android:layout_width="match_parent"
-            android:layout_height="0.5dp"
-            android:background="@color/separator" />
-
-        <LinearLayout
-            android:id="@+id/featureBottomTabs"
-            android:layout_width="match_parent"
-            android:layout_height="64dp"
-            android:background="@color/bar_bg"
-            android:gravity="center"
-            android:orientation="horizontal"
-            android:paddingTop="5dp"
-            android:paddingBottom="5dp">
-
-            <TextView
-                android:id="@+id/featureTabAgent"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:drawablePadding="0dp"
-                android:drawableTop="@drawable/ic_tab_agent"
-                android:gravity="center"
-                android:includeFontPadding="false"
-                android:text="@string/tab_agent"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
-
-            <TextView
-                android:id="@+id/featureTabMessages"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:drawablePadding="0dp"
-                android:drawableTop="@drawable/ic_tab_chat"
-                android:gravity="center"
-                android:includeFontPadding="false"
-                android:text="@string/tab_messages"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
-
-            <TextView
-                android:id="@+id/featureTabContacts"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:drawablePadding="0dp"
-                android:drawableTop="@drawable/ic_tab_contacts_outline"
-                android:gravity="center"
-                android:includeFontPadding="false"
-                android:text="@string/tab_contacts"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
-
-            <TextView
-                android:id="@+id/featureTabDiscover"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:drawablePadding="0dp"
-                android:drawableTop="@drawable/ic_tab_discover"
-                android:gravity="center"
-                android:includeFontPadding="false"
-                android:text="@string/tab_discover"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
-
-            <TextView
-                android:id="@+id/featureTabMe"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:drawablePadding="0dp"
-                android:drawableTop="@drawable/ic_tab_settings"
-                android:gravity="center"
-                android:includeFontPadding="false"
-                android:text="@string/tab_settings"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
-        </LinearLayout>
     </LinearLayout>
 
     <LinearLayout

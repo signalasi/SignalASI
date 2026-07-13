@@ -714,4 +714,6 @@
     <string name="agent_session_input_tokens">云模型输入 Token</string>
     <string name="agent_session_output_tokens">云模型输出 Token</string>
     <string name="agent_session_context_compacted">较早上下文已整理</string>
+    <string name="settings_pages">页面</string>
+    <string name="settings_agent_tools">Agent 工具</string>
 </resources>

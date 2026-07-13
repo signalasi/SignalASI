@@ -1139,4 +1139,6 @@
     <string name="agent_session_input_tokens">Cloud input tokens</string>
     <string name="agent_session_output_tokens">Cloud output tokens</string>
     <string name="agent_session_context_compacted">Older context summarized</string>
+    <string name="settings_pages">Pages</string>
+    <string name="settings_agent_tools">Agent tools</string>
 </resources>
