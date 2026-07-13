@@ -285,7 +285,7 @@
     <string name="status_unknown">Unknown</string>
     <string name="accessibility_service_label">SignalASI Screen Agent</string>
     <string name="accessibility_service_description">Reads the active screen structure after user authorization so SignalASI can plan local tasks.</string>
-    <string name="agent_tab_title">Agent</string>
+    <string name="agent_tab_title">SignalASI</string>
     <string name="agent_tab_subtitle">Phone-native super agent</string>
     <string name="agent_status_observing">Observing current screen</string>
     <string name="agent_status_planning">Planning from your goal</string>

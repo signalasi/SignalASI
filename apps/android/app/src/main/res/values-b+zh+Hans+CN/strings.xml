@@ -207,7 +207,7 @@
     <string name="security_device_agent_fingerprint_summary">%1$d 个 Agent / %2$s</string>
     <string name="security_revoked_all_pc">已撤销所有 PC 配对</string>
     <string name="status_unknown">未知</string>
-    <string name="agent_tab_title">Agent</string>
+    <string name="agent_tab_title">SignalASI</string>
     <string name="agent_tab_subtitle">手机本体超级智能体</string>
     <string name="agent_status_observing">正在观察当前屏幕</string>
     <string name="agent_status_planning">正在根据目标规划</string>
