@@ -64,10 +64,12 @@ data class AgentConversationMetrics(
 
 class AgentTranscriptStore(context: Context) {
     private val preferences = AgentEncryptedDatabase(context.applicationContext, PREFS)
+    private var draftConversation: AgentConversation? = null
 
     @Synchronized
     fun conversations(includeArchived: Boolean = false): List<AgentConversation> {
         ensureConversation()
+        prunePersistedEmptyConversations()
         return decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]"))
             .filter { includeArchived || it.status == AgentConversationStatus.ACTIVE }
             .sortedWith(compareByDescending<AgentConversation> { it.pinned }.thenByDescending { it.updatedAt })
@@ -75,6 +77,7 @@ class AgentTranscriptStore(context: Context) {
 
     @Synchronized
     fun activeConversation(): AgentConversation {
+        draftConversation?.let { return it }
         val all = conversations(includeArchived = true)
         val activeId = preferences.readString(KEY_ACTIVE_CONVERSATION, "")
         return all.firstOrNull { it.id == activeId && it.status == AgentConversationStatus.ACTIVE }
@@ -91,10 +94,8 @@ class AgentTranscriptStore(context: Context) {
             createdAt = now,
             updatedAt = now
         )
-        val all = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]")).toMutableList()
-        all += conversation
-        saveConversations(all)
-        preferences.writeString(KEY_ACTIVE_CONVERSATION, conversation.id)
+        draftConversation = conversation
+        preferences.remove(KEY_ACTIVE_CONVERSATION)
         return conversation
     }
 
@@ -103,6 +104,7 @@ class AgentTranscriptStore(context: Context) {
         val match = conversations(includeArchived = true)
             .firstOrNull { it.id == conversationId && it.status == AgentConversationStatus.ACTIVE }
             ?: return false
+        draftConversation = null
         preferences.writeString(KEY_ACTIVE_CONVERSATION, match.id)
         return true
     }
@@ -242,6 +244,7 @@ class AgentTranscriptStore(context: Context) {
     ): Boolean {
         val cleanText = text.trim().take(MAX_TEXT_CHARACTERS)
         if (cleanText.isBlank()) return false
+        persistDraftIfNeeded(conversationId)
         val cleanKey = dedupeKey.trim().take(MAX_DEDUPE_KEY_CHARACTERS)
         val current = allEntries().toMutableList()
         if (cleanKey.isNotBlank() && current.any { it.conversationId == conversationId && it.dedupeKey == cleanKey }) return false
@@ -269,6 +272,7 @@ class AgentTranscriptStore(context: Context) {
         val cleanText = text.trim().take(MAX_TEXT_CHARACTERS)
         val cleanKey = dedupeKey.trim().take(MAX_DEDUPE_KEY_CHARACTERS)
         if (cleanText.isBlank() || cleanKey.isBlank()) return false
+        persistDraftIfNeeded(conversationId)
         val current = allEntries().toMutableList()
         val index = current.indexOfFirst { it.conversationId == conversationId && it.dedupeKey == cleanKey }
         if (index >= 0) {
@@ -292,7 +296,10 @@ class AgentTranscriptStore(context: Context) {
         return true
     }
 
-    fun clear() = preferences.clear()
+    fun clear() {
+        draftConversation = null
+        preferences.clear()
+    }
 
     @Synchronized
     fun removeExactText(text: String): Int {
@@ -307,6 +314,7 @@ class AgentTranscriptStore(context: Context) {
         if (existing.isNotEmpty()) return
         val now = System.currentTimeMillis()
         val legacyEntries = decodeEntries(preferences.readString(KEY_ITEMS, "[]"), "")
+        if (legacyEntries.isEmpty()) return
         val conversation = AgentConversation(
             id = UUID.randomUUID().toString(),
             title = if (legacyEntries.isEmpty()) "New session" else "Previous Agent conversation",
@@ -318,6 +326,31 @@ class AgentTranscriptStore(context: Context) {
         if (legacyEntries.isNotEmpty()) {
             saveEntries(legacyEntries.map { it.copy(conversationId = conversation.id) })
         }
+    }
+
+    private fun persistDraftIfNeeded(conversationId: String) {
+        val draft = draftConversation?.takeIf { it.id == conversationId } ?: return
+        val all = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]")).toMutableList()
+        if (all.none { it.id == draft.id }) {
+            all += draft
+            saveConversations(all)
+        }
+        preferences.writeString(KEY_ACTIVE_CONVERSATION, draft.id)
+        draftConversation = null
+    }
+
+    private fun prunePersistedEmptyConversations() {
+        val all = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]"))
+        if (all.isEmpty()) return
+        val conversationIdsWithContent = decodeEntries(
+            preferences.readString(KEY_ITEMS, "[]"),
+            preferences.readString(KEY_ACTIVE_CONVERSATION, "")
+        ).mapTo(mutableSetOf()) { it.conversationId }
+        val retained = all.filter { it.id in conversationIdsWithContent }
+        if (retained.size == all.size) return
+        saveConversations(retained)
+        val activeId = preferences.readString(KEY_ACTIVE_CONVERSATION, "")
+        if (retained.none { it.id == activeId }) preferences.remove(KEY_ACTIVE_CONVERSATION)
     }
 
     private fun allEntries(): List<AgentTranscriptEntry> {
