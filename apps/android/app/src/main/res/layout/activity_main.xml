@@ -157,8 +157,7 @@
                             android:contentDescription="@string/agent_quick_understand"
                             android:padding="7dp"
                             android:src="@drawable/ic_agent_screen"
-                            android:tint="@color/text_primary"
-                            android:visibility="gone" />
+                            android:tint="@color/text_primary" />
 
                         <ImageButton
                             android:id="@+id/agentQuickSaveScreenButton"
@@ -168,8 +167,7 @@
                             android:contentDescription="@string/agent_quick_save_screen"
                             android:padding="7dp"
                             android:src="@drawable/ic_agent_memory"
-                            android:tint="@color/text_primary"
-                            android:visibility="gone" />
+                            android:tint="@color/text_primary" />
 
                         <ImageButton
                             android:id="@+id/agentQuickSearchKnowledgeButton"
@@ -179,8 +177,7 @@
                             android:contentDescription="@string/agent_quick_search_knowledge"
                             android:padding="7dp"
                             android:src="@drawable/ic_agent_knowledge"
-                            android:tint="@color/text_primary"
-                            android:visibility="gone" />
+                            android:tint="@color/text_primary" />
 
                         <ImageButton
                             android:id="@+id/agentQuickPermissionsButton"
@@ -188,17 +185,6 @@
                             android:layout_height="36dp"
                             android:background="@android:color/transparent"
                             android:contentDescription="@string/agent_quick_permissions"
-                            android:padding="7dp"
-                            android:src="@drawable/ic_agent_control"
-                            android:tint="@color/text_primary"
-                            android:visibility="gone" />
-
-                        <ImageButton
-                            android:id="@+id/agentToolsMenuButton"
-                            android:layout_width="36dp"
-                            android:layout_height="36dp"
-                            android:background="@android:color/transparent"
-                            android:contentDescription="@string/agent_toolbox_title"
                             android:padding="7dp"
                             android:src="@drawable/ic_agent_control"
                             android:tint="@color/text_primary" />

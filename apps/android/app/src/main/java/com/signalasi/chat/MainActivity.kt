@@ -165,7 +165,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentQuickSaveScreenButton: ImageButton
     private lateinit var agentQuickSearchKnowledgeButton: ImageButton
     private lateinit var agentQuickPermissionsButton: ImageButton
-    private lateinit var agentToolsMenuButton: ImageButton
     private lateinit var agentRecentTasksButton: ImageButton
     private lateinit var agentPermissionModeButton: TextView
     private lateinit var agentHighRiskGuardButton: TextView
@@ -423,7 +422,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentQuickSaveScreenButton = findViewById(R.id.agentQuickSaveScreenButton)
         agentQuickSearchKnowledgeButton = findViewById(R.id.agentQuickSearchKnowledgeButton)
         agentQuickPermissionsButton = findViewById(R.id.agentQuickPermissionsButton)
-        agentToolsMenuButton = findViewById(R.id.agentToolsMenuButton)
         agentRecentTasksButton = findViewById(R.id.agentRecentTasksButton)
         agentPermissionModeButton = findViewById(R.id.agentPermissionModeButton)
         agentHighRiskGuardButton = findViewById(R.id.agentHighRiskGuardButton)
@@ -1132,23 +1130,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         agentQuickPermissionsButton.setOnClickListener {
             showOnDeviceAgentFeaturePage()
-        }
-        agentToolsMenuButton.setOnClickListener { anchor ->
-            PopupMenu(this, anchor).apply {
-                menu.add(getString(R.string.agent_quick_understand)).setOnMenuItemClickListener {
-                    startAgentScreenUnderstanding(); true
-                }
-                menu.add(getString(R.string.agent_quick_save_screen)).setOnMenuItemClickListener {
-                    showAgentMemoryPage(); true
-                }
-                menu.add(getString(R.string.agent_quick_search_knowledge)).setOnMenuItemClickListener {
-                    showAgentKnowledgePage(); true
-                }
-                menu.add(getString(R.string.agent_quick_permissions)).setOnMenuItemClickListener {
-                    showOnDeviceAgentFeaturePage(); true
-                }
-                show()
-            }
         }
         agentRecentTasksButton.setOnClickListener {
             showAgentRecentTasksPage()
