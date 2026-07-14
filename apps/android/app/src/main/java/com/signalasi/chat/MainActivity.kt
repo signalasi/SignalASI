@@ -660,15 +660,23 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             if (handleAgentTaskEvent(envelope)) return@runOnUiThread
             val msg = parseIncomingMessage(payload)
             if (msg.content.isBlank()) return@runOnUiThread
+            if (msg.taskId.isNotBlank() && messages[msg.contact.id].orEmpty().any {
+                    !it.isMine && it.taskId == msg.taskId && it.content == msg.content
+                }
+            ) return@runOnUiThread
             msg.deliveryTrace.add(newTraceEvent("received", "MQTT inbound"))
             msg.deliveryTrace.add(newTraceEvent("decrypted", "SignalASI Link"))
             addMessage(msg, fromIncoming = true)
             val sourceMessageId = envelope?.optString("source_message_id")?.toLongOrNull()
                 ?: envelope?.optLong("source_message_id", 0L)
                 ?: 0L
-            val nativeAgentResponse = VoiceAssistantSettings.get(this).routingMode ==
-                VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT &&
-                mobileNativeAgent.canAcceptConnectorResponse(sourceMessageId, msg.contact.id)
+            val nativeAgentResponse = sourceMessageId > 0L && (
+                activeAgentTasks[sourceMessageId]?.canAcceptConnectorResponse(sourceMessageId, msg.contact.id) == true ||
+                    provisionalAgentTasks.any {
+                        it.canAcceptConnectorResponse(sourceMessageId, msg.contact.id)
+                    } ||
+                    mobileNativeAgent.canAcceptConnectorResponse(sourceMessageId, msg.contact.id)
+                )
             val responseConversationId = envelope?.optString("conversation_id").orEmpty()
             val responseTurnId = envelope?.optString("turn_id").orEmpty()
             publishAgentConnectorResponse(envelope, msg)
@@ -1076,25 +1084,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             Log.d("SignalASIAgent", "Agent submit clicked")
             handleAgentPrimaryAction()
         }
-        agentSubmitButton.setOnTouchListener { view, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    view.isPressed = true
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    view.isPressed = false
-                    Log.d("SignalASIAgent", "Agent submit touch released")
-                    handleAgentPrimaryAction()
-                    true
-                }
-                MotionEvent.ACTION_CANCEL -> {
-                    view.isPressed = false
-                    true
-                }
-                else -> true
-            }
-        }
         agentGoalInput.setOnEditorActionListener { _, _, _ ->
             submitAgentGoal()
             true
@@ -1258,7 +1247,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         refreshAgentConversationHeader()
         renderAgentTranscript(agentTranscriptStore.list())
         agentGoalInput.setText("")
-        hideKeyboard()
+        agentGoalInput.clearFocus()
+        getSystemService(InputMethodManager::class.java)
+            .hideSoftInputFromWindow(agentGoalInput.windowToken, 0)
         executeConcurrentAgentGoal(goal, conversationContext, conversation.id, turnId)
     }
 
@@ -5241,6 +5232,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             applyDeliveryAck(json, incomingTrace)
             return ChatMessage(newMessageId(), "", false, CONTACT_SYSTEM, isSystem = true, deliveryTrace = incomingTrace)
         }
+        if (json?.optString("type") == "capability_manifest") {
+            json.optJSONArray("connector_agents")?.let { agents ->
+                AppStore.updateConnectorAgentStatuses(this, agents)
+                refreshContactList()
+                refreshDirectoryContacts()
+            }
+            return ChatMessage(newMessageId(), "", false, CONTACT_SYSTEM, isSystem = true, deliveryTrace = incomingTrace)
+        }
         if (json?.optString("type") == "pairing_revoked") {
             Log.w("SignalASIDebug", "Pairing revoked control message received")
             val desktopId = json.optString("desktop_id")
@@ -5812,7 +5811,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun persistChatHistorySnapshot(sync: Boolean) {
         val snapshot = messages.mapValues { (_, list) ->
-            list.takeLast(MAX_SAVED_MESSAGES_PER_CONTACT).map { it.copy() }
+            list.takeLast(MAX_SAVED_MESSAGES_PER_CONTACT).map { message ->
+                message.copy(deliveryTrace = message.deliveryTrace.toMutableList())
+            }
         }
         val saveSeq = historySaveSeq.incrementAndGet()
         val writeSnapshot = {

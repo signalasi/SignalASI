@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(WHISPER_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/whispercpp)
 
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_CPU_ARM_ARCH "armv8-a" CACHE STRING "" FORCE)
 set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -13,7 +14,7 @@ add_subdirectory(${WHISPER_ROOT}/ggml ${CMAKE_CURRENT_BINARY_DIR}/ggml)
 
 foreach(GGML_TARGET ggml ggml-base ggml-cpu)
     if(TARGET ${GGML_TARGET})
-        target_compile_options(${GGML_TARGET} PRIVATE -O3 -march=armv8.2-a+fp16)
+        target_compile_options(${GGML_TARGET} PRIVATE -O3 -march=armv8-a)
     endif()
 endforeach()
 
@@ -28,7 +29,7 @@ target_compile_definitions(whisper PRIVATE
 )
 target_compile_options(whisper PRIVATE
     -O3
-    -march=armv8.2-a+fp16
+    -march=armv8-a
     -fvisibility=hidden
     -fvisibility-inlines-hidden
 )

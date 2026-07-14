@@ -9,7 +9,9 @@ data class StoredIncomingMessage(
     val contactName: String,
     val content: String,
     val messageId: Long = 0L,
-    val notify: Boolean = true
+    val notify: Boolean = true,
+    val taskId: String = "",
+    val remoteMessageId: String = ""
 )
 
 object ChatHistoryStore {
@@ -81,6 +83,7 @@ object ChatHistoryStore {
         }.getOrElse { JSONObject() }
         val nextId = maxMessageId(root) + 1L
         val array = root.optJSONArray(parsed.contactId) ?: JSONArray()
+        if (hasIncomingDuplicate(array, parsed)) return null
         array.put(JSONObject()
             .put("id", nextId)
             .put("content", parsed.content)
@@ -89,6 +92,8 @@ object ChatHistoryStore {
             .put("isSystem", false)
             .put("timestamp", System.currentTimeMillis())
             .put("deliveryStatus", "")
+            .put("taskId", parsed.taskId)
+            .put("remoteMessageId", parsed.remoteMessageId)
             .put("deliveryTrace", deliveryTrace))
         root.put(parsed.contactId, trim(array))
         prefs.edit()
@@ -217,6 +222,21 @@ object ChatHistoryStore {
     private fun parseIncoming(context: Context, payload: String): StoredIncomingMessage {
         val json = runCatching { JSONObject(payload) }.getOrNull()
         return when (json?.optString("type").orEmpty()) {
+            "delivery_ack", "agent_task_event" -> StoredIncomingMessage(
+                CONTACT_SYSTEM,
+                context.getString(R.string.system_contact_name),
+                "",
+                notify = false
+            )
+            "capability_manifest" -> {
+                json?.optJSONArray("connector_agents")?.let { AppStore.updateConnectorAgentStatuses(context, it) }
+                StoredIncomingMessage(
+                    CONTACT_SYSTEM,
+                    context.getString(R.string.system_contact_name),
+                    "",
+                    notify = false
+                )
+            }
             "pairing_revoked" -> {
                 AppStore.deleteContact(context, CONTACT_HERMES, deleteMessages = false)
                 StoredIncomingMessage(
@@ -259,9 +279,30 @@ object ChatHistoryStore {
                     sender == "system" -> CONTACT_SYSTEM
                     else -> json?.optString("contact_id", CONTACT_HERMES)?.takeIf { it.isNotBlank() } ?: CONTACT_HERMES
                 }
-                StoredIncomingMessage(contactId, contactName(context, contactId), content)
+                StoredIncomingMessage(
+                    contactId,
+                    contactName(context, contactId),
+                    content,
+                    taskId = json?.optString("task_id").orEmpty(),
+                    remoteMessageId = json?.optString("message_id").orEmpty()
+                )
             }
         }
+    }
+
+    private fun hasIncomingDuplicate(array: JSONArray, incoming: StoredIncomingMessage): Boolean {
+        for (index in 0 until array.length()) {
+            val item = array.optJSONObject(index) ?: continue
+            if (item.optBoolean("isMine")) continue
+            if (incoming.remoteMessageId.isNotBlank() &&
+                item.optString("remoteMessageId") == incoming.remoteMessageId
+            ) return true
+            if (incoming.taskId.isNotBlank() &&
+                item.optString("taskId") == incoming.taskId &&
+                item.optString("content") == incoming.content
+            ) return true
+        }
+        return false
     }
 
     private fun contactName(context: Context, contactId: String): String {

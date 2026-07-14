@@ -52,7 +52,7 @@ class CodexAppServer:
         if not run.thread_id:
             response = self._request("thread/start", {
                 "cwd": os.path.abspath(cwd), "model": model, "ephemeral": False,
-                "approvalPolicy": "on-request", "sandbox": "workspace-write",
+                "approvalPolicy": "never", "sandbox": "workspace-write",
             }, timeout=30)
             run.thread_id = str((response.get("thread") or {}).get("id") or "")
             if conversation_id and run.thread_id:
@@ -124,7 +124,7 @@ class CodexAppServer:
             threading.Thread(target=self._read_stdout, daemon=True).start()
             threading.Thread(target=self._drain_stderr, daemon=True).start()
         self._request("initialize", {
-            "clientInfo": {"name": "signalasi-desktop", "title": "SignalASI Desktop", "version": "0.1.0"},
+            "clientInfo": {"name": "signalasi-desktop", "title": "SignalASI Desktop", "version": "0.1.1"},
             "capabilities": {"experimentalApi": True},
         }, timeout=15)
         self._notify("initialized", {})
