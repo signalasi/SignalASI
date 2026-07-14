@@ -171,14 +171,15 @@
           </div>
           <iframe id="pairingFrame" title="SignalASI pairing QR"></iframe>
           <div id="pairingStatusDetail" class="pairing-state">Checking phone pairing state</div>
+          <div id="pairedClients" class="paired-clients"></div>
           <div class="pairing-actions">
             <button id="copyPairingLinkSecondary">Copy pairing link</button>
             <button data-nav="agents">Configure agents</button>
             <button id="pairingSelfTest">Run self-test</button>
-            <button id="forgetPhone">Forget phone</button>
+            <button id="forgetPhone">Revoke all clients</button>
           </div>
           <div class="hint">
-            The only pairing route is <code>/signalasi/verify</code>. Pairing a new phone revokes the previous phone first. Existing agents do not need SignalASI settings because Desktop owns the SignalASI identity and calls them through CLI/API.
+            The pairing route is <code>/signalasi/verify</code>. Every client receives an independent encrypted relationship and can be revoked without affecting other clients.
           </div>
         </article>
       </section>

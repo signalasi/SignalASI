@@ -4110,7 +4110,13 @@ class MobileNativeAgent(
 
     private fun prepareKnowledgeAnswerCommand(query: String): AgentUiState {
         val targets = connectorRegistry.availableTargets()
-        val target = listOf("codex", "hermes", "local-llm", "cloud-models")
+        val hasPairedDesktop = SignalASILinkProtocol.allServerLinks(appContext).any { it.paired }
+        val preferredTargets = if (hasPairedDesktop) {
+            listOf("codex", "hermes", "local-llm", "cloud-models")
+        } else {
+            listOf("cloud-models", "local-llm")
+        }
+        val target = preferredTargets
             .firstNotNullOfOrNull { preferredId ->
                 targets.firstOrNull { target ->
                     target.status == AgentConnectorStatus.AVAILABLE &&

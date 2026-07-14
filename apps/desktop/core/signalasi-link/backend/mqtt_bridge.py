@@ -1,9 +1,11 @@
 ﻿"""SignalASI Link MQTT bridge - connects the public broker and mobile app."""
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import re
+import secrets
 import socket
 import threading
 import time
@@ -17,7 +19,28 @@ from api_response import api_error, api_ok
 from agent_gateway import ask_agent_sync, connector_diagnostics
 from agent_task_manager import agent_task_manager
 from codex_app_server import CodexAppServer
-from pairing_state import is_paired, pairing_status, record_pairing_success, validate_pairing_token
+from link_delivery import (
+    acknowledge_outbound,
+    claim_message,
+    complete_message,
+    mark_outbound_published,
+    pending_outbound,
+    previous_acknowledgement,
+    queue_outbound,
+)
+from link_protocol import LinkTopics, PROTOCOL_NAME, PROTOCOL_VERSION, decrypt_pairing_claim, make_envelope, parse_topic, validate_envelope, valid_route_id
+from pairing_state import (
+    get_client,
+    is_paired,
+    list_clients,
+    pairing_status,
+    pairing_secret,
+    record_pairing_success,
+    revoke_client,
+    server_route_id,
+    touch_client,
+    validate_pairing_token,
+)
 from signalasi_client import (
     decrypt_signal_envelope,
     desktop_id,
@@ -25,17 +48,15 @@ from signalasi_client import (
     encrypt_signal_payload,
     get_signal_bundle,
     replace_peer_signal_bundle,
+    remove_peer_signal_session,
 )
 from stt_bridge import transcribe_audio
 
 log = logging.getLogger("signalasi.mqtt")
 
-BROKER = "broker.emqx.io"
-PORT = 1883
-DEVICE_ID = "android"
-TOPIC_SEND = f"signalasichat/{DEVICE_ID}/send"
-TOPIC_RECV = f"signalasichat/{DEVICE_ID}/recv"
-TOPIC_PC = f"signalasichat/{DEVICE_ID}/pc"
+BROKER = os.environ.get("SIGNALASI_MQTT_HOST", "broker.emqx.io")
+PORT = int(os.environ.get("SIGNALASI_MQTT_PORT", "8883"))
+MQTT_TLS = os.environ.get("SIGNALASI_MQTT_TLS", "1") != "0"
 FILES_DIR = Path.home() / "signalasi_files"
 MQTT_QOS = 1
 MOBILE_HIDDEN_AGENT_IDS = {"cloud-model"}
@@ -47,6 +68,46 @@ codex_task_callbacks: dict[str, Callable[[str, dict], None]] = {}
 codex_task_callbacks_lock = threading.Lock()
 pending_delivery_acks: dict[int, dict] = {}
 pending_delivery_acks_lock = threading.Lock()
+pending_outbound_acks: dict[int, tuple[str, str]] = {}
+pending_outbound_acks_lock = threading.Lock()
+
+
+def _client_topics(client_route_id: str) -> LinkTopics:
+    return LinkTopics(server_route_id(), client_route_id)
+
+
+def _wire_client(wire_payload: dict) -> dict | None:
+    route_id = str(wire_payload.get("_client_route_id") or "")
+    return get_client(route_id) if route_id else None
+
+
+def _wire_down_topic(wire_payload: dict) -> str:
+    client = _wire_client(wire_payload)
+    return str((client or {}).get("topics", {}).get("down") or "")
+
+
+def _wire_control_topic(wire_payload: dict) -> str:
+    client = _wire_client(wire_payload)
+    return str((client or {}).get("topics", {}).get("control") or "")
+
+
+def _wire_remote_name(wire_payload: dict) -> str:
+    client = _wire_client(wire_payload)
+    return str((client or {}).get("signal_name") or "")
+
+
+def _subscribe_client(mqttc, client: dict) -> None:
+    topics = client.get("topics") or {}
+    for key in ("up", "control"):
+        topic = str(topics.get(key) or "")
+        if topic:
+            mqttc.subscribe(topic, qos=MQTT_QOS)
+
+
+def _subscribe_all_routes(mqttc) -> None:
+    mqttc.subscribe(LinkTopics(server_route_id()).pairing, qos=MQTT_QOS)
+    for paired_client in list_clients():
+        _subscribe_client(mqttc, paired_client)
 
 
 def _dispatch_codex_event(task_id: str, event: dict) -> None:
@@ -114,13 +175,11 @@ def _reason_code_value(reason_code):
 def on_connect(mqttc, userdata, flags, reason_code, properties=None):
     if _reason_code_value(reason_code) == 0:
         log.info(f"MQTT connected {BROKER}:{PORT}")
-        mqttc.subscribe(TOPIC_SEND, qos=MQTT_QOS)
-        local_ip = get_lan_ip()
-        pc_info = {"ip": local_ip, "port": 18765, "signal": get_signal_bundle()}
-        mqttc.publish(TOPIC_PC, json.dumps(pc_info, ensure_ascii=False), qos=MQTT_QOS, retain=True)
+        _subscribe_all_routes(mqttc)
         for recovered_task in agent_task_manager.drain_recovered():
             _publish_or_queue_task_event(mqttc, {"scheme": "signal", "from": "android"}, recovered_task, [])
         flush_pending_task_events(mqttc)
+        flush_outbound_messages(mqttc)
     else:
         log.warning(f"MQTT connection failed rc={reason_code}")
 
@@ -136,6 +195,10 @@ def on_publish(mqttc, userdata, mid, reason_code=None, properties=None):
         ack = pending_delivery_acks.pop(int(mid), None)
     if ack:
         publish_delivery_ack(mqttc, ack, reason_code)
+    with pending_outbound_acks_lock:
+        outbound = pending_outbound_acks.pop(int(mid), None)
+    if outbound:
+        mark_outbound_published(outbound[0], outbound[1])
 
 
 def track_delivery_ack(mid: int, payload: dict, stage: str, detail: object = ""):
@@ -161,6 +224,7 @@ def build_delivery_ack_payload(payload: dict, stage: str, detail: object = "") -
         "delivery_status": "broker_ack",
         "time": time.time(),
         "delivery_trace": _delivery_trace(payload, _trace_event(stage, detail)),
+        "_client_route_id": str(payload.get("_client_route_id") or ""),
     }
 
 
@@ -170,9 +234,13 @@ def publish_delivery_ack(mqttc, ack: dict, reason_code=None):
         ack,
         _trace_event("desktop_broker_ack", f"mid source={ack.get('source_message_id')}")
     )
+    client_route_id = str(ack.pop("_client_route_id", "") or "")
+    paired_client = get_client(client_route_id)
+    if not paired_client:
+        return
+    target_topic = paired_client["topics"]["control"]
     try:
-        encrypted = encrypt_signal_payload(ack, remote_name="android")
-        info = mqttc.publish(TOPIC_RECV, json.dumps(encrypted, ensure_ascii=False), qos=MQTT_QOS)
+        info = _publish_to_registered_client(mqttc, paired_client, ack, "control", durable=False)
         log.info(
             "MQTT delivery ack control published "
             f"source={ack.get('source_message_id')} mid={info.mid} rc={info.rc}"
@@ -247,16 +315,23 @@ def clean_audio_reply(reply: str) -> str:
 
 
 def _publish_phone_payload(mqttc, wire_payload: dict, reply_payload: dict) -> bool:
+    paired_client = _wire_client(wire_payload)
+    if not paired_client:
+        log.warning("Phone publish skipped: no active client route")
+        return False
+    channel = "control" if reply_payload.get("type") in {
+        "delivery_ack", "agent_task_event", "pairing_revoked", "connector_status", "capability_manifest"
+    } else "down"
+    target_topic = paired_client["topics"][channel]
     with phone_publish_lock:
-        if wire_payload.get("scheme") == "signal":
-            encrypted_reply = encrypt_signal_payload(reply_payload, remote_name=wire_payload.get("from", "android"))
-            info = mqttc.publish(TOPIC_RECV, json.dumps(encrypted_reply, ensure_ascii=False), qos=MQTT_QOS)
-            track_delivery_ack(info.mid, reply_payload, "desktop_reply_broker_ack", TOPIC_RECV)
-            log.info(f"MQTT encrypted reply published mid={info.mid} rc={info.rc}")
-        else:
-            info = mqttc.publish(TOPIC_RECV, json.dumps(reply_payload, ensure_ascii=False), qos=MQTT_QOS)
-            track_delivery_ack(info.mid, reply_payload, "desktop_reply_broker_ack", TOPIC_RECV)
-            log.info(f"MQTT plain reply published mid={info.mid} rc={info.rc}")
+        info = _publish_to_registered_client(
+            mqttc, paired_client, reply_payload, channel,
+            durable=reply_payload.get("type") != "delivery_ack",
+        )
+        reply_payload["_client_route_id"] = wire_payload.get("_client_route_id", "")
+        if reply_payload.get("type") != "delivery_ack":
+            track_delivery_ack(info.mid, reply_payload, "desktop_reply_broker_ack", target_topic)
+        log.info(f"MQTT encrypted reply published mid={info.mid} rc={info.rc}")
         return info.rc == mqtt.MQTT_ERR_SUCCESS
 
 
@@ -354,7 +429,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             "delivery_trace": _delivery_trace(
                 {"delivery_trace": trace},
                 _trace_event("agent_replied", f"{agent_id} chars={len(reply)}"),
-                _trace_event("desktop_reply_publish_queued", TOPIC_RECV),
+                _trace_event("desktop_reply_publish_queued", _wire_down_topic(wire_payload)),
             ),
             "sender": "other",
             "time": time.time(),
@@ -414,26 +489,82 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
 
 def on_message(mqttc, userdata, msg):
     try:
+        if len(msg.payload) > 512 * 1024:
+            log.warning("MQTT message rejected: envelope exceeds size limit")
+            return
+        route = parse_topic(msg.topic)
+        if route is None or route[0] != server_route_id():
+            log.warning("MQTT message rejected: invalid SignalASI Link route")
+            return
+        _, client_route_id, channel = route
         wire_payload = json.loads(msg.payload.decode("utf-8"))
-        if wire_payload.get("type") == "signalasi_pairing_claim":
-            handle_pairing_claim(mqttc, wire_payload)
-            return
-        if wire_payload.get("type") == "signal_bundle_request":
-            handle_signal_bundle_request(mqttc, wire_payload)
-            return
-        if not is_paired() and os.environ.get("SIGNALASI_ALLOW_UNPAIRED_MQTT") != "1":
-            log.warning("MQTT message rejected: no paired phone is trusted")
-            return
-        if wire_payload.get("scheme") != "signal":
-            if os.environ.get("SIGNALASI_ALLOW_PLAIN_SIGNAL") == "1" or os.environ.get("HERMES_SIGNAL_ALLOW_PLAIN") == "1":
-                payload = wire_payload
-                trace = _delivery_trace(payload, _trace_event("desktop_received", msg.topic), _trace_event("desktop_plain", "unencrypted debug path"))
-            else:
-                log.warning("Rejected unencrypted MQTT message: scheme != signal")
+        if channel == "pair":
+            token = str(wire_payload.get("pairing_token") or "")
+            secret = pairing_secret(token)
+            if not secret:
+                log.warning("MQTT pairing ciphertext rejected: unknown token")
                 return
+            try:
+                claim = decrypt_pairing_claim(wire_payload, secret)
+            except Exception as exc:
+                log.warning("MQTT pairing ciphertext rejected: %s", exc)
+                return
+            if claim.get("pairing_token") != token:
+                log.warning("MQTT pairing ciphertext rejected: token binding mismatch")
+                return
+            handle_pairing_claim(mqttc, claim)
+            return
+        paired_client = get_client(client_route_id)
+        if paired_client is None:
+            log.warning("MQTT message rejected: client route is not paired")
+            return
+        wire_payload["_client_route_id"] = client_route_id
+        if wire_payload.get("scheme") != "signal":
+            log.warning("Rejected unencrypted MQTT message: scheme != signal")
+            return
         else:
-            payload = decrypt_signal_envelope(wire_payload, remote_name=wire_payload.get("from", "android"))
+            if str(wire_payload.get("from") or "") != paired_client["signal_name"]:
+                log.warning("Rejected MQTT message: cryptographic sender does not match route")
+                return
+            application_envelope = decrypt_signal_envelope(wire_payload, remote_name=paired_client["signal_name"])
+            validate_envelope(application_envelope)
+            if application_envelope["source_id"] != paired_client["signal_name"]:
+                log.warning("Rejected MQTT message: application sender does not match paired identity")
+                return
+            message_id = str(application_envelope["message_id"])
+            if not claim_message(client_route_id, message_id):
+                if application_envelope.get("payload", {}).get("type") == "delivery_ack":
+                    return
+                previous = previous_acknowledgement(client_route_id, message_id)
+                _publish_phone_payload(mqttc, wire_payload, {
+                    "type": "delivery_ack",
+                    "message_id": message_id,
+                    "delivery_status": previous.get("status", "duplicate"),
+                    "duplicate": True,
+                    "sender": "system",
+                    "time": time.time(),
+                })
+                return
+            payload = application_envelope["payload"]
+            payload.setdefault("message_id", message_id)
+            payload.setdefault("conversation_id", application_envelope.get("conversation_id", ""))
+            payload.setdefault("source_message_id", message_id)
+            touch_client(client_route_id)
             trace = _delivery_trace(payload, _trace_event("desktop_received", msg.topic), _trace_event("desktop_decrypted", "SignalASI Link"))
+            if payload.get("type") == "delivery_ack":
+                acknowledged_id = str(payload.get("source_message_id") or application_envelope.get("reply_to") or "")
+                acknowledge_outbound(client_route_id, acknowledged_id)
+                complete_message(client_route_id, message_id, "completed", {"status": "completed"})
+                return
+            complete_message(client_route_id, message_id, "accepted", {"status": "accepted"})
+            _publish_phone_payload(mqttc, wire_payload, {
+                "type": "delivery_ack",
+                "source_message_id": message_id,
+                "delivery_status": "accepted",
+                "sender": "system",
+                "time": time.time(),
+                "delivery_trace": trace,
+            })
 
         content = payload.get("content", "")
         contact_id = payload.get("contact_id", "hermes")
@@ -445,6 +576,14 @@ def on_message(mqttc, userdata, msg):
         audio_mode = str(payload.get("audio_mode") or "agent_reply")
 
         log.info(f"MQTT received: [{msg_type}] {content[:50]}")
+
+        if msg_type == "client_revoked":
+            revoke_client(client_route_id, str(payload.get("reason") or "forgotten_by_client"))
+            remove_peer_signal_session(
+                paired_client["signal_name"], int(paired_client.get("signal_device_id") or 1)
+            )
+            log.info("Client relationship revoked client=%s", client_route_id)
+            return
 
         if msg_type == "agent_task_cancel":
             task_id = str(payload.get("task_id") or "").strip()
@@ -516,7 +655,7 @@ def on_message(mqttc, userdata, msg):
                 "source_message_id": payload.get("client_message_id") or payload.get("message_id") or "",
                 "delivery_trace": _delivery_trace(
                     {"delivery_trace": trace},
-                    _trace_event("desktop_transcript_publish_queued", TOPIC_RECV),
+                    _trace_event("desktop_transcript_publish_queued", _wire_down_topic(wire_payload)),
                 ),
                 "sender": "other",
                 "time": time.time(),
@@ -535,40 +674,51 @@ def handle_pairing_claim(mqttc, payload: dict):
     token = str(payload.get("pairing_token") or "")
     bundle = payload.get("signal_bundle")
     fingerprint = str(payload.get("identity_fingerprint") or "")
-    if not validate_pairing_token(token):
-        log.warning("MQTT pairing claim rejected: invalid token")
+    client_route_id = str(payload.get("client_route_id") or "")
+    signal_name = str(payload.get("signal_name") or "")
+    if payload.get("protocol") != PROTOCOL_NAME or payload.get("version") != PROTOCOL_VERSION:
+        log.warning("MQTT pairing claim rejected: unsupported protocol")
         return
-    if not isinstance(bundle, dict):
+    if payload.get("server_route_id") != server_route_id() or not valid_route_id(client_route_id):
+        log.warning("MQTT pairing claim rejected: invalid route binding")
+        return
+    if not signal_name or signal_name != str(payload.get("signalasi_id") or payload.get("from") or ""):
+        log.warning("MQTT pairing claim rejected: invalid Signal identity name")
+        return
+    if not isinstance(bundle, dict) or not fingerprint:
         log.warning("MQTT pairing claim rejected: missing signal bundle")
         return
-
-    previous_pairing = pairing_status()
-    identity_changed = bool(
-        previous_pairing.get("paired")
-        and previous_pairing.get("identity_fingerprint")
-        and previous_pairing.get("identity_fingerprint") != fingerprint
+    try:
+        bundle_fingerprint = hashlib.sha256(base64.b64decode(bundle["identityKey"], validate=True)).hexdigest()
+    except Exception:
+        log.warning("MQTT pairing claim rejected: invalid identity key")
+        return
+    if not secrets.compare_digest(bundle_fingerprint.lower(), fingerprint.lower()):
+        log.warning("MQTT pairing claim rejected: bundle fingerprint mismatch")
+        return
+    if signal_name != f"signalasi:{fingerprint[:16]}":
+        log.warning("MQTT pairing claim rejected: Signal name does not match identity")
+        return
+    if get_client(client_route_id, include_revoked=True) is not None:
+        log.warning("MQTT pairing claim rejected: client route was already used")
+        return
+    if not validate_pairing_token(token, consume=True):
+        log.warning("MQTT pairing claim rejected: invalid token")
+        return
+    result = replace_peer_signal_bundle(
+        bundle,
+        remote_name=signal_name,
+        remote_device_id=int(payload.get("signal_device_id") or 1),
     )
-    revoke_payload = {
-        "type": "pairing_revoked",
-        "content": "This PC has been paired with a new SignalASI device. This device session is no longer valid.",
-        "contact_id": "system",
-        "desktop_id": desktop_id(),
-        "desktop_name": desktop_name(),
-        "sender": "system",
-        "connector_agents": mobile_connector_agents(),
-        "delivery_trace": _desktop_trace(_trace_event("desktop_pairing_revocation_queued", "new_pairing_claim")),
-        "time": time.time(),
-    }
-    if identity_changed:
-        try:
-            encrypted_revoke = encrypt_signal_payload(revoke_payload, remote_name="android")
-            info = mqttc.publish(TOPIC_RECV, json.dumps(encrypted_revoke, ensure_ascii=False), qos=MQTT_QOS)
-            log.info(f"MQTT old pairing revocation published mid={info.mid} rc={info.rc}")
-        except Exception as exc:
-            log.warning(f"MQTT old pairing revocation skipped: {exc}")
-
-    result = replace_peer_signal_bundle(bundle, remote_name="android")
-    record_pairing_success(fingerprint=fingerprint, remote_name="android", remote_device_id=1)
+    paired_client = record_pairing_success(
+        fingerprint=fingerprint,
+        remote_name=signal_name,
+        remote_device_id=int(payload.get("signal_device_id") or 1),
+        client_route_id=client_route_id,
+        display_name=str(payload.get("client_name") or "SignalASI Client")[:120],
+        platform=str(payload.get("platform") or "unknown")[:32],
+    )
+    _subscribe_client(mqttc, paired_client)
     log.info(f"MQTT pairing claim accepted fingerprint={fingerprint[:16]} result={result}")
 
     ack_payload = {
@@ -578,66 +728,31 @@ def handle_pairing_claim(mqttc, payload: dict):
         "desktop_id": desktop_id(),
         "desktop_name": desktop_name(),
         "desktop_fingerprint": get_signal_bundle().get("identityKeySha256", ""),
+        "protocol": PROTOCOL_NAME,
+        "version": PROTOCOL_VERSION,
+        "server_route_id": server_route_id(),
+        "client_route_id": client_route_id,
+        "routes": paired_client["topics"],
         "signal_bundle": get_signal_bundle(),
         "sender": "system",
-        "connector_agents": mobile_connector_agents(),
+        "connector_agents": mobile_connector_agents(client_route_id),
         "delivery_trace": _desktop_trace(_trace_event("desktop_pairing_confirmed", fingerprint[:16])),
         "time": time.time(),
     }
-    info = mqttc.publish(TOPIC_RECV, json.dumps(ack_payload, ensure_ascii=False), qos=MQTT_QOS)
+    info = mqttc.publish(paired_client["topics"]["down"], json.dumps(ack_payload, ensure_ascii=False), qos=MQTT_QOS)
     log.info(f"MQTT public pairing confirmation published mid={info.mid} rc={info.rc}")
+    timer = threading.Timer(1.0, publish_capability_manifest, args=(mqttc, client_route_id))
+    timer.daemon = True
+    timer.start()
 
 
-def handle_signal_bundle_request(mqttc, payload: dict):
-    if not is_paired():
-        log.warning("Signal bundle request rejected: no paired phone is trusted")
-        return
-    bundle = get_signal_bundle()
-    fingerprint = str(bundle.get("identityKeySha256") or "")
-    requested_fingerprint = str(payload.get("requested_fingerprint") or "").strip()
-    if requested_fingerprint and requested_fingerprint != fingerprint:
-        log.warning("Signal bundle request rejected: desktop fingerprint mismatch")
-        return
-    requester_fingerprint = str(payload.get("identity_fingerprint") or "").strip()
-    requester_bundle = payload.get("signal_bundle")
-    trusted_fingerprint = str(pairing_status().get("identity_fingerprint") or "").strip()
-    if not requester_fingerprint or requester_fingerprint != trusted_fingerprint:
-        log.warning(
-            "Signal bundle request rejected: requester fingerprint mismatch "
-            f"trusted={trusted_fingerprint[:16]} requester={requester_fingerprint[:16]}"
-        )
-        return
-    if not isinstance(requester_bundle, dict):
-        log.warning("Signal bundle request rejected: requester bundle missing")
-        return
-    replace_peer_signal_bundle(requester_bundle, remote_name="android")
-    reply_topic = str(payload.get("reply_topic") or TOPIC_RECV).strip()
-    if reply_topic != TOPIC_RECV and not reply_topic.startswith(f"signalasichat/{DEVICE_ID}/"):
-        log.warning("Signal bundle request rejected: invalid reply topic")
-        return
-    requested_contact = str(payload.get("to") or "").strip()
-    response = {
-        "version": 1,
-        "type": "signal_bundle_response",
-        "from": requested_contact or desktop_id(),
-        "to": str(payload.get("from") or ""),
-        "desktop_id": desktop_id(),
-        "desktop_name": desktop_name(),
-        "desktop_fingerprint": fingerprint,
-        "signal_bundle": bundle,
-        "session_recovery": True,
-        "time": time.time(),
-    }
-    info = mqttc.publish(reply_topic, json.dumps(response, ensure_ascii=False), qos=MQTT_QOS)
-    log.info(f"Signal bundle response published mid={info.mid} rc={info.rc} to={reply_topic}")
-
-
-def mobile_connector_agents() -> list[dict]:
+def mobile_connector_agents(client_route_id: str = "") -> list[dict]:
     diagnostics = connector_diagnostics()
     agents = []
     did = desktop_id()
     dname = desktop_name()
     fingerprint = get_signal_bundle().get("identityKeySha256", "")
+    up_topic = _client_topics(client_route_id).up if client_route_id else ""
     for agent in diagnostics.get("agents", []):
         agent_id = agent.get("mobile_contact_id") or agent.get("id")
         if agent_id in MOBILE_HIDDEN_AGENT_IDS or agent.get("kind") in MOBILE_HIDDEN_AGENT_IDS:
@@ -654,10 +769,91 @@ def mobile_connector_agents() -> list[dict]:
             "detail": agent.get("detail") or "",
             "setup": agent.get("setup") or "",
             "kind": agent.get("kind") or "",
-            "mqtt_topic": TOPIC_SEND,
+            "mqtt_topic": up_topic,
             "updated_at": time.time(),
         })
     return agents
+
+
+def capability_manifest(client_route_id: str = "") -> dict:
+    diagnostics = connector_diagnostics()
+    return {
+        "type": "capability_manifest",
+        "manifest_version": 1,
+        "server": {
+            "id": desktop_id(),
+            "name": desktop_name(),
+            "platform": "windows",
+            "role": "server",
+        },
+        "agents": mobile_connector_agents(client_route_id),
+        "models": [],
+        "tools": ["agent_tasks", "voice_stt", "file_transfer"],
+        "features": ["tasks", "task_events", "voice", "files", "reliable_delivery", "multi_client"],
+        "limits": {
+            "max_parallel_tasks": int(os.environ.get("SIGNALASI_MAX_PARALLEL_TASKS", "4")),
+            "max_message_bytes": 524288,
+        },
+        "generated_at": int(time.time() * 1000),
+        "connector_agents": mobile_connector_agents(client_route_id),
+    }
+
+
+def publish_capability_manifest(mqttc, client_route_id: str) -> bool:
+    paired_client = get_client(client_route_id)
+    if not paired_client:
+        return False
+    try:
+        info = _publish_to_registered_client(
+            mqttc, paired_client, capability_manifest(client_route_id), "control"
+        )
+        return info.rc == mqtt.MQTT_ERR_SUCCESS
+    except Exception as exc:
+        log.warning("Capability manifest publish failed client=%s: %s", client_route_id, exc)
+        return False
+
+
+def _publish_to_registered_client(
+    mqttc, paired_client: dict, payload: dict, channel: str = "down", durable: bool = True
+):
+    application_envelope = make_envelope(
+        payload,
+        source_id=desktop_id(),
+        target_id=paired_client["signal_name"],
+        conversation_id=str(payload.get("conversation_id") or ""),
+        reply_to=str(payload.get("source_message_id") or ""),
+    )
+    encrypted = encrypt_signal_payload(application_envelope, remote_name=paired_client["signal_name"])
+    topic = paired_client["topics"][channel]
+    wire_payload = json.dumps(encrypted, ensure_ascii=False)
+    message_id = application_envelope["message_id"]
+    if durable:
+        queue_outbound(paired_client["client_route_id"], message_id, topic, wire_payload)
+    info = mqttc.publish(topic, wire_payload, qos=MQTT_QOS)
+    if durable:
+        with pending_outbound_acks_lock:
+            pending_outbound_acks[int(info.mid)] = (paired_client["client_route_id"], message_id)
+    return info
+
+
+def flush_outbound_messages(mqttc) -> None:
+    for pending in pending_outbound():
+        paired_client = get_client(pending["client_route_id"])
+        if not paired_client:
+            continue
+        info = mqttc.publish(pending["topic"], pending["wire_payload"], qos=MQTT_QOS)
+        with pending_outbound_acks_lock:
+            pending_outbound_acks[int(info.mid)] = (pending["client_route_id"], pending["message_id"])
+
+
+def _target_clients(client_route_id: str = "", broadcast: bool = False) -> list[dict]:
+    if client_route_id:
+        paired_client = get_client(client_route_id)
+        return [paired_client] if paired_client else []
+    clients = list_clients()
+    if broadcast or len(clients) <= 1:
+        return clients
+    return []
 
 
 def _agent_id_from_contact(contact_id: str, explicit_agent_id: object = None) -> str:
@@ -670,7 +866,7 @@ def _agent_id_from_contact(contact_id: str, explicit_agent_id: object = None) ->
     return value or "hermes"
 
 
-def publish_connector_status(mqttc=None, reason: str = "status_update") -> dict:
+def publish_connector_status(mqttc=None, reason: str = "status_update", client_route_id: str = "") -> dict:
     if not is_paired() and os.environ.get("SIGNALASI_ALLOW_UNPAIRED_MQTT") != "1":
         return api_error("phone_not_paired", "Phone is not paired", reason=reason, params={"reason": reason})
     mqttc = mqttc or client
@@ -687,21 +883,20 @@ def publish_connector_status(mqttc=None, reason: str = "status_update") -> dict:
         "desktop_fingerprint": get_signal_bundle().get("identityKeySha256", ""),
         "sender": "system",
         "reason": reason,
-        "connector_agents": mobile_connector_agents(),
+        "connector_agents": mobile_connector_agents(client_route_id),
         "delivery_trace": _desktop_trace(_trace_event("desktop_connector_status", reason)),
         "time": time.time(),
     }
     try:
-        encrypted = encrypt_signal_payload(payload, remote_name="android")
-        info = mqttc.publish(TOPIC_RECV, json.dumps(encrypted, ensure_ascii=False), qos=MQTT_QOS)
-        log.info(f"MQTT connector status published mid={info.mid} rc={info.rc} reason={reason}")
-        return api_ok("connector_status_published", reason=reason, mid=info.mid, rc=info.rc, params={"reason": reason, "mid": info.mid, "rc": info.rc})
+        targets = _target_clients(client_route_id, broadcast=True)
+        mids = [_publish_to_registered_client(mqttc, target, {**payload, "connector_agents": mobile_connector_agents(target["client_route_id"])}, "control").mid for target in targets]
+        return api_ok("connector_status_published", reason=reason, client_count=len(targets), mids=mids, params={"reason": reason, "client_count": len(targets)})
     except Exception as exc:
         log.warning(f"MQTT connector status skipped: {exc}")
         return api_error("publish_failed", str(exc), reason=reason, params={"reason": reason})
 
 
-def publish_pairing_revoked(mqttc=None, reason: str = "forgotten_by_desktop") -> dict:
+def publish_pairing_revoked(mqttc=None, reason: str = "forgotten_by_desktop", client_route_id: str = "") -> dict:
     """Notify the previously paired phone before local trust is cleared."""
     if not is_paired() and os.environ.get("SIGNALASI_ALLOW_UNPAIRED_MQTT") != "1":
         return api_error("phone_not_paired", "Phone is not paired", reason=reason, params={"reason": reason})
@@ -722,19 +917,18 @@ def publish_pairing_revoked(mqttc=None, reason: str = "forgotten_by_desktop") ->
         "time": time.time(),
     }
     try:
-        encrypted_revoke = encrypt_signal_payload(revoke_payload, remote_name="android")
-        info = mqttc.publish(TOPIC_RECV, json.dumps(encrypted_revoke, ensure_ascii=False), qos=MQTT_QOS)
-        ok = info.rc == mqtt.MQTT_ERR_SUCCESS
-        log.info(f"MQTT pairing revocation published mid={info.mid} rc={info.rc} reason={reason}")
+        targets = _target_clients(client_route_id, broadcast=not bool(client_route_id))
+        results = [_publish_to_registered_client(mqttc, target, revoke_payload, "control") for target in targets]
+        ok = all(info.rc == mqtt.MQTT_ERR_SUCCESS for info in results)
         if ok:
-            return api_ok("pairing_revocation_published", reason=reason, mid=info.mid, rc=info.rc, params={"reason": reason, "mid": info.mid, "rc": info.rc})
-        return api_error("publish_failed", f"MQTT publish failed rc={info.rc}", reason=reason, mid=info.mid, rc=info.rc, params={"reason": reason, "mid": info.mid, "rc": info.rc})
+            return api_ok("pairing_revocation_published", reason=reason, client_count=len(results), params={"reason": reason, "client_count": len(results)})
+        return api_error("publish_failed", "One or more revocation messages failed", reason=reason)
     except Exception as exc:
         log.warning(f"MQTT pairing revocation skipped: {exc}")
         return api_error("publish_failed", str(exc), reason=reason, params={"reason": reason})
 
 
-def publish_mobile_test_message(contact_id: str, content: str) -> dict:
+def publish_mobile_test_message(contact_id: str, content: str, client_route_id: str = "", broadcast: bool = False) -> dict:
     """Publish an encrypted diagnostic message to the Android app."""
     if not is_paired() and os.environ.get("SIGNALASI_ALLOW_UNPAIRED_MQTT") != "1":
         return api_error(
@@ -759,14 +953,16 @@ def publish_mobile_test_message(contact_id: str, content: str) -> dict:
         "diagnostic": True,
         "delivery_trace": _desktop_trace(_trace_event("desktop_mobile_test_queued", contact_id)),
     }
-    encrypted = encrypt_signal_payload(payload, remote_name="android")
-    info = client.publish(TOPIC_RECV, json.dumps(encrypted, ensure_ascii=False), qos=MQTT_QOS)
-    if info.rc == mqtt.MQTT_ERR_SUCCESS:
-        return api_ok("mobile_test_published", mid=info.mid, rc=info.rc, contact_id=contact_id, params={"contact_id": contact_id, "mid": info.mid, "rc": info.rc})
-    return api_error("publish_failed", f"MQTT publish failed rc={info.rc}", mid=info.mid, rc=info.rc, contact_id=contact_id, params={"contact_id": contact_id, "mid": info.mid, "rc": info.rc})
+    targets = _target_clients(client_route_id, broadcast=broadcast)
+    if not targets and len(list_clients()) > 1 and not client_route_id and not broadcast:
+        return api_error("client_route_required", "Multiple clients are paired; select a client or explicitly broadcast")
+    results = [_publish_to_registered_client(client, target, payload) for target in targets]
+    if results and all(info.rc == mqtt.MQTT_ERR_SUCCESS for info in results):
+        return api_ok("mobile_test_published", client_count=len(results), contact_id=contact_id, params={"contact_id": contact_id, "client_count": len(results)})
+    return api_error("publish_failed", "No target client or publish failed", contact_id=contact_id)
 
 
-def publish_agent_push_message(contact_id: str, content: str, source: str = "agent") -> dict:
+def publish_agent_push_message(contact_id: str, content: str, source: str = "agent", client_route_id: str = "", broadcast: bool = False) -> dict:
     """Publish an encrypted message initiated by a local Agent or automation."""
     cleaned_contact_id = str(contact_id or "").strip()
     cleaned_content = str(content or "").strip()
@@ -798,27 +994,43 @@ def publish_agent_push_message(contact_id: str, content: str, source: str = "age
         "agent_push": True,
         "delivery_trace": _desktop_trace(_trace_event("desktop_agent_push_queued", cleaned_contact_id)),
     }
-    encrypted = encrypt_signal_payload(payload, remote_name="android")
-    info = client.publish(TOPIC_RECV, json.dumps(encrypted, ensure_ascii=False), qos=MQTT_QOS)
-    params = {"contact_id": cleaned_contact_id, "source": payload["source"], "mid": info.mid, "rc": info.rc}
-    if info.rc == mqtt.MQTT_ERR_SUCCESS:
-        return api_ok("agent_push_published", mid=info.mid, rc=info.rc, contact_id=cleaned_contact_id, source=payload["source"], params=params)
-    return api_error("publish_failed", f"MQTT publish failed rc={info.rc}", mid=info.mid, rc=info.rc, contact_id=cleaned_contact_id, source=payload["source"], params=params)
+    targets = _target_clients(client_route_id, broadcast=broadcast)
+    if not targets and len(list_clients()) > 1 and not client_route_id and not broadcast:
+        return api_error("client_route_required", "Multiple clients are paired; select a client or explicitly broadcast")
+    results = [_publish_to_registered_client(client, target, payload) for target in targets]
+    params = {"contact_id": cleaned_contact_id, "source": payload["source"], "client_count": len(results)}
+    if results and all(info.rc == mqtt.MQTT_ERR_SUCCESS for info in results):
+        return api_ok("agent_push_published", contact_id=cleaned_contact_id, source=payload["source"], params=params)
+    return api_error("publish_failed", "No target client or publish failed", contact_id=cleaned_contact_id, source=payload["source"], params=params)
 
 
-def publish_agent_task_event(task: dict) -> bool:
+def publish_agent_task_event(task: dict, client_route_id: str = "", broadcast: bool = False) -> bool:
     if not is_paired():
         return False
-    return _publish_or_queue_task_event(client, {"scheme": "signal", "from": "android"}, task, [])
+    published = False
+    for paired_client in _target_clients(client_route_id, broadcast=broadcast):
+        published = _publish_or_queue_task_event(client, {
+            "scheme": "signal",
+            "_client_route_id": paired_client["client_route_id"],
+        }, task, []) or published
+    return published
 
 
-def start_agent_task(contact_id: str, prompt: str, source_message_id: str = "", task_id: str = "") -> dict:
+def start_agent_task(
+    contact_id: str,
+    prompt: str,
+    source_message_id: str = "",
+    task_id: str = "",
+    client_route_id: str = "",
+) -> dict:
     cleaned_contact_id = str(contact_id or "").strip()
     cleaned_prompt = str(prompt or "").strip()
     if not cleaned_contact_id:
         return api_error("contact_id_required")
     if not cleaned_prompt:
         return api_error("content_required", contact_id=cleaned_contact_id)
+    if not _target_clients(client_route_id) and len(list_clients()) > 1:
+        return api_error("client_route_required", "Multiple clients are paired; select a client")
     agent_id = _agent_id_from_contact(cleaned_contact_id)
 
     def run_task(task) -> str:
@@ -829,6 +1041,7 @@ def start_agent_task(contact_id: str, prompt: str, source_message_id: str = "", 
             cleaned_contact_id,
             str(task.get("result") or ""),
             source=f"agent-task:{task.get('task_id', '')}",
+            client_route_id=client_route_id,
         )
 
     task = agent_task_manager.create(
@@ -837,7 +1050,7 @@ def start_agent_task(contact_id: str, prompt: str, source_message_id: str = "", 
         source_message_id=str(source_message_id or ""),
         prompt=cleaned_prompt,
         runner=run_task,
-        on_event=publish_agent_task_event,
+        on_event=lambda event: publish_agent_task_event(event, client_route_id=client_route_id),
         on_result=publish_result,
         task_id=str(task_id or ""),
     )
@@ -863,6 +1076,9 @@ def start():
     mqttc.on_disconnect = on_disconnect
     mqttc.on_message = on_message
     mqttc.on_publish = on_publish
+    if MQTT_TLS:
+        mqttc.tls_set()
+        mqttc.tls_insecure_set(False)
 
     mqttc.reconnect_delay_set(min_delay=1, max_delay=30)
     while running:

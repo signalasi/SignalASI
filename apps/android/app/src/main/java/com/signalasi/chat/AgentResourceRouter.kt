@@ -253,11 +253,13 @@ object AgentResourceCatalog {
 }
 
 class AgentResourceRouter(context: Context) {
-    private val healthStore = AgentResourceHealthStore(context)
+    private val appContext = context.applicationContext
+    private val healthStore = AgentResourceHealthStore(appContext)
 
     fun route(goal: String, targets: List<AgentCallableTarget>, tools: List<AgentSystemTool>): AgentRoutingDecision {
         val requirements = AgentTaskRequirementAnalyzer.analyze(goal)
-        val preferredTargets = preferredTargetOrder(requirements)
+        val hasPairedDesktop = SignalASILinkProtocol.allServerLinks(appContext).any { it.paired }
+        val preferredTargets = preferredTargetOrder(requirements, hasPairedDesktop)
         val candidates = AgentResourceCatalog.build(targets, tools)
             .asSequence()
             .filter { it.targetId.isNotBlank() }
@@ -272,18 +274,22 @@ class AgentResourceRouter(context: Context) {
         return AgentRoutingDecision(requirements, candidates.firstOrNull(), candidates.drop(1).take(fallbackLimit))
     }
 
-    private fun preferredTargetOrder(requirements: AgentTaskRequirements): List<String> {
+    private fun preferredTargetOrder(
+        requirements: AgentTaskRequirements,
+        hasPairedDesktop: Boolean
+    ): List<String> {
         val remainder = when {
-            AgentCapability.CODE in requirements.capabilities -> listOf("claude-code")
-            AgentCapability.KNOWLEDGE_SEARCH in requirements.capabilities -> listOf("local-llm", "cloud-models")
+            AgentCapability.CODE in requirements.capabilities -> listOf("cloud-models", "local-llm")
+            AgentCapability.KNOWLEDGE_SEARCH in requirements.capabilities -> listOf("cloud-models", "local-llm")
             requirements.liveDataRequired -> listOf("cloud-models")
             requirements.mode == AgentRoutingMode.QUALITY -> listOf("cloud-models")
             requirements.mode == AgentRoutingMode.FAST -> listOf("local-llm")
-            requirements.mode == AgentRoutingMode.ECONOMY -> listOf("local-llm", "claude-code", "cloud-models")
+            requirements.mode == AgentRoutingMode.ECONOMY -> listOf("local-llm", "cloud-models")
             requirements.mode == AgentRoutingMode.PRIVATE -> listOf("local-llm")
-            else -> listOf("local-llm", "cloud-models")
+            else -> listOf("cloud-models", "local-llm")
         }
-        return (listOf("codex", "hermes") + remainder)
+        val desktopAgents = if (hasPairedDesktop) listOf("codex", "hermes", "claude-code") else emptyList()
+        return (desktopAgents + remainder)
             .map(::canonicalTargetId)
             .distinct()
     }

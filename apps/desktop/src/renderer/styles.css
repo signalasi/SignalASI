@@ -356,6 +356,31 @@ iframe {
   font-size: 9.3px;
 }
 
+.paired-clients {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.paired-client {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.paired-client div {
+  display: grid;
+  gap: 3px;
+}
+
+.paired-client span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .setup-item {
   display: grid;
   grid-template-columns: 42px 1fr auto;

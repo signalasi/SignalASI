@@ -96,6 +96,8 @@ const statusDoc = fs.readFileSync(path.join(root, "docs/CONNECTOR_STATUS.md"), "
 const backendMain = fs.readFileSync(path.join(backendDir, "main.py"), "utf8");
 const backendMqtt = fs.readFileSync(path.join(backendDir, "mqtt_bridge.py"), "utf8");
 const backendPairing = fs.readFileSync(path.join(backendDir, "pairing_state.py"), "utf8");
+const backendLinkProtocol = fs.readFileSync(path.join(backendDir, "link_protocol.py"), "utf8");
+const backendLinkDelivery = fs.readFileSync(path.join(backendDir, "link_delivery.py"), "utf8");
 const backendSignalClient = fs.readFileSync(path.join(backendDir, "signalasi_client.py"), "utf8");
 const backendGateway = fs.readFileSync(path.join(backendDir, "agent_gateway.py"), "utf8");
 const backendTaskManager = fs.readFileSync(path.join(backendDir, "agent_task_manager.py"), "utf8");
@@ -120,6 +122,8 @@ const androidForegroundTracker = fs.readFileSync(path.join(workspaceRoot, "andro
 const androidAppStore = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "AppStore.kt"), "utf8");
 const androidCrypto = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "SignalASICrypto.kt"), "utf8");
 const androidMqtt = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "SignalASIMqttClient.kt"), "utf8");
+const androidLinkProtocol = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "SignalASILinkProtocol.kt"), "utf8");
+const androidLinkDelivery = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "SignalASILinkDeliveryStore.kt"), "utf8");
 const androidVoiceSettings = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "VoiceAssistantSettings.kt"), "utf8");
 const androidLocalWhisper = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "LocalWhisperAsr.kt"), "utf8");
 const androidWhisperModels = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "WhisperModelManager.kt"), "utf8");
@@ -141,8 +145,32 @@ if (!backendSignalClient.includes('"type": "signalasi_verify"')) {
   throw new Error("Pairing QR payload must use signalasi_verify");
 }
 
-if (!backendMqtt.includes('"signalasi_pairing_claim"')) {
-  throw new Error("MQTT pairing claim must use signalasi_pairing_claim");
+if (!backendMqtt.includes("decrypt_pairing_claim") || !backendLinkProtocol.includes('"signalasi_pairing_ciphertext"')) {
+  throw new Error("MQTT pairing must use the encrypted Link v1 bootstrap");
+}
+
+for (const source of [backendMqtt, backendPairing, androidMqtt, androidAppStore]) {
+  if (source.includes("signalasichat/android/")) {
+    throw new Error("Fixed Android MQTT topics are forbidden by SignalASI Link v1");
+  }
+}
+
+for (const required of ["signalasichat/v1", "server_route_id", "client_route_id", "message_id", "expires_at"]) {
+  if (!backendLinkProtocol.includes(required) || !androidLinkProtocol.includes(required)) {
+    throw new Error(`Desktop and Android Link protocol implementations must include ${required}`);
+  }
+}
+
+for (const required of ["inbound_messages", "outbound_messages", "claim_message", "queue_outbound"]) {
+  if (!backendLinkDelivery.includes(required)) {
+    throw new Error(`Desktop reliable delivery store missing ${required}`);
+  }
+}
+
+for (const required of ["enqueue", "claimIncoming", "acknowledge", "pending"]) {
+  if (!androidLinkDelivery.includes(required)) {
+    throw new Error(`Android reliable delivery store missing ${required}`);
+  }
 }
 
 if (!backendSignalClient.includes("signalasi-link-sidecar") || !main.includes("signalasi-link-sidecar") || !packager.includes("signalasi-link-sidecar") || !smokePackaged.includes("signalasi-link-sidecar")) {
@@ -208,6 +236,11 @@ for (const requiredBackendCode of [
 
 if (!packager.includes("\"api_response.py\"")) {
   throw new Error("Packaged Desktop backend must include api_response.py");
+}
+for (const requiredFile of ["link_protocol.py", "link_delivery.py", "task_workspace.py"]) {
+  if (!packager.includes(`"${requiredFile}"`)) {
+    throw new Error(`Packaged Desktop backend must include ${requiredFile}`);
+  }
 }
 
 if (!backendMain.includes("custom_agent: dict[str, str]") || !backendAgentConfig.includes("def custom_agent_config") || !backendAgentConfig.includes("def custom_agent_configs")) {
@@ -292,10 +325,10 @@ for (const requiredText of [
   "pairingState",
   "/api/pairing/status",
   "/api/pairing/clear",
-  "Forget phone",
+  "Revoke all clients",
   "data-pairing-type",
   "signalasi_verify",
-  "signalasi_pairing_claim",
+  "signalasi_pairing_ciphertext",
   "connector_agents",
   "publish_connector_status",
   "publish_pairing_revoked",
@@ -330,7 +363,7 @@ for (const requiredText of [
   "Use stdin template",
   "Use MCP wrapper template",
   "custom_agent",
-  "Existing agents do not need SignalASI settings",
+  "independent encrypted relationship",
   "clipboard:write",
   "backend dependencies",
   "Self-test all",
@@ -517,7 +550,7 @@ for (const requiredText of [
   "taskStatusSeq",
   "smoke:agent-lifecycle"
 ]) {
-if (![main, preload, html, renderer, packageJson, packager, androidAdb, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidContactTags, smokeAndroidLanguage, smokeAndroidCloudModels, smokeAndroidBackground, smokeAndroidAgentReplies, smokeAndroidBackup, smokeAndroidVoiceReply, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeAgentLifecycle, smokeVoiceStt, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendGateway, backendTaskManager, backendAgentConfig, backendPushAuth, backendSignalasiNotify, backendStt, androidMainActivity, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
+if (![main, preload, html, renderer, packageJson, packager, androidAdb, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidContactTags, smokeAndroidLanguage, smokeAndroidCloudModels, smokeAndroidBackground, smokeAndroidAgentReplies, smokeAndroidBackup, smokeAndroidVoiceReply, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeAgentLifecycle, smokeVoiceStt, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendLinkProtocol, backendGateway, backendTaskManager, backendAgentConfig, backendPushAuth, backendSignalasiNotify, backendStt, androidMainActivity, androidMqtt, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
     throw new Error(`Missing desktop connector capability: ${requiredText}`);
   }
 }

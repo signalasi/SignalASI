@@ -342,14 +342,14 @@ async function main() {
     if (!mobileResearch || mobileResearch.name !== "Research Agent" || mobileResearch.status !== "ready" || mobileResearch.kind !== "custom-cli") {
       fail(`Dynamic custom agent was not included in mobile connector payload: ${JSON.stringify(mobileResearch)}`);
     }
-    const traceProbe = await runBackendJson("import json; from mqtt_bridge import _delivery_trace, _trace_event; print(json.dumps(_delivery_trace({'delivery_trace':[{'stage':'created','at':1,'detail':'phone'}]}, _trace_event('desktop_received','signalasichat/android/send'), _trace_event('agent_started','codex')), ensure_ascii=False))");
+    const traceProbe = await runBackendJson("import json; from mqtt_bridge import _delivery_trace, _trace_event; print(json.dumps(_delivery_trace({'delivery_trace':[{'stage':'created','at':1,'detail':'client'}]}, _trace_event('desktop_received','signalasichat/v1/server/client/up'), _trace_event('agent_started','codex')), ensure_ascii=False))");
     const traceStages = traceProbe.map((event) => event.stage);
     for (const stage of ["created", "desktop_received", "agent_started"]) {
       if (!traceStages.includes(stage)) {
         fail(`Delivery trace helper dropped ${stage}: ${JSON.stringify(traceProbe)}`);
       }
     }
-    const ackProbe = await runBackendJson("import json; from mqtt_bridge import build_delivery_ack_payload; print(json.dumps(build_delivery_ack_payload({'source_message_id':'42','contact_id':'codex','agent_id':'codex','delivery_trace':[{'stage':'desktop_reply_publish_queued','at':2,'detail':'recv'}]}, 'desktop_reply_broker_ack', 'signalasichat/android/recv'), ensure_ascii=False))");
+    const ackProbe = await runBackendJson("import json; from mqtt_bridge import build_delivery_ack_payload; print(json.dumps(build_delivery_ack_payload({'source_message_id':'42','contact_id':'codex','agent_id':'codex','delivery_trace':[{'stage':'desktop_reply_publish_queued','at':2,'detail':'down'}]}, 'desktop_reply_broker_ack', 'signalasichat/v1/server/client/down'), ensure_ascii=False))");
     const ackStages = (ackProbe.delivery_trace || []).map((event) => event.stage);
     if (ackProbe.type !== "delivery_ack" || ackProbe.source_message_id !== "42" || !ackStages.includes("desktop_reply_broker_ack")) {
       fail(`Delivery ack payload was not shaped correctly: ${JSON.stringify(ackProbe)}`);

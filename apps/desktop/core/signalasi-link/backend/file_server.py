@@ -7,7 +7,6 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, File, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 log = logging.getLogger("signalasi.files")
@@ -16,7 +15,6 @@ FILES_DIR = Path.home() / "signalasi_files"
 FILES_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="SignalASI Files")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 @app.post("/upload")
@@ -67,7 +65,7 @@ async def list_files():
     return files
 
 
-def start(host="0.0.0.0", port=18765):
+def start(host="127.0.0.1", port=18765):
     log.info("File service started on %s:%s", host, port)
     uvicorn.run(app, host=host, port=port, log_level="info")
 

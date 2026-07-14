@@ -47,6 +47,7 @@ const setupProgressDetail = document.getElementById("setupProgressDetail");
 const setupProgressBar = document.getElementById("setupProgressBar");
 const pairingState = document.getElementById("pairingState");
 const pairingStatusDetail = document.getElementById("pairingStatusDetail");
+const pairedClients = document.getElementById("pairedClients");
 const navButtons = Array.from(document.querySelectorAll(".nav"));
 const sections = Array.from(document.querySelectorAll(".section"));
 const languageSelect = document.getElementById("languageSelect");
@@ -266,15 +267,21 @@ function setupItem(state, title, detail, actionLabel, action) {
 
 function renderPairingStatus(status) {
   const text = status.paired
-    ? t("Phone paired: {name} / fingerprint {fingerprint}", {
-      name: status.remote_name || "android",
-      fingerprint: status.identity_fingerprint_short || "unknown"
-    })
+    ? t("{count} client(s) paired", { count: status.client_count || status.clients?.length || 0 })
     : (status.token?.active
       ? t("Waiting for phone scan. QR expires in {seconds}s.", { seconds: status.token.expires_in })
       : t("Phone is not paired yet. Open Pairing and refresh the QR code."));
   pairingState.textContent = text;
   pairingStatusDetail.textContent = text;
+  pairedClients.innerHTML = (status.clients || []).map((client) => `
+    <div class="paired-client">
+      <div>
+        <strong>${escapeHtml(client.display_name || "SignalASI Client")}</strong>
+        <span>${escapeHtml(client.platform || "unknown")} · ${escapeHtml(client.identity_fingerprint_short || "unknown")}</span>
+      </div>
+      <button data-revoke-client="${escapeHtml(client.client_route_id || "")}">${escapeHtml(t("Revoke"))}</button>
+    </div>
+  `).join("");
 }
 
 function renderSetupGuide(diagnostics, pairingStatus = {}) {
@@ -507,14 +514,17 @@ async function refreshPairingStatus() {
   return status;
 }
 
-async function clearPairing() {
-  if (!confirm(t("Forget this paired phone on this desktop connector? The phone must scan the QR again before it can communicate."))) {
+async function clearPairing(clientRouteId = "") {
+  const prompt = clientRouteId
+    ? t("Revoke this client? It must scan the QR again before it can communicate.")
+    : t("Revoke all paired clients? Every client must scan the QR again.");
+  if (!confirm(prompt)) {
     return;
   }
   forgetPhoneButton.disabled = true;
   forgetPhoneButton.textContent = t("Forgetting");
   try {
-    const status = await window.signalasi.clearPairing();
+    const status = await window.signalasi.clearPairing(clientRouteId);
     renderPairingStatus(status);
     await refreshDiagnostics();
     testResult.textContent = t("Paired phone was forgotten. Open Pairing and scan again to reconnect.");
@@ -522,9 +532,14 @@ async function clearPairing() {
     testResult.textContent = error.message || String(error);
   } finally {
     forgetPhoneButton.disabled = false;
-    forgetPhoneButton.textContent = t("Forget phone");
+    forgetPhoneButton.textContent = t("Revoke all clients");
   }
 }
+
+pairedClients.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-revoke-client]");
+  if (button) clearPairing(button.dataset.revokeClient || "");
+});
 
 async function refreshAgents() {
   detectAgentsButton.disabled = true;
@@ -875,7 +890,7 @@ pairingSelfTestButton.addEventListener("click", () => {
   scrollToSelfTest();
   runSelfTest();
 });
-forgetPhoneButton.addEventListener("click", clearPairing);
+forgetPhoneButton.addEventListener("click", () => clearPairing(""));
 copyPairingLinkButton.addEventListener("click", copyPairingLink);
 copyPairingLinkSecondaryButton.addEventListener("click", copyPairingLink);
 copyContactMapButton.addEventListener("click", () => copyText(CONTACT_MAP_TEXT, "Contact map"));

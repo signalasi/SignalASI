@@ -49,7 +49,7 @@ public final class SignalSidecar {
     private final KyberPreKeyRecord kyberPreKey;
 
     private SignalSidecar() throws Exception {
-        Path storePath = migratedStorePath();
+        Path storePath = storePath();
         this.store = new PersistentSignalProtocolStore(storePath);
         IdentityKeyPair identity = store.getIdentityKeyPair();
 
@@ -81,23 +81,26 @@ public final class SignalSidecar {
         server.createContext("/decrypt", app::decrypt);
         server.createContext("/encrypt", app::encrypt);
         server.createContext("/replace-peer", app::replacePeer);
+        server.createContext("/remove-peer", app::removePeer);
         server.setExecutor(Executors.newCachedThreadPool());
         server.start();
         System.out.println("SignalASI Link sidecar listening on 127.0.0.1:" + PORT);
     }
 
-    private static Path migratedStorePath() throws IOException {
+    private static Path storePath() throws IOException {
         Path storePath = Path.of(System.getProperty("user.home"), ".signalasi", "signal_pc_store.json");
-        Path legacyPath = Path.of(System.getProperty("user.home"), ".hermeschat", "signal_pc_store.json");
-        if (!Files.exists(storePath) && Files.exists(legacyPath)) {
-            Files.createDirectories(storePath.getParent());
-            Files.copy(legacyPath, storePath);
-        }
+        Files.createDirectories(storePath.getParent());
         return storePath;
     }
 
     private void health(HttpExchange exchange) throws IOException {
-        writeJson(exchange, new JSONObject().put("ok", true).put("device", DEVICE_NAME).put("port", PORT));
+        writeJson(exchange, new JSONObject()
+                .put("ok", true)
+                .put("protocol", "signalasi-link")
+                .put("apiVersion", 1)
+                .put("device", DEVICE_NAME)
+                .put("port", PORT)
+                .put("removePeer", true));
     }
 
     private void bundle(HttpExchange exchange) throws IOException {
@@ -171,6 +174,20 @@ public final class SignalSidecar {
             );
             new SessionBuilder(store, new SignalProtocolAddress(remoteName, deviceId)).process(bundle);
             writeJson(exchange, new JSONObject().put("ok", true).put("remoteName", remoteName).put("remoteDeviceId", deviceId));
+        } catch (Exception exc) {
+            writeError(exchange, exc);
+        }
+    }
+
+    private void removePeer(HttpExchange exchange) throws IOException {
+        try {
+            JSONObject req = readJson(exchange);
+            String remoteName = req.getString("remoteName");
+            int deviceId = req.optInt("remoteDeviceId", 1);
+            store.deleteAllSessions(remoteName);
+            store.deleteSenderKeys(remoteName);
+            store.deleteIdentity(remoteName, deviceId);
+            writeJson(exchange, new JSONObject().put("ok", true).put("remoteName", remoteName));
         } catch (Exception exc) {
             writeError(exchange, exc);
         }

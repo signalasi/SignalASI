@@ -271,7 +271,6 @@ class AndroidPersistentSignalStore(context: Context) : SignalProtocolStore {
 
     companion object {
         private const val PREFS = "signalasi_signal_store"
-        private const val OLD_PREFS = "hermes_signal_store"
         private const val KEY_IDENTITY = "identity_key_pair"
         private const val KEY_REGISTRATION_ID = "registration_id"
         private const val KEY_IDENTITIES = "identities"
@@ -285,26 +284,7 @@ class AndroidPersistentSignalStore(context: Context) : SignalProtocolStore {
         private const val DEFAULT_KYBER_PRE_KEY_ID = 1
 
         private fun openPrefs(context: Context): SharedPreferences {
-            val oldPrefs = context.getSharedPreferences(OLD_PREFS, Context.MODE_PRIVATE)
-            val newPrefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            if (oldPrefs.all.isNotEmpty() && newPrefs.all.isEmpty()) {
-                val editor = newPrefs.edit()
-                oldPrefs.all.forEach { (key, value) ->
-                    when (value) {
-                        is String -> editor.putString(key, value)
-                        is Int -> editor.putInt(key, value)
-                        is Long -> editor.putLong(key, value)
-                        is Boolean -> editor.putBoolean(key, value)
-                        is Float -> editor.putFloat(key, value)
-                        is Set<*> -> {
-                            @Suppress("UNCHECKED_CAST")
-                            editor.putStringSet(key, value as Set<String>)
-                        }
-                    }
-                }
-                editor.commit()
-            }
-            return newPrefs
+            return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         }
 
         private fun addressKey(address: SignalProtocolAddress): String =

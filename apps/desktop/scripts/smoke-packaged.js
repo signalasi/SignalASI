@@ -10,6 +10,7 @@ const exe = path.join(packageDir, "SignalASI Desktop.exe");
 const resources = path.join(packageDir, "resources");
 const bundledPython = path.join(resources, "python", "venv", "Scripts", "python.exe");
 const backendMain = path.join(resources, "signalasi-link", "backend", "main.py");
+const packagedTaskWorkspace = path.join(resources, "signalasi-link", "backend", "task_workspace.py");
 const packagedBackendDir = path.dirname(backendMain);
 const packagedCustomAgent = path.join(packagedBackendDir, "custom_agent_stdio.py");
 const packagedMcpWrapper = path.join(packagedBackendDir, "mcp_agent_wrapper.py");
@@ -124,6 +125,7 @@ async function main() {
   console.log("[packaged-smoke] checking portable package layout");
   assertExists(exe, "SignalASI Desktop exe");
   assertExists(backendMain, "Packaged backend");
+  assertExists(packagedTaskWorkspace, "Packaged task workspace module");
   assertExists(packagedCustomAgent, "Packaged Custom Agent wrapper");
   assertExists(packagedMcpWrapper, "Packaged MCP wrapper");
   assertExists(sidecar, "Packaged Signal sidecar");
@@ -134,7 +136,7 @@ async function main() {
   console.log("[packaged-smoke] checking bundled Python dependencies");
   const pythonCheck = spawn(
     bundledPython,
-    ["-c", "import fastapi, multipart, uvicorn, paho.mqtt.client, sqlalchemy, pydantic, websockets, qrcode; print('ok')"],
+    ["-c", "import cryptography, fastapi, multipart, uvicorn, paho.mqtt.client, sqlalchemy, pydantic, websockets, qrcode; print('ok')"],
     { windowsHide: true }
   );
   await new Promise((resolve, reject) => {
@@ -151,7 +153,7 @@ async function main() {
   );
   try {
     let backendOk = false;
-    for (let attempt = 0; attempt < 20; attempt += 1) {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 500));
       try {
         await fetchOk(`http://127.0.0.1:${tempPort}/signalasi/verify`);
@@ -207,7 +209,7 @@ async function main() {
       }
     }
     if (!ok) throw new Error("Packaged backend did not answer /signalasi/verify");
-    await waitForExit(child, 25000);
+    await waitForExit(child, 60000);
     for (const screenshot of packagedUiScreenshots) {
       assertScreenshot(screenshot);
     }

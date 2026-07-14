@@ -36,6 +36,8 @@ const backendFiles = [
   "codex_app_server.py",
   "custom_agent_stdio.py",
   "file_server.py",
+  "link_delivery.py",
+  "link_protocol.py",
   "main.py",
   "mcp_agent_wrapper.py",
   "models.py",
@@ -46,6 +48,7 @@ const backendFiles = [
   "signalasi_client.py",
   "signalasi_notify.py",
   "stt_bridge.py",
+  "task_workspace.py",
   "websocket.py"
 ];
 

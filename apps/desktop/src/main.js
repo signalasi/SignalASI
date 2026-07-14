@@ -1,5 +1,5 @@
 const { app, BrowserWindow, clipboard, ipcMain, shell } = require("electron");
-const { spawn, execFile } = require("node:child_process");
+const { spawn, spawnSync, execFile } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
@@ -282,7 +282,7 @@ async function startBackend() {
   const backendLogPath = path.join(app.getPath("userData"), "backend.log");
   const backendLog = fs.openSync(backendLogPath, "a");
   try {
-    backendProcess = spawn(python, ["-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", String(BACKEND_PORT)], {
+    backendProcess = spawn(python, ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", String(BACKEND_PORT)], {
       cwd: BACKEND_DIR,
       env: {
         ...process.env,
@@ -506,9 +506,10 @@ async function getPairingStatus() {
   return fetchJson("/api/pairing/status");
 }
 
-async function clearPairing() {
+async function clearPairing(clientRouteId = "") {
   await startBackend();
-  return fetchJson("/api/pairing/clear", { method: "POST" });
+  const query = clientRouteId ? `?client_route_id=${encodeURIComponent(clientRouteId)}` : "";
+  return fetchJson(`/api/pairing/clear${query}`, { method: "POST" });
 }
 
 async function runAgentSelfTest(options = {}) {
@@ -555,7 +556,7 @@ ipcMain.handle("backend:start", startBackend);
 ipcMain.handle("backend:status", backendStatus);
 ipcMain.handle("runtime:diagnostics", runtimeDiagnostics);
 ipcMain.handle("pairing:status", getPairingStatus);
-ipcMain.handle("pairing:clear", clearPairing);
+ipcMain.handle("pairing:clear", (_event, clientRouteId = "") => clearPairing(clientRouteId));
 ipcMain.handle("agents:detect", detectAgents);
 ipcMain.handle("agents:diagnostics", getAgentDiagnostics);
 ipcMain.handle("agents:execution-log", (_event, limit) => getAgentExecutionLog(limit));
@@ -593,6 +594,13 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   if (backendProcess && !backendProcess.killed) {
-    backendProcess.kill();
+    if (process.platform === "win32" && backendProcess.pid) {
+      spawnSync("taskkill", ["/pid", String(backendProcess.pid), "/T", "/F"], {
+        windowsHide: true,
+        stdio: "ignore"
+      });
+    } else {
+      backendProcess.kill();
+    }
   }
 });

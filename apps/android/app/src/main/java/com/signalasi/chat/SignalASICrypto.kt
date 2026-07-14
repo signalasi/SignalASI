@@ -1,7 +1,6 @@
 package com.signalasi.chat
 
 import android.content.Context
-import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
 import android.util.Base64
 import android.util.Log
@@ -25,9 +24,7 @@ object SignalASICrypto {
     private const val REMOTE_DEVICE_ID = 1
     private const val DEFAULT_DEVICE_ID = 1
     private const val PREFS = "signalasi_signal_trust"
-    private const val OLD_PREFS = "hermes_signal_trust"
     private const val SIGNAL_STORE_PREFS = "signalasi_signal_store"
-    private const val OLD_SIGNAL_STORE_PREFS = "hermes_signal_store"
     private const val KEY_VERIFIED_PC_SHA256 = "verified_pc_identity_sha256"
 
     private val remoteAddress = SignalProtocolAddress(REMOTE_NAME, REMOTE_DEVICE_ID)
@@ -40,8 +37,6 @@ object SignalASICrypto {
     fun initialize(context: Context) {
         if (::store.isInitialized) return
         appContext = context.applicationContext
-        migrateSharedPreferences(appContext, OLD_PREFS, PREFS)
-        migrateSharedPreferences(appContext, OLD_SIGNAL_STORE_PREFS, SIGNAL_STORE_PREFS)
         store = AndroidPersistentSignalStore(appContext)
         Log.i(TAG, "Persistent Signal store initialized")
     }
@@ -101,6 +96,21 @@ object SignalASICrypto {
     }
 
     @Synchronized
+    fun clearDesktopTrust(context: Context, desktopId: String) {
+        if (desktopId.isBlank()) return
+        initialize(context.applicationContext)
+        val address = SignalProtocolAddress(desktopId, REMOTE_DEVICE_ID)
+        store.deleteSession(address)
+        store.deleteAllSessions(desktopId)
+        store.deleteIdentity(address)
+        appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove("verified_desktop_identity_sha256_$desktopId")
+            .commit()
+        Log.i(TAG, "Desktop Signal trust removed desktop=$desktopId")
+    }
+
+    @Synchronized
     fun clearPeerTrust(context: Context, contactId: String) {
         if (contactId.isBlank() || contactId == "hermes") return
         initialize(context.applicationContext)
@@ -119,15 +129,7 @@ object SignalASICrypto {
             .edit()
             .clear()
             .commit()
-        appContext.getSharedPreferences(OLD_PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .clear()
-            .commit()
         appContext.getSharedPreferences(SIGNAL_STORE_PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .clear()
-            .commit()
-        appContext.getSharedPreferences(OLD_SIGNAL_STORE_PREFS, Context.MODE_PRIVATE)
             .edit()
             .clear()
             .commit()
@@ -200,6 +202,10 @@ object SignalASICrypto {
         ensureInitialized()
         val json = runCatching { JSONObject(contents) }.getOrNull() ?: return false
         if (json.optString("type") != "signalasi_verify") return false
+        if (json.optString("protocol") != SignalASILinkProtocol.NAME ||
+            json.optInt("version") != SignalASILinkProtocol.VERSION ||
+            json.optString("role") != "server"
+        ) return false
         if (json.optString("device") != REMOTE_NAME) return false
         val identityKey = json.optString("identity_key")
         val declaredHash = json.optString("identity_key_sha256")
@@ -402,8 +408,9 @@ object SignalASICrypto {
             val message = SessionCipher(store, address).encrypt(payload.toString().toByteArray(Charsets.UTF_8))
             JSONObject()
                 .put("version", 1)
+                .put("protocol", SignalASILinkProtocol.NAME)
                 .put("scheme", "signal")
-                .put("from", LOCAL_NAME)
+                .put("from", localSignalasiId())
                 .put("to", desktopId)
                 .put("signal_type", if (message.type == CiphertextMessage.PREKEY_TYPE) "prekey" else "signal")
                 .put("message_type", message.type)
@@ -477,32 +484,6 @@ object SignalASICrypto {
 
     private fun ensureInitialized() {
         check(::store.isInitialized) { "SignalASICrypto.initialize(context) must be called first" }
-    }
-
-    private fun migrateSharedPreferences(context: Context, oldName: String, newName: String) {
-        if (oldName == newName) return
-        val oldPrefs = context.getSharedPreferences(oldName, Context.MODE_PRIVATE)
-        val newPrefs = context.getSharedPreferences(newName, Context.MODE_PRIVATE)
-        if (oldPrefs.all.isEmpty() || newPrefs.all.isNotEmpty()) return
-        val editor = newPrefs.edit()
-        copySharedPreferences(oldPrefs, editor)
-        editor.commit()
-    }
-
-    private fun copySharedPreferences(from: SharedPreferences, to: SharedPreferences.Editor) {
-        from.all.forEach { (key, value) ->
-            when (value) {
-                is String -> to.putString(key, value)
-                is Int -> to.putInt(key, value)
-                is Long -> to.putLong(key, value)
-                is Boolean -> to.putBoolean(key, value)
-                is Float -> to.putFloat(key, value)
-                is Set<*> -> {
-                    @Suppress("UNCHECKED_CAST")
-                    to.putStringSet(key, value as Set<String>)
-                }
-            }
-        }
     }
 
     private fun pcBundleHash(bundleJson: JSONObject): String {

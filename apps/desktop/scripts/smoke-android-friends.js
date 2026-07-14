@@ -118,8 +118,8 @@ async function main() {
     signalasi_id: contactId,
     identity_public_key: "SMOKE_PUBLIC_KEY_FOR_FRIEND_READD_FLOW",
     identity_fingerprint: "A1B2C3D4E5F60718293A4B5C6D7E8F90112233445566778899AABBCCDDEEFF00",
-    mqtt_topic: `signalasichat/android/smoke/${Date.now()}`,
-    mqtt_inbox_topic: `signalasichat/android/smoke/${Date.now()}`
+    mqtt_topic: `signalasichat/v1/AAAAAAAAAAAAAAAAAAAAAA/BBBBBBBBBBBBBBBBBBBBBB/up`,
+    mqtt_inbox_topic: `signalasichat/v1/AAAAAAAAAAAAAAAAAAAAAA/BBBBBBBBBBBBBBBBBBBBBB/down`
   };
   const payloadB64 = Buffer.from(JSON.stringify(qr), "utf8").toString("base64");
 

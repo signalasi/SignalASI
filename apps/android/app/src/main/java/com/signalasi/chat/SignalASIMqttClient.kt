@@ -14,24 +14,29 @@ import org.eclipse.paho.client.mqttv3.MqttMessage
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
 import org.json.JSONObject
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 object SignalASIMqttClient {
-    private const val TAG = "HermesMqtt"
-    private const val SERVER_URI = "tcp://broker.emqx.io:1883"
-    private const val DEVICE_ID = "android"
-    private const val SEND_TOPIC = "signalasichat/$DEVICE_ID/send"
-    private const val RECV_TOPIC = "signalasichat/$DEVICE_ID/recv"
-    private const val PC_TOPIC = "signalasichat/$DEVICE_ID/pc"
+    private const val TAG = "SignalASILink"
+    private const val SERVER_URI = "ssl://broker.emqx.io:8883"
     private const val MQTT_QOS = 1
 
     private val connecting = AtomicBoolean(false)
+    private val retryHandler = Handler(Looper.getMainLooper())
+    private val retryRunnable = object : Runnable {
+        override fun run() {
+            if (connected) {
+                retryPendingMessages()
+                retryHandler.postDelayed(this, 30_000L)
+            }
+        }
+    }
     private val listeners = CopyOnWriteArraySet<Listener>()
+    private val deliveryMessageIds = ConcurrentHashMap<Int, String>()
     private var client: MqttAsyncClient? = null
     @Volatile private var connected = false
     @Volatile private var secureReady = false
-    @Volatile private var lastPcSignalBundle: JSONObject? = null
-    @Volatile private var localInboxTopic: String = RECV_TOPIC
     @Volatile private var appContext: Context? = null
 
     interface Listener {
@@ -56,23 +61,47 @@ object SignalASIMqttClient {
     fun isSecureReady(): Boolean = secureReady
 
     fun forgetSecureChannel() {
-        setSecureReady(false)
+        val context = appContext
+        setSecureReady(context != null && SignalASILinkProtocol.allServerLinks(context).any { it.paired })
+    }
+
+    fun publishServerRevocation(context: Context, desktopId: String): Boolean {
+        val link = SignalASILinkProtocol.serverLink(context, desktopId) ?: return false
+        val mqtt = client ?: return false
+        if (!mqtt.isConnected || !link.paired) return false
+        val payload = JSONObject()
+            .put("type", "client_revoked")
+            .put("desktop_id", desktopId)
+            .put("reason", "forgotten_by_client")
+            .put("time", System.currentTimeMillis())
+        val envelope = SignalASILinkProtocol.makeEnvelope(
+            payload, SignalASICrypto.localSignalasiId(), desktopId
+        )
+        val encrypted = SignalASICrypto.encryptPayloadForDesktop(desktopId, envelope) ?: return false
+        val messageId = envelope.getString("message_id")
+        val wirePayload = encrypted.toString()
+        SignalASILinkDeliveryStore.enqueue(context, messageId, link.routes.control, wirePayload)
+        SignalASILinkDeliveryStore.markAttempt(context, messageId)
+        val token = mqtt.publish(link.routes.control, MqttMessage(wirePayload.toByteArray(Charsets.UTF_8)).apply {
+            qos = MQTT_QOS
+            isRetained = false
+        })
+        deliveryMessageIds[token.messageId] = messageId
+        return true
     }
 
     fun verifyPcIdentityFromQr(contents: String): Boolean {
-        val verified = SignalASICrypto.verifyPcIdentityFromQr(contents)
-        if (verified) {
-            lastPcSignalBundle?.let { bundle ->
-                setSecureReady(SignalASICrypto.processPcBundle(bundle))
-            }
-        }
-        return verified
+        val context = appContext ?: return false
+        val qr = runCatching { JSONObject(contents) }.getOrNull() ?: return false
+        if (!SignalASILinkProtocol.validatePairingQr(qr)) return false
+        if (!SignalASICrypto.verifyPcIdentityFromQr(contents)) return false
+        SignalASILinkProtocol.ensureServerLink(context, qr)
+        return true
     }
 
     fun connect(context: Context) {
         appContext = context.applicationContext
         SignalASICrypto.initialize(context.applicationContext)
-        localInboxTopic = AppStore.localInboxTopic(context.applicationContext)
         val current = client
         if (current?.isConnected == true || !connecting.compareAndSet(false, true)) return
 
@@ -87,43 +116,27 @@ object SignalASIMqttClient {
                     Log.i(TAG, "MQTT connectComplete reconnect=$reconnect")
                     setConnected(true)
                     subscribe()
+                    scheduleOutboxRetries()
                 }
 
                 override fun connectionLost(cause: Throwable?) {
                     Log.w(TAG, "MQTT connection lost", cause)
                     setConnected(false)
+                    retryHandler.removeCallbacks(retryRunnable)
                 }
 
                 override fun messageArrived(topic: String?, message: MqttMessage?) {
                     val payload = message?.payload?.toString(Charsets.UTF_8).orEmpty()
                     if (payload.isBlank()) return
-                    if (topic == PC_TOPIC) {
-                        runCatching {
-                            val json = JSONObject(payload)
-                            val ip = json.optString("ip")
-                            val port = json.optInt("port", 18765)
-                            json.optJSONObject("signal")?.let {
-                                lastPcSignalBundle = JSONObject(it.toString())
-                                setSecureReady(SignalASICrypto.processPcBundle(it))
-                            } ?: Log.w(TAG, "PC info received without Signal bundle")
-                            if (ip.isNotBlank()) listeners.forEach { listener -> listener.onPcInfo(ip, port) }
-                        }.onFailure { Log.e(TAG, "Failed to handle PC info", it) }
-                    } else {
-                        runCatching {
-                            val json = JSONObject(payload)
-                            if (handlePublicControlMessage(json)) return
-                            SignalASICrypto.decryptEnvelope(json)?.let { decrypted ->
-                                if (handleSecureControlMessage(decrypted)) {
-                                    listeners.forEach { listener -> listener.onMessage(decrypted.toString()) }
-                                    return@let
-                                }
-                                listeners.forEach { listener -> listener.onMessage(decrypted.toString()) }
-                            }
-                        }.onFailure { Log.e(TAG, "Failed to handle incoming MQTT message", it) }
-                    }
+                    runCatching { handleIncoming(topic.orEmpty(), JSONObject(payload)) }
+                        .onFailure { Log.e(TAG, "Failed to handle incoming MQTT message", it) }
                 }
 
-                override fun deliveryComplete(token: IMqttDeliveryToken?) = Unit
+                override fun deliveryComplete(token: IMqttDeliveryToken?) {
+                    val context = appContext ?: return
+                    val messageId = token?.messageId?.let { deliveryMessageIds.remove(it) } ?: return
+                    SignalASILinkDeliveryStore.markPublished(context, messageId)
+                }
             })
         }
 
@@ -140,8 +153,12 @@ object SignalASIMqttClient {
                 connecting.set(false)
                 setConnected(true)
                 subscribe()
+                scheduleOutboxRetries()
                 Handler(Looper.getMainLooper()).postDelayed(
-                    { requestMissingSignalSessions(context.applicationContext) },
+                    {
+                        requestMissingSignalSessions(context.applicationContext)
+                        retryPendingMessages()
+                    },
                     800L
                 )
             }
@@ -191,7 +208,7 @@ object SignalASIMqttClient {
                     .put("desktop_name", contact.optString("desktop_name"))
             }
         }
-        return publishJson(payload, topicOverride ?: SEND_TOPIC, contactId)
+        return publishJson(payload, topicOverride ?: outgoingTopic(contactId), contactId)
     }
 
     fun publishAgentTaskCancel(
@@ -214,7 +231,7 @@ object SignalASIMqttClient {
                     .put("desktop_id", contact.optString("desktop_id"))
             }
         }
-        return publishJson(payload, topicOverride ?: SEND_TOPIC, contactId)
+        return publishJson(payload, topicOverride ?: outgoingTopic(contactId), contactId)
     }
 
     fun publishAgentConversationDelete(conversationId: String, taskIds: Set<String>): Boolean {
@@ -225,7 +242,7 @@ object SignalASIMqttClient {
             .put("task_ids", org.json.JSONArray(taskIds.toList()))
             .put("cleanup_scope", "records_and_temporary_files")
             .put("time", System.currentTimeMillis())
-        return publishJson(payload, SEND_TOPIC, "hermes")
+        return publishJson(payload, outgoingTopic("hermes"), "hermes")
     }
 
     fun publishProfileUpdate(contactId: String, topicOverride: String? = null): Boolean {
@@ -244,19 +261,33 @@ object SignalASIMqttClient {
 
     fun publishPairingClaim(pairingQr: JSONObject): Boolean {
         val context = appContext ?: return false
+        if (!SignalASILinkProtocol.validatePairingQr(pairingQr)) return false
+        val link = SignalASILinkProtocol.ensureServerLink(context, pairingQr)
+        subscribeLink(link)
         val profile = AppStore.profile(context)
         val payload = JSONObject()
-            .put("version", 1)
+            .put("protocol", SignalASILinkProtocol.NAME)
+            .put("version", SignalASILinkProtocol.VERSION)
             .put("type", "signalasi_pairing_claim")
             .put("pairing_token", pairingQr.optString("pairing_token"))
             .put("from", SignalASICrypto.localSignalasiId())
-            .put("name", profile.optString("name", "Me"))
+            .put("signal_name", SignalASICrypto.localSignalasiId())
+            .put("signal_device_id", 1)
+            .put("server_route_id", link.routes.serverRouteId)
+            .put("client_route_id", link.routes.clientRouteId)
+            .put("client_name", profile.optString("name", "Me"))
+            .put("platform", "android")
             .put("signalasi_id", profile.optString("signalasi_id"))
             .put("identity_fingerprint", SignalASICrypto.localIdentitySha256())
             .put("identity_public_key", SignalASICrypto.localIdentityPublicKey())
             .put("signal_bundle", SignalASICrypto.localSignalBundleJson())
             .put("time", System.currentTimeMillis())
-        return publishPublicJson(SEND_TOPIC, payload)
+        val encryptedClaim = runCatching { SignalASILinkProtocol.encryptPairingClaim(payload, pairingQr) }
+            .getOrElse {
+                Log.e(TAG, "Pairing claim encryption failed", it)
+                return false
+            }
+        return publishPublicJson(link.routes.pairing, encryptedClaim)
     }
 
     fun publishGroupTextMessage(
@@ -299,7 +330,7 @@ object SignalASIMqttClient {
             .put("caption", caption)
             .put("content", caption)
             .put("contact_id", contactId)
-            .put("time", System.currentTimeMillis()), topicOverride ?: SEND_TOPIC, contactId)
+            .put("time", System.currentTimeMillis()), topicOverride ?: outgoingTopic(contactId), contactId)
     }
 
     fun requestSignalBundleForContact(context: Context, contactId: String): Boolean {
@@ -313,7 +344,7 @@ object SignalASIMqttClient {
             .put("type", "signal_bundle_request")
             .put("from", SignalASICrypto.localSignalasiId())
             .put("to", contactId)
-            .put("reply_topic", AppStore.localInboxTopic(context))
+            .put("reply_topic", incomingTopicForContact(context, contactId))
             .put("requested_fingerprint", contact.optString("identity_fingerprint"))
             .put("identity_fingerprint", SignalASICrypto.localIdentitySha256())
             .put("signal_bundle", SignalASICrypto.localSignalBundleJson())
@@ -321,7 +352,7 @@ object SignalASIMqttClient {
         return publishPublicJson(topic, request)
     }
 
-    private fun publishJson(payload: JSONObject, topic: String = SEND_TOPIC, contactId: String = "hermes"): Boolean {
+    private fun publishJson(payload: JSONObject, topic: String?, contactId: String = "hermes"): Boolean {
         val mqtt = client ?: run {
             Log.w(TAG, "Publish rejected: MQTT client is null")
             return false
@@ -330,30 +361,74 @@ object SignalASIMqttClient {
             Log.w(TAG, "Publish rejected: MQTT is disconnected")
             return false
         }
-        if (topic.isBlank()) {
+        if (topic.isNullOrBlank()) {
             Log.w(TAG, "Publish rejected: target topic is blank")
             return false
         }
+        val targetId = if (usesPcConnectorTunnel(contactId)) {
+            appContext?.let { AppStore.desktopIdForContact(it, contactId) }.orEmpty()
+        } else contactId
+        val applicationEnvelope = SignalASILinkProtocol.makeEnvelope(
+            payload,
+            SignalASICrypto.localSignalasiId(),
+            targetId
+        )
         val encrypted = if (usesPcConnectorTunnel(contactId)) {
             val desktopId = appContext?.let { AppStore.desktopIdForContact(it, contactId) }.orEmpty()
             if (desktopId.isNotBlank()) {
-                SignalASICrypto.encryptPayloadForDesktop(desktopId, payload)
+                SignalASICrypto.encryptPayloadForDesktop(desktopId, applicationEnvelope)
             } else {
-                SignalASICrypto.encryptPayload(payload)
+                null
             }
         } else {
-            SignalASICrypto.encryptPayloadForContact(contactId, payload)
+            SignalASICrypto.encryptPayloadForContact(contactId, applicationEnvelope)
         } ?: run {
             appContext?.let { requestSignalBundleForContact(it, contactId) }
             Log.w(TAG, "Encrypted publish deferred: secure session refresh requested for $contactId")
             return false
         }
-        mqtt.publish(topic, MqttMessage(encrypted.toString().toByteArray(Charsets.UTF_8)).apply {
+        val context = appContext ?: return false
+        val messageId = applicationEnvelope.getString("message_id")
+        val wirePayload = encrypted.toString()
+        SignalASILinkDeliveryStore.enqueue(context, messageId, topic, wirePayload)
+        SignalASILinkDeliveryStore.markAttempt(context, messageId)
+        val token = mqtt.publish(topic, MqttMessage(wirePayload.toByteArray(Charsets.UTF_8)).apply {
             qos = MQTT_QOS
             isRetained = false
         })
+        deliveryMessageIds[token.messageId] = messageId
         Log.i(TAG, "Published encrypted MQTT message topic=$topic bytes=${encrypted.optString("body").length}")
         return true
+    }
+
+    private fun retryPendingMessages() {
+        val context = appContext ?: return
+        val mqtt = client ?: return
+        if (!mqtt.isConnected) return
+        SignalASILinkDeliveryStore.pending(context).forEach { pending ->
+            if (pending.topic.isBlank() || pending.wirePayload.isBlank()) return@forEach
+            runCatching {
+                SignalASILinkDeliveryStore.markAttempt(context, pending.messageId)
+                val token = mqtt.publish(pending.topic, MqttMessage(pending.wirePayload.toByteArray(Charsets.UTF_8)).apply {
+                    qos = MQTT_QOS
+                    isRetained = false
+                })
+                deliveryMessageIds[token.messageId] = pending.messageId
+            }.onFailure { Log.w(TAG, "Outbox retry failed message=${pending.messageId}", it) }
+        }
+    }
+
+    private fun scheduleOutboxRetries() {
+        retryHandler.removeCallbacks(retryRunnable)
+        retryHandler.postDelayed(retryRunnable, 3_000L)
+    }
+
+    private fun outgoingTopic(contactId: String): String? =
+        appContext?.let { AppStore.outgoingTopicForContact(it, contactId) }
+
+    private fun incomingTopicForContact(context: Context, contactId: String): String {
+        val desktopId = AppStore.desktopIdForContact(context, contactId)
+        return SignalASILinkProtocol.serverLink(context, desktopId)?.routes?.down.orEmpty()
     }
 
     private fun publishPublicJson(topic: String, payload: JSONObject): Boolean {
@@ -379,31 +454,95 @@ object SignalASIMqttClient {
         return AppStore.usesPcConnectorTunnel(context, contactId)
     }
 
-    private fun handlePublicControlMessage(json: JSONObject): Boolean {
-        return when (json.optString("type")) {
-            "pairing_confirmed", "connector_status" -> {
-                handlePublicDesktopControl(json)
-                true
-            }
-            "signal_bundle_request" -> {
-                handleSignalBundleRequest(json)
-                true
-            }
-            "signal_bundle_response" -> {
-                handleSignalBundleResponse(json)
-                true
-            }
-            else -> false
+    private fun handleIncoming(topic: String, wire: JSONObject) {
+        val context = appContext ?: return
+        val link = SignalASILinkProtocol.allServerLinks(context).firstOrNull {
+            topic == it.routes.down || topic == it.routes.control
+        } ?: run {
+            Log.w(TAG, "Rejected message on unknown relationship topic")
+            return
         }
+        if (wire.optString("type") == "pairing_confirmed") {
+            handlePairingConfirmation(link, wire)
+            return
+        }
+        if (!link.paired || wire.optString("scheme") != "signal") {
+            Log.w(TAG, "Rejected non-Signal traffic on paired relationship")
+            return
+        }
+        if (wire.optString("from") == SignalASICrypto.localSignalasiId() &&
+            wire.optString("to") == link.desktopId
+        ) {
+            return
+        }
+        if (wire.optString("from") != link.desktopId || wire.optString("to") != SignalASICrypto.localSignalasiId()) {
+            Log.w(TAG, "Rejected Signal envelope with mismatched endpoint identity")
+            return
+        }
+        val decrypted = SignalASICrypto.decryptEnvelope(wire) ?: return
+        if (decrypted.optString("source_id") != link.desktopId ||
+            decrypted.optString("target_id") != SignalASICrypto.localSignalasiId()
+        ) {
+            Log.w(TAG, "Rejected application envelope with mismatched endpoint identity")
+            return
+        }
+        val payload = SignalASILinkProtocol.unwrapEnvelope(decrypted) ?: return
+        if (!SignalASILinkDeliveryStore.claimIncoming(context, payload.optString("message_id"))) {
+            Log.i(TAG, "Ignored duplicate inbound message ${payload.optString("message_id")}")
+            return
+        }
+        if (payload.optString("type") == "delivery_ack") {
+            val acknowledgedId = payload.optString("source_message_id").ifBlank { payload.optString("reply_to") }
+            SignalASILinkDeliveryStore.acknowledge(context, acknowledgedId)
+        } else {
+            publishInboundReceipt(link, payload.optString("message_id"))
+        }
+        if (handleSecureControlMessage(payload)) {
+            listeners.forEach { it.onMessage(payload.toString()) }
+            return
+        }
+        payload.optJSONArray("connector_agents")?.let { AppStore.updateConnectorAgentStatuses(context, it) }
+        listeners.forEach { it.onMessage(payload.toString()) }
     }
 
-    private fun handlePublicDesktopControl(json: JSONObject) {
+    private fun publishInboundReceipt(link: SignalASILinkProtocol.ServerLink, receivedMessageId: String) {
+        if (receivedMessageId.isBlank()) return
+        val mqtt = client ?: return
+        if (!mqtt.isConnected) return
+        val payload = JSONObject()
+            .put("type", "delivery_ack")
+            .put("source_message_id", receivedMessageId)
+            .put("delivery_status", "accepted")
+            .put("sender", "system")
+            .put("time", System.currentTimeMillis())
+        val envelope = SignalASILinkProtocol.makeEnvelope(
+            payload,
+            SignalASICrypto.localSignalasiId(),
+            link.desktopId
+        )
+        val encrypted = SignalASICrypto.encryptPayloadForDesktop(link.desktopId, envelope) ?: return
+        mqtt.publish(link.routes.control, MqttMessage(encrypted.toString().toByteArray(Charsets.UTF_8)).apply {
+            qos = MQTT_QOS
+            isRetained = false
+        })
+    }
+
+    private fun handlePairingConfirmation(link: SignalASILinkProtocol.ServerLink, json: JSONObject) {
         val context = appContext ?: return
+        if (json.optString("protocol") != SignalASILinkProtocol.NAME ||
+            json.optInt("version") != SignalASILinkProtocol.VERSION ||
+            json.optString("server_route_id") != link.routes.serverRouteId ||
+            json.optString("client_route_id") != link.routes.clientRouteId
+        ) return
         val desktopId = json.optString("desktop_id")
+        if (desktopId != link.desktopId) return
         val expected = json.optString("desktop_fingerprint")
         json.optJSONObject("signal_bundle")?.let { bundle ->
-            val ready = SignalASICrypto.processPcBundleForDesktop(desktopId, bundle, expected)
-            if (ready) setSecureReady(true)
+            val ready = SignalASICrypto.processPcBundleForDesktop(desktopId, bundle, expected, replaceExisting = true)
+            if (ready) {
+                SignalASILinkProtocol.markPaired(context, desktopId)
+                setSecureReady(true)
+            }
         }
         json.optJSONArray("connector_agents")?.let { AppStore.updateConnectorAgentStatuses(context, it) }
         listeners.forEach { listener -> listener.onMessage(json.toString()) }
@@ -417,73 +556,38 @@ object SignalASIMqttClient {
                 val desktopId = json.optString("desktop_id")
                 if (desktopId.isNotBlank()) {
                     AppStore.deleteDesktopConnector(context, desktopId, deleteMessages = false)
+                    SignalASICrypto.clearDesktopTrust(context, desktopId)
+                    SignalASILinkProtocol.removeServer(context, desktopId)
                 } else {
                     AppStore.deleteContact(context, "hermes", deleteMessages = false)
                 }
-                setSecureReady(false)
+                setSecureReady(SignalASILinkProtocol.allServerLinks(context).any { it.paired })
                 true
             }
             else -> false
         }
     }
 
-    private fun handleSignalBundleRequest(json: JSONObject) {
-        val context = appContext ?: return
-        val to = json.optString("to")
-        val localId = SignalASICrypto.localSignalasiId()
-        if (to.isNotBlank() && to != localId) return
-        val replyTopic = json.optString("reply_topic")
-        if (replyTopic.isBlank()) return
-        val response = JSONObject()
-            .put("version", 1)
-            .put("type", "signal_bundle_response")
-            .put("from", localId)
-            .put("to", json.optString("from"))
-            .put("identity_fingerprint", SignalASICrypto.localIdentitySha256())
-            .put("signal_bundle", SignalASICrypto.localSignalBundleJson())
-            .put("time", System.currentTimeMillis())
-        publishPublicJson(replyTopic, response)
-    }
-
-    private fun handleSignalBundleResponse(json: JSONObject) {
-        val context = appContext ?: return
-        val to = json.optString("to")
-        val localId = SignalASICrypto.localSignalasiId()
-        if (to.isNotBlank() && to != localId) return
-        val applied = AppStore.applySignalBundleResponse(context, json)
-        Log.i(TAG, "Signal bundle response applied=$applied from=${json.optString("from")}")
-    }
-
     private fun requestMissingSignalSessions(context: Context) {
-        val contacts = AppStore.contacts(context)
-        val requestedDesktopIds = mutableSetOf<String>()
-        for (index in 0 until contacts.length()) {
-            val contact = contacts.optJSONObject(index) ?: continue
-            if (contact.optBoolean("deleted", false)) continue
-            val contactId = contact.optString("id").ifBlank { contact.optString("signalasi_id") }
-            if (contactId.isBlank() || AppStore.outgoingTopicForContact(context, contactId) == null) continue
-            val sessionReady = if (AppStore.usesPcConnectorTunnel(context, contactId)) {
-                val desktopId = AppStore.desktopIdForContact(context, contactId)
-                if (desktopId.isBlank() || !requestedDesktopIds.add(desktopId)) continue
-                false
-            } else {
-                SignalASICrypto.hasPeerSession(context, contactId)
-            }
-            if (!sessionReady) requestSignalBundleForContact(context, contactId)
-        }
+        setSecureReady(SignalASILinkProtocol.allServerLinks(context).any { link ->
+            link.paired && SignalASICrypto.hasDesktopSession(context, link.desktopId)
+        })
     }
 
     private fun subscribe() {
         val mqtt = client ?: return
         if (!mqtt.isConnected) return
         runCatching {
-            mqtt.subscribe(RECV_TOPIC, MQTT_QOS)
-            if (localInboxTopic.isNotBlank() && localInboxTopic != RECV_TOPIC) {
-                mqtt.subscribe(localInboxTopic, MQTT_QOS)
-            }
-            mqtt.subscribe(PC_TOPIC, MQTT_QOS)
-            Log.i(TAG, "Subscribed to encrypted topics with persistent QoS$MQTT_QOS session")
+            SignalASILinkProtocol.allServerLinks(appContext ?: return).forEach { subscribeLink(it) }
+            Log.i(TAG, "Subscribed to SignalASI Link v1 relationship topics")
         }.onFailure { Log.e(TAG, "MQTT subscribe failed", it) }
+    }
+
+    private fun subscribeLink(link: SignalASILinkProtocol.ServerLink) {
+        val mqtt = client ?: return
+        if (!mqtt.isConnected) return
+        mqtt.subscribe(link.routes.down, MQTT_QOS)
+        mqtt.subscribe(link.routes.control, MQTT_QOS)
     }
 
     private fun stableClientId(): String {

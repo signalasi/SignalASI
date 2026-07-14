@@ -2,10 +2,11 @@
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query, HTTPException, Header
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -53,11 +54,20 @@ manager = ConnectionManager()
 from pathlib import Path
 
 def signalasi_pairing_payload(include_agents: bool = False) -> dict:
-    from pairing_state import new_pairing_token
+    from pairing_state import new_pairing_session, server_route_id
+    from link_protocol import LinkTopics, PROTOCOL_NAME, PROTOCOL_VERSION
     from signalasi_client import get_signal_verification_payload
 
     payload = get_signal_verification_payload()
-    payload["pairing_token"] = new_pairing_token()
+    route_id = server_route_id()
+    payload["protocol"] = PROTOCOL_NAME
+    payload["version"] = PROTOCOL_VERSION
+    payload["role"] = "server"
+    payload["server_route_id"] = route_id
+    payload["pairing_topic"] = LinkTopics(route_id).pairing
+    pairing = new_pairing_session()
+    payload["pairing_token"] = pairing["token"]
+    payload["pairing_secret"] = pairing["secret"]
     if include_agents:
         from mqtt_bridge import mobile_connector_agents
         payload["connector_agents"] = mobile_connector_agents()
@@ -65,12 +75,13 @@ def signalasi_pairing_payload(include_agents: bool = False) -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    file_server_process = None
     init_db()
     # Start the local Signal Protocol sidecar.
     try:
-        from signalasi_client import start_signal_sidecar
-        start_signal_sidecar()
-        log.info("Signal sidecar started (:18766)")
+        import signalasi_client
+        signalasi_client.start_signal_sidecar()
+        log.info("Signal sidecar started (:%s)", signalasi_client.SIDECAR_PORT)
     except Exception as e:
         log.warning(f"Signal sidecar start failed: {e}")
     # Start the MQTT bridge in a background thread.
@@ -84,16 +95,50 @@ async def lifespan(app: FastAPI):
     try:
         import subprocess, sys
         file_server_script = Path(__file__).parent / "file_server.py"
-        subprocess.Popen([sys.executable, str(file_server_script)],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        file_server_process = subprocess.Popen(
+            [sys.executable, str(file_server_script)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         log.info("File service started (:18765)")
     except Exception as e:
         log.warning(f"File service start failed: {e}")
     log.info("SignalASI Link backend started")
-    yield
+    try:
+        yield
+    finally:
+        try:
+            from mqtt_bridge import stop
+            stop()
+        except Exception as exc:
+            log.warning("MQTT shutdown failed: %s", exc)
+        if file_server_process is not None and file_server_process.poll() is None:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(file_server_process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            else:
+                file_server_process.terminate()
+                try:
+                    file_server_process.wait(timeout=5)
+                except Exception:
+                    file_server_process.kill()
+        try:
+            from signalasi_client import stop_signal_sidecar
+            stop_signal_sidecar()
+        except Exception as exc:
+            log.warning("Signal sidecar shutdown failed: %s", exc)
 
 app = FastAPI(title="SignalASI Link", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:8765", "http://localhost:8765", "null"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-SignalASI-Token"],
+)
 
 # ── API ──
 
@@ -123,18 +168,36 @@ def api_pairing_status():
     from pairing_state import pairing_status
     return pairing_status()
 
+def require_loopback(request: Request) -> None:
+    host = str(request.client.host if request.client else "")
+    if host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        raise HTTPException(status_code=403, detail="Pairing payload is available only on the local Desktop")
+
+
 @app.get("/api/pairing/payload")
-def api_pairing_payload():
-    return signalasi_pairing_payload(include_agents=True)
+def api_pairing_payload(request: Request):
+    require_loopback(request)
+    return signalasi_pairing_payload()
 
 @app.post("/api/pairing/clear")
-def api_pairing_clear():
-    from pairing_state import clear_pairing_state, pairing_status
+def api_pairing_clear(client_route_id: str = Query("")):
+    from pairing_state import clear_pairing_state, get_client, list_clients, pairing_status
     from mqtt_bridge import publish_pairing_revoked
-    revoke = publish_pairing_revoked(reason="forgotten_by_desktop")
-    clear_pairing_state()
+    from signalasi_client import remove_peer_signal_session
+    targets = [get_client(client_route_id)] if client_route_id else list_clients()
+    targets = [target for target in targets if target]
+    revoke = publish_pairing_revoked(reason="forgotten_by_desktop", client_route_id=client_route_id)
+    removed_sessions = []
+    for target in targets:
+        try:
+            remove_peer_signal_session(target["signal_name"], int(target.get("signal_device_id") or 1))
+            removed_sessions.append(target["client_route_id"])
+        except Exception as exc:
+            log.warning("Signal session removal failed client=%s: %s", target["client_route_id"], exc)
+    clear_pairing_state(client_route_id)
     status = pairing_status()
     status["revoke"] = revoke
+    status["removed_sessions"] = removed_sessions
     return status
 
 class AgentSelfTestReq(BaseModel):
@@ -184,17 +247,21 @@ def api_test_agent(agent_id: str, req: AgentTestReq):
 class MobileTestMessageReq(BaseModel):
     contact_id: str
     content: str
+    client_route_id: str = ""
+    broadcast: bool = False
 
 @app.post("/api/mobile/test-message")
 def api_mobile_test_message(req: MobileTestMessageReq):
     from mqtt_bridge import publish_mobile_test_message
-    return publish_mobile_test_message(req.contact_id, req.content)
+    return publish_mobile_test_message(req.contact_id, req.content, req.client_route_id, req.broadcast)
 
 class AgentPushReq(BaseModel):
     contact_id: str
     content: str
     source: str = "agent"
     secret: str = ""
+    client_route_id: str = ""
+    broadcast: bool = False
 
 @app.post("/api/agent/push")
 def api_agent_push(req: AgentPushReq, x_signalasi_token: str = Header(default="")):
@@ -207,13 +274,14 @@ def api_agent_push(req: AgentPushReq, x_signalasi_token: str = Header(default=""
             status_code=401,
             detail=api_error("agent_push_token_invalid", "Invalid SignalASI Agent push token."),
         )
-    return publish_agent_push_message(req.contact_id, req.content, req.source)
+    return publish_agent_push_message(req.contact_id, req.content, req.source, req.client_route_id, req.broadcast)
 
 class AgentTaskStartReq(BaseModel):
     contact_id: str
     prompt: str
     source_message_id: str = ""
     task_id: str = ""
+    client_route_id: str = ""
 
 @app.post("/api/agent/tasks")
 def api_start_agent_task(req: AgentTaskStartReq, x_signalasi_token: str = Header(default="")):
@@ -221,7 +289,7 @@ def api_start_agent_task(req: AgentTaskStartReq, x_signalasi_token: str = Header
     from mqtt_bridge import start_agent_task
     if not verify_agent_push_token(x_signalasi_token):
         raise HTTPException(status_code=401, detail=api_error("agent_push_token_invalid", "Invalid SignalASI Agent push token."))
-    return start_agent_task(req.contact_id, req.prompt, req.source_message_id, req.task_id)
+    return start_agent_task(req.contact_id, req.prompt, req.source_message_id, req.task_id, req.client_route_id)
 
 @app.get("/api/agent/tasks")
 def api_list_agent_tasks(limit: int = Query(100)):
@@ -319,7 +387,8 @@ def serve_index():
     return FileResponse(str(frontend_path))
 
 @app.get("/signalasi/verify")
-def signalasi_verify_qr():
+def signalasi_verify_qr(request: Request):
+    require_loopback(request)
     import qrcode
     from mqtt_bridge import mobile_connector_agents
 

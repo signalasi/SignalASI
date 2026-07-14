@@ -105,7 +105,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_AGENT_CAMERA_PERMISSION = 2009
         private const val UI_PREFS = "signalasi_ui_preferences"
         private const val HISTORY_PREFS = "signalasi_chat_history"
-        private const val OLD_HISTORY_PREFS = "hermes_chat_history"
         private const val HISTORY_KEY = "messages"
         private const val HISTORY_UPDATED_KEY = "updated_at"
         private const val MAX_SAVED_MESSAGES_PER_CONTACT = 500
@@ -4418,8 +4417,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 updateMessageStatus(msg.id, contact.id, getString(R.string.delivery_status_failed))
             }
         } else {
-            appendDeliveryTrace(msg.id, contact.id, "local_saved", "missing target topic")
-            updateMessageStatus(msg.id, contact.id, getString(R.string.delivery_status_local_saved))
+            appendDeliveryTrace(msg.id, contact.id, "link_unavailable", "No paired SignalASI Link v1 relationship")
+            updateMessageStatus(msg.id, contact.id, getString(R.string.delivery_status_failed))
         }
     }
 
@@ -5634,7 +5633,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     // ===== Chat History =====
     private fun loadChatHistory() {
-        migrateHistoryPrefs()
         val prefs = getSharedPreferences(HISTORY_PREFS, MODE_PRIVATE)
         val raw = prefs.getString(HISTORY_KEY, null)
         lastHistoryLoadedAt = prefs.getLong(HISTORY_UPDATED_KEY, 0L)
@@ -5699,7 +5697,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun reloadChatHistoryIfChanged(force: Boolean = false) {
-        migrateHistoryPrefs()
         val updatedAt = getSharedPreferences(HISTORY_PREFS, MODE_PRIVATE).getLong(HISTORY_UPDATED_KEY, 0L)
         if (!force && updatedAt <= lastHistoryLoadedAt) return
         val selectedId = selectedContact?.id
@@ -5800,7 +5797,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun saveChatHistory(sync: Boolean = false) {
-        migrateHistoryPrefs()
         if (!sync) {
             handler.removeCallbacks(historySaveRunnable)
             handler.postDelayed(historySaveRunnable, 120L)
@@ -5856,27 +5852,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 writeSnapshot()
             }
         }
-    }
-
-    private fun migrateHistoryPrefs() {
-        val oldPrefs = getSharedPreferences(OLD_HISTORY_PREFS, MODE_PRIVATE)
-        val newPrefs = getSharedPreferences(HISTORY_PREFS, MODE_PRIVATE)
-        if (oldPrefs.all.isEmpty() || newPrefs.all.isNotEmpty()) return
-        val editor = newPrefs.edit()
-        oldPrefs.all.forEach { (key, value) ->
-            when (value) {
-                is String -> editor.putString(key, value)
-                is Int -> editor.putInt(key, value)
-                is Long -> editor.putLong(key, value)
-                is Boolean -> editor.putBoolean(key, value)
-                is Float -> editor.putFloat(key, value)
-                is Set<*> -> {
-                    @Suppress("UNCHECKED_CAST")
-                    editor.putStringSet(key, value as Set<String>)
-                }
-            }
-        }
-        editor.commit()
     }
 
     // ===== Refreshing =====
@@ -6255,7 +6230,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         try {
             val json = JSONObject(contents)
             if (json.optString("type") == "signalasi_verify") {
-                if (SignalASICrypto.verifyPcIdentityFromQr(contents)) {
+                if (SignalASILinkProtocol.validatePairingQr(json) && SignalASICrypto.verifyPcIdentityFromQr(contents)) {
                     if (autoConfirm) {
                         completeDesktopPairing(json)
                     } else {
@@ -6320,8 +6295,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun completeDesktopPairing(pairingQr: JSONObject) {
+        if (!SignalASIMqttClient.publishPairingClaim(pairingQr)) {
+            Toast.makeText(this, getString(R.string.pairing_scan_failed, "SignalASI Link is offline"), Toast.LENGTH_LONG).show()
+            return
+        }
         AppStore.markDesktopVerified(this, pairingQr)
-        SignalASIMqttClient.publishPairingClaim(pairingQr)
         Toast.makeText(this, getString(R.string.pairing_desktop_added, pairingQr.optString("desktop_name", "PC")), Toast.LENGTH_LONG).show()
         refreshContactList()
         refreshDirectoryContacts()

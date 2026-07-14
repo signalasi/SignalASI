@@ -8,6 +8,7 @@ import time
 import urllib.error
 import urllib.request
 import socket
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -19,15 +20,27 @@ SIDECAR_BIN_DIR = SIDECAR_DIR / "build" / "install" / "signalasi-link-sidecar" /
 SIDECAR_SCRIPT = SIDECAR_BIN_DIR / ("signalasi-link-sidecar.bat" if os.name == "nt" else "signalasi-link-sidecar")
 
 _process: subprocess.Popen | None = None
+_peer_locks: dict[tuple[str, int], threading.RLock] = {}
+_peer_locks_guard = threading.Lock()
+
+
+def _peer_lock(remote_name: str, remote_device_id: int) -> threading.RLock:
+    key = (remote_name, int(remote_device_id))
+    with _peer_locks_guard:
+        return _peer_locks.setdefault(key, threading.RLock())
 
 
 def start_signal_sidecar() -> None:
     """Start the local JVM sidecar if it is not already responding."""
-    global _process
+    global _process, SIDECAR_PORT, SIDECAR_BASE
     if _is_healthy():
         return
     if not SIDECAR_SCRIPT.exists():
         raise FileNotFoundError(f"Signal sidecar is not built: {SIDECAR_SCRIPT}")
+
+    if _port_is_in_use(SIDECAR_PORT):
+        SIDECAR_PORT = _available_local_port()
+        SIDECAR_BASE = f"http://127.0.0.1:{SIDECAR_PORT}"
 
     out = open(SIDECAR_DIR / "sidecar.out.log", "ab", buffering=0)
     err = open(SIDECAR_DIR / "sidecar.err.log", "ab", buffering=0)
@@ -35,6 +48,7 @@ def start_signal_sidecar() -> None:
         "cwd": str(SIDECAR_DIR),
         "stdout": out,
         "stderr": err,
+        "env": {**os.environ, "SIGNALASI_LINK_PORT": str(SIDECAR_PORT)},
     }
     if os.name == "nt":
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -45,6 +59,29 @@ def start_signal_sidecar() -> None:
             return
         time.sleep(0.25)
     raise RuntimeError("Signal sidecar did not become healthy")
+
+
+def stop_signal_sidecar() -> None:
+    """Stop only the sidecar process started by this backend instance."""
+    global _process
+    process = _process
+    _process = None
+    if process is None or process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
 
 
 def get_signal_bundle() -> dict[str, Any]:
@@ -78,24 +115,26 @@ def get_signal_verification_payload() -> dict[str, Any]:
 
 def decrypt_signal_envelope(envelope: dict[str, Any], remote_name: str = "android", remote_device_id: int = 1) -> dict[str, Any]:
     start_signal_sidecar()
-    response = _request("POST", "/decrypt", {
-        "remoteName": remote_name,
-        "remoteDeviceId": remote_device_id,
-        "type": envelope.get("signal_type") or envelope.get("type") or "prekey",
-        "messageType": envelope.get("message_type", envelope.get("messageType", -1)),
-        "body": envelope["body"],
-    })
+    with _peer_lock(remote_name, remote_device_id):
+        response = _request("POST", "/decrypt", {
+            "remoteName": remote_name,
+            "remoteDeviceId": remote_device_id,
+            "type": envelope.get("signal_type") or envelope.get("type") or "prekey",
+            "messageType": envelope.get("message_type", envelope.get("messageType", -1)),
+            "body": envelope["body"],
+        })
     plaintext = response["plaintext"]
     return json.loads(plaintext)
 
 
 def encrypt_signal_payload(payload: dict[str, Any], remote_name: str = "android", remote_device_id: int = 1) -> dict[str, Any]:
     start_signal_sidecar()
-    response = _request("POST", "/encrypt", {
-        "remoteName": remote_name,
-        "remoteDeviceId": remote_device_id,
-        "plaintext": json.dumps(payload, ensure_ascii=False),
-    })
+    with _peer_lock(remote_name, remote_device_id):
+        response = _request("POST", "/encrypt", {
+            "remoteName": remote_name,
+            "remoteDeviceId": remote_device_id,
+            "plaintext": json.dumps(payload, ensure_ascii=False),
+        })
     return {
         "version": 1,
         "scheme": "signal",
@@ -110,18 +149,46 @@ def encrypt_signal_payload(payload: dict[str, Any], remote_name: str = "android"
 
 def replace_peer_signal_bundle(bundle: dict[str, Any], remote_name: str = "android", remote_device_id: int = 1) -> dict[str, Any]:
     start_signal_sidecar()
-    return _request("POST", "/replace-peer", {
-        "remoteName": remote_name,
-        "remoteDeviceId": remote_device_id,
-        "bundle": bundle,
-    })
+    with _peer_lock(remote_name, remote_device_id):
+        return _request("POST", "/replace-peer", {
+            "remoteName": remote_name,
+            "remoteDeviceId": remote_device_id,
+            "bundle": bundle,
+        })
+
+
+def remove_peer_signal_session(remote_name: str, remote_device_id: int = 1) -> dict[str, Any]:
+    start_signal_sidecar()
+    with _peer_lock(remote_name, remote_device_id):
+        return _request("POST", "/remove-peer", {
+            "remoteName": remote_name,
+            "remoteDeviceId": remote_device_id,
+        })
 
 
 def _is_healthy() -> bool:
     try:
-        return bool(_request("GET", "/health").get("ok"))
+        status = _request("GET", "/health")
+        return bool(
+            status.get("ok")
+            and status.get("protocol") == "signalasi-link"
+            and int(status.get("apiVersion") or 0) == 1
+            and status.get("removePeer") is True
+        )
     except Exception:
         return False
+
+
+def _port_is_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.25)
+        return probe.connect_ex(("127.0.0.1", int(port))) == 0
+
+
+def _available_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
 
 
 def _request(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:

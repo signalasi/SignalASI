@@ -19,7 +19,9 @@ SignalASI treats the network, broker, and agent runtime as separate trust zones.
 - The QR payload uses `type: signalasi_verify`, includes the Desktop identity key, and includes the SHA-256 fingerprint of that key.
 - Android recomputes the fingerprint from the scanned identity key before accepting it.
 - The phone stores the verified Desktop fingerprint and processes the Desktop signal bundle only after fingerprint verification.
-- A new pairing replaces the previous trusted app state; revocation messages tell the previous paired app that it is no longer trusted.
+- Every Server-Client relationship has independent opaque route IDs and an independent Signal session. Pairing a new client does not replace existing clients.
+- The bootstrap claim is encrypted with a one-time QR secret before it reaches MQTT; the secret expires after ten minutes and is consumed once.
+- Revocation is relationship-scoped. It removes only the selected route, registry entry, and Signal session.
 - Deleted contacts must be re-added before communication is allowed again.
 
 ## Message Protection
@@ -27,7 +29,7 @@ SignalASI treats the network, broker, and agent runtime as separate trust zones.
 - Android refuses plaintext Desktop publish when no Signal session is ready.
 - Android encrypts trusted Desktop and contact payloads as Signal envelopes with `scheme: signal`.
 - Desktop decrypts and encrypts through the local SignalASI Link sidecar.
-- Message metadata can still reveal routing information such as contact IDs, timestamps, topic names, delivery status, and coarse message size.
+- Agent/contact IDs and message content are inside the Signal ciphertext. The relay can still observe opaque topic names, timing, delivery behavior, and coarse message size.
 - Delivery traces and acknowledgements prove routing state; they are not a substitute for identity verification.
 
 ## Broker Boundary
@@ -38,6 +40,7 @@ SignalASI can use a public MQTT broker for reachability. The broker must be trea
 - It must not receive plaintext message content after pairing.
 - It must not decide whether a phone or Desktop is trusted.
 - It must not be the only place where delivery state is stored.
+- MQTT transport uses certificate-validated TLS. The public EMQX relay is development-only; production requires an authenticated broker and route-scoped ACLs.
 
 ## Local Data Boundary
 
@@ -57,7 +60,7 @@ Local identity and runtime files are device-local state:
 
 ## Current Security Limits
 
-- SignalASI does not treat a public MQTT broker as anonymous transport.
+- Opaque relationship routes reduce correlation but do not make a public MQTT broker anonymous transport.
 - Android hardware DSP wake through OEM SoundTrigger paths is deferred.
 - Group chat is deferred.
 - Cloud model API calls are direct mobile integrations and inherit the selected provider account and API policy.

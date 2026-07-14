@@ -1,7 +1,6 @@
 ﻿package com.signalasi.chat
 
 import android.content.Context
-import android.content.SharedPreferences
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -21,18 +20,12 @@ object AppStore {
     @Volatile private var contactsCacheRaw = ""
     @Volatile private var contactsCacheById: Map<String, String> = emptyMap()
     private const val PREFS = "signalasi_app_store"
-    private const val OLD_PREFS = "hermes_app_store"
     private const val HISTORY_PREFS = "signalasi_chat_history"
-    private const val OLD_HISTORY_PREFS = "hermes_chat_history"
     private const val TRUST_PREFS = "signalasi_signal_trust"
-    private const val OLD_TRUST_PREFS = "hermes_signal_trust"
     private const val SIGNAL_STORE_PREFS = "signalasi_signal_store"
-    private const val OLD_SIGNAL_STORE_PREFS = "hermes_signal_store"
     private const val KEY_CONTACTS = "contacts"
     private const val KEY_FRIEND_REQUESTS = "friend_requests"
     private const val KEY_PROFILE = "profile"
-    private const val DEFAULT_DESKTOP_SEND_TOPIC = "signalasichat/android/send"
-    private const val DEFAULT_LOCAL_INBOX_TOPIC = "signalasichat/android/recv"
     private const val BACKUP_VERSION = 1
     private const val PBKDF2_ITERATIONS = 180_000
     private const val KEY_SIZE_BITS = 256
@@ -51,10 +44,6 @@ object AppStore {
     }
 
     private fun initializeOnce(appContext: Context) {
-        migrateSharedPreferences(appContext, OLD_PREFS, PREFS)
-        migrateSharedPreferences(appContext, OLD_HISTORY_PREFS, HISTORY_PREFS)
-        migrateSharedPreferences(appContext, OLD_TRUST_PREFS, TRUST_PREFS)
-        migrateSharedPreferences(appContext, OLD_SIGNAL_STORE_PREFS, SIGNAL_STORE_PREFS)
         SignalASICrypto.initialize(appContext)
         val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (!prefs.contains(KEY_PROFILE)) {
@@ -70,6 +59,7 @@ object AppStore {
         removeLegacyDesktopConnectorContacts(appContext)
         removeDesktopCloudModelContacts(appContext)
         normalizeCloudApiProviderContacts(appContext)
+        removeContactsForMissingServerLinks(appContext)
     }
 
     fun profile(context: Context): JSONObject {
@@ -78,14 +68,6 @@ object AppStore {
         var changed = false
         if (current.optString("name").isBlank()) {
             current.put("name", "Me")
-            changed = true
-        }
-        if (current.optString("mqtt_topic").isBlank() || current.optString("mqtt_topic") == DEFAULT_DESKTOP_SEND_TOPIC) {
-            current.put("mqtt_topic", DEFAULT_LOCAL_INBOX_TOPIC)
-            changed = true
-        }
-        if (current.optString("mqtt_inbox_topic").isBlank()) {
-            current.put("mqtt_inbox_topic", current.optString("mqtt_topic", DEFAULT_LOCAL_INBOX_TOPIC))
             changed = true
         }
         if (changed) writeObject(context, KEY_PROFILE, current)
@@ -393,9 +375,10 @@ object AppStore {
     fun revokeDesktopConnector(context: Context, desktopId: String): Boolean {
         ensureInitialized(context)
         if (desktopId.isBlank()) return false
+        val linkExisted = SignalASILinkProtocol.serverLink(context, desktopId) != null
+        SignalASIMqttClient.publishServerRevocation(context, desktopId)
         val contacts = contacts(context)
         var changed = false
-        var revokedCurrentPc = false
         for (i in 0 until contacts.length()) {
             val contact = contacts.optJSONObject(i) ?: continue
             val isTarget = contact.optString("desktop_id") == desktopId ||
@@ -403,10 +386,6 @@ object AppStore {
                 contact.optString("id").ifBlank { signalasiIdOf(contact) }.startsWith("$desktopId:")
             if (!isTarget) continue
             if (contact.optString("delivery_mode") == "pc_connector") {
-                val fingerprint = contact.optString("desktop_fingerprint", contact.optString("identity_fingerprint"))
-                if (fingerprint.isNotBlank() && fingerprint.equals(SignalASICrypto.verifiedPcFingerprint(), ignoreCase = true)) {
-                    revokedCurrentPc = true
-                }
                 contact.put("deleted", true)
                 contact.put("trust_state", "deleted")
                 contact.put("deleted_at", System.currentTimeMillis())
@@ -415,12 +394,13 @@ object AppStore {
         }
         if (changed) {
             writeArray(context, KEY_CONTACTS, contacts)
-            if (revokedCurrentPc) {
-                SignalASICrypto.clearPcTrust(context)
-                SignalASIMqttClient.forgetSecureChannel()
-            }
         }
-        return changed
+        if (linkExisted) {
+            SignalASICrypto.clearDesktopTrust(context, desktopId)
+            SignalASILinkProtocol.removeServer(context, desktopId)
+            SignalASIMqttClient.forgetSecureChannel()
+        }
+        return changed || linkExisted
     }
 
     fun setSelectedCloudModel(context: Context, hermesId: String, modelId: String): Boolean {
@@ -442,22 +422,19 @@ object AppStore {
     }
 
     fun localInboxTopic(context: Context): String {
-        val profile = profile(context)
-        return profile.optString("mqtt_inbox_topic")
-            .ifBlank { profile.optString("mqtt_topic") }
-            .ifBlank { DEFAULT_LOCAL_INBOX_TOPIC }
+        return SignalASILinkProtocol.allServerLinks(context).firstOrNull { it.paired }?.routes?.down.orEmpty()
     }
 
     fun outgoingTopicForContact(context: Context, hermesId: String): String? {
-        if (hermesId == "hermes") {
-            return if (canCommunicateWith(context, hermesId)) DEFAULT_DESKTOP_SEND_TOPIC else null
-        }
         if (hermesId.startsWith("group:")) return null
         val contact = contactById(context, hermesId) ?: return null
         if (!canCommunicateWith(context, hermesId)) return null
-        val topic = contact.optString("mqtt_topic")
-            .ifBlank { contact.optString("mqtt_inbox_topic") }
-        return if (topic.isBlank()) null else topic
+        val desktopId = contact.optString("desktop_id")
+        if (desktopId.isNotBlank()) {
+            return SignalASILinkProtocol.serverLink(context, desktopId)?.takeIf { it.paired }?.routes?.up
+        }
+        val directTopic = contact.optString("mqtt_topic").ifBlank { contact.optString("mqtt_inbox_topic") }
+        return directTopic.takeIf { it.isNotBlank() }
     }
 
     fun deleteDesktopConnector(context: Context, desktopId: String, deleteMessages: Boolean = false) {
@@ -568,6 +545,7 @@ object AppStore {
 
     fun markDesktopVerified(context: Context, pairingQr: JSONObject) {
         ensureInitialized(context)
+        val link = SignalASILinkProtocol.ensureServerLink(context, pairingQr)
         val contacts = contacts(context)
         val desktopId = pairingQr.optString("desktop_id")
             .ifBlank { "desktop_${pairingQr.optString("identity_key_sha256").take(16)}" }
@@ -601,7 +579,7 @@ object AppStore {
                     .put("status", "unknown")
                     .put("detail", "Waiting for SignalASI Desktop status")
                     .put("setup", "")
-                    .put("mqtt_topic", DEFAULT_DESKTOP_SEND_TOPIC)
+                    .put("mqtt_topic", link.routes.up)
                     .put("updated_at", now)
             )
         }
@@ -641,7 +619,7 @@ object AppStore {
                 val contact = contacts.optJSONObject(j) ?: continue
                 val contactId = contact.optString("id").ifBlank { signalasiIdOf(contact) }
                 if (contactId != id && signalasiIdOf(contact) != id) continue
-                applyConnectorAgentStatus(contact, agent, id, now, desktopId, desktopName, fingerprint, agentId)
+                applyConnectorAgentStatus(context, contact, agent, id, now, desktopId, desktopName, fingerprint, agentId)
                 changed = true
                 found = true
                 break
@@ -656,9 +634,11 @@ object AppStore {
                     desktopId,
                     desktopName,
                     agentId,
-                    agent.optString("mqtt_topic").ifBlank { DEFAULT_DESKTOP_SEND_TOPIC }
+                    agent.optString("mqtt_topic").ifBlank {
+                        SignalASILinkProtocol.serverLink(context, desktopId)?.routes?.up.orEmpty()
+                    }
                 )
-                applyConnectorAgentStatus(created, agent, id, now, desktopId, desktopName, fingerprint, agentId)
+                applyConnectorAgentStatus(context, created, agent, id, now, desktopId, desktopName, fingerprint, agentId)
                 contacts.put(created)
                 changed = true
             }
@@ -668,6 +648,7 @@ object AppStore {
     }
 
     private fun applyConnectorAgentStatus(
+        context: Context,
         contact: JSONObject,
         agent: JSONObject,
         id: String,
@@ -688,7 +669,9 @@ object AppStore {
         contact.put("desktop_name", desktopName)
         contact.put("agent_id", agentId)
         putSignalasiId(contact, id)
-        contact.put("mqtt_topic", agent.optString("mqtt_topic").ifBlank { DEFAULT_DESKTOP_SEND_TOPIC })
+        contact.put("mqtt_topic", agent.optString("mqtt_topic").ifBlank {
+            SignalASILinkProtocol.serverLink(context, desktopId)?.routes?.up.orEmpty()
+        })
         contact.put("identity_fingerprint", fingerprint)
         contact.put("desktop_fingerprint", fingerprint)
         contact.put("agent_kind", agent.optString("kind", contact.optString("agent_kind", "custom-cli")))
@@ -867,7 +850,6 @@ object AppStore {
             payload.put("friend_requests", friendRequests(context))
         }
         if (includeMessages) {
-            migrateSharedPreferences(context.applicationContext, OLD_HISTORY_PREFS, HISTORY_PREFS)
             val rawMessages = context.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
                 .getString("messages", "{}")
             payload.put("messages", JSONObject(rawMessages ?: "{}"))
@@ -907,13 +889,9 @@ object AppStore {
         contactsCacheById = emptyMap()
         AgentWorkflowScheduler.cancelAll(context)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().commit()
-        context.getSharedPreferences(OLD_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
-        context.getSharedPreferences(OLD_HISTORY_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences(TRUST_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
-        context.getSharedPreferences(OLD_TRUST_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences(SIGNAL_STORE_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
-        context.getSharedPreferences(OLD_SIGNAL_STORE_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_runtime", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_memory", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_knowledge", Context.MODE_PRIVATE).edit().clear().commit()
@@ -932,6 +910,8 @@ object AppStore {
         CustomDeviceConnectorStore(context).clear()
         AgentModelPlannerSettingsStore(context).clear()
         VoiceAssistantSettings.clear(context)
+        SignalASILinkProtocol.clear(context)
+        SignalASILinkDeliveryStore.clear(context)
         runCatching { AgentStorageCipher.deleteMasterKey() }
         SignalASICrypto.resetLocalIdentity(context)
         context.cacheDir.deleteRecursively()
@@ -983,9 +963,7 @@ object AppStore {
     private fun defaultProfile(context: Context): JSONObject =
         JSONObject()
             .put("name", "Me")
-            .put("device_id", "android")
-            .put("mqtt_topic", DEFAULT_LOCAL_INBOX_TOPIC)
-            .put("mqtt_inbox_topic", DEFAULT_LOCAL_INBOX_TOPIC)
+            .put("device_id", SignalASILinkProtocol.newRouteId())
             .put("created_at", System.currentTimeMillis())
 
     private fun removeLegacyDesktopConnectorContacts(context: Context) {
@@ -1010,6 +988,23 @@ object AppStore {
                 id.contains(":") &&
                 contact.optString("desktop_id").isNotBlank()
             if (shouldRemoveHermes || (isPcConnector && !isFlatDesktopContact)) {
+                changed = true
+                continue
+            }
+            cleaned.put(contact)
+        }
+        if (changed) writeArray(context, KEY_CONTACTS, cleaned)
+    }
+
+    private fun removeContactsForMissingServerLinks(context: Context) {
+        val activeDesktopIds = SignalASILinkProtocol.allServerLinks(context).map { it.desktopId }.toSet()
+        val contacts = readArray(context, KEY_CONTACTS)
+        val cleaned = JSONArray()
+        var changed = false
+        for (index in 0 until contacts.length()) {
+            val contact = contacts.optJSONObject(index) ?: continue
+            val desktopId = contact.optString("desktop_id")
+            if (desktopId.isNotBlank() && desktopId !in activeDesktopIds) {
                 changed = true
                 continue
             }
@@ -1187,7 +1182,7 @@ object AppStore {
         desktopId: String = "desktop_${fingerprint.take(16)}",
         desktopName: String = "Computer",
         agentId: String = id,
-        topic: String = DEFAULT_DESKTOP_SEND_TOPIC
+        topic: String = ""
     ): JSONObject =
         run {
             val displayName = if (desktopId.isNotBlank()) "$name · $desktopName" else name
@@ -1403,37 +1398,10 @@ object AppStore {
     }
 
     private fun removeChatHistory(context: Context, contactId: String) {
-        migrateSharedPreferences(context.applicationContext, OLD_HISTORY_PREFS, HISTORY_PREFS)
         val prefs = context.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
         val root = runCatching { JSONObject(prefs.getString("messages", "{}") ?: "{}") }.getOrDefault(JSONObject())
         root.remove(contactId)
         prefs.edit().putString("messages", root.toString()).apply()
-    }
-
-    private fun migrateSharedPreferences(context: Context, oldName: String, newName: String) {
-        if (oldName == newName) return
-        val oldPrefs = context.getSharedPreferences(oldName, Context.MODE_PRIVATE)
-        val newPrefs = context.getSharedPreferences(newName, Context.MODE_PRIVATE)
-        if (oldPrefs.all.isEmpty() || newPrefs.all.isNotEmpty()) return
-        val editor = newPrefs.edit()
-        copySharedPreferences(oldPrefs, editor)
-        editor.commit()
-    }
-
-    private fun copySharedPreferences(from: SharedPreferences, to: SharedPreferences.Editor) {
-        from.all.forEach { (key, value) ->
-            when (value) {
-                is String -> to.putString(key, value)
-                is Int -> to.putInt(key, value)
-                is Long -> to.putLong(key, value)
-                is Boolean -> to.putBoolean(key, value)
-                is Float -> to.putFloat(key, value)
-                is Set<*> -> {
-                    @Suppress("UNCHECKED_CAST")
-                    to.putStringSet(key, value as Set<String>)
-                }
-            }
-        }
     }
 
     private fun ByteArray.b64(): String =

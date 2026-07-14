@@ -1,134 +1,238 @@
-"""Pairing token and persisted phone pairing state."""
+"""Pairing tokens and persisted SignalASI Link v1 client registry."""
 from __future__ import annotations
 
 import json
 import os
 import secrets
-import shutil
+import threading
 import time
 from pathlib import Path
 
-_token = ""
-_created_at = 0.0
+from link_protocol import LinkTopics, new_route_id, valid_route_id
+
 TTL_SECONDS = 10 * 60
-LEGACY_STATE_PATH = Path(__file__).with_name("signalasi_pairing_state.json")
 DEFAULT_DATA_DIR = (
     Path(os.environ["APPDATA"]) / "signalasi-desktop" / "runtime"
     if os.name == "nt" and os.environ.get("APPDATA")
     else Path.home() / ".signalasi"
 )
 DATA_DIR = Path(os.environ.get("SIGNALASI_DATA_DIR", DEFAULT_DATA_DIR))
-STATE_PATH = DATA_DIR / "signalasi_pairing_state.json"
+STATE_PATH = DATA_DIR / "signalasi_link_registry.json"
+
+_tokens: dict[str, dict] = {}
+_registry_lock = threading.RLock()
 
 
-def _migrate_legacy_state() -> None:
-    if STATE_PATH.exists() or not LEGACY_STATE_PATH.exists() or STATE_PATH == LEGACY_STATE_PATH:
-        return
-    try:
-        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(LEGACY_STATE_PATH, STATE_PATH)
-    except OSError:
-        pass
-
-
-def new_pairing_token() -> str:
-    global _token, _created_at
-    if _token and time.time() - _created_at <= TTL_SECONDS:
-        return _token
-    _token = secrets.token_urlsafe(24)
-    _created_at = time.time()
-    return _token
-
-
-def validate_pairing_token(token: str) -> bool:
-    if not token or not _token:
-        return False
-    if time.time() - _created_at > TTL_SECONDS:
-        return False
-    return secrets.compare_digest(token, _token)
-
-
-def token_status() -> dict:
-    if not _token:
-        return {"active": False, "created_at": 0, "expires_at": 0, "expires_in": 0}
-    expires_at = _created_at + TTL_SECONDS
-    expires_in = max(0, int(expires_at - time.time()))
+def _empty_state() -> dict:
     return {
-        "active": expires_in > 0,
-        "created_at": _created_at,
-        "expires_at": expires_at,
-        "expires_in": expires_in,
+        "schema": 2,
+        "server_route_id": new_route_id(),
+        "clients": {},
+        "updated_at": time.time(),
     }
 
 
 def _read_state() -> dict:
-    _migrate_legacy_state()
     try:
         data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except FileNotFoundError:
-        return {}
+        if not isinstance(data, dict):
+            raise ValueError("invalid registry")
     except Exception:
-        return {}
+        data = _empty_state()
+        _write_state(data)
+    if not valid_route_id(data.get("server_route_id")):
+        data["server_route_id"] = new_route_id()
+        _write_state(data)
+    if not isinstance(data.get("clients"), dict):
+        data["clients"] = {}
+    return data
 
 
 def _write_state(data: dict) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(f"{json.dumps(data, ensure_ascii=False, indent=2)}\n", encoding="utf-8")
+    temp = STATE_PATH.with_suffix(".tmp")
+    temp.write_text(f"{json.dumps(data, ensure_ascii=False, indent=2)}\n", encoding="utf-8")
+    temp.replace(STATE_PATH)
 
 
-def record_pairing_success(fingerprint: str, remote_name: str = "android", remote_device_id: int = 1) -> dict:
-    previous = _read_state()
-    now = time.time()
-    previous_fingerprint = str(previous.get("identity_fingerprint", ""))
-    identity_changed = bool(previous.get("paired") and previous_fingerprint and previous_fingerprint != fingerprint)
-    data = {
-        "paired": True,
-        "paired_at": now,
+def server_route_id() -> str:
+    return str(_read_state()["server_route_id"])
+
+
+def new_pairing_session() -> dict:
+    with _registry_lock:
+        now = time.time()
+        for token, entry in list(_tokens.items()):
+            if now - float(entry.get("created_at") or 0) > TTL_SECONDS:
+                _tokens.pop(token, None)
+        token = secrets.token_urlsafe(24)
+        secret = secrets.token_urlsafe(32)
+        _tokens[token] = {"created_at": now, "secret": secret}
+        return {"token": token, "secret": secret, "created_at": now, "expires_at": now + TTL_SECONDS}
+
+
+def new_pairing_token() -> str:
+    return str(new_pairing_session()["token"])
+
+
+def pairing_secret(token: str) -> str:
+    with _registry_lock:
+        entry = _tokens.get(str(token or "")) or {}
+        if time.time() - float(entry.get("created_at") or 0) > TTL_SECONDS:
+            return ""
+        return str(entry.get("secret") or "")
+
+
+def validate_pairing_token(token: str, consume: bool = False) -> bool:
+    with _registry_lock:
+        entry = _tokens.get(str(token or ""))
+        created_at = float((entry or {}).get("created_at") or 0)
+        if not entry or time.time() - created_at > TTL_SECONDS:
+            _tokens.pop(str(token or ""), None)
+            return False
+        if consume:
+            _tokens.pop(str(token), None)
+        return True
+
+
+def token_status() -> dict:
+    with _registry_lock:
+        now = time.time()
+        active = [
+            float(entry.get("created_at") or 0)
+            for entry in _tokens.values()
+            if now - float(entry.get("created_at") or 0) <= TTL_SECONDS
+        ]
+        newest = max(active, default=0.0)
+        return {
+            "active": bool(active),
+            "active_count": len(active),
+            "created_at": newest,
+            "expires_at": newest + TTL_SECONDS if newest else 0,
+            "expires_in": max(0, int(newest + TTL_SECONDS - now)) if newest else 0,
+        }
+
+
+def record_pairing_success(
+    fingerprint: str,
+    remote_name: str = "",
+    remote_device_id: int = 1,
+    *,
+    client_route_id: str = "",
+    display_name: str = "SignalASI Client",
+    platform: str = "unknown",
+) -> dict:
+    if not fingerprint:
+        raise ValueError("identity fingerprint required")
+    route_id = client_route_id or new_route_id()
+    if not valid_route_id(route_id):
+        raise ValueError("invalid client route id")
+    with _registry_lock:
+        state = _read_state()
+        previous = state["clients"].get(route_id, {})
+        now = time.time()
+        client = {
+        "client_route_id": route_id,
+        "signal_name": remote_name or previous.get("signal_name") or f"client_{route_id}",
+        "signal_device_id": int(remote_device_id or 1),
+        "identity_fingerprint": fingerprint,
+        "display_name": display_name or previous.get("display_name") or "SignalASI Client",
+        "platform": platform or previous.get("platform") or "unknown",
+        "paired_at": float(previous.get("paired_at") or now),
         "updated_at": now,
-        "remote_name": remote_name or "android",
-        "remote_device_id": remote_device_id,
-        "identity_fingerprint": fingerprint or "",
-        "previous_identity_fingerprint": previous_fingerprint if identity_changed else previous.get("previous_identity_fingerprint", ""),
-        "replacement_count": int(previous.get("replacement_count", 0)) + (1 if identity_changed else 0),
+        "last_seen_at": now,
+        "revoked": False,
+        }
+        state["clients"][route_id] = client
+        state["updated_at"] = now
+        _write_state(state)
+        return client_status(client, state["server_route_id"])
+
+
+def client_status(client: dict, server_id: str | None = None) -> dict:
+    route_id = str(client.get("client_route_id") or "")
+    sid = server_id or server_route_id()
+    topics = LinkTopics(sid, route_id)
+    return {
+        **client,
+        "paired": not bool(client.get("revoked")),
+        "identity_fingerprint_short": str(client.get("identity_fingerprint") or "")[:16],
+        "topics": {"up": topics.up, "down": topics.down, "control": topics.control},
     }
-    _write_state(data)
-    return data
 
 
-def clear_pairing_state() -> dict:
-    data = {
-        "paired": False,
-        "paired_at": 0,
-        "updated_at": time.time(),
-        "remote_name": "",
-        "remote_device_id": 0,
-        "identity_fingerprint": "",
-        "previous_identity_fingerprint": "",
-        "replacement_count": 0,
-    }
-    _write_state(data)
-    return data
+def get_client(client_route_id: str, include_revoked: bool = False) -> dict | None:
+    state = _read_state()
+    client = state["clients"].get(client_route_id)
+    if not isinstance(client, dict) or (client.get("revoked") and not include_revoked):
+        return None
+    return client_status(client, state["server_route_id"])
 
 
-def is_paired() -> bool:
-    return bool(_read_state().get("paired"))
+def list_clients(include_revoked: bool = False) -> list[dict]:
+    state = _read_state()
+    values = []
+    for client in state["clients"].values():
+        if not isinstance(client, dict) or (client.get("revoked") and not include_revoked):
+            continue
+        values.append(client_status(client, state["server_route_id"]))
+    return sorted(values, key=lambda item: float(item.get("paired_at") or 0))
+
+
+def touch_client(client_route_id: str) -> None:
+    with _registry_lock:
+        state = _read_state()
+        client = state["clients"].get(client_route_id)
+        if not isinstance(client, dict) or client.get("revoked"):
+            return
+        client["last_seen_at"] = time.time()
+        client["updated_at"] = client["last_seen_at"]
+        state["updated_at"] = client["updated_at"]
+        _write_state(state)
+
+
+def revoke_client(client_route_id: str, reason: str = "forgotten_by_desktop") -> dict | None:
+    with _registry_lock:
+        state = _read_state()
+        client = state["clients"].get(client_route_id)
+        if not isinstance(client, dict):
+            return None
+        client["revoked"] = True
+        client["revoked_at"] = time.time()
+        client["revoke_reason"] = reason
+        client["updated_at"] = client["revoked_at"]
+        state["updated_at"] = client["updated_at"]
+        _write_state(state)
+        return client_status(client, state["server_route_id"])
+
+
+def clear_pairing_state(client_route_id: str = "") -> dict:
+    state = _read_state()
+    if client_route_id:
+        revoke_client(client_route_id)
+    else:
+        for route_id in list(state["clients"]):
+            revoke_client(route_id)
+    return pairing_status()
+
+
+def is_paired(client_route_id: str = "") -> bool:
+    return bool(get_client(client_route_id)) if client_route_id else bool(list_clients())
 
 
 def pairing_status() -> dict:
-    state = _read_state()
-    token = token_status()
-    paired = bool(state.get("paired"))
+    clients = list_clients()
     return {
-        "paired": paired,
-        "state": "paired" if paired else ("waiting_for_scan" if token["active"] else "not_paired"),
-        "paired_at": state.get("paired_at", 0),
-        "updated_at": state.get("updated_at", 0),
-        "remote_name": state.get("remote_name", ""),
-        "remote_device_id": state.get("remote_device_id", 0),
-        "identity_fingerprint": state.get("identity_fingerprint", ""),
-        "identity_fingerprint_short": str(state.get("identity_fingerprint", ""))[:16],
-        "previous_identity_fingerprint": state.get("previous_identity_fingerprint", ""),
-        "replacement_count": int(state.get("replacement_count", 0)),
-        "token": token,
+        "paired": bool(clients),
+        "state": "paired" if clients else ("waiting_for_scan" if token_status()["active"] else "not_paired"),
+        "server_route_id": server_route_id(),
+        "pairing_topic": LinkTopics(server_route_id()).pairing,
+        "client_count": len(clients),
+        "clients": clients,
+        "token": token_status(),
+        # Transitional summary fields for the current Desktop renderer.
+        "remote_name": clients[0].get("signal_name", "") if clients else "",
+        "remote_device_id": clients[0].get("signal_device_id", 0) if clients else 0,
+        "identity_fingerprint": clients[0].get("identity_fingerprint", "") if clients else "",
+        "identity_fingerprint_short": clients[0].get("identity_fingerprint_short", "") if clients else "",
     }

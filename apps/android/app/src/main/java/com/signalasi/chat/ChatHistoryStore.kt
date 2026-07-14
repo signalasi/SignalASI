@@ -1,7 +1,6 @@
 package com.signalasi.chat
 
 import android.content.Context
-import android.content.SharedPreferences
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -15,7 +14,6 @@ data class StoredIncomingMessage(
 
 object ChatHistoryStore {
     private const val HISTORY_PREFS = "signalasi_chat_history"
-    private const val OLD_HISTORY_PREFS = "hermes_chat_history"
     private const val HISTORY_KEY = "messages"
     private const val HISTORY_UPDATED_KEY = "updated_at"
     private const val MAX_SAVED_MESSAGES_PER_CONTACT = 500
@@ -34,7 +32,6 @@ object ChatHistoryStore {
         if (contactId.isBlank() || cleanContent.isBlank()) return 0L
         val appContext = context.applicationContext
         AppStore.ensureInitialized(appContext)
-        migrateHistoryPrefs(appContext)
         val prefs = appContext.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
         val root = runCatching {
             JSONObject(prefs.getString(HISTORY_KEY, null).orEmpty())
@@ -67,7 +64,6 @@ object ChatHistoryStore {
     fun appendIncoming(context: Context, payload: String): StoredIncomingMessage? {
         val appContext = context.applicationContext
         AppStore.ensureInitialized(appContext)
-        migrateHistoryPrefs(appContext)
         val parsed = parseIncoming(appContext, payload)
         if (parsed.content.isBlank()) return null
         if (parsed.contactId == CONTACT_HERMES) {
@@ -189,7 +185,6 @@ object ChatHistoryStore {
     private fun markMessageTrace(context: Context, contactId: String, messageId: Long, stage: String, detail: String, status: String) {
         if (contactId.isBlank() || messageId <= 0L) return
         val appContext = context.applicationContext
-        migrateHistoryPrefs(appContext)
         val prefs = appContext.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
         val root = runCatching {
             JSONObject(prefs.getString(HISTORY_KEY, null).orEmpty())
@@ -320,31 +315,6 @@ object ChatHistoryStore {
             if (trace.optJSONObject(i)?.optString("stage") == stage) return true
         }
         return false
-    }
-
-    private fun migrateHistoryPrefs(context: Context) {
-        val oldPrefs = context.getSharedPreferences(OLD_HISTORY_PREFS, Context.MODE_PRIVATE)
-        val newPrefs = context.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
-        if (oldPrefs.all.isEmpty() || newPrefs.all.isNotEmpty()) return
-        val editor = newPrefs.edit()
-        copySharedPreferences(oldPrefs, editor)
-        editor.commit()
-    }
-
-    private fun copySharedPreferences(from: SharedPreferences, to: SharedPreferences.Editor) {
-        from.all.forEach { (key, value) ->
-            when (value) {
-                is String -> to.putString(key, value)
-                is Int -> to.putInt(key, value)
-                is Long -> to.putLong(key, value)
-                is Boolean -> to.putBoolean(key, value)
-                is Float -> to.putFloat(key, value)
-                is Set<*> -> {
-                    @Suppress("UNCHECKED_CAST")
-                    to.putStringSet(key, value as Set<String>)
-                }
-            }
-        }
     }
 
     private fun trim(array: JSONArray): JSONArray {
