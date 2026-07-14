@@ -14,6 +14,8 @@ const packagedTaskWorkspace = path.join(resources, "signalasi-link", "backend", 
 const packagedBackendDir = path.dirname(backendMain);
 const packagedCustomAgent = path.join(packagedBackendDir, "custom_agent_stdio.py");
 const packagedMcpWrapper = path.join(packagedBackendDir, "mcp_agent_wrapper.py");
+const packagedPhoneToolBroker = path.join(packagedBackendDir, "phone_tool_broker.py");
+const packagedRichOutput = path.join(packagedBackendDir, "rich_output.py");
 const packagedStatusScript = path.join(resources, "app", "scripts", "connector-status.js");
 const packagedStatusDoc = path.join(resources, "app", "docs", "CONNECTOR_STATUS.md");
 const packagedUiSmokeDir = path.join(packageDir, "ui-smoke");
@@ -128,6 +130,8 @@ async function main() {
   assertExists(packagedTaskWorkspace, "Packaged task workspace module");
   assertExists(packagedCustomAgent, "Packaged Custom Agent wrapper");
   assertExists(packagedMcpWrapper, "Packaged MCP wrapper");
+  assertExists(packagedPhoneToolBroker, "Packaged phone tool broker");
+  assertExists(packagedRichOutput, "Packaged rich output module");
   assertExists(sidecar, "Packaged Signal sidecar");
   assertExists(bundledPython, "Bundled Python");
   assertExists(packagedStatusScript, "Packaged connector status script");
@@ -136,8 +140,8 @@ async function main() {
   console.log("[packaged-smoke] checking bundled Python dependencies");
   const pythonCheck = spawn(
     bundledPython,
-    ["-c", "import cryptography, fastapi, multipart, uvicorn, paho.mqtt.client, sqlalchemy, pydantic, websockets, qrcode; print('ok')"],
-    { windowsHide: true }
+    ["-c", "import cryptography, fastapi, multipart, uvicorn, paho.mqtt.client, sqlalchemy, pydantic, websockets, qrcode, mqtt_bridge, phone_tool_broker, rich_output; print('ok')"],
+    { cwd: packagedBackendDir, windowsHide: true }
   );
   await new Promise((resolve, reject) => {
     pythonCheck.on("error", reject);

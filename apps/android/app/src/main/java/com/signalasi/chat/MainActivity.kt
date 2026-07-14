@@ -1415,7 +1415,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             agentRuntimeConversationIds[runtime] = conversationId
             agentRuntimeTurnIds[runtime] = turnId
             val outcome = runCatching {
-                runtime.submitGoal(goal, conversationContext, turnId)
+                var state = runtime.submitGoal(goal, conversationContext, turnId)
+                var approvals = 0
+                while (state.pendingAction != null &&
+                    state.phase != AgentPhase.WAITING_RESPONSE &&
+                    state.pendingAction.risk != AgentRisk.BLOCKED &&
+                    approvals++ < 32
+                ) {
+                    state = runtime.approveNextAction(highRiskConfirmed = true)
+                }
+                state
             }
             val state = outcome.getOrElse { runtime.snapshot() }
             appendEvent(
