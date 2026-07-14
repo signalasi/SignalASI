@@ -413,7 +413,12 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         return reply
 
     def publish_result(task: dict) -> None:
-        reply = str(task.get("result") or "")
+        from rich_output import build_rich_output
+        reply, rich_output = build_rich_output(
+            str(task.get("result") or ""),
+            list(task.get("output_files") or []),
+            str(task.get("task_id") or ""),
+        )
         reply_payload = {
             "type": "text",
             "content": reply,
@@ -434,6 +439,8 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             "sender": "other",
             "time": time.time(),
         }
+        if rich_output:
+            reply_payload["rich_output"] = rich_output
         _publish_phone_payload(mqttc, wire_payload, reply_payload)
 
     if agent_id == "codex":

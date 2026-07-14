@@ -16,7 +16,8 @@ data class AgentTranscriptEntry(
     val dedupeKey: String = "",
     val conversationId: String = "",
     val turnId: String = "",
-    val taskId: String = ""
+    val taskId: String = "",
+    val richOutputJson: String = ""
 )
 
 data class AgentConversation(
@@ -249,7 +250,8 @@ class AgentTranscriptStore(context: Context) {
         timestampMillis: Long = System.currentTimeMillis(),
         conversationId: String = activeConversation().id,
         turnId: String = "",
-        taskId: String = ""
+        taskId: String = "",
+        richOutputJson: String = ""
     ): Boolean {
         val cleanText = text.trim().take(MAX_TEXT_CHARACTERS)
         if (cleanText.isBlank()) return false
@@ -260,7 +262,8 @@ class AgentTranscriptStore(context: Context) {
         current += AgentTranscriptEntry(
             id = UUID.randomUUID().toString(), role = role, text = cleanText,
             timestampMillis = timestampMillis, dedupeKey = cleanKey,
-            conversationId = conversationId, turnId = turnId, taskId = taskId
+            conversationId = conversationId, turnId = turnId, taskId = taskId,
+            richOutputJson = AgentRichContentCodec.normalize(richOutputJson)
         )
         saveEntries(boundedEntries(current))
         touchConversation(conversationId, role, cleanText, timestampMillis)
@@ -276,7 +279,8 @@ class AgentTranscriptStore(context: Context) {
         timestampMillis: Long = System.currentTimeMillis(),
         conversationId: String = activeConversation().id,
         turnId: String = "",
-        taskId: String = ""
+        taskId: String = "",
+        richOutputJson: String = ""
     ): Boolean {
         val cleanText = text.trim().take(MAX_TEXT_CHARACTERS)
         val cleanKey = dedupeKey.trim().take(MAX_DEDUPE_KEY_CHARACTERS)
@@ -286,17 +290,21 @@ class AgentTranscriptStore(context: Context) {
         val index = current.indexOfFirst { it.conversationId == conversationId && it.dedupeKey == cleanKey }
         if (index >= 0) {
             val previous = current[index]
-            if (previous.text == cleanText && previous.role == role) return false
+            val normalizedRichOutput = AgentRichContentCodec.normalize(richOutputJson)
+            if (previous.text == cleanText && previous.role == role &&
+                (normalizedRichOutput.isBlank() || normalizedRichOutput == previous.richOutputJson)
+            ) return false
             current[index] = previous.copy(
                 id = UUID.randomUUID().toString(), role = role, text = cleanText,
                 timestampMillis = timestampMillis,
                 turnId = turnId.ifBlank { previous.turnId },
-                taskId = taskId.ifBlank { previous.taskId }
+                taskId = taskId.ifBlank { previous.taskId },
+                richOutputJson = normalizedRichOutput.ifBlank { previous.richOutputJson }
             )
         } else {
             current += AgentTranscriptEntry(
                 UUID.randomUUID().toString(), role, cleanText, timestampMillis, cleanKey,
-                conversationId, turnId, taskId
+                conversationId, turnId, taskId, AgentRichContentCodec.normalize(richOutputJson)
             )
         }
         saveEntries(boundedEntries(current))
@@ -445,7 +453,7 @@ class AgentTranscriptStore(context: Context) {
                 .put("id", entry.id).put("role", entry.role.name).put("text", entry.text)
                 .put("timestamp", entry.timestampMillis).put("dedupe_key", entry.dedupeKey)
                 .put("conversation_id", entry.conversationId).put("turn_id", entry.turnId)
-                .put("task_id", entry.taskId))
+                .put("task_id", entry.taskId).put("rich_output", entry.richOutputJson))
         }
         preferences.writeString(KEY_ITEMS, array.toString())
     }
@@ -481,7 +489,8 @@ class AgentTranscriptStore(context: Context) {
                     text = text, timestampMillis = item.optLong("timestamp", System.currentTimeMillis()),
                     dedupeKey = item.optString("dedupe_key").take(MAX_DEDUPE_KEY_CHARACTERS),
                     conversationId = item.optString("conversation_id").ifBlank { fallbackConversationId },
-                    turnId = item.optString("turn_id"), taskId = item.optString("task_id")
+                    turnId = item.optString("turn_id"), taskId = item.optString("task_id"),
+                    richOutputJson = AgentRichContentCodec.normalize(item.optString("rich_output"))
                 ))
             }
         }

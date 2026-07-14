@@ -704,7 +704,8 @@ class MobileNativeAgent(
         sourceMessageId: Long,
         contactId: String,
         content: String,
-        success: Boolean = true
+        success: Boolean = true,
+        richOutputJson: String = ""
     ): AgentUiState? {
         if (sourceMessageId <= 0L || (success && content.isBlank())) return null
         val pendingResult = lastActionResult ?: return null
@@ -735,7 +736,8 @@ class MobileNativeAgent(
             message = response,
             metadata = pendingResult.metadata + mapOf(
                 "awaiting_response" to "false",
-                "response_received_at" to System.currentTimeMillis().toString()
+                "response_received_at" to System.currentTimeMillis().toString(),
+                "rich_output" to AgentRichContentCodec.normalize(richOutputJson)
             )
         )
         val responseStatus = if (success) AgentActionStatus.COMPLETED else AgentActionStatus.FAILED

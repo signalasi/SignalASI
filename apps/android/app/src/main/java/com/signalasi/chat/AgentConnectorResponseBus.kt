@@ -13,6 +13,7 @@ data class AgentConnectorResponse(
     val inputTokens: Long = 0L,
     val outputTokens: Long = 0L,
     val costMicros: Long = 0L,
+    val richOutputJson: String = "",
     val receivedAtMillis: Long = System.currentTimeMillis()
 )
 
@@ -75,6 +76,7 @@ object AgentConnectorResponseStore {
                             inputTokens = item.optLong("input_tokens", 0L),
                             outputTokens = item.optLong("output_tokens", 0L),
                             costMicros = item.optLong("cost_micros", 0L),
+                            richOutputJson = AgentRichContentCodec.normalize(item.optString("rich_output")),
                             receivedAtMillis = receivedAt
                         )
                     )
@@ -110,6 +112,7 @@ object AgentConnectorResponseStore {
                     .put("input_tokens", response.inputTokens)
                     .put("output_tokens", response.outputTokens)
                     .put("cost_micros", response.costMicros)
+                    .put("rich_output", AgentRichContentCodec.normalize(response.richOutputJson))
                     .put("received_at", response.receivedAtMillis)
             )
         }

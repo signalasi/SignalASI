@@ -192,7 +192,7 @@ copyRecursive(path.join(root, "scripts"), path.join(appDir, "scripts"), {
 copyRecursive(path.join(root, "docs"), path.join(appDir, "docs"));
 writeJson(path.join(appDir, "package.json"), {
   name: "signalasi-desktop",
-  version: "0.1.1",
+  version: "0.1.2",
   main: "src/main.js",
   private: true,
   scripts: {

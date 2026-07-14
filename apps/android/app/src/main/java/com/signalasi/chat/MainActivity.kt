@@ -568,7 +568,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             AgentConnectorResponse(
                 sourceMessageId = sourceMessageId,
                 contactId = envelope?.optString("contact_id").orEmpty().ifBlank { message.contact.id },
-                content = message.content
+                content = message.content,
+                richOutputJson = AgentRichContentCodec.fromEnvelope(envelope)
             )
         )
     }
@@ -582,7 +583,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     sourceMessageId = response.sourceMessageId,
                     contactId = response.contactId,
                     content = response.content,
-                    success = response.success
+                    success = response.success,
+                    richOutputJson = response.richOutputJson
                 ) ?: runtime.snapshot()
             activeAgentTasks.remove(response.sourceMessageId)
             runOnUiThread {
@@ -688,7 +690,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     msg.content,
                     conversationId = responseConversationId,
                     turnId = responseTurnId,
-                    taskId = envelope?.optString("task_id").orEmpty()
+                    taskId = envelope?.optString("task_id").orEmpty(),
+                    richOutputJson = AgentRichContentCodec.fromEnvelope(envelope)
                 )
                 if (responseConversationId == agentTranscriptStore.activeConversation().id) {
                     renderAgentTranscript(agentTranscriptStore.list(responseConversationId))
@@ -2733,7 +2736,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 dedupeKey = "result:$planId:$actionId:${result.hashCode()}",
                 conversationId = conversationId,
                 turnId = turnId,
-                taskId = state.sessionId
+                taskId = state.sessionId,
+                richOutputJson = state.lastActionResult?.metadata?.get("rich_output").orEmpty()
             )
         }
     }
@@ -2794,21 +2798,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 attachAgentTranscriptActions(this, entry)
             })
         }
-        AgentTranscriptRole.ASSISTANT -> TextView(this).apply {
-            text = entry.text
-            setTextColor(getColorCompat(R.color.text_primary))
-            textSize = 16f
-            setLineSpacing(dp(5).toFloat(), 1f)
-            setTextIsSelectable(true)
-            attachAgentTranscriptActions(this, entry)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                topMargin = dp(18)
-                marginEnd = dp(22)
-            }
-        }
+        AgentTranscriptRole.ASSISTANT -> AgentRichContentView(
+            activity = this,
+            onTextViewReady = { textView -> attachAgentTranscriptActions(textView, entry) },
+            onAction = { action -> handleAgentRichAction(entry, action) },
+            onFormSubmit = { block, values -> handleAgentRichForm(entry, block, values) }
+        ).create(entry)
         AgentTranscriptRole.PROCESS -> TextView(this).apply {
             text = if (entry.taskId.isNotBlank()) "${entry.text}  ›" else entry.text
             setTextColor(getColorCompat(R.color.text_secondary))
@@ -2872,6 +2867,75 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
                 .show()
             true
+        }
+    }
+
+    private fun handleAgentRichAction(entry: AgentTranscriptEntry, action: AgentRichAction) {
+        when (action.verb) {
+            "copy" -> {
+                val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText(action.label, action.value))
+                Toast.makeText(this, getString(R.string.toast_copied), Toast.LENGTH_SHORT).show()
+            }
+            "open_uri" -> {
+                val uri = runCatching { Uri.parse(action.value) }.getOrNull()
+                if (uri?.scheme?.lowercase() in setOf("https", "content", "file", "android.resource")) {
+                    runCatching { startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                        .onFailure { Toast.makeText(this, action.value, Toast.LENGTH_SHORT).show() }
+                }
+            }
+            "set_input" -> setAgentRichInput(action.value, submit = false)
+            "submit_prompt" -> setAgentRichInput(action.value, submit = true)
+            "approve_task", "reject_task" -> runAgentRichTaskDecision(
+                entry,
+                approved = action.verb == "approve_task"
+            )
+            else -> Toast.makeText(this, action.label, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun handleAgentRichForm(
+        entry: AgentTranscriptEntry,
+        block: AgentRichBlock,
+        values: Map<String, String>
+    ) {
+        val response = JSONObject().apply {
+            put("form_id", block.id)
+            put("task_id", entry.taskId)
+            put("values", JSONObject(values))
+        }
+        setAgentRichInput("${block.title.ifBlank { "Form response" }}: $response", submit = true)
+    }
+
+    private fun setAgentRichInput(value: String, submit: Boolean) {
+        if (value.isBlank()) return
+        agentGoalInput.setText(value)
+        agentGoalInput.setSelection(agentGoalInput.text?.length ?: 0)
+        if (submit) submitAgentGoal() else {
+            agentGoalInput.requestFocus()
+            getSystemService(InputMethodManager::class.java)
+                .showSoftInput(agentGoalInput, InputMethodManager.SHOW_IMPLICIT)
+        }
+    }
+
+    private fun runAgentRichTaskDecision(entry: AgentTranscriptEntry, approved: Boolean) {
+        val runtimes = buildList {
+            addAll(activeAgentTasks.values)
+            addAll(provisionalAgentTasks)
+            add(mobileNativeAgent)
+        }.distinct()
+        val runtime = runtimes.firstOrNull { it.snapshot().sessionId == entry.taskId }
+        if (runtime == null) {
+            Toast.makeText(this, getString(R.string.agent_task_detail_unavailable), Toast.LENGTH_SHORT).show()
+            return
+        }
+        thread(name = "signalasi-rich-decision") {
+            val state = if (approved) {
+                runtime.approveNextAction(highRiskConfirmed = true)
+            } else {
+                runtime.cancelCurrentTask()
+            }
+            runOnUiThread { renderAgentState(state, entry.conversationId, entry.turnId) }
         }
     }
 
