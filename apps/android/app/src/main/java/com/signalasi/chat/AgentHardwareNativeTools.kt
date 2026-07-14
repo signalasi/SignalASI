@@ -1198,7 +1198,7 @@ object AgentHardwareNativeTools {
                     "observed_at_epoch_ms" to snapshot.observedAtEpochMillis.coerceAtLeast(0L),
                     "scope" to "app_visible"
                 ),
-                message = "App-visible battery status read"
+                message = "Battery ${snapshot.percent}% / charging=${snapshot.charging} / status=${snapshot.status}"
             )
         }
     )

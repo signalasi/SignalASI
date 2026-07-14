@@ -4858,6 +4858,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         notificationReplyAction(request)?.let { return it }
         AgentSystemToolPlanner.actionFor(request)?.let { return it }
         installedAppOpenAction(request)?.let { return it }
+        phoneBatteryAction(request)?.let { return it }
         explicitCallableTargetAction(request)?.let { return it }
         return when {
             lower == "back" || lower.contains("go back") -> AgentAction(
@@ -4917,7 +4918,6 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 )
             lower.contains("device status") ||
                 lower.contains("phone status") ||
-                lower.contains("battery status") ||
                 lower.contains("storage status") ||
                 lower.contains("network status") -> AgentAction(
                     id = "read-device-status",
@@ -4993,6 +4993,44 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             else -> informationQueryAction(request)
                 ?: draftPlanAction(request)
         }
+    }
+
+    private fun phoneBatteryAction(request: AgentRequest): AgentAction? {
+        val goal = request.goal.lowercase(Locale.US)
+        val batteryQuery = goal.contains("battery status") ||
+            goal.contains("phone battery") ||
+            goal.contains("手机电量") ||
+            goal.contains("手机电池") ||
+            goal.contains("电池电量") ||
+            goal.contains("电量多少") ||
+            goal.contains("查看电量") ||
+            goal.contains("查询电量") ||
+            goal.contains("查电量")
+        if (!batteryQuery) return null
+        val descriptor = request.runtimeContext.nativeTools.firstOrNull {
+            it.id == AgentHardwareNativeTools.BATTERY_STATUS &&
+                it.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE
+        } ?: return null
+        val risk = when (descriptor.risk) {
+            AgentNativeToolRisk.LOW -> AgentRisk.LOW
+            AgentNativeToolRisk.MEDIUM -> AgentRisk.MEDIUM
+            AgentNativeToolRisk.HIGH -> AgentRisk.HIGH
+            AgentNativeToolRisk.BLOCKED -> AgentRisk.BLOCKED
+        }
+        return AgentAction(
+            id = "read-phone-battery",
+            kind = AgentActionKind.CALL_NATIVE_TOOL,
+            target = descriptor.title,
+            risk = risk,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = descriptor.title,
+            parameters = mapOf(
+                "tool_id" to descriptor.id,
+                "tool_version" to descriptor.version,
+                "native_tool_risk" to descriptor.risk.wireValue,
+                "input_json" to "{}"
+            )
+        )
     }
 
     private fun informationQueryAction(request: AgentRequest): AgentAction? {

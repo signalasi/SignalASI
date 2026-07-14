@@ -19,6 +19,16 @@ class GuardedModelAgentPlanner(
         val fallbackPlan = fallback.plan(request)
         val requirements = AgentTaskRequirementAnalyzer.analyze(request.goal)
         if (fallbackPlan.plannerProfile.startsWith("specialized-adapter:")) return fallbackPlan
+        if (fallbackPlan.actions.isNotEmpty() && fallbackPlan.actions.all {
+                it.id == "read-device-status" ||
+                    it.parameters["tool_id"] == AgentHardwareNativeTools.BATTERY_STATUS
+            }
+        ) {
+            return fallbackPlan.copy(
+                plannerProfile = "rule-based-phone-status",
+                routeRationale = "The request explicitly targets this phone's local device status."
+            )
+        }
         if (!settings.enabled || !safetySettingsStore.load().connectorCallsAllowed) {
             return fallbackPlan.copy(plannerProfile = "rule-based-local")
         }
