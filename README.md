@@ -71,6 +71,10 @@ Full test coverage is documented in `docs/testing/README.md`.
 
 Product requirements are documented in `docs/product/PRODUCT_REQUIREMENTS.md`.
 
+The phone-owned Super Agent architecture is specified in
+`docs/product/MOBILE_NATIVE_SUPER_AGENT_IMPLEMENTATION.md`, with its bounded tool-session contract in
+`docs/protocol/Phone-Native-Tool-Session-v1.md`.
+
 Local release gates:
 
 ```bash

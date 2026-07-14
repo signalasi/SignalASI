@@ -3,6 +3,8 @@ package com.signalasi.chat
 import android.content.Context
 import org.json.JSONObject
 import java.util.Locale
+import java.util.UUID
+import kotlinx.coroutines.runBlocking
 
 class GuardedModelAgentPlanner(
     context: Context,
@@ -43,12 +45,7 @@ class GuardedModelAgentPlanner(
         val contact = resolveCloudPlannerContact(settings.cloudContactId)
             ?: return fallbackPlan.copy(plannerProfile = "rule-based-model-unavailable")
         val raw = runCatching {
-            CloudModelClient.sendStructured(
-                appContext,
-                contact,
-                MODEL_PLANNER_SYSTEM_PROMPT,
-                AgentModelPlanningPrompt.build(request, settings, requirements)
-            )
+            modelPlanWithSafeNativeTools(contact, request, settings, requirements)
         }.getOrElse {
             return fallbackPlan.copy(
                 plannerProfile = "rule-based-model-error",
@@ -65,6 +62,65 @@ class GuardedModelAgentPlanner(
                 plannerProfile = "rule-based-invalid-model-plan",
                 routeRationale = "Model output failed local ActionPlan validation; deterministic fallback used."
             )
+    }
+
+    private fun modelPlanWithSafeNativeTools(
+        contact: JSONObject,
+        request: AgentRequest,
+        settings: AgentModelPlannerSettings,
+        requirements: AgentTaskRequirements
+    ): String {
+        val prompt = AgentModelPlanningPrompt.build(request, settings, requirements)
+        val fullRegistry = AgentPhoneNativeToolCatalog.defaultRegistry(
+            context = appContext,
+            screenProvider = { request.screen }
+        )
+        val safeRegistry = fullRegistry.subset { descriptor ->
+            descriptor.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE &&
+                descriptor.risk == AgentNativeToolRisk.LOW &&
+                descriptor.requiredConsents.none { it.required }
+        }
+        val catalog = safeRegistry.descriptors()
+        if (catalog.isEmpty()) {
+            return CloudModelClient.sendStructured(appContext, contact, MODEL_PLANNER_SYSTEM_PROMPT, prompt)
+        }
+        val turnId = UUID.randomUUID().toString()
+        val conversationId = request.conversationContext.conversationId.ifBlank {
+            request.runtimeContext.sessionId
+        }
+        val outcome = runBlocking {
+            AgentModelToolLoop(
+                modelAdapter = CloudModelClient.nativeToolAdapter(appContext, contact, catalog),
+                toolRegistry = safeRegistry
+            ).run(
+                AgentModelToolLoopRequest(
+                    sessionId = request.runtimeContext.sessionId,
+                    conversationId = conversationId,
+                    turnId = turnId,
+                    taskId = turnId,
+                    workspaceId = turnId,
+                    messages = listOf(
+                        AgentModelMessage.system(MODEL_PLANNER_SYSTEM_PROMPT),
+                        AgentModelMessage.user(prompt)
+                    ),
+                    budget = AgentModelToolLoopBudget(
+                        maxRounds = 4,
+                        maxToolCalls = 8,
+                        maxDepth = 2,
+                        maxTokens = 12_000,
+                        maxDurationMillis = 45_000
+                    ),
+                    grantedPermissions = catalog
+                        .flatMap { it.requiredPermissions }
+                        .filter { it.required }
+                        .mapTo(linkedSetOf()) { it.id }
+                )
+            )
+        }
+        if (outcome.status != AgentModelToolLoopStatus.COMPLETED || outcome.assistantText.isBlank()) {
+            error(outcome.error?.message ?: "Model-native tool planning did not complete")
+        }
+        return outcome.assistantText
     }
 
     private fun resolveCloudPlannerContact(preferredId: String): JSONObject? {
@@ -116,6 +172,7 @@ private object AgentModelPlanningPrompt {
         append("TYPE_TEXT requires an exact field_query and text. ")
         append("DELETE_TEXT/PASTE_TEXT require field_query. SWIPE requires direction up/down/left/right. ")
         append("OPEN_APP requires an exact package from inventory. OPEN_URL requires an http/https URL. ")
+        append("CALL_NATIVE_TOOL requires an exact tool_id from the phone-native inventory and arguments matching its input schema. ")
         append("CALL_CONNECTOR/CONTROL_DEVICE require an exact connector_id from inventory. ")
         append("Never create more than ").append(settings.maxActions.coerceIn(1, 12)).append(" actions.\n\n")
         if (settings.multiAgentCoordination) {
@@ -175,6 +232,18 @@ private object AgentModelPlanningPrompt {
                 .append(" | capabilities=").append(it.capabilities.joinToString(",") { capability -> capability.name })
                 .append("\n")
         }
+        append("Phone-native tools:\n")
+        request.runtimeContext.nativeTools
+            .filter { it.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE }
+            .take(if (compact) 24 else 60)
+            .forEach { tool ->
+                append("- ").append(tool.id)
+                    .append(" | ").append(tool.title.take(100))
+                    .append(" | risk=").append(tool.risk.wireValue)
+                    .append(" | input=")
+                    .append(AgentNativeJsonCodec.stringify(tool.inputSchema.document).take(1_200))
+                    .append("\n")
+            }
         }.take(promptLimit)
     }
 

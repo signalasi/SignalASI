@@ -10,8 +10,10 @@ import socket
 import threading
 import time
 import logging
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Mapping
 
 import paho.mqtt.client as mqtt
 
@@ -19,6 +21,7 @@ from api_response import api_error, api_ok
 from agent_gateway import ask_agent_sync, connector_diagnostics
 from agent_task_manager import agent_task_manager
 from codex_app_server import CodexAppServer
+import phone_tool_broker as phone_tool
 from link_delivery import (
     acknowledge_outbound,
     claim_message,
@@ -71,6 +74,32 @@ pending_delivery_acks_lock = threading.Lock()
 pending_outbound_acks: dict[int, tuple[str, str]] = {}
 pending_outbound_acks_lock = threading.Lock()
 
+TOOL_SESSION_START_TYPE = "tool_session_start"
+TOOL_CALL_REQUEST_TYPE = "tool_call_request"
+TOOL_CALL_RESULT_TYPE = "tool_call_result"
+TOOL_CALL_CANCEL_TYPE = "tool_call_cancel"
+
+
+class PhoneToolSessionRoutingError(RuntimeError):
+    """Raised when a phone tool message is not bound to its paired session."""
+
+
+@dataclass
+class _PhoneToolSession:
+    session_id: str
+    task_id: str
+    turn_id: str
+    manifest_hash: str
+    conversation_id: str
+    client_route_id: str
+    signal_name: str
+    mqttc: Any
+    broker: phone_tool.PhoneToolBroker
+
+
+phone_tool_sessions: dict[str, _PhoneToolSession] = {}
+phone_tool_sessions_lock = threading.RLock()
+
 
 def _client_topics(client_route_id: str) -> LinkTopics:
     return LinkTopics(server_route_id(), client_route_id)
@@ -94,6 +123,359 @@ def _wire_control_topic(wire_payload: dict) -> str:
 def _wire_remote_name(wire_payload: dict) -> str:
     client = _wire_client(wire_payload)
     return str((client or {}).get("signal_name") or "")
+
+
+def _phone_tool_identifier(name: str, value: object) -> str:
+    text = str(value or "")
+    if not text or len(text) > phone_tool.MAX_ID_CHARS or any(ord(char) < 0x20 for char in text):
+        raise PhoneToolSessionRoutingError(f"invalid {name}")
+    return text
+
+
+def _phone_tool_manifest_hash(value: object) -> str:
+    text = str(value or "")
+    normalized = text.removeprefix("sha256:").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", normalized):
+        raise PhoneToolSessionRoutingError("invalid manifest_hash")
+    return normalized
+
+
+def _normalize_tool_session_start(payload: dict, application_envelope: dict) -> dict:
+    candidate = dict(payload)
+    candidate.setdefault("protocol", phone_tool.PROTOCOL_NAME)
+    candidate.setdefault("version", phone_tool.PROTOCOL_VERSION)
+    candidate.setdefault("message_id", application_envelope.get("message_id"))
+    candidate.setdefault("sent_at", application_envelope.get("sent_at"))
+    candidate.setdefault("expires_at", application_envelope.get("expires_at"))
+    if candidate.get("protocol") != phone_tool.PROTOCOL_NAME or candidate.get("version") != phone_tool.PROTOCOL_VERSION:
+        raise PhoneToolSessionRoutingError("unsupported phone tool session protocol")
+    try:
+        uuid.UUID(str(candidate.get("message_id") or ""))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise PhoneToolSessionRoutingError("invalid tool session message_id") from exc
+
+    now_ms = int(time.time() * 1000)
+    sent_at = candidate.get("sent_at")
+    expires_at = candidate.get("expires_at")
+    if (
+        isinstance(sent_at, bool)
+        or not isinstance(sent_at, int)
+        or isinstance(expires_at, bool)
+        or not isinstance(expires_at, int)
+        or sent_at <= 0
+        or sent_at - now_ms > phone_tool.MAX_CLOCK_SKEW_MS
+        or expires_at <= sent_at
+        or now_ms >= expires_at
+    ):
+        raise PhoneToolSessionRoutingError("invalid or expired tool session timestamps")
+    sequence = candidate.get("sequence")
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence <= 0:
+        raise PhoneToolSessionRoutingError("invalid tool session sequence")
+
+    start_payload = candidate.get("payload") if isinstance(candidate.get("payload"), dict) else {}
+    candidate["session_id"] = _phone_tool_identifier("session_id", candidate.get("session_id"))
+    candidate["task_id"] = _phone_tool_identifier("task_id", candidate.get("task_id"))
+    candidate["turn_id"] = _phone_tool_identifier("turn_id", candidate.get("turn_id"))
+    candidate["manifest_hash"] = _phone_tool_manifest_hash(
+        candidate.get("manifest_hash") or start_payload.get("manifest_hash")
+    )
+    conversation_id = str(candidate.get("conversation_id") or application_envelope.get("conversation_id") or "")
+    link_conversation_id = str(application_envelope.get("conversation_id") or "")
+    if link_conversation_id and conversation_id != link_conversation_id:
+        raise PhoneToolSessionRoutingError("tool session conversation does not match Link envelope")
+    candidate["conversation_id"] = conversation_id
+    return candidate
+
+
+def _tool_broker_envelope(payload: dict, internal_type: str) -> dict:
+    nested = payload.get("envelope")
+    candidate = dict(nested) if isinstance(nested, dict) else dict(payload)
+    if isinstance(nested, dict):
+        for field_name in (
+            "session_id",
+            "task_id",
+            "turn_id",
+            "tool_call_id",
+            "manifest_hash",
+        ):
+            if field_name in payload and str(payload[field_name]) != str(candidate.get(field_name, "")):
+                raise PhoneToolSessionRoutingError(f"outer {field_name} does not match tool envelope")
+    candidate.pop("envelope", None)
+    candidate["type"] = internal_type
+    return candidate
+
+
+def _session_for_authenticated_route(
+    session_id: str,
+    client_route_id: str,
+    signal_name: str,
+) -> _PhoneToolSession:
+    with phone_tool_sessions_lock:
+        session = phone_tool_sessions.get(session_id)
+    if session is None:
+        raise PhoneToolSessionRoutingError(f"unknown phone tool session {session_id!r}")
+    paired_client = get_client(client_route_id)
+    if (
+        session.client_route_id != client_route_id
+        or session.signal_name != signal_name
+        or paired_client is None
+        or str(paired_client.get("signal_name") or "") != signal_name
+    ):
+        raise PhoneToolSessionRoutingError("phone tool session does not belong to authenticated client")
+    return session
+
+
+def _publish_phone_tool_envelope(session_id: str, envelope: dict) -> None:
+    with phone_tool_sessions_lock:
+        session = phone_tool_sessions.get(session_id)
+    if session is None:
+        raise PhoneToolSessionRoutingError("phone tool session is no longer active")
+    paired_client = get_client(session.client_route_id)
+    if paired_client is None or str(paired_client.get("signal_name") or "") != session.signal_name:
+        raise PhoneToolSessionRoutingError("phone tool session pairing is no longer active")
+    mqttc = session.mqttc
+    if mqttc is None or (hasattr(mqttc, "is_connected") and not mqttc.is_connected()):
+        raise PhoneToolSessionRoutingError("MQTT is not connected")
+
+    transport_types = {
+        phone_tool.REQUEST_TYPE: TOOL_CALL_REQUEST_TYPE,
+        phone_tool.CANCEL_TYPE: TOOL_CALL_CANCEL_TYPE,
+    }
+    transport_type = transport_types.get(str(envelope.get("type") or ""))
+    if not transport_type:
+        raise PhoneToolSessionRoutingError("unsupported outbound phone tool envelope")
+    transport_payload = {
+        **envelope,
+        "type": transport_type,
+        "conversation_id": session.conversation_id,
+    }
+    with phone_publish_lock:
+        info = _publish_to_registered_client(
+            mqttc,
+            paired_client,
+            transport_payload,
+            "control",
+        )
+    if info.rc != mqtt.MQTT_ERR_SUCCESS:
+        raise PhoneToolSessionRoutingError(f"phone tool publish failed rc={info.rc}")
+
+
+def _register_phone_tool_session(
+    mqttc,
+    paired_client: dict,
+    application_envelope: dict,
+    payload: dict,
+) -> _PhoneToolSession:
+    start = _normalize_tool_session_start(payload, application_envelope)
+    session_id = start["session_id"]
+    client_route_id = str(paired_client["client_route_id"])
+    signal_name = str(paired_client["signal_name"])
+    with phone_tool_sessions_lock:
+        existing = phone_tool_sessions.get(session_id)
+        if existing is not None:
+            matches = (
+                existing.client_route_id == client_route_id
+                and existing.signal_name == signal_name
+                and existing.task_id == start["task_id"]
+                and existing.turn_id == start["turn_id"]
+                and existing.manifest_hash == start["manifest_hash"]
+                and existing.conversation_id == start["conversation_id"]
+            )
+            if not matches:
+                raise PhoneToolSessionRoutingError("tool session identity or policy binding changed")
+            existing.mqttc = mqttc
+            return existing
+
+        broker = phone_tool.PhoneToolBroker(
+            lambda envelope: _publish_phone_tool_envelope(session_id, envelope)
+        )
+        session = _PhoneToolSession(
+            session_id=session_id,
+            task_id=start["task_id"],
+            turn_id=start["turn_id"],
+            manifest_hash=start["manifest_hash"],
+            conversation_id=start["conversation_id"],
+            client_route_id=client_route_id,
+            signal_name=signal_name,
+            mqttc=mqttc,
+            broker=broker,
+        )
+        phone_tool_sessions[session_id] = session
+    log.info("Phone tool session registered session=%s client=%s", session_id, client_route_id)
+    return session
+
+
+def _receive_phone_tool_result(
+    mqttc,
+    paired_client: dict,
+    application_envelope: dict,
+    payload: dict,
+) -> dict:
+    envelope = _tool_broker_envelope(payload, phone_tool.RESPONSE_TYPE)
+    session = _session_for_authenticated_route(
+        str(envelope.get("session_id") or ""),
+        str(paired_client["client_route_id"]),
+        str(paired_client["signal_name"]),
+    )
+    if str(application_envelope.get("conversation_id") or "") != session.conversation_id:
+        raise PhoneToolSessionRoutingError("tool result conversation does not match phone tool session")
+    if envelope.get("conversation_id") and str(envelope["conversation_id"]) != session.conversation_id:
+        raise PhoneToolSessionRoutingError("tool result envelope conversation does not match phone tool session")
+    session.mqttc = mqttc
+    return session.broker.receive_response(envelope)
+
+
+def _receive_phone_tool_cancel(
+    mqttc,
+    paired_client: dict,
+    application_envelope: dict,
+    payload: dict,
+) -> dict:
+    cancel = _tool_broker_envelope(payload, phone_tool.CANCEL_TYPE)
+    phone_tool.validate_phone_tool_envelope(cancel, expected_type=phone_tool.CANCEL_TYPE)
+    session = _session_for_authenticated_route(
+        str(cancel.get("session_id") or ""),
+        str(paired_client["client_route_id"]),
+        str(paired_client["signal_name"]),
+    )
+    if str(application_envelope.get("conversation_id") or "") != session.conversation_id:
+        raise PhoneToolSessionRoutingError("tool cancellation conversation does not match phone tool session")
+    if cancel.get("conversation_id") and str(cancel["conversation_id"]) != session.conversation_id:
+        raise PhoneToolSessionRoutingError("tool cancellation envelope conversation does not match phone tool session")
+    session.mqttc = mqttc
+    response = {
+        **cancel,
+        "type": phone_tool.RESPONSE_TYPE,
+        "payload": {
+            "status": "cancelled",
+            "result": None,
+            "error": {
+                "code": "phone_cancelled",
+                "message": str(cancel.get("payload", {}).get("reason") or "Phone cancelled tool call"),
+            },
+        },
+    }
+    return session.broker.receive_response(response)
+
+
+def _route_phone_tool_payload(
+    mqttc,
+    paired_client: dict,
+    application_envelope: dict,
+    payload: dict,
+    channel: str,
+) -> bool:
+    message_type = str(payload.get("type") or "")
+    if message_type not in {
+        TOOL_SESSION_START_TYPE,
+        TOOL_CALL_RESULT_TYPE,
+        TOOL_CALL_CANCEL_TYPE,
+    }:
+        return False
+    if application_envelope.get("target_id") != desktop_id():
+        log.warning("Phone tool message rejected: application target does not match this Desktop")
+        return True
+    if channel not in {"up", "control"}:
+        log.warning("Phone tool message rejected on invalid channel=%s", channel)
+        return True
+    try:
+        if message_type == TOOL_SESSION_START_TYPE:
+            _register_phone_tool_session(mqttc, paired_client, application_envelope, payload)
+        elif message_type == TOOL_CALL_RESULT_TYPE:
+            _receive_phone_tool_result(mqttc, paired_client, application_envelope, payload)
+        else:
+            _receive_phone_tool_cancel(mqttc, paired_client, application_envelope, payload)
+    except phone_tool.PhoneToolBrokerError as exc:
+        log.warning("Phone tool broker message rejected type=%s: %s", message_type, exc)
+    except PhoneToolSessionRoutingError as exc:
+        log.warning("Phone tool route rejected type=%s: %s", message_type, exc)
+    return True
+
+
+def request_phone_tool_call(
+    session_id: str,
+    *,
+    call_id: str,
+    sequence: int,
+    tool_id: str,
+    arguments: Mapping[str, Any],
+    task_id: str = "",
+    turn_id: str = "",
+    manifest_hash: str = "",
+    parent_call_id: str = "",
+    approval_handle: str = "",
+    timeout_ms: int | None = None,
+    expires_at: int | None = None,
+    message_id: str = "",
+) -> dict:
+    with phone_tool_sessions_lock:
+        session = phone_tool_sessions.get(str(session_id or ""))
+    if session is None:
+        raise PhoneToolSessionRoutingError(f"unknown phone tool session {session_id!r}")
+    if task_id and task_id != session.task_id:
+        raise PhoneToolSessionRoutingError("task_id does not match phone tool session")
+    if turn_id and turn_id != session.turn_id:
+        raise PhoneToolSessionRoutingError("turn_id does not match phone tool session")
+    if manifest_hash and _phone_tool_manifest_hash(manifest_hash) != session.manifest_hash:
+        raise PhoneToolSessionRoutingError("manifest_hash does not match phone tool session")
+    return session.broker.start_call(
+        session_id=session.session_id,
+        task_id=session.task_id,
+        turn_id=session.turn_id,
+        call_id=call_id,
+        manifest_hash=session.manifest_hash,
+        sequence=sequence,
+        tool_id=tool_id,
+        arguments=arguments,
+        parent_call_id=parent_call_id,
+        approval_handle=approval_handle,
+        timeout_ms=timeout_ms,
+        expires_at=expires_at,
+        message_id=message_id,
+    )
+
+
+def wait_for_phone_tool_result(
+    session_id: str,
+    call_id: str,
+    timeout_ms: int | None = None,
+) -> dict:
+    with phone_tool_sessions_lock:
+        session = phone_tool_sessions.get(str(session_id or ""))
+    if session is None:
+        raise PhoneToolSessionRoutingError(f"unknown phone tool session {session_id!r}")
+    return session.broker.wait_for_result(call_id, timeout_ms)
+
+
+def cancel_phone_tool_call(
+    session_id: str,
+    call_id: str,
+    reason: str = "cancelled by Desktop",
+) -> dict | None:
+    with phone_tool_sessions_lock:
+        session = phone_tool_sessions.get(str(session_id or ""))
+    if session is None:
+        raise PhoneToolSessionRoutingError(f"unknown phone tool session {session_id!r}")
+    return session.broker.cancel_call(call_id, reason)
+
+
+def _close_phone_tool_sessions(client_route_id: str = "", reason: str = "session closed") -> list[str]:
+    with phone_tool_sessions_lock:
+        sessions = [
+            session
+            for session in phone_tool_sessions.values()
+            if not client_route_id or session.client_route_id == client_route_id
+        ]
+    for session in sessions:
+        session.broker.close(reason)
+    with phone_tool_sessions_lock:
+        for session in sessions:
+            if phone_tool_sessions.get(session.session_id) is session:
+                phone_tool_sessions.pop(session.session_id, None)
+    return [session.session_id for session in sessions]
+
+
+start_phone_tool_call = request_phone_tool_call
 
 
 def _subscribe_client(mqttc, client: dict) -> None:
@@ -573,6 +955,15 @@ def on_message(mqttc, userdata, msg):
                 "delivery_trace": trace,
             })
 
+        if _route_phone_tool_payload(
+            mqttc,
+            paired_client,
+            application_envelope,
+            payload,
+            channel,
+        ):
+            return
+
         content = payload.get("content", "")
         contact_id = payload.get("contact_id", "hermes")
         agent_id = _agent_id_from_contact(contact_id, payload.get("agent_id"))
@@ -585,6 +976,7 @@ def on_message(mqttc, userdata, msg):
         log.info(f"MQTT received: [{msg_type}] {content[:50]}")
 
         if msg_type == "client_revoked":
+            _close_phone_tool_sessions(client_route_id, "paired phone revoked this Desktop")
             revoke_client(client_route_id, str(payload.get("reason") or "forgotten_by_client"))
             remove_peer_signal_session(
                 paired_client["signal_name"], int(paired_client.get("signal_device_id") or 1)
@@ -796,7 +1188,15 @@ def capability_manifest(client_route_id: str = "") -> dict:
         "agents": mobile_connector_agents(client_route_id),
         "models": [],
         "tools": ["agent_tasks", "voice_stt", "file_transfer"],
-        "features": ["tasks", "task_events", "voice", "files", "reliable_delivery", "multi_client"],
+        "features": [
+            "tasks",
+            "task_events",
+            "voice",
+            "files",
+            "reliable_delivery",
+            "multi_client",
+            "phone_native_tool_session_v1",
+        ],
         "limits": {
             "max_parallel_tasks": int(os.environ.get("SIGNALASI_MAX_PARALLEL_TASKS", "4")),
             "max_message_bytes": 524288,
@@ -1108,6 +1508,7 @@ def start_background():
 def stop():
     global client, running
     running = False
+    _close_phone_tool_sessions(reason="Desktop MQTT bridge stopped")
     if client:
         client.disconnect()
         client = None

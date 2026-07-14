@@ -8,6 +8,7 @@ data class AgentRuntimeContext(
     val highRiskGuard: Boolean,
     val memoryCapture: Boolean,
     val systemTools: List<AgentSystemTool>,
+    val nativeTools: List<AgentNativeToolDescriptor> = emptyList(),
     val callableTargets: List<AgentCallableTarget>,
     val memories: List<AgentMemoryItem>,
     val knowledgeItems: List<AgentKnowledgeItem>,
@@ -15,7 +16,7 @@ data class AgentRuntimeContext(
     val createdAtMillis: Long = System.currentTimeMillis()
 ) {
     val callableCount: Int
-        get() = systemTools.size + callableTargets.size
+        get() = nativeTools.size + callableTargets.size
 
     fun compactSummary(): String = buildString {
         append("session=").append(sessionId)
@@ -27,6 +28,7 @@ data class AgentRuntimeContext(
         append("; battery=").append(screen.deviceStatus.batteryPercent)
         append("; network=").append(screen.deviceStatus.network)
         append("; tools=").append(systemTools.size)
+        append("; native_tools=").append(nativeTools.size)
         append("; targets=").append(callableTargets.size)
         append("; memories=").append(memories.size)
         append("; knowledge=").append(knowledgeStats.itemCount)
@@ -56,6 +58,7 @@ object AgentRuntimeContextBuilder {
         callableTargets: List<AgentCallableTarget>,
         memories: List<AgentMemoryItem>,
         systemTools: List<AgentSystemTool> = AgentSystemToolPlanner.availableTools(),
+        nativeTools: List<AgentNativeToolDescriptor> = emptyList(),
         knowledgeItems: List<AgentKnowledgeItem> = emptyList(),
         knowledgeStats: AgentKnowledgeStats = AgentKnowledgeStats()
     ): AgentRuntimeContext = AgentRuntimeContext(
@@ -66,6 +69,7 @@ object AgentRuntimeContextBuilder {
         highRiskGuard = highRiskGuard,
         memoryCapture = memoryCapture,
         systemTools = systemTools,
+        nativeTools = nativeTools,
         callableTargets = callableTargets,
         memories = memories,
         knowledgeItems = knowledgeItems,

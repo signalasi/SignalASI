@@ -71,7 +71,7 @@ class MobileNativeAgent(
     private val planner: AgentPlanner = GuardedModelAgentPlanner(context),
     private val safetySettingsStore: AgentSafetySettingsStore = SharedPreferencesAgentSafetySettingsStore(context),
     private val safetyPolicy: AgentSafetyPolicy = DefaultAgentSafetyPolicy(safetySettingsStore),
-    private val actionExecutor: AgentActionExecutor = AndroidAgentActionExecutor(context),
+    private val actionExecutor: AgentActionExecutor = PhoneExecutionAuthority.guarded(AndroidAgentActionExecutor(context)),
     private val observationController: AgentContinuousObservationController = AgentContinuousObservationController(),
     private val recoveryController: AgentActionRecoveryController = AgentActionRecoveryController(),
     private val memoryStore: AgentMemoryStore = SharedPreferencesAgentMemoryStore(context),
@@ -95,6 +95,13 @@ class MobileNativeAgent(
     private var lastActionResult: AgentActionResult? = null
     private var activeWorkflowExecutionId: String? = null
     private val auditTrail = mutableListOf<AgentAuditEntry>()
+    private val nativeToolRegistry: AgentNativeToolRegistry by lazy {
+        AgentPhoneNativeToolCatalog.defaultRegistry(
+            context = appContext,
+            screenProvider = { currentScreen },
+            actionExecutor = actionExecutor
+        )
+    }
 
     init {
         restoreSession(sessionStore.load())
@@ -164,6 +171,85 @@ class MobileNativeAgent(
     fun knowledgeSourceGroups(): List<AgentKnowledgeSourceGroup> =
         AgentKnowledgeRetriever.sourceGroups(knowledgeStore)
 
+    fun nativeToolCatalog(): List<AgentNativeToolDescriptor> = nativeToolRegistry.descriptors()
+
+    fun invokeNativeTool(
+        toolId: String,
+        input: AgentNativeJsonObject,
+        grantedPermissions: Set<String> = emptySet(),
+        grantedConsents: Set<String> = emptySet(),
+        cancellationToken: AgentNativeToolCancellationToken = AgentNativeToolCancellationToken.NONE
+    ): AgentNativeToolResult = nativeToolRegistry.invoke(
+        id = toolId,
+        input = input,
+        context = AgentNativeToolInvocationContext(
+            sessionId = sessionId,
+            conversationId = activeConversationContext.conversationId,
+            turnId = activeConversationTurnId,
+            grantedPermissions = grantedPermissions,
+            grantedConsents = grantedConsents,
+            attributes = mapOf("execution_authority" to "signalasi-phone")
+        ),
+        hooks = AgentNativeToolInvocationHooks(cancellationToken = cancellationToken)
+    )
+
+    private fun executeAction(
+        action: AgentAction,
+        screen: ScreenContext,
+        userConfirmed: Boolean = false
+    ): AgentActionResult {
+        if (action.kind != AgentActionKind.CALL_NATIVE_TOOL) return actionExecutor.execute(action, screen)
+        val toolId = action.parameters["tool_id"].orEmpty()
+        val descriptor = nativeToolRegistry.lookup(toolId)?.descriptor
+            ?: return AgentActionResult(action.id, false, "Native tool is not registered: $toolId")
+        val input = runCatching { nativeJsonObject(action.parameters["input_json"].orEmpty()) }
+            .getOrElse { return AgentActionResult(action.id, false, it.message ?: "Invalid native tool input") }
+        val grantedConsents = if (userConfirmed) descriptor.requiredConsents.mapTo(linkedSetOf()) { it.id } else emptySet()
+        val result = nativeToolRegistry.invoke(
+            id = toolId,
+            input = input,
+            context = AgentNativeToolInvocationContext(
+                sessionId = sessionId,
+                conversationId = activeConversationContext.conversationId,
+                turnId = activeConversationTurnId,
+                callerId = "signalasi.mobile_agent.plan",
+                grantedPermissions = descriptor.requiredPermissions.mapTo(linkedSetOf()) { it.id },
+                grantedConsents = grantedConsents,
+                attributes = mapOf(
+                    "execution_authority" to "signalasi-phone",
+                    "confirmation_id" to action.id
+                )
+            )
+        )
+        val renderedOutput = AgentNativeJsonCodec.stringify(result.output).take(8_000)
+        return AgentActionResult(
+            actionId = action.id,
+            success = result.isSuccess,
+            message = result.message.ifBlank { renderedOutput },
+            metadata = mapOf(
+                "native_tool_id" to toolId,
+                "native_tool_status" to result.status.wireValue,
+                "native_tool_output" to renderedOutput,
+                "invocation_id" to result.receipt.invocationId,
+                "provenance" to result.provenance.executorId
+            )
+        )
+    }
+
+    private fun nativeJsonObject(value: String): AgentNativeJsonObject {
+        val source = value.ifBlank { "{}" }
+        val root = JSONObject(source)
+        return root.keys().asSequence().associateWith { key -> nativeJsonValue(root.opt(key)) }
+    }
+
+    private fun nativeJsonValue(value: Any?): Any? = when (value) {
+        null, JSONObject.NULL -> null
+        is JSONObject -> value.keys().asSequence().associateWith { key -> nativeJsonValue(value.opt(key)) }
+        is org.json.JSONArray -> (0 until value.length()).map { index -> nativeJsonValue(value.opt(index)) }
+        is String, is Boolean, is Number -> value
+        else -> value.toString()
+    }
+
     fun searchKnowledge(query: String, limit: Int = 12): List<AgentKnowledgeHit> =
         knowledgeStore.searchRanked(query, limit)
 
@@ -218,6 +304,7 @@ class MobileNativeAgent(
         conversationContext: AgentConversationContext = AgentConversationContext("", "", emptyList(), false),
         turnId: String = ""
     ): AgentUiState {
+        PhoneExecutionAuthority.clearCancellation(sessionId)
         val requestedGoal = goal.trim()
         activeConversationContext = conversationContext
         activeConversationTurnId = turnId
@@ -629,7 +716,10 @@ class MobileNativeAgent(
             allowOutputHandoff = AgentModelPlannerSettingsStore(appContext).load().multiAgentCoordination
         ) ?: hardenedAction
         val executionAction = materializedAction.copy(
-            parameters = materializedAction.parameters + mapOf("original_goal" to currentGoal)
+            parameters = materializedAction.parameters + mapOf(
+                "original_goal" to currentGoal,
+                "_signalasi_task_id" to sessionId
+            )
         )
         if (executionAction.parameters["prompt"] != hardenedAction.parameters["prompt"]) {
             recordAudit(
@@ -637,7 +727,7 @@ class MobileNativeAgent(
                 "action=${hardenedAction.id}; sources=${hardenedAction.outputSourceIds().size}; target=${hardenedAction.target}"
             )
         }
-        lastActionResult = actionExecutor.execute(executionAction, currentScreen)
+        lastActionResult = executeAction(executionAction, currentScreen, userConfirmed)
         phase = AgentPhase.VERIFYING
         val observation = captureVerificationScreen(
             action = hardenedAction,
@@ -900,7 +990,7 @@ class MobileNativeAgent(
         val recovery = recoveryController.recover(action, result, observation) {
             recordAudit(AgentAuditEvent.ACTION_RECOVERY_STARTED, "action:${action.kind}:${action.id}")
             val retryScreen = observation.screen
-            val retryResult = actionExecutor.execute(action, retryScreen)
+            val retryResult = executeAction(action, retryScreen, userConfirmed = true)
             val retryObservation = captureVerificationScreen(action, retryScreen, retryResult)
             AgentRecoveryAttempt(
                 result = applyObservationResult(action, retryResult, retryObservation),
@@ -933,6 +1023,7 @@ class MobileNativeAgent(
     )
 
     fun cancelCurrentTask(): AgentUiState {
+        PhoneExecutionAuthority.requestCancellation(sessionId)
         phase = AgentPhase.CANCELLED
         lastActionResult = AgentActionResult(
             actionId = "agent-cancelled",
@@ -4378,6 +4469,7 @@ class MobileNativeAgent(
         callableTargets = targets,
         memories = memories,
         systemTools = workflowSystemTools() + AgentSystemToolPlanner.availableTools(),
+        nativeTools = nativeToolRegistry.descriptors(),
         knowledgeItems = knowledgeItems,
         knowledgeStats = knowledgeStats
     )
@@ -5474,6 +5566,18 @@ object AgentPlanFactory {
                         it.key == action.parameters["notification_key"] && it.canReply
                     }
             )
+            AgentActionKind.CALL_NATIVE_TOOL -> {
+                val descriptor = request.runtimeContext.nativeTools.firstOrNull {
+                    it.id == action.parameters["tool_id"]
+                }
+                descriptor?.requiredPermissions?.forEach { requirement ->
+                    permissions += AgentPermissionRequirement(
+                        id = requirement.id,
+                        title = requirement.title,
+                        granted = descriptor.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE
+                    )
+                }
+            }
             AgentActionKind.CALL_CONNECTOR,
             AgentActionKind.CONTROL_DEVICE -> {
                 val connectorId = action.parameters["connector_id"]
@@ -5551,6 +5655,7 @@ object AgentPlanFactory {
         AgentActionKind.SWIPE -> "Observe the result and go back if the page changed unexpectedly."
         AgentActionKind.LOCK_SCREEN -> "Wake and unlock the phone manually to continue."
         AgentActionKind.REPLY_NOTIFICATION -> "The sent reply cannot be recalled; report delivery failure immediately."
+        AgentActionKind.CALL_NATIVE_TOOL -> "Use the native tool receipt and its verification evidence before retrying."
         AgentActionKind.CALL_CONNECTOR,
         AgentActionKind.CONTROL_DEVICE -> "Keep the task in chat history and report delivery failure."
         AgentActionKind.IMPORT_WEB_KNOWLEDGE -> "Remove the imported source if extraction or indexing is incorrect."
@@ -5571,6 +5676,7 @@ object AgentPlanFactory {
         AgentActionKind.PASTE_TEXT -> "Clipboard text is pasted into the active input field."
         AgentActionKind.CREATE_NOTIFICATION -> "A local Android notification is created."
         AgentActionKind.REPLY_NOTIFICATION -> "The selected app receives the confirmed notification reply."
+        AgentActionKind.CALL_NATIVE_TOOL -> "The selected phone-native tool returns a locally verified receipt."
         AgentActionKind.CALL_CONNECTOR -> "The task is sent to the paired agent contact."
         AgentActionKind.CONTROL_DEVICE -> "The trusted device connector receives the task."
         AgentActionKind.IMPORT_WEB_KNOWLEDGE -> "The web page is extracted and indexed in Agent knowledge."
@@ -5589,6 +5695,8 @@ object AgentPlanFactory {
         AgentActionKind.SET_ALARM -> 30
         AgentActionKind.CREATE_NOTIFICATION -> 10
         AgentActionKind.REPLY_NOTIFICATION -> 30
+        AgentActionKind.CALL_NATIVE_TOOL -> action.parameters["tool_timeout_seconds"]
+            ?.toIntOrNull()?.coerceIn(1, 120) ?: 30
         else -> 20
     }
 
@@ -5605,6 +5713,7 @@ object AgentPlanFactory {
             }
         }
         AgentActionKind.CONTROL_DEVICE -> "Device route selected because the goal targets Home Assistant or smart devices."
+        AgentActionKind.CALL_NATIVE_TOOL -> "Phone-native tool route selected from the live, locally validated capability catalog."
         AgentActionKind.IMPORT_WEB_KNOWLEDGE -> "Knowledge route selected to extract and index a user-approved web page."
         AgentActionKind.READ_SCREEN,
         AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
@@ -5643,6 +5752,7 @@ object AgentRouteResolver {
                 null -> AgentRouteKind.UNKNOWN
             }
             AgentActionKind.CONTROL_DEVICE -> AgentRouteKind.DEVICE_CONNECTOR
+            AgentActionKind.CALL_NATIVE_TOOL -> AgentRouteKind.LOCAL_SYSTEM
             AgentActionKind.IMPORT_WEB_KNOWLEDGE -> AgentRouteKind.KNOWLEDGE
             AgentActionKind.READ_SCREEN,
             AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
@@ -5964,6 +6074,11 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         AgentActionKind.SET_ALARM -> setAlarm(action)
         AgentActionKind.CREATE_NOTIFICATION -> createLocalNotification(action)
         AgentActionKind.REPLY_NOTIFICATION -> replyToNotification(action)
+        AgentActionKind.CALL_NATIVE_TOOL -> AgentActionResult(
+            action.id,
+            false,
+            "Native tools must execute through the phone Agent authority"
+        )
         AgentActionKind.CALL_CONNECTOR -> dispatchConnectorTask(action)
         AgentActionKind.CONTROL_DEVICE -> dispatchDeviceTask(action)
         AgentActionKind.IMPORT_WEB_KNOWLEDGE -> importWebKnowledge(action)
@@ -7546,22 +7661,25 @@ class InMemoryAgentSessionStore : AgentSessionStore {
     override fun clear() { snapshot = null }
 }
 
-class SharedPreferencesAgentSessionStore(context: Context) : AgentSessionStore {
+class SharedPreferencesAgentSessionStore(
+    context: Context,
+    private val storageKey: String = KEY_SESSION
+) : AgentSessionStore {
     private val prefs = AgentEncryptedPreferences(context, PREFS)
 
     override fun load(): AgentSessionSnapshot? {
-        val raw = prefs.readString(KEY_SESSION, "").takeIf { it.isNotBlank() } ?: return null
+        val raw = prefs.readString(storageKey, "").takeIf { it.isNotBlank() } ?: return null
         return runCatching {
             decodeSession(JSONObject(raw))
         }.getOrNull()
     }
 
     override fun save(snapshot: AgentSessionSnapshot) {
-        prefs.writeString(KEY_SESSION, encodeSession(snapshot).toString())
+        prefs.writeString(storageKey, encodeSession(snapshot).toString())
     }
 
     override fun clear() {
-        prefs.clear()
+        prefs.remove(storageKey)
     }
 
     private fun encodeSession(snapshot: AgentSessionSnapshot): JSONObject = JSONObject()
@@ -8376,6 +8494,7 @@ private fun AgentActionKind.mayChangeScreen(): Boolean = when (this) {
     AgentActionKind.CREATE_NOTIFICATION,
     AgentActionKind.REPLY_NOTIFICATION,
     AgentActionKind.IMPORT_WEB_KNOWLEDGE,
+    AgentActionKind.CALL_NATIVE_TOOL,
     AgentActionKind.CALL_CONNECTOR,
     AgentActionKind.CONTROL_DEVICE -> false
 }
@@ -8401,6 +8520,7 @@ private fun AgentActionKind.requiresScreenObservation(): Boolean = when (this) {
     AgentActionKind.CREATE_NOTIFICATION,
     AgentActionKind.REPLY_NOTIFICATION,
     AgentActionKind.IMPORT_WEB_KNOWLEDGE,
+    AgentActionKind.CALL_NATIVE_TOOL,
     AgentActionKind.CALL_CONNECTOR,
     AgentActionKind.CONTROL_DEVICE -> false
 }
@@ -8422,6 +8542,7 @@ private fun AgentActionKind.isLocalExecutionAction(): Boolean = when (this) {
     AgentActionKind.COPY_SCREEN_TEXT,
     AgentActionKind.DELETE_TEXT,
     AgentActionKind.PASTE_TEXT -> true
+    AgentActionKind.CALL_NATIVE_TOOL -> true
     AgentActionKind.READ_SCREEN,
     AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
     AgentActionKind.DRAFT_PLAN,
@@ -8739,6 +8860,7 @@ enum class AgentActionKind {
     DELETE_TEXT,
     PASTE_TEXT,
     CALL_CONNECTOR,
+    CALL_NATIVE_TOOL,
     CONTROL_DEVICE
 }
 

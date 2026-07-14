@@ -252,20 +252,23 @@ function checkProtocolSpec() {
 
   const content = fs.readFileSync(spec, "utf8");
   const requiredText = [
-    "Version: v1.0.3",
-    "Transport",
-    "Pairing QR Payload",
-    "Pairing Claim",
-    "Signal Envelope",
-    "Delivery Trace",
-    "Agent Contact Metadata",
-    "Compatibility Rules",
-    "signalasichat/android/send",
-    "signalasichat/android/recv",
-    "signalasichat/android/pc",
+    "# SignalASI Link Protocol v1",
+    "clean-break protocol",
+    "MQTT Topics",
+    "Pairing",
+    "Signal Wire Envelope",
+    "Encrypted Application Envelope",
+    "Reliability and Idempotency",
+    "Capability Discovery",
+    "Application Resource Routing",
+    "signalasichat/v1/{S}/pair",
+    "signalasichat/v1/{S}/{C}/up",
+    "signalasichat/v1/{S}/{C}/down",
+    "signalasichat/v1/{S}/{C}/control",
     "signalasi_pairing_claim",
-    "delivery_ack",
-    "connector_agents"
+    "capability_manifest",
+    "Task Events",
+    "Revocation"
   ];
 
   for (const text of requiredText) {

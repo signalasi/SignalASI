@@ -174,6 +174,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val provisionalAgentTasks = ConcurrentHashMap.newKeySet<MobileNativeAgent>()
     private val agentRuntimeConversationIds = ConcurrentHashMap<MobileNativeAgent, String>()
     private val agentRuntimeTurnIds = ConcurrentHashMap<MobileNativeAgent, String>()
+    private val agentConnectorResponsesInFlight = ConcurrentHashMap.newKeySet<String>()
     private lateinit var agentScreenSearchInput: EditText
     private lateinit var agentScreenDetailList: LinearLayout
     private lateinit var agentActionQueueList: LinearLayout
@@ -577,32 +578,158 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun consumeAgentConnectorResponse(response: AgentConnectorResponse) {
         val runtime = runtimeForConnectorResponse(response.sourceMessageId, response.contactId)
         if (!runtime.canAcceptConnectorResponse(response.sourceMessageId, response.contactId)) return
-        AgentConnectorResponseStore.remove(this, response)
+        val responseKey = "${response.sourceMessageId}:${response.contactId}"
+        if (!agentConnectorResponsesInFlight.add(responseKey)) return
+        resumeAgentConnectorResponse(response, runtime, responseKey)
+    }
+
+    private fun resumeAgentConnectorResponse(
+        response: AgentConnectorResponse,
+        runtime: MobileNativeAgent,
+        responseKey: String,
+        attempt: Int = 0
+    ) {
+        val conversationId = agentRuntimeConversationIds[runtime]
+            ?: agentTranscriptStore.activeConversation().id
+        val turnId = agentRuntimeTurnIds[runtime].orEmpty()
+        val supervisor = AgentTaskRuntime.supervisor(this)
+        if (turnId.isBlank()) {
+            consumeLegacyAgentConnectorResponse(response, runtime, responseKey, conversationId)
+            return
+        }
+        if (turnId in supervisor.activeTaskIds()) {
+            if (attempt < 100) {
+                handler.postDelayed(
+                    { resumeAgentConnectorResponse(response, runtime, responseKey, attempt + 1) },
+                    100L
+                )
+            } else {
+                agentConnectorResponsesInFlight.remove(responseKey)
+            }
+            return
+        }
+        val resumed = runCatching {
+            supervisor.resume(
+                workspaceId = turnId,
+                lane = AgentTaskLane.READ_REASONING,
+                hook = AgentTaskResumeHook { context, _ ->
+                    val state = try {
+                        runtime.acceptConnectorResponse(
+                            sourceMessageId = response.sourceMessageId,
+                            contactId = response.contactId,
+                            content = response.content,
+                            success = response.success,
+                            richOutputJson = response.richOutputJson
+                        ) ?: runtime.snapshot()
+                    } catch (failure: Throwable) {
+                        agentConnectorResponsesInFlight.remove(responseKey)
+                        throw failure
+                    }
+                    context.appendEvent(
+                        kind = "agent.connector.response",
+                        message = state.phase.name,
+                        payloadJson = JSONObject()
+                            .put("source_message_id", response.sourceMessageId)
+                            .put("contact_id", response.contactId)
+                            .put("success", response.success)
+                            .toString()
+                    )
+                    AgentConnectorResponseStore.remove(this@MainActivity, response)
+                    activeAgentTasks.remove(response.sourceMessageId)
+                    runOnUiThread {
+                        finishAgentConnectorResponseUi(
+                            response = response,
+                            runtime = runtime,
+                            state = state,
+                            conversationId = conversationId,
+                            turnId = turnId,
+                            responseKey = responseKey
+                        )
+                    }
+                    when (state.phase) {
+                        AgentPhase.WAITING_CONFIRMATION -> context.waitForConfirmation(
+                            state.pendingAction?.description.orEmpty()
+                        )
+                        AgentPhase.WAITING_RESPONSE -> context.waitForResponse(
+                            state.lastActionResult?.message.orEmpty()
+                        )
+                        AgentPhase.PAUSED -> context.pause(state.lastActionResult?.message.orEmpty())
+                        AgentPhase.BLOCKED -> context.blockTask(state.plan?.safetyReview?.reason.orEmpty())
+                        AgentPhase.FAILED -> throw IllegalStateException(
+                            state.lastActionResult?.message.orEmpty().ifBlank { "Agent task failed" }
+                        )
+                        AgentPhase.CANCELLED -> context.cancellationSource.cancel("Agent task cancelled")
+                        else -> Unit
+                    }
+                }
+            )
+        }
+        if (resumed.isFailure) {
+            if (attempt < 100) {
+                handler.postDelayed(
+                    { resumeAgentConnectorResponse(response, runtime, responseKey, attempt + 1) },
+                    100L
+                )
+            } else {
+                agentConnectorResponsesInFlight.remove(responseKey)
+                consumeLegacyAgentConnectorResponse(response, runtime, responseKey, conversationId)
+            }
+        }
+    }
+
+    private fun consumeLegacyAgentConnectorResponse(
+        response: AgentConnectorResponse,
+        runtime: MobileNativeAgent,
+        responseKey: String,
+        conversationId: String
+    ) {
         thread(name = "signalasi-agent-response-${response.sourceMessageId}") {
             val state = runtime.acceptConnectorResponse(
-                    sourceMessageId = response.sourceMessageId,
-                    contactId = response.contactId,
-                    content = response.content,
-                    success = response.success,
-                    richOutputJson = response.richOutputJson
-                ) ?: runtime.snapshot()
+                sourceMessageId = response.sourceMessageId,
+                contactId = response.contactId,
+                content = response.content,
+                success = response.success,
+                richOutputJson = response.richOutputJson
+            ) ?: runtime.snapshot()
+            AgentConnectorResponseStore.remove(this, response)
             activeAgentTasks.remove(response.sourceMessageId)
             runOnUiThread {
-                val conversationId = agentRuntimeConversationIds[runtime]
-                    ?: agentTranscriptStore.activeConversation().id
-                val turnId = agentRuntimeTurnIds[runtime].orEmpty()
-                agentTranscriptStore.recordUsage(
-                    conversationId, response.inputTokens, response.outputTokens, response.costMicros
+                finishAgentConnectorResponseUi(
+                    response,
+                    runtime,
+                    state,
+                    conversationId,
+                    agentRuntimeTurnIds[runtime].orEmpty(),
+                    responseKey
                 )
-                renderAgentState(state, conversationId, turnId)
-                agentRuntimeConversationIds.remove(runtime)
-                agentRuntimeTurnIds.remove(runtime)
-                if (VoiceAssistantSettings.get(this).routingMode == VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT &&
-                    voiceAssistantAwake
-                ) {
-                    presentVoiceAgentState(state)
-                }
             }
+        }
+    }
+
+    private fun finishAgentConnectorResponseUi(
+        response: AgentConnectorResponse,
+        runtime: MobileNativeAgent,
+        state: AgentUiState,
+        conversationId: String,
+        turnId: String,
+        responseKey: String
+    ) {
+        agentConnectorResponsesInFlight.remove(responseKey)
+        agentTranscriptStore.recordUsage(
+            conversationId, response.inputTokens, response.outputTokens, response.costMicros
+        )
+        renderAgentState(state, conversationId, turnId)
+        if (state.phase == AgentPhase.COMPLETED || state.phase == AgentPhase.FAILED ||
+            state.phase == AgentPhase.CANCELLED
+        ) {
+            provisionalAgentTasks.remove(runtime)
+            agentRuntimeConversationIds.remove(runtime)
+            agentRuntimeTurnIds.remove(runtime)
+        }
+        if (VoiceAssistantSettings.get(this).routingMode == VoiceAssistantSettings.ROUTING_MODE_NATIVE_AGENT &&
+            voiceAssistantAwake
+        ) {
+            presentVoiceAgentState(state)
         }
     }
 
@@ -1225,7 +1352,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 onComplete(state)
                 consumePendingAgentConnectorResponses()
                 outcome.exceptionOrNull()?.let { error ->
-                    Toast.makeText(this, error.message ?: "Agent operation failed", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, error.message ?: "Agent operation failed", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -1272,25 +1399,36 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         conversationId: String,
         turnId: String
     ) {
-        thread(name = "signalasi-agent-goal-${System.nanoTime()}") {
-            val runtime = MobileNativeAgent(this, sessionStore = InMemoryAgentSessionStore())
+        val workspace = AgentWorkspace(
+            workspaceId = turnId,
+            sessionId = turnId,
+            conversationId = conversationId,
+            taskId = turnId,
+            status = AgentWorkspaceStatus.CREATED
+        )
+        AgentTaskRuntime.supervisor(this).submit(workspace, AgentTaskLane.READ_REASONING) {
+            val runtime = MobileNativeAgent(
+                this@MainActivity,
+                sessionStore = SharedPreferencesAgentSessionStore(this@MainActivity, "task:$turnId")
+            )
             provisionalAgentTasks.add(runtime)
             agentRuntimeConversationIds[runtime] = conversationId
             agentRuntimeTurnIds[runtime] = turnId
             val outcome = runCatching {
-                var state = runtime.submitGoal(goal, conversationContext, turnId)
-                var approvals = 0
-                while (state.pendingAction != null &&
-                    state.phase != AgentPhase.WAITING_RESPONSE &&
-                    state.pendingAction.risk != AgentRisk.BLOCKED &&
-                    approvals++ < 32
-                ) {
-                    state = runtime.approveNextAction(highRiskConfirmed = true)
-                }
-                state
+                runtime.submitGoal(goal, conversationContext, turnId)
             }
+            val state = outcome.getOrElse { runtime.snapshot() }
+            appendEvent(
+                kind = "agent.state",
+                message = state.phase.name,
+                payloadJson = JSONObject()
+                    .put("session_id", state.sessionId)
+                    .put("phase", state.phase.name)
+                    .put("goal", goal.take(2_000))
+                    .toString()
+            )
             runOnUiThread {
-                val state = outcome.getOrElse { runtime.snapshot() }
+                mobileNativeAgent = runtime
                 state.lastActionResult?.metadata?.get("source_message_id")?.toLongOrNull()?.let { sourceId ->
                     activeAgentTasks[sourceId] = runtime
                     provisionalAgentTasks.remove(runtime)
@@ -1299,8 +1437,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 consumePendingAgentConnectorResponses()
                 outcome.exceptionOrNull()?.let { error ->
                     provisionalAgentTasks.remove(runtime)
-                    Toast.makeText(this, error.message ?: "Agent operation failed", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, error.message ?: "Agent operation failed", Toast.LENGTH_LONG).show()
                 }
+            }
+            when (state.phase) {
+                AgentPhase.WAITING_CONFIRMATION -> waitForConfirmation(state.pendingAction?.description.orEmpty())
+                AgentPhase.WAITING_RESPONSE -> waitForResponse(state.lastActionResult?.message.orEmpty())
+                AgentPhase.PAUSED -> pause(state.lastActionResult?.message.orEmpty())
+                AgentPhase.BLOCKED -> blockTask(state.plan?.safetyReview?.reason.orEmpty())
+                AgentPhase.FAILED -> error(state.lastActionResult?.message.orEmpty().ifBlank { "Agent task failed" })
+                AgentPhase.CANCELLED -> cancellationSource.cancel("Agent task cancelled")
+                else -> Unit
             }
         }
     }

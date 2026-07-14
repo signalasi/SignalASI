@@ -36,12 +36,14 @@ class SharedPreferencesAgentTaskStore(context: Context) : AgentTaskStore {
 
     override fun upsert(record: AgentTaskRecord) {
         if (record.taskId.isBlank() || record.goal.isBlank()) return
-        val items = loadItems()
-            .filterNot { it.taskId == record.taskId }
-            .plus(record.copy(updatedAtMillis = System.currentTimeMillis()))
-            .sortedBy { it.updatedAtMillis }
-            .takeLast(MAX_ITEMS)
-        saveItems(items)
+        synchronized(STORE_LOCK) {
+            val items = loadItems()
+                .filterNot { it.taskId == record.taskId }
+                .plus(record.copy(updatedAtMillis = System.currentTimeMillis()))
+                .sortedBy { it.updatedAtMillis }
+                .takeLast(MAX_ITEMS)
+            saveItems(items)
+        }
     }
 
     override fun recent(limit: Int): List<AgentTaskRecord> =
@@ -69,12 +71,14 @@ class SharedPreferencesAgentTaskStore(context: Context) : AgentTaskStore {
     }
 
     override fun clear() {
-        prefs.clear()
+        synchronized(STORE_LOCK) { prefs.clear() }
     }
 
     override fun delete(taskIds: Set<String>) {
         if (taskIds.isEmpty()) return
-        saveItems(loadItems().filterNot { it.taskId in taskIds || it.sessionId in taskIds })
+        synchronized(STORE_LOCK) {
+            saveItems(loadItems().filterNot { it.taskId in taskIds || it.sessionId in taskIds })
+        }
     }
 
     private fun score(item: AgentTaskRecord, query: String, tokens: List<String>): Int {
@@ -172,5 +176,6 @@ class SharedPreferencesAgentTaskStore(context: Context) : AgentTaskStore {
         const val PREFS = "signalasi_agent_tasks"
         const val KEY_ITEMS = "items"
         const val MAX_ITEMS = 200
+        val STORE_LOCK = Any()
     }
 }

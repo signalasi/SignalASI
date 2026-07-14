@@ -25,6 +25,7 @@ object AgentModelPlanParser {
         AgentActionKind.DELETE_TEXT,
         AgentActionKind.PASTE_TEXT,
         AgentActionKind.IMPORT_WEB_KNOWLEDGE,
+        AgentActionKind.CALL_NATIVE_TOOL,
         AgentActionKind.CALL_CONNECTOR,
         AgentActionKind.CONTROL_DEVICE
     )
@@ -206,6 +207,8 @@ object AgentModelPlanParser {
         AgentActionKind.CALL_CONNECTOR,
         AgentActionKind.CONTROL_DEVICE -> resolveConnector(kind, input, request)
 
+        AgentActionKind.CALL_NATIVE_TOOL -> resolveNativeTool(input, request)
+
         AgentActionKind.READ_SCREEN,
         AgentActionKind.SAVE_SCREEN_KNOWLEDGE,
         AgentActionKind.DRAFT_PLAN,
@@ -235,6 +238,22 @@ object AgentModelPlanParser {
                 .ifBlank { request.goal.take(MAX_CONNECTOR_PROMPT_CHARACTERS) },
             "custom_device_id" to target.id.removePrefix("custom-device:")
                 .takeIf { target.id.startsWith("custom-device:") }.orEmpty()
+        )
+    }
+
+    private fun resolveNativeTool(input: JSONObject, request: AgentRequest): Map<String, String>? {
+        val toolId = input.optString("tool_id").trim()
+        val descriptor = request.runtimeContext.nativeTools.firstOrNull {
+            it.id == toolId && it.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE
+        } ?: return null
+        val arguments = input.optJSONObject("arguments") ?: JSONObject()
+        val inputJson = arguments.toString()
+        if (inputJson.length > MAX_NATIVE_TOOL_ARGUMENT_CHARACTERS) return null
+        return mapOf(
+            "tool_id" to descriptor.id,
+            "tool_version" to descriptor.version,
+            "native_tool_risk" to descriptor.risk.wireValue,
+            "input_json" to inputJson
         )
     }
 
@@ -277,6 +296,8 @@ object AgentModelPlanParser {
         AgentActionKind.CALL_CONNECTOR,
         AgentActionKind.CONTROL_DEVICE -> request.targets
             .firstOrNull { it.id == parameters["connector_id"] }?.title.orEmpty()
+        AgentActionKind.CALL_NATIVE_TOOL -> request.runtimeContext.nativeTools
+            .firstOrNull { it.id == parameters["tool_id"] }?.title.orEmpty()
         else -> proposed.trim().take(200).ifBlank { request.screen.foregroundApp }
     }
 
@@ -305,6 +326,13 @@ object AgentModelPlanParser {
         AgentActionKind.PASTE_TEXT,
         AgentActionKind.IMPORT_WEB_KNOWLEDGE,
         AgentActionKind.CALL_CONNECTOR -> AgentRisk.MEDIUM
+
+        AgentActionKind.CALL_NATIVE_TOOL -> when (parameters["native_tool_risk"]) {
+            AgentNativeToolRisk.HIGH.wireValue -> AgentRisk.HIGH
+            AgentNativeToolRisk.MEDIUM.wireValue -> AgentRisk.MEDIUM
+            AgentNativeToolRisk.BLOCKED.wireValue -> AgentRisk.BLOCKED
+            else -> AgentRisk.LOW
+        }
 
         AgentActionKind.LOCK_SCREEN,
         AgentActionKind.CONTROL_DEVICE -> if (isHighRiskTarget(target, parameters)) AgentRisk.HIGH else AgentRisk.MEDIUM
@@ -344,4 +372,5 @@ object AgentModelPlanParser {
     private const val MAX_ACTIONS = 12
     private const val MAX_TEXT_INPUT_CHARACTERS = 2_000
     private const val MAX_CONNECTOR_PROMPT_CHARACTERS = 4_000
+    private const val MAX_NATIVE_TOOL_ARGUMENT_CHARACTERS = 64 * 1_024
 }

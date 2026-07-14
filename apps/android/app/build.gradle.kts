@@ -11,8 +11,8 @@ android {
         applicationId = "com.signalasi.chat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "0.1.3"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -80,4 +80,5 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20250517")
 }

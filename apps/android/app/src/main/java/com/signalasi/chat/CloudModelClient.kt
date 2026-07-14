@@ -8,6 +8,9 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 object CloudModelClient {
     private const val SYSTEM_PROMPT =
@@ -40,6 +43,81 @@ object CloudModelClient {
     fun sendStructured(context: Context, contact: JSONObject, systemPrompt: String, prompt: String): String {
         val turn = ChatMessage(0L, prompt, true, Contact("me", context.getString(R.string.chat_me), ""))
         return send(context, contact, listOf(turn), systemPrompt.take(4_000), null)
+    }
+
+    fun nativeToolAdapter(
+        context: Context,
+        contact: JSONObject,
+        catalog: List<AgentNativeToolDescriptor>
+    ): AgentModelAdapter {
+        validateContact(context, contact)
+        val provider = when (contact.optString("cloud_api_style", "openai")) {
+            "anthropic" -> AgentModelToolProvider.ANTHROPIC
+            "gemini" -> AgentModelToolProvider.GEMINI
+            else -> AgentModelToolProvider.OPENAI_COMPATIBLE
+        }
+        val protocol = AgentModelToolProtocolAdapters.forProvider(provider)
+        return AgentModelAdapter { request ->
+            if (request.cancellationToken.isCancellationRequested) {
+                throw CancellationException("Model tool request cancelled")
+            }
+            withContext(Dispatchers.IO) {
+                val conversation = protocol.encodeConversation(request.messages)
+                val body = JSONObject().put("model", contact.getString("cloud_model"))
+                copyJsonFields(conversation, body)
+                when (provider) {
+                    AgentModelToolProvider.OPENAI_COMPATIBLE -> {
+                        body.put("tools", protocol.encodeToolCatalog(catalog))
+                            .put("tool_choice", "auto")
+                            .put("stream", false)
+                    }
+                    AgentModelToolProvider.ANTHROPIC -> {
+                        body.put("tools", protocol.encodeToolCatalog(catalog))
+                            .put("max_tokens", request.remainingTokens.coerceIn(256L, 4_000L))
+                    }
+                    AgentModelToolProvider.GEMINI -> {
+                        body.put("tools", protocol.encodeToolCatalog(catalog))
+                            .put(
+                                "generationConfig",
+                                JSONObject()
+                                    .put("temperature", 0.1)
+                                    .put("maxOutputTokens", request.remainingTokens.coerceIn(256L, 4_000L))
+                            )
+                    }
+                }
+                val endpoint = contact.getString("cloud_endpoint")
+                val response = when (provider) {
+                    AgentModelToolProvider.OPENAI_COMPATIBLE -> postJson(
+                        endpoint,
+                        openAiHeaders(contact),
+                        body
+                    )
+                    AgentModelToolProvider.ANTHROPIC -> postJson(
+                        endpoint,
+                        mapOf(
+                            "x-api-key" to contact.getString("cloud_api_key"),
+                            "anthropic-version" to "2023-06-01",
+                            "anthropic-dangerous-direct-browser-access" to "true"
+                        ),
+                        body
+                    )
+                    AgentModelToolProvider.GEMINI -> {
+                        val separator = if (endpoint.contains("?")) "&" else "?"
+                        val url = endpoint + separator + "key=" +
+                            URLEncoder.encode(contact.getString("cloud_api_key"), "UTF-8")
+                        postJson(url, emptyMap(), body)
+                    }
+                }
+                if (request.cancellationToken.isCancellationRequested) {
+                    throw CancellationException("Model tool request cancelled")
+                }
+                protocol.decodeResponse(response, catalog)
+            }
+        }
+    }
+
+    private fun copyJsonFields(source: JSONObject, destination: JSONObject) {
+        source.keys().forEachRemaining { key -> destination.put(key, source.opt(key)) }
     }
 
     private fun send(
