@@ -120,6 +120,8 @@ object AgentPhoneNativeToolCatalog {
             AgentHardwareNativeTools.definitions(
                 AgentHardwareNativeTools.androidFacade(context.applicationContext, clock)
             )
+        ).registerAll(
+            AgentAndroidSystemNativeTools.definitions(context.applicationContext)
         )
     }
 

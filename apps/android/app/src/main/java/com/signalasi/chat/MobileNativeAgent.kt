@@ -213,6 +213,9 @@ class MobileNativeAgent(
                 conversationId = activeConversationContext.conversationId,
                 turnId = activeConversationTurnId,
                 callerId = "signalasi.mobile_agent.plan",
+                idempotencyKey = if (descriptor.idempotency == AgentNativeToolIdempotency.IDEMPOTENCY_KEY_REQUIRED) {
+                    action.id
+                } else null,
                 grantedPermissions = descriptor.requiredPermissions.mapTo(linkedSetOf()) { it.id },
                 grantedConsents = grantedConsents,
                 attributes = mapOf(
@@ -222,10 +225,15 @@ class MobileNativeAgent(
             )
         )
         val renderedOutput = AgentNativeJsonCodec.stringify(result.output).take(8_000)
+        val userMessage = if (toolId in AgentAndroidSystemNativeTools.toolIds) {
+            renderAndroidSystemToolResult(result.message, result.output)
+        } else {
+            result.message.ifBlank { renderedOutput }
+        }
         return AgentActionResult(
             actionId = action.id,
             success = result.isSuccess,
-            message = result.message.ifBlank { renderedOutput },
+            message = userMessage,
             metadata = mapOf(
                 "native_tool_id" to toolId,
                 "native_tool_status" to result.status.wireValue,
@@ -234,6 +242,25 @@ class MobileNativeAgent(
                 "provenance" to result.provenance.executorId
             )
         )
+    }
+
+    private fun renderAndroidSystemToolResult(message: String, output: AgentNativeJsonObject): String {
+        if (output.isEmpty()) return message
+        val details = output.entries.joinToString("\n") { (key, value) ->
+            "${key.replace('_', ' ')}: ${renderAndroidSystemToolValue(value)}"
+        }.take(6_000)
+        return listOf(message.trim(), details.trim()).filter { it.isNotBlank() }.joinToString("\n")
+    }
+
+    private fun renderAndroidSystemToolValue(value: Any?): String = when (value) {
+        null -> "-"
+        is Map<*, *> -> value.entries.joinToString(prefix = "{", postfix = "}", limit = 12) {
+            "${it.key}: ${renderAndroidSystemToolValue(it.value)}"
+        }
+        is Iterable<*> -> value.joinToString(prefix = "[", postfix = "]", separator = "; ", limit = 30) {
+            renderAndroidSystemToolValue(it)
+        }
+        else -> value.toString()
     }
 
     private fun nativeJsonObject(value: String): AgentNativeJsonObject {
@@ -4858,7 +4885,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         notificationReplyAction(request)?.let { return it }
         AgentSystemToolPlanner.actionFor(request)?.let { return it }
         installedAppOpenAction(request)?.let { return it }
-        phoneBatteryAction(request)?.let { return it }
+        androidSystemNativeToolAction(request)?.let { return it }
         explicitCallableTargetAction(request)?.let { return it }
         return when {
             lower == "back" || lower.contains("go back") -> AgentAction(
@@ -4995,22 +5022,96 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         }
     }
 
-    private fun phoneBatteryAction(request: AgentRequest): AgentAction? {
-        val goal = request.goal.lowercase(Locale.US)
-        val batteryQuery = goal.contains("battery status") ||
-            goal.contains("phone battery") ||
-            goal.contains("手机电量") ||
-            goal.contains("手机电池") ||
-            goal.contains("电池电量") ||
-            goal.contains("电量多少") ||
-            goal.contains("查看电量") ||
-            goal.contains("查询电量") ||
-            goal.contains("查电量")
-        if (!batteryQuery) return null
-        val descriptor = request.runtimeContext.nativeTools.firstOrNull {
-            it.id == AgentHardwareNativeTools.BATTERY_STATUS &&
-                it.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE
-        } ?: return null
+    private fun androidSystemNativeToolAction(request: AgentRequest): AgentAction? {
+        val goal = request.goal.trim()
+        val lower = goal.lowercase(Locale.US)
+        val now = System.currentTimeMillis()
+        val selected: Pair<String, JSONObject> = when {
+            lower.hasAny("battery status", "phone battery", "\u624b\u673a\u7535\u91cf", "\u624b\u673a\u7535\u6c60", "\u7535\u6c60\u7535\u91cf", "\u7535\u91cf\u591a\u5c11", "\u67e5\u770b\u7535\u91cf", "\u67e5\u8be2\u7535\u91cf", "\u67e5\u7535\u91cf") ->
+                AgentHardwareNativeTools.BATTERY_STATUS to JSONObject()
+            lower.hasAny("call state", "incoming call", "\u6765\u7535\u72b6\u6001", "\u901a\u8bdd\u72b6\u6001", "\u662f\u5426\u6765\u7535") ->
+                AgentAndroidSystemNativeTools.TELEPHONY_CALL_STATE to JSONObject()
+            lower.hasAny("monitor incoming call", "observe call state", "\u76d1\u542c\u6765\u7535", "\u76d1\u542c\u7535\u8bdd", "\u7b49\u5f85\u6765\u7535") ->
+                AgentAndroidSystemNativeTools.TELEPHONY_CALL_STATE_OBSERVE to JSONObject().put("timeout_ms", 30_000)
+            lower.hasAny("phone service", "telephony status", "mobile service", "\u7535\u8bdd\u72b6\u6001", "\u624b\u673a\u4fe1\u53f7", "\u8fd0\u8425\u5546", "\u79fb\u52a8\u7f51\u7edc\u72b6\u6001") ->
+                AgentAndroidSystemNativeTools.TELEPHONY_STATUS to JSONObject()
+            lower.hasAny("recent sms", "read sms", "sms list", "\u67e5\u770b\u77ed\u4fe1", "\u8bfb\u53d6\u77ed\u4fe1", "\u6700\u8fd1\u77ed\u4fe1", "\u77ed\u4fe1\u5217\u8868") ->
+                AgentAndroidSystemNativeTools.SMS_LIST to JSONObject().put("limit", 30)
+            lower.hasAny("start wifi scan", "rescan wifi", "\u91cd\u65b0\u626b\u63cfwifi", "\u5f00\u59cb\u626b\u63cfwifi") ->
+                AgentAndroidSystemNativeTools.WIFI_SCAN_START to JSONObject()
+            lower.hasAny("scan wifi", "nearby wifi", "wi-fi scan", "\u626b\u63cfwifi", "\u9644\u8fd1wifi", "\u67e5\u627ewifi") ->
+                AgentAndroidSystemNativeTools.WIFI_SCAN_RESULTS to JSONObject().put("limit", 30)
+            lower.hasAny("wifi status", "wi-fi status", "\u67e5\u770bwifi", "wifi\u72b6\u6001", "\u65e0\u7ebf\u7f51\u7edc\u72b6\u6001") ->
+                AgentAndroidSystemNativeTools.WIFI_STATUS to JSONObject()
+            lower.hasAny("open wifi settings", "open internet panel", "\u6253\u5f00wifi", "\u6253\u5f00\u7f51\u7edc\u8bbe\u7f6e") ->
+                AgentAndroidSystemNativeTools.WIFI_PANEL_OPEN to JSONObject()
+            lower.hasAny("open hotspot settings", "hotspot settings", "\u6253\u5f00\u70ed\u70b9", "\u70ed\u70b9\u8bbe\u7f6e") ->
+                AgentAndroidSystemNativeTools.WIFI_HOTSPOT_PANEL_OPEN to JSONObject()
+            lower.hasAny("audio status", "volume status", "\u97f3\u91cf\u72b6\u6001", "\u67e5\u770b\u97f3\u91cf", "\u5f53\u524d\u97f3\u91cf") ->
+                AgentAndroidSystemNativeTools.AUDIO_STATUS to JSONObject()
+            lower.hasAny("biometric status", "fingerprint status", "\u751f\u7269\u8bc6\u522b\u72b6\u6001", "\u6307\u7eb9\u72b6\u6001", "\u662f\u5426\u652f\u6301\u6307\u7eb9") ->
+                AgentAndroidSystemNativeTools.BIOMETRIC_STATUS to JSONObject()
+            lower.hasAny("open biometric enrollment", "enroll fingerprint", "\u5f55\u5165\u6307\u7eb9", "\u6253\u5f00\u751f\u7269\u8bc6\u522b\u8bbe\u7f6e") ->
+                AgentAndroidSystemNativeTools.BIOMETRIC_ENROLLMENT_OPEN to JSONObject()
+            lower.hasAny("vpn status", "\u67e5\u770bvpn", "vpn\u72b6\u6001", "\u662f\u5426\u8fde\u63a5vpn") ->
+                AgentAndroidSystemNativeTools.VPN_STATUS to JSONObject()
+            lower.hasAny("request vpn permission", "open vpn consent", "\u8bf7\u6c42vpn\u6743\u9650", "\u6253\u5f00vpn\u6388\u6743") ->
+                AgentAndroidSystemNativeTools.VPN_CONSENT_OPEN to JSONObject()
+            lower.hasAny("device policy status", "device owner status", "\u8bbe\u5907\u7ba1\u7406\u72b6\u6001", "\u8bbe\u5907\u6240\u6709\u8005\u72b6\u6001") ->
+                AgentAndroidSystemNativeTools.DEVICE_POLICY_STATUS to JSONObject()
+            lower.hasAny("lock this phone", "lock device", "\u9501\u5b9a\u624b\u673a", "\u9501\u5c4f") ->
+                AgentAndroidSystemNativeTools.DEVICE_POLICY_LOCK to JSONObject()
+            lower.hasAny("reboot this phone", "reboot device", "\u91cd\u542f\u624b\u673a", "\u91cd\u542f\u8bbe\u5907") ->
+                AgentAndroidSystemNativeTools.DEVICE_POLICY_REBOOT to JSONObject()
+            lower.hasAny("list calendars", "calendar list", "\u65e5\u5386\u5217\u8868", "\u6709\u54ea\u4e9b\u65e5\u5386") ->
+                AgentAndroidSystemNativeTools.CALENDARS_LIST to JSONObject()
+            lower.hasAny("calendar events", "schedule", "agenda", "\u67e5\u770b\u65e5\u7a0b", "\u6700\u8fd1\u65e5\u7a0b", "\u4eca\u5929\u65e5\u7a0b", "\u65e5\u7a0b\u5b89\u6392") ->
+                AgentAndroidSystemNativeTools.CALENDAR_EVENTS_QUERY to JSONObject()
+                    .put("start_epoch_ms", now - 24L * 60L * 60L * 1000L)
+                    .put("end_epoch_ms", now + 7L * 24L * 60L * 60L * 1000L)
+                    .put("limit", 50)
+            lower.startsWith("search contacts ") || lower.startsWith("find contact ") ||
+                lower.startsWith("\u641c\u7d22\u8054\u7cfb\u4eba") || lower.startsWith("\u67e5\u627e\u8054\u7cfb\u4eba") || lower.startsWith("\u67e5\u8054\u7cfb\u4eba") -> {
+                val query = goal.replace(Regex("^(?i:search contacts|find contact)\\s*|^(?:\u641c\u7d22\u8054\u7cfb\u4eba|\u67e5\u627e\u8054\u7cfb\u4eba|\u67e5\u8054\u7cfb\u4eba)\\s*"), "").trim()
+                AgentAndroidSystemNativeTools.CONTACTS_SEARCH to JSONObject().put("query", query).put("limit", 30)
+            }
+            Regex("(?:volume|\u97f3\u91cf)[^0-9]{0,12}(\\d{1,3})", RegexOption.IGNORE_CASE).find(goal) != null -> {
+                val percent = Regex("(\\d{1,3})").find(goal)?.groupValues?.get(1)?.toIntOrNull()?.coerceIn(0, 100) ?: 50
+                AgentAndroidSystemNativeTools.AUDIO_VOLUME_SET to JSONObject().put("stream", audioStreamFromGoal(lower)).put("percent", percent)
+            }
+            lower.hasAny("unmute phone", "unmute media", "\u53d6\u6d88\u9759\u97f3", "\u6062\u590d\u58f0\u97f3") ->
+                AgentAndroidSystemNativeTools.AUDIO_MUTE_SET to JSONObject().put("stream", audioStreamFromGoal(lower)).put("muted", false)
+            lower.hasAny("mute phone", "mute media", "\u624b\u673a\u9759\u97f3", "\u5a92\u4f53\u9759\u97f3") ->
+                AgentAndroidSystemNativeTools.AUDIO_MUTE_SET to JSONObject().put("stream", audioStreamFromGoal(lower)).put("muted", true)
+            Regex("(?:dial|\u62e8\u53f7|\u6253\u7535\u8bdd\u7ed9)\\s*([+0-9][0-9 ()-]{2,31})", RegexOption.IGNORE_CASE).find(goal) != null -> {
+                val number = Regex("([+0-9][0-9 ()-]{2,31})").find(goal)?.groupValues?.get(1).orEmpty().trim()
+                AgentAndroidSystemNativeTools.TELEPHONY_DIAL_HANDOFF to JSONObject().put("phone_number", number)
+            }
+            Regex("(?:send sms to|\u7ed9)\\s*([+0-9][0-9 ()-]{2,31})\\s*(?:send|\u53d1\u77ed\u4fe1|\u53d1\u9001)?\\s*[:\uff1a]?\\s*(.+)", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)).find(goal) != null -> {
+                val match = Regex("(?:send sms to|\u7ed9)\\s*([+0-9][0-9 ()-]{2,31})\\s*(?:send|\u53d1\u77ed\u4fe1|\u53d1\u9001)?\\s*[:\uff1a]?\\s*(.+)", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)).find(goal)
+                AgentAndroidSystemNativeTools.SMS_SEND to JSONObject()
+                    .put("phone_number", match?.groupValues?.getOrNull(1).orEmpty().trim())
+                    .put("message", match?.groupValues?.getOrNull(2).orEmpty().trim())
+            }
+            Regex("(?:download status|\u67e5\u770b\u4e0b\u8f7d)\\s*(\\d+)", RegexOption.IGNORE_CASE).find(goal) != null -> {
+                val id = Regex("(\\d+)").find(goal)?.value?.toLongOrNull() ?: 0L
+                AgentAndroidSystemNativeTools.DOWNLOAD_QUERY to JSONObject().put("download_id", id)
+            }
+            Regex("(?:remove download|delete download|\u5220\u9664\u4e0b\u8f7d)\\s*(\\d+)", RegexOption.IGNORE_CASE).find(goal) != null -> {
+                val id = Regex("(\\d+)").find(goal)?.value?.toLongOrNull() ?: 0L
+                AgentAndroidSystemNativeTools.DOWNLOAD_REMOVE to JSONObject().put("download_id", id)
+            }
+            lower.contains("https://") && lower.hasAny("download", "\u4e0b\u8f7d") -> {
+                val url = Regex("https://\\S+", RegexOption.IGNORE_CASE).find(goal)?.value.orEmpty().trimEnd('.', ',', '\u3002')
+                AgentAndroidSystemNativeTools.DOWNLOAD_ENQUEUE to JSONObject().put("url", url).put("title", "SignalASI download")
+            }
+            else -> return null
+        }
+        return nativeToolAction(request, selected.first, selected.second)
+    }
+
+    private fun nativeToolAction(request: AgentRequest, toolId: String, input: JSONObject): AgentAction? {
+        val descriptor = request.runtimeContext.nativeTools.firstOrNull { it.id == toolId } ?: return null
         val risk = when (descriptor.risk) {
             AgentNativeToolRisk.LOW -> AgentRisk.LOW
             AgentNativeToolRisk.MEDIUM -> AgentRisk.MEDIUM
@@ -5018,7 +5119,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             AgentNativeToolRisk.BLOCKED -> AgentRisk.BLOCKED
         }
         return AgentAction(
-            id = "read-phone-battery",
+            id = "native-${descriptor.id.substringAfterLast('.')}-${request.goal.hashCode().toUInt()}",
             kind = AgentActionKind.CALL_NATIVE_TOOL,
             target = descriptor.title,
             risk = risk,
@@ -5028,9 +5129,19 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 "tool_id" to descriptor.id,
                 "tool_version" to descriptor.version,
                 "native_tool_risk" to descriptor.risk.wireValue,
-                "input_json" to "{}"
+                "input_json" to input.toString()
             )
         )
+    }
+
+    private fun String.hasAny(vararg values: String): Boolean = values.any(::contains)
+
+    private fun audioStreamFromGoal(goal: String): String = when {
+        goal.hasAny("ring", "ringer", "\u94c3\u58f0") -> "ring"
+        goal.hasAny("alarm", "\u95f9\u949f") -> "alarm"
+        goal.hasAny("notification", "\u901a\u77e5") -> "notification"
+        goal.hasAny("call", "\u901a\u8bdd") -> "voice_call"
+        else -> "music"
     }
 
     private fun informationQueryAction(request: AgentRequest): AgentAction? {

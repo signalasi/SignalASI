@@ -103,6 +103,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_AGENT_SCREEN_CAPTURE = 2007
         private const val REQUEST_AGENT_CAMERA = 2008
         private const val REQUEST_AGENT_CAMERA_PERMISSION = 2009
+        private const val REQUEST_AGENT_NATIVE_PERMISSIONS = 2010
         private const val UI_PREFS = "signalasi_ui_preferences"
         private const val HISTORY_PREFS = "signalasi_chat_history"
         private const val HISTORY_KEY = "messages"
@@ -1039,6 +1040,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         ) {
             openAgentCamera()
         }
+        if (requestCode == REQUEST_AGENT_NATIVE_PERMISSIONS) {
+            val granted = grantResults.count { it == PackageManager.PERMISSION_GRANTED }
+            Toast.makeText(
+                this,
+                getString(R.string.agent_native_permissions_result, granted, grantResults.size),
+                Toast.LENGTH_LONG
+            ).show()
+        }
     }
 
     // ===== Chat Page =====
@@ -1422,6 +1431,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     state.pendingAction.risk != AgentRisk.BLOCKED &&
                     approvals++ < 32
                 ) {
+                    if (state.pendingAction.kind == AgentActionKind.CALL_NATIVE_TOOL &&
+                        state.pendingAction.risk.weight >= AgentRisk.MEDIUM.weight
+                    ) break
                     state = runtime.approveNextAction(highRiskConfirmed = true)
                 }
                 state
@@ -1443,6 +1455,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     provisionalAgentTasks.remove(runtime)
                 }
                 renderAgentState(state, conversationId, turnId)
+                val permissionRequested = requestMissingAgentNativePermissions(state)
+                if (!permissionRequested && state.phase == AgentPhase.WAITING_CONFIRMATION) {
+                    state.pendingAction?.takeIf { it.kind == AgentActionKind.CALL_NATIVE_TOOL }?.let {
+                        showNativeAgentConfirmation(it)
+                    }
+                }
                 consumePendingAgentConnectorResponses()
                 outcome.exceptionOrNull()?.let { error ->
                     provisionalAgentTasks.remove(runtime)
@@ -1459,6 +1477,48 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 else -> Unit
             }
         }
+    }
+
+    private fun requestMissingAgentNativePermissions(state: AgentUiState): Boolean {
+        val runtimePermissions = setOf(
+            android.Manifest.permission.READ_PHONE_STATE,
+            android.Manifest.permission.READ_SMS,
+            android.Manifest.permission.SEND_SMS,
+            android.Manifest.permission.READ_CONTACTS,
+            android.Manifest.permission.WRITE_CONTACTS,
+            android.Manifest.permission.READ_CALENDAR,
+            android.Manifest.permission.WRITE_CALENDAR,
+            android.Manifest.permission.ACCESS_FINE_LOCATION,
+            android.Manifest.permission.ACCESS_COARSE_LOCATION,
+            android.Manifest.permission.BLUETOOTH_CONNECT,
+            android.Manifest.permission.BLUETOOTH_SCAN,
+            android.Manifest.permission.CAMERA,
+            android.Manifest.permission.RECORD_AUDIO
+        )
+        val missing = state.plan?.requiredPermissions.orEmpty()
+            .asSequence()
+            .filterNot { it.granted }
+            .map { it.id }
+            .filter { it in runtimePermissions }
+            .filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+            .distinct()
+            .toList()
+        if (missing.isNotEmpty()) {
+            requestPermissions(missing.toTypedArray(), REQUEST_AGENT_NATIVE_PERMISSIONS)
+            return true
+        }
+        return false
+    }
+
+    private fun showNativeAgentConfirmation(action: AgentAction) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.agent_native_confirmation_title))
+            .setMessage(getString(R.string.agent_native_confirmation_message, action.description, action.risk.name))
+            .setPositiveButton(getString(R.string.agent_native_confirmation_execute)) { _, _ ->
+                runAgentOperationAsync { mobileNativeAgent.approveNextAction(highRiskConfirmed = true) }
+            }
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .show()
     }
 
     private fun refreshAgentConversationHeader() {

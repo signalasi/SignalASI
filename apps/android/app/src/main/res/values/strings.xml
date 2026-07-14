@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">SignalASI</string>
+    <string name="device_admin_description">Allows explicitly confirmed device-policy actions such as locking a managed device.</string>
+    <string name="agent_native_permissions_result">Granted %1$d of %2$d requested Android permissions. Run the task again to use them.</string>
+    <string name="agent_native_confirmation_title">Confirm phone action</string>
+    <string name="agent_native_confirmation_message">%1$s\n\nRisk level: %2$s. SignalASI will use an Android system API after confirmation.</string>
+    <string name="agent_native_confirmation_execute">Continue</string>
     <string name="tab_agent">Agent</string>
     <string name="tab_messages">Messages</string>
     <string name="tab_contacts">Contacts</string>
@@ -578,7 +583,7 @@
     <string name="settings_on_device_agent">On-device Agent &amp; Permissions</string>
     <string name="settings_destroy_data">Reset Data</string>
     <string name="settings_about_signalasi">About SignalASI</string>
-    <string name="settings_about_signalasi_subtitle">Version 0.1.5 · Security and open-source information</string>
+    <string name="settings_about_signalasi_subtitle">Version 0.1.6 · Security and open-source information</string>
     <string name="about_product_subtitle">A secure superintelligent agent for people, agents, models, and devices</string>
     <string name="about_section_product">Product</string>
     <string name="about_version">Version</string>

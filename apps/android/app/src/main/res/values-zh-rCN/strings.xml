@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">SignalASI</string>
+    <string name="device_admin_description">允许执行经过明确确认的设备策略操作，例如锁定受管理设备。</string>
+    <string name="agent_native_permissions_result">已授予 %1$d/%2$d 项 Android 权限，请重新执行任务。</string>
+    <string name="agent_native_confirmation_title">确认手机操作</string>
+    <string name="agent_native_confirmation_message">%1$s\n\n风险等级：%2$s。确认后 SignalASI 将调用 Android 系统 API。</string>
+    <string name="agent_native_confirmation_execute">继续执行</string>
     <string name="tab_agent">Agent</string>
     <string name="tab_messages">消息</string>
     <string name="tab_contacts">通讯录</string>
@@ -338,7 +343,7 @@
     <string name="settings_on_device_agent">手机端 Agent 与权限</string>
     <string name="settings_destroy_data">重置数据</string>
     <string name="settings_about_signalasi">关于 SignalASI</string>
-    <string name="settings_about_signalasi_subtitle">版本 0.1.5 · 安全与开源信息</string>
+    <string name="settings_about_signalasi_subtitle">版本 0.1.6 · 安全与开源信息</string>
     <string name="about_product_subtitle">连接用户、Agent、模型与设备的安全超级智能体</string>
     <string name="about_section_product">产品信息</string>
     <string name="about_version">版本</string>
