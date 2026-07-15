@@ -13,6 +13,7 @@ from typing import Callable
 
 TaskEvent = Callable[[str, dict], None]
 CONVERSATION_THREADS_PATH = Path.home() / ".signalasi" / "codex_conversation_threads.json"
+CONVERSATION_THREAD_VERSION = "v2"
 CODEX_TASK_POLICY = """
 SignalASI execution policy:
 - Do not inspect or invoke personal Codex Skills. Execute the request with the model and available tools directly.
@@ -55,7 +56,8 @@ class CodexAppServer:
         self._ensure_started()
         run = CodexRun(task_id=task_id)
         self._runs[task_id] = run
-        run.thread_id = self._conversation_threads.get(conversation_id, "") if conversation_id else ""
+        conversation_key = self._conversation_key(conversation_id)
+        run.thread_id = self._conversation_threads.get(conversation_key, "") if conversation_key else ""
         if not run.thread_id:
             run.thread_id = self._start_thread(cwd, model, conversation_id)
         if not run.thread_id:
@@ -67,7 +69,7 @@ class CodexAppServer:
             if not run.thread_id or "thread not found" not in str(exc).lower():
                 raise
             if conversation_id:
-                self._conversation_threads.pop(conversation_id, None)
+                self._conversation_threads.pop(conversation_key, None)
                 self._save_conversation_threads()
             run.thread_id = self._start_thread(cwd, model, conversation_id)
             self.on_event(task_id, {
@@ -87,9 +89,14 @@ class CodexAppServer:
         }, timeout=30)
         thread_id = str((response.get("thread") or {}).get("id") or "")
         if conversation_id and thread_id:
-            self._conversation_threads[conversation_id] = thread_id
+            self._conversation_threads[self._conversation_key(conversation_id)] = thread_id
             self._save_conversation_threads()
         return thread_id
+
+    @staticmethod
+    def _conversation_key(conversation_id: str) -> str:
+        value = str(conversation_id or "").strip()
+        return f"{CONVERSATION_THREAD_VERSION}:{value}" if value else ""
 
     def _start_turn(self, thread_id: str, prompt: str, model: str) -> dict:
         from response_policy import apply_response_policy
@@ -125,10 +132,11 @@ class CodexAppServer:
         if not clean_id:
             return False
         with self._lock:
-            removed = self._conversation_threads.pop(clean_id, None)
-            if removed is not None:
+            removed = self._conversation_threads.pop(self._conversation_key(clean_id), None)
+            legacy = self._conversation_threads.pop(clean_id, None)
+            if removed is not None or legacy is not None:
                 self._save_conversation_threads()
-            return removed is not None
+            return removed is not None or legacy is not None
 
     def interrupt(self, task_id: str) -> bool:
         run = self._runs.get(task_id)
@@ -157,7 +165,7 @@ class CodexAppServer:
             threading.Thread(target=self._read_stdout, daemon=True).start()
             threading.Thread(target=self._drain_stderr, daemon=True).start()
         self._request("initialize", {
-            "clientInfo": {"name": "signalasi-desktop", "title": "SignalASI Desktop", "version": "0.1.10"},
+            "clientInfo": {"name": "signalasi-desktop", "title": "SignalASI Desktop", "version": "0.1.11"},
             "capabilities": {"experimentalApi": True},
         }, timeout=15)
         self._notify("initialized", {})

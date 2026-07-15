@@ -159,6 +159,15 @@ def api_list_agents():
 def api_agent_diagnostics():
     return connector_diagnostics()
 
+
+@app.get("/health")
+def api_health():
+    return {
+        "status": "ok",
+        "protocol": "SignalASI Link Protocol",
+        "connector": "SignalASI Desktop",
+    }
+
 @app.get("/api/agents/execution-log")
 def api_agent_execution_log(limit: int = Query(50)):
     return recent_agent_execution_log(limit)

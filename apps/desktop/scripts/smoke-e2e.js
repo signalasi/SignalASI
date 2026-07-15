@@ -223,7 +223,7 @@ function createFakeMcpServer(tmpDir) {
       "        write_frame({'jsonrpc':'2.0','id':msg['id'],'result':{'tools':[{'name':'echo','description':'Echo prompt','inputSchema':{'type':'object','properties':{'prompt':{'type':'string'}}}}]}})",
       "    elif method == 'tools/call':",
       "        prompt = (msg.get('params') or {}).get('arguments', {}).get('prompt', '')",
-      "        write_frame({'jsonrpc':'2.0','id':msg['id'],'result':{'content':[{'type':'text','text':'MCP_E2E_OK:' + prompt[:32]}]}})",
+      "        write_frame({'jsonrpc':'2.0','id':msg['id'],'result':{'content':[{'type':'text','text':'MCP_E2E_OK:' + prompt[-64:]}]}})",
       "    else:",
       "        write_frame({'jsonrpc':'2.0','id':msg['id'],'error':{'code':-32601,'message':'unknown method'}})"
     ].join("\n"),
@@ -475,7 +475,8 @@ async function main() {
       method: "POST",
       body: JSON.stringify({ prompt: "SignalASI MCP e2e prompt" })
     });
-    if (!String(mcpCustom.reply || "").startsWith("MCP_E2E_OK:SignalASI MCP e2e prompt")) {
+    if (!String(mcpCustom.reply || "").startsWith("MCP_E2E_OK:") ||
+        !String(mcpCustom.reply || "").includes("SignalASI MCP e2e prompt")) {
       fail(`Unexpected MCP custom agent reply: ${mcpCustom.reply}`);
     }
 

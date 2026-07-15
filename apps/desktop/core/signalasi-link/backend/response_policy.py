@@ -6,6 +6,7 @@ import re
 
 
 POLICY_MARKER = "SignalASI response policy:"
+CURRENT_REQUEST_MARKER = "\nCurrent user request:\n"
 CODEX_STYLE_RESPONSE_POLICY = """
 SignalASI response policy:
 - Respond in the user's language; default to Simplified Chinese for Chinese users.
@@ -24,6 +25,14 @@ def apply_response_policy(prompt: str) -> str:
     if not value or POLICY_MARKER in value:
         return value
     return f"{CODEX_STYLE_RESPONSE_POLICY}\n\n{value}"
+
+
+def compact_codex_turn_prompt(prompt: str) -> str:
+    """Send only the new request when Codex already owns the conversation thread."""
+    value = str(prompt or "").strip()
+    if CURRENT_REQUEST_MARKER in value:
+        return value.rsplit(CURRENT_REQUEST_MARKER, 1)[1].strip()
+    return value
 
 
 def sanitize_assistant_response(response: str) -> str:

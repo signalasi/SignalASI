@@ -954,3 +954,7 @@ setInterval(() => {
   if (!document.hidden) refreshAgentTasks();
 }, 2000);
 
+setInterval(() => {
+  if (!document.hidden) refreshBackend();
+}, 3000);
+

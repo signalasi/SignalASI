@@ -782,10 +782,11 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
     agent_id = _agent_id_from_contact(contact_id, payload.get("agent_id"))
     source_message_id = str(payload.get("client_message_id") or payload.get("message_id") or "")
 
-    def content_with_attachments(task_id: str) -> str:
+    def content_with_attachments(task_id: str, base_content: str | None = None) -> str:
+        task_content = content if base_content is None else base_content
         attachments = payload.get("attachments") or []
         if not isinstance(attachments, list) or not attachments:
-            return content
+            return task_content
         from task_workspace import task_workspace
         attachment_root = task_workspace(task_id, agent_id) / "downloads" / "input"
         attachment_root.mkdir(parents=True, exist_ok=True)
@@ -811,12 +812,12 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             target.write_bytes(raw)
             materialized.append(str(target))
         if not materialized and not metadata_only:
-            return content
+            return task_content
         details = ["\n\nInput attachments available for this task:"]
         details.extend(f"- {path}" for path in materialized)
         details.extend(f"- {name} (content indexed on the phone; binary was not transferred)" for name in metadata_only)
         details.append("Inspect the available files when they are relevant to the user's request.")
-        return content + "\n".join(details)
+        return task_content + "\n".join(details)
 
     def publish_event(task: dict) -> None:
         _publish_or_queue_task_event(mqttc, wire_payload, task, trace)
@@ -884,6 +885,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         def start_codex() -> None:
             try:
                 executable = _find_codex_desktop_cli() or "codex"
+                from response_policy import compact_codex_turn_prompt
                 from task_workspace import task_workspace
 
                 with codex_task_callbacks_lock:
@@ -891,7 +893,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                 server = _codex_server(executable, _agent_env(BASE_AGENTS["codex"]))
                 server.start_task(
                     task.task_id,
-                    content_with_attachments(task.task_id),
+                    content_with_attachments(task.task_id, compact_codex_turn_prompt(content)),
                     str(task_workspace(task.task_id, agent_id)),
                     conversation_id=str(payload.get("conversation_id") or ""),
                 )

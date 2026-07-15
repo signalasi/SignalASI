@@ -3385,7 +3385,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 if (connectorProcess) {
                     agentTranscriptStore.upsert(
                         AgentTranscriptRole.PROCESS,
-                        description,
+                        "${pending.target} · ${getString(R.string.agent_task_status_starting)}",
                         dedupeKey = processKey,
                         conversationId = conversationId,
                         turnId = turnId,

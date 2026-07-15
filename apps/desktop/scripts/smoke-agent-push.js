@@ -112,14 +112,17 @@ except HTTPException as exc:
     assert isinstance(exc.detail.get("params"), dict), exc.detail
 
 data = api_agent_push(
-    AgentPushReq(contact_id="codex", content="Task complete", source="codex"),
+    AgentPushReq(contact_id="codex", content="Task complete", source="codex", broadcast=True),
     x_signalasi_token=agent_push_token(),
 )
 assert data["ok"] is True and data["contact_id"] == "codex", data
 assert data["code"] == "agent_push_published" and data["params"]["contact_id"] == "codex", data
 assert published, "no MQTT publish captured"
 wire = json.loads(published[-1]["payload"])
-payload = wire["debug_payload"]
+envelope = wire["debug_payload"]
+assert envelope["protocol"] == "signalasi-link", envelope
+assert envelope["version"] == 1, envelope
+payload = envelope["payload"]
 assert payload["contact_id"] == "codex", payload
 assert payload["content"] == "Task complete", payload
 assert payload["agent_push"] is True, payload

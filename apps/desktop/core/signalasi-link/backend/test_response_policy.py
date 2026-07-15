@@ -8,6 +8,7 @@ from response_policy import (
     CODEX_STYLE_RESPONSE_POLICY,
     apply_response_policy,
     attachment_clarification,
+    compact_codex_turn_prompt,
     is_input_artifact,
     sanitize_assistant_response,
 )
@@ -112,6 +113,13 @@ def _evaluate(case: dict) -> dict:
 
 
 class ResponsePolicyTest(unittest.TestCase):
+    def test_codex_turn_prompt_does_not_repeat_mobile_history(self):
+        prompt = (
+            "Conversation context:\nUser: old request\nAssistant: old result\n\n"
+            "Current user request:\nRead report.xlsx"
+        )
+        self.assertEqual("Read report.xlsx", compact_codex_turn_prompt(prompt))
+
     def test_policy_is_idempotent_and_complete(self):
         prompt = apply_response_policy("hello")
         self.assertEqual(prompt, apply_response_policy(prompt))
