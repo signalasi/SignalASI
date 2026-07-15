@@ -48,15 +48,22 @@ class SharedPreferencesAgentConfirmationConsentStore(context: Context) : AgentCo
 object AgentConfirmationPolicy {
     fun tier(action: AgentAction): AgentConfirmationTier {
         val value = searchableValue(action)
+        val nativeToolId = action.parameters["tool_id"].orEmpty()
+        if (nativeToolId in CONFIRM_ONCE_NATIVE_TOOL_IDS) {
+            return AgentConfirmationTier.CONFIRM_ONCE
+        }
         if (action.kind in ALWAYS_CONFIRM_KINDS || ALWAYS_CONFIRM_TERMS.any(value::contains)) {
             return AgentConfirmationTier.CONFIRM_ALWAYS
         }
-        if (CONFIRM_ONCE_TERMS.any(value::contains) || action.kind == AgentActionKind.CONTROL_DEVICE) {
+        if (CONFIRM_ONCE_TERMS.any(value::contains) ||
+            action.kind == AgentActionKind.CONTROL_DEVICE
+        ) {
             return AgentConfirmationTier.CONFIRM_ONCE
         }
         if (action.kind == AgentActionKind.SET_ALARM || action.kind == AgentActionKind.OPEN_APP ||
             action.kind == AgentActionKind.CALL_CONNECTOR ||
-            action.id in DIRECT_ACTION_IDS || DIRECT_TERMS.any(value::contains)
+            action.id in DIRECT_ACTION_IDS || nativeToolId in DIRECT_NATIVE_TOOL_IDS ||
+            DIRECT_TERMS.any(value::contains)
         ) return AgentConfirmationTier.DIRECT
         return when (action.risk) {
             AgentRisk.LOW -> AgentConfirmationTier.DIRECT
@@ -74,10 +81,18 @@ object AgentConfirmationPolicy {
             DOWNLOAD_TERMS.any(value::contains) -> "downloads"
             CONTACT_WRITE_TERMS.any(value::contains) -> "contacts_write"
             CALENDAR_WRITE_TERMS.any(value::contains) -> "calendar_write"
+            nativeToolId(action) == AgentHardwareNativeTools.BLUETOOTH_DISCOVERY_FOREGROUND -> "bluetooth_discovery"
+            nativeToolId(action) == AgentAndroidSystemNativeTools.WIFI_SCAN_START -> "wifi_scan"
+            nativeToolId(action) in setOf(
+                AgentHardwareNativeTools.INSTALLED_APPS_LIST,
+                AgentHardwareNativeTools.PACKAGE_DETAIL
+            ) -> "installed_apps_read"
             action.kind == AgentActionKind.CONTROL_DEVICE -> "device_control:${action.target.lowercase().trim()}"
             else -> "action:${action.kind.name.lowercase()}:${action.id.lowercase().trim()}"
         }
     }
+
+    private fun nativeToolId(action: AgentAction): String = action.parameters["tool_id"].orEmpty()
 
     private fun searchableValue(action: AgentAction): String = buildString {
         append(action.id).append(' ')
@@ -103,6 +118,32 @@ object AgentConfirmationPolicy {
     private val DIRECT_ACTION_IDS = setOf(
         "set-timer", "open-timer", "set-alarm", "open-camera", "open-flashlight",
         "battery-status", "device-status"
+    )
+
+    private val DIRECT_NATIVE_TOOL_IDS = setOf(
+        AgentHardwareNativeTools.BATTERY_STATUS,
+        AgentHardwareNativeTools.POWER_STATUS,
+        AgentHardwareNativeTools.STORAGE_STATUS,
+        AgentHardwareNativeTools.NETWORK_STATUS,
+        AgentHardwareNativeTools.SENSORS_LIST,
+        AgentHardwareNativeTools.SENSOR_SAMPLE,
+        AgentHardwareNativeTools.BLUETOOTH_STATUS,
+        AgentHardwareNativeTools.NFC_STATUS,
+        AgentHardwareNativeTools.FLASHLIGHT_SET,
+        AgentHardwareNativeTools.BLUETOOTH_PAIRING_HANDOFF,
+        AgentAndroidSystemNativeTools.AUDIO_STATUS,
+        AgentAndroidSystemNativeTools.AUDIO_VOLUME_SET,
+        AgentAndroidSystemNativeTools.AUDIO_MUTE_SET,
+        AgentAndroidSystemNativeTools.WIFI_PANEL_OPEN,
+        AgentAndroidSystemNativeTools.WIFI_HOTSPOT_PANEL_OPEN,
+        AgentAndroidSystemNativeTools.BIOMETRIC_ENROLLMENT_OPEN
+    )
+
+    private val CONFIRM_ONCE_NATIVE_TOOL_IDS = setOf(
+        AgentHardwareNativeTools.BLUETOOTH_DISCOVERY_FOREGROUND,
+        AgentHardwareNativeTools.INSTALLED_APPS_LIST,
+        AgentHardwareNativeTools.PACKAGE_DETAIL,
+        AgentAndroidSystemNativeTools.WIFI_SCAN_START
     )
 
     private val ALWAYS_CONFIRM_TERMS = listOf(

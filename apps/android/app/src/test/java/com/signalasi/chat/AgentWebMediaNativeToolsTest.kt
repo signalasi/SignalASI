@@ -43,6 +43,78 @@ class AgentWebMediaNativeToolsTest {
     }
 
     @Test
+    fun searchUsesFastProviderAndReturnsSchemaValidResults() {
+        val html = """
+            <html><body><li class="b_algo"><div class="b_algoheader"><a href="https://signalasi.example/result"><h2>SignalASI result</h2></a></div></li></body></html>
+        """.trimIndent().toByteArray()
+        val transport = FakeTransport(
+            AgentWebTransportResponse(
+                200,
+                mapOf("Content-Type" to listOf("text/html; charset=utf-8")),
+                html
+            )
+        )
+        val registry = registry(
+            transport,
+            FakeResolver("cn.bing.com" to listOf(publicAddress(13, 107, 21, 200)))
+        )
+
+        val result = registry.invoke(
+            AgentWebMediaNativeTools.WEB_SEARCH,
+            mapOf("query" to "SignalASI", "max_results" to 2, "timeout_ms" to 10_000),
+            webContext()
+        )
+
+        assertTrue(result.toJson(), result.isSuccess)
+        assertEquals(1, result.output["result_count"])
+        val first = (result.output["results"] as List<*>).first() as Map<*, *>
+        assertEquals("SignalASI result", first["title"])
+        assertEquals("https://signalasi.example/result", first["url"])
+        assertEquals("bing", result.metadata["provider"])
+    }
+
+    @Test
+    fun openHttpAndContentResultsSatisfyTheirDeclaredSchemas() {
+        listOf(AgentWebMediaNativeTools.WEB_OPEN, AgentWebMediaNativeTools.BROWSER_RENDER).forEach { toolId ->
+            val registry = registry(
+                FakeTransport(
+                    AgentWebTransportResponse(
+                        200,
+                        mapOf("Content-Type" to listOf("text/html; charset=utf-8")),
+                        "<h1>SignalASI</h1>".toByteArray()
+                    )
+                ),
+                FakeResolver("public.example.test" to listOf(publicAddress(93, 184, 216, 34)))
+            )
+            val result = registry.invoke(
+                toolId,
+                mapOf("url" to "https://public.example.test/page"),
+                webContext()
+            )
+            assertTrue(result.toJson(), result.isSuccess)
+            assertEquals("SignalASI", result.output["text"])
+        }
+
+        val headRegistry = registry(
+            FakeTransport(AgentWebTransportResponse(200, mapOf("Content-Type" to listOf("text/plain")))),
+            FakeResolver("public.example.test" to listOf(publicAddress(93, 184, 216, 34)))
+        )
+        val head = headRegistry.invoke(
+            AgentWebMediaNativeTools.HTTP_REQUEST,
+            mapOf("url" to "https://public.example.test/status", "method" to "HEAD"),
+            webContext()
+        )
+        assertTrue(head.toJson(), head.isSuccess)
+
+        val content = AgentWebMediaNativeTools.createRegistry(services(FakeTransport())).invoke(
+            AgentWebMediaNativeTools.CONTENT_EXTRACT,
+            mapOf("content" to "<p>Readable text</p>")
+        )
+        assertTrue(content.toJson(), content.isSuccess)
+        assertEquals("Readable text", content.output["text"])
+    }
+
+    @Test
     fun fetchFollowsRevalidatedRedirectAndReturnsTimestampedSourceProvenance() {
         val clock = MutableClock(1_000L)
         val transport = FakeTransport(

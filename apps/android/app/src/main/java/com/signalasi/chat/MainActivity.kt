@@ -24,6 +24,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.provider.MediaStore
 import android.provider.Settings
@@ -1544,23 +1545,43 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun continueAgentGoalSubmission(goal: String, conversationId: String, turnId: String) {
+        val routingStartedAt = SystemClock.elapsedRealtime()
         val conversationContext = agentTranscriptStore.context(conversationId)
         if (handleAgentSkillCommand(goal, conversationId, turnId)) return
         val skillMatch = agentSkillMatcher.match(goal)
+        val deterministicAction = deterministicSystemActionFor(goal, conversationContext)
+        Log.d(
+            "SignalASIAgent",
+            "route_resolved turn=${turnId.take(8)} tool=${deterministicAction?.parameters?.get("tool_id").orEmpty()} " +
+                "action=${deterministicAction?.id.orEmpty()} skill=${skillMatch != null} " +
+                "elapsed_ms=${SystemClock.elapsedRealtime() - routingStartedAt}"
+        )
         val run = agentRunRecorder.begin(
             conversationId = conversationId,
             request = goal,
-            activeSkillId = skillMatch?.installation?.id.orEmpty()
+            activeSkillId = if (deterministicAction == null) skillMatch?.installation?.id.orEmpty() else ""
+        )
+        Log.d(
+            "SignalASIAgent",
+            "run_recorded turn=${turnId.take(8)} elapsed_ms=${SystemClock.elapsedRealtime() - routingStartedAt}"
         )
         agentRunIdsByTurn[turnId] = run.runId
-        if (skillMatch != null && executeMatchedSkill(skillMatch, conversationId, turnId, goal, conversationContext)) {
+        if (deterministicAction != null) {
+            if (AgentConfirmationPolicy.tier(deterministicAction) == AgentConfirmationTier.DIRECT) {
+                Log.d("SignalASIAgent", "route_direct turn=${turnId.take(8)} action=${deterministicAction.id}")
+                executeDirectSystemAction(deterministicAction, conversationId, turnId)
+            } else {
+                Log.d("SignalASIAgent", "route_protected turn=${turnId.take(8)} action=${deterministicAction.id}")
+                executeConcurrentAgentGoal(
+                    goal,
+                    conversationContext,
+                    conversationId,
+                    turnId,
+                    deterministicAction
+                )
+            }
+        } else if (skillMatch != null && executeMatchedSkill(skillMatch, conversationId, turnId, goal, conversationContext)) {
             return
-        }
-        val deterministicAction = deterministicSystemActionFor(goal, conversationContext)
-        if (deterministicAction != null &&
-            AgentConfirmationPolicy.tier(deterministicAction) == AgentConfirmationTier.DIRECT
-        ) {
-            executeDirectSystemAction(deterministicAction, conversationId, turnId)
         } else {
             executeConcurrentAgentGoal(goal, conversationContext, conversationId, turnId)
         }
@@ -1580,7 +1601,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         goal: String,
         conversationContext: AgentConversationContext,
         conversationId: String,
-        turnId: String
+        turnId: String,
+        deterministicAction: AgentAction? = null
     ) {
         val workspace = AgentWorkspace(
             workspaceId = turnId,
@@ -1592,6 +1614,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         AgentTaskRuntime.supervisor(this).submit(workspace, AgentTaskLane.READ_REASONING) {
             val runtime = MobileNativeAgent(
                 this@MainActivity,
+                planner = deterministicAction?.let { selectedAction ->
+                    object : AgentPlanner {
+                        override fun plan(request: AgentRequest): AgentPlan =
+                            AgentPlanFactory.actions(request, listOf(selectedAction)).copy(
+                                plannerProfile = "deterministic-native-route",
+                                routeRationale = "An exact phone-native route was selected before model planning."
+                            )
+                    }
+                } ?: GuardedModelAgentPlanner(this@MainActivity),
                 sessionStore = SharedPreferencesAgentSessionStore(this@MainActivity, "task:$turnId")
             )
             provisionalAgentTasks.add(runtime)
@@ -3810,19 +3841,30 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .orEmpty()
             .ifBlank { state.plan?.selectedAgentOrModel.orEmpty() }
             .ifBlank { getString(R.string.agent_output_on_device) }
+        val phoneNativePlan = state.plan?.actions?.any { it.kind == AgentActionKind.CALL_NATIVE_TOOL } == true
         return when (entry.event) {
             AgentAuditEvent.PLAN_REPLANNED,
             AgentAuditEvent.PLAN_EDITED -> getString(R.string.agent_trace_plan_updated)
             AgentAuditEvent.TOOL_OUTPUT_HANDOFF -> getString(R.string.agent_trace_tool_result_ready)
-            AgentAuditEvent.ACTION_RECOVERY_STARTED -> getString(R.string.agent_trace_recovery_started)
-            AgentAuditEvent.ACTION_RECOVERY_COMPLETED -> getString(R.string.agent_trace_recovery_completed)
-            AgentAuditEvent.ACTION_RECOVERY_MANUAL_REQUIRED -> getString(R.string.agent_trace_recovery_manual)
+            AgentAuditEvent.ACTION_RECOVERY_STARTED ->
+                if (phoneNativePlan) null else getString(R.string.agent_trace_recovery_started)
+            AgentAuditEvent.ACTION_RECOVERY_COMPLETED ->
+                if (phoneNativePlan) null else getString(R.string.agent_trace_recovery_completed)
+            AgentAuditEvent.ACTION_RECOVERY_MANUAL_REQUIRED ->
+                if (phoneNativePlan) null else getString(R.string.agent_trace_recovery_manual)
             AgentAuditEvent.CONNECTOR_RESPONSE_RECEIVED -> null
             AgentAuditEvent.ACTION_EXECUTED -> when {
+                entry.detail.contains("FAILED", ignoreCase = true) && phoneNativePlan -> null
                 entry.detail.contains("FAILED", ignoreCase = true) -> getString(R.string.agent_trace_request_failed, route)
                 else -> null
             }
-            AgentAuditEvent.ACTION_BLOCKED -> getString(R.string.agent_trace_action_blocked)
+            AgentAuditEvent.ACTION_BLOCKED -> if (
+                entry.detail.startsWith("secondary_confirmation_required:")
+            ) {
+                null
+            } else {
+                getString(R.string.agent_trace_action_blocked)
+            }
             AgentAuditEvent.TASK_PAUSED -> getString(R.string.agent_trace_task_paused)
             AgentAuditEvent.TASK_RESUMED -> getString(R.string.agent_trace_task_resumed)
             AgentAuditEvent.TASK_INTERRUPTED -> getString(R.string.agent_trace_task_interrupted)

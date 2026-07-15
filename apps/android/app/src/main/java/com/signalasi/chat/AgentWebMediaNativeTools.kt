@@ -908,7 +908,7 @@ object AgentWebMediaNativeTools {
                 ),
                 required = setOf("query")
             ),
-            outputSchema = objectSchema(),
+            outputSchema = webSearchOutputSchema(),
             consents = emptyList(),
             availability = web.availability
         ),
@@ -916,14 +916,58 @@ object AgentWebMediaNativeTools {
             executeBounded {
                 val query = invocation.input.string("query")
                 val maxResults = invocation.input.long("max_results", 5L).toInt().coerceIn(1, 10)
-                val url = "https://html.duckduckgo.com/html/?q=" + URLEncoder.encode(query, Charsets.UTF_8.name())
-                val resource = web.fetch(url, MAX_FETCH_BYTES, invocation.input.timeout(invocation), invocation.cancellationToken, invocation::checkpoint)
-                val html = resource.body.toString(charset(resource.contentType, resource.selectedHeaders))
-                val results = parseSearchResults(html, maxResults)
+                val encoded = URLEncoder.encode(query, Charsets.UTF_8.name())
+                val endpoints = if (query.any { it.code > 127 }) {
+                    listOf(
+                        "baidu" to "https://www.baidu.com/s?wd=$encoded&rn=$maxResults",
+                        "bing" to "https://cn.bing.com/search?q=$encoded&count=$maxResults",
+                        "duckduckgo" to "https://html.duckduckgo.com/html/?q=$encoded"
+                    )
+                } else {
+                    listOf(
+                        "bing" to "https://cn.bing.com/search?q=$encoded&count=$maxResults",
+                        "baidu" to "https://www.baidu.com/s?wd=$encoded&rn=$maxResults",
+                        "duckduckgo" to "https://html.duckduckgo.com/html/?q=$encoded"
+                    )
+                }
+                var selected: Pair<String, AgentWebResource>? = null
+                var results: List<Map<String, String>> = emptyList()
+                var lastError: AgentWebMediaException? = null
+                for ((provider, url) in endpoints) {
+                    invocation.checkpoint()
+                    val remaining = invocation.remainingTimeMillis
+                    if (remaining < 250L) break
+                    val attemptTimeout = minOf(4_000L, remaining)
+                    try {
+                        val resource = web.fetch(
+                            url,
+                            MAX_FETCH_BYTES,
+                            attemptTimeout,
+                            invocation.cancellationToken,
+                            invocation::checkpoint
+                        )
+                        val html = resource.body.toString(charset(resource.contentType, resource.selectedHeaders))
+                        val parsed = parseSearchResults(html, maxResults)
+                        if (parsed.isNotEmpty()) {
+                            selected = provider to resource
+                            results = parsed
+                            break
+                        }
+                    } catch (error: AgentWebMediaException) {
+                        lastError = error
+                    }
+                }
+                val (provider, resource) = selected ?: throw lastError
+                    ?: AgentWebMediaException("search_no_results", "Public search providers returned no readable results", retryable = true)
                 AgentNativeToolExecutionResult.success(
                     output = resource.commonValue() + mapOf("query" to query, "results" to results, "result_count" to results.size),
                     message = "Public web search completed",
-                    metadata = mapOf("network_policy" to "public_https_pinned_dns_v1", "cookies" to "none")
+                    metadata = mapOf(
+                        "network_policy" to "public_https_pinned_dns_v1",
+                        "cookies" to "none",
+                        "provider" to provider,
+                        "fallback_count" to endpoints.indexOfFirst { it.first == provider }
+                    )
                 )
             }
         },
@@ -938,7 +982,7 @@ object AgentWebMediaNativeTools {
             title = title,
             description = "Fetches a bounded public HTTPS page and extracts readable text without sharing browser cookies.",
             inputSchema = webGetInputSchema(MAX_FETCH_BYTES),
-            outputSchema = objectSchema(),
+            outputSchema = webOpenOutputSchema(),
             consents = emptyList(),
             availability = web.availability
         ),
@@ -979,7 +1023,13 @@ object AgentWebMediaNativeTools {
                 properties = mapOf("content" to AgentNativeJsonSchema.string(minLength = 1, maxLength = MAX_FETCH_BYTES.toInt())),
                 required = setOf("content")
             ),
-            outputSchema = objectSchema(),
+            outputSchema = objectSchema(
+                properties = mapOf(
+                    "text" to AgentNativeJsonSchema.string(maxLength = 240_000),
+                    "source_chars" to AgentNativeJsonSchema.integer(1, MAX_FETCH_BYTES)
+                ),
+                required = setOf("text", "source_chars")
+            ),
             risk = AgentNativeToolRisk.LOW,
             capabilities = setOf("content.extract", "html.no_script_execution"),
             timeoutMillis = MAX_TOOL_TIMEOUT_MILLIS,
@@ -1005,7 +1055,7 @@ object AgentWebMediaNativeTools {
                 properties = webInputProperties(MAX_FETCH_BYTES) + ("method" to AgentNativeJsonSchema.string(enumValues = listOf("GET", "HEAD"))),
                 required = setOf("url", "method")
             ),
-            outputSchema = objectSchema(),
+            outputSchema = httpRequestOutputSchema(),
             consents = emptyList(),
             availability = web.availability
         ),
@@ -1040,14 +1090,58 @@ object AgentWebMediaNativeTools {
     )
 
     private fun parseSearchResults(html: String, limit: Int): List<Map<String, String>> {
-        val pattern = Regex("""<a[^>]+class=[\"'][^\"']*result__a[^\"']*[\"'][^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-        return pattern.findAll(html).take(limit).map { match ->
-            mapOf("title" to extractText(match.groupValues[2]), "url" to Html.fromHtml(match.groupValues[1], Html.FROM_HTML_MODE_LEGACY).toString())
-        }.toList()
+        val patterns = listOf(
+            Regex(
+                """<div[^>]+class=[\"'][^\"']*b_algoheader[^\"']*[\"'][^>]*>\s*<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>\s*<h2[^>]*>(.*?)</h2>""",
+                setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+            ),
+            Regex(
+                """<a[^>]+class=[\"'][^\"']*result__a[^\"']*[\"'][^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>""",
+                setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+            ),
+            Regex(
+                """<li[^>]+class=[\"'][^\"']*b_algo[^\"']*[\"'][^>]*>.*?<h2[^>]*>\s*<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>""",
+                setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+            ),
+            Regex(
+                """<h3[^>]+class=[\"'][^\"']*(?:c-title|\bt\b)[^\"']*[\"'][^>]*>.*?<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>""",
+                setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+            )
+        )
+        return patterns.asSequence()
+            .flatMap { pattern -> pattern.findAll(html).asSequence() }
+            .map { match ->
+                mapOf(
+                    "title" to extractText(match.groupValues[2]).take(4_096),
+                    "url" to decodeHtml(match.groupValues[1]).take(4_096)
+                )
+            }
+            .filter { it.getValue("title").isNotBlank() && it.getValue("url").startsWith("http") }
+            .distinctBy { it.getValue("url") }
+            .take(limit)
+            .toList()
     }
 
-    private fun extractText(source: String): String = Html.fromHtml(source, Html.FROM_HTML_MODE_LEGACY)
-        .toString().replace(Regex("[ \\t]+"), " ").replace(Regex("\\n{3,}"), "\n\n").trim().take(240_000)
+    private fun extractText(source: String): String = decodeHtml(source)
+        .replace(Regex("[ \\t]+"), " ")
+        .replace(Regex("\\n{3,}"), "\n\n")
+        .trim()
+        .take(240_000)
+
+    private fun decodeHtml(source: String): String = runCatching {
+        Html.fromHtml(source, Html.FROM_HTML_MODE_LEGACY).toString()
+    }.getOrElse {
+        source
+            .replace(Regex("(?is)<script[^>]*>.*?</script>|<style[^>]*>.*?</style>"), " ")
+            .replace(Regex("(?i)<br\\s*/?>|</p>|</div>|</li>|</h[1-6]>"), "\n")
+            .replace(Regex("(?s)<[^>]+>"), " ")
+            .replace("&nbsp;", " ", ignoreCase = true)
+            .replace("&amp;", "&", ignoreCase = true)
+            .replace("&lt;", "<", ignoreCase = true)
+            .replace("&gt;", ">", ignoreCase = true)
+            .replace("&quot;", "\"", ignoreCase = true)
+            .replace("&#39;", "'", ignoreCase = true)
+    }
 
     private fun webHeadDefinition(web: AgentBoundedWebService) = AgentNativeToolDefinition(
         descriptor = webDescriptor(
@@ -1428,6 +1522,40 @@ object AgentWebMediaNativeTools {
     )
 
     private fun webHeadOutputSchema() = objectSchema(webCommonOutputProperties(), WEB_COMMON_REQUIRED)
+
+    private fun webSearchOutputSchema() = objectSchema(
+        webCommonOutputProperties() + mapOf(
+            "query" to AgentNativeJsonSchema.string(minLength = 1, maxLength = 1_024),
+            "results" to AgentNativeJsonSchema.array(
+                objectSchema(
+                    properties = mapOf(
+                        "title" to AgentNativeJsonSchema.string(maxLength = 4_096),
+                        "url" to AgentNativeJsonSchema.string(maxLength = 4_096)
+                    ),
+                    required = setOf("title", "url")
+                ),
+                maxItems = 10
+            ),
+            "result_count" to AgentNativeJsonSchema.integer(0, 10)
+        ),
+        WEB_COMMON_REQUIRED + setOf("query", "results", "result_count")
+    )
+
+    private fun webOpenOutputSchema() = objectSchema(
+        webCommonOutputProperties() + mapOf(
+            "text" to AgentNativeJsonSchema.string(maxLength = 240_000),
+            "html_sha256" to sha256Schema(),
+            "render_mode" to AgentNativeJsonSchema.string(enumValues = listOf("bounded_http", "isolated_static_dom"))
+        ),
+        WEB_COMMON_REQUIRED + setOf("text", "html_sha256", "render_mode")
+    )
+
+    private fun httpRequestOutputSchema() = objectSchema(
+        webCommonOutputProperties() + mapOf(
+            "text" to AgentNativeJsonSchema.string(maxLength = MAX_FETCH_BYTES.toInt())
+        ),
+        WEB_COMMON_REQUIRED
+    )
 
     private fun webFetchOutputSchema() = objectSchema(
         webCommonOutputProperties() + mapOf(

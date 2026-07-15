@@ -218,7 +218,16 @@ class MobileNativeAgent(
             ?: return AgentActionResult(action.id, false, "Native tool is not registered: $toolId")
         val input = runCatching { nativeJsonObject(action.parameters["input_json"].orEmpty()) }
             .getOrElse { return AgentActionResult(action.id, false, it.message ?: "Invalid native tool input") }
-        val grantedConsents = if (userConfirmed) descriptor.requiredConsents.mapTo(linkedSetOf()) { it.id } else emptySet()
+        val confirmationTier = AgentConfirmationPolicy.tier(action)
+        val rememberedConsent = confirmationTier == AgentConfirmationTier.CONFIRM_ONCE &&
+            confirmationConsentStore.isRemembered(AgentConfirmationPolicy.consentKey(action))
+        val grantedConsents = if (
+            userConfirmed || confirmationTier == AgentConfirmationTier.DIRECT || rememberedConsent
+        ) {
+            descriptor.requiredConsents.mapTo(linkedSetOf()) { it.id }
+        } else {
+            emptySet()
+        }
         val result = nativeToolRegistry.invoke(
             id = toolId,
             input = input,
@@ -239,11 +248,9 @@ class MobileNativeAgent(
             )
         )
         val renderedOutput = AgentNativeJsonCodec.stringify(result.output).take(8_000)
-        val userMessage = if (toolId in AgentAndroidSystemNativeTools.toolIds || toolId in AgentWebMediaNativeTools.toolIds) {
-            renderAndroidSystemToolResult(result.message, result.output)
-        } else {
-            result.message.ifBlank { renderedOutput }
-        }
+        val nativeMessage = result.message.ifBlank { result.error?.message.orEmpty() }
+        val userMessage = renderNativeToolResult(toolId, nativeMessage, result.output)
+            .ifBlank { renderedOutput }
         return AgentActionResult(
             actionId = action.id,
             success = result.isSuccess,
@@ -264,6 +271,367 @@ class MobileNativeAgent(
             "${key.replace('_', ' ')}: ${renderAndroidSystemToolValue(value)}"
         }.take(6_000)
         return listOf(message.trim(), details.trim()).filter { it.isNotBlank() }.joinToString("\n")
+    }
+
+    private fun renderNativeToolResult(
+        toolId: String,
+        message: String,
+        output: AgentNativeJsonObject
+    ): String {
+        val zh = currentGoal.any { it in '\u3400'..'\u9fff' }
+        if (output.isEmpty()) return renderNativeToolFailure(message, zh)
+        renderAndroidSystemSummary(toolId, output, zh)?.let { return it }
+        if (zh) return renderNativeToolResultChinese(toolId, message, output)
+        fun bool(name: String) = output[name] as? Boolean ?: false
+        fun long(name: String) = (output[name] as? Number)?.toLong()
+        fun number(name: String) = (output[name] as? Number)?.toDouble()
+        fun text(name: String) = output[name]?.toString().orEmpty()
+        return when (toolId) {
+            AgentHardwareNativeTools.BATTERY_STATUS -> {
+                val percent = long("percent")?.toString() ?: "unknown"
+                val charging = bool("charging")
+                val status = text("status")
+                when {
+                    status == "full" -> "Phone battery is $percent% and fully charged."
+                    charging -> "Phone battery is $percent% and charging."
+                    else -> "Phone battery is $percent%."
+                }
+            }
+            AgentHardwareNativeTools.POWER_STATUS ->
+                "Screen is ${if (bool("interactive")) "on" else "off"}. Battery Saver is ${if (bool("power_save_mode")) "on" else "off"}; Doze is ${if (bool("device_idle_mode")) "active" else "inactive"}."
+            AgentHardwareNativeTools.STORAGE_STATUS -> {
+                val available = formatBytes(long("available_bytes") ?: 0L)
+                val total = formatBytes(long("total_bytes") ?: 0L)
+                "Available storage is $available of $total on the app volume."
+            }
+            AgentHardwareNativeTools.NETWORK_STATUS -> {
+                val transports = (output["transports"] as? Iterable<*>)?.joinToString(", ") { it.toString() }.orEmpty()
+                if (!bool("connected")) {
+                    "The phone is currently offline."
+                } else {
+                    "The phone is connected over ${transports.ifBlank { "an active network" }}. Internet is ${if (bool("validated")) "available" else "not yet validated"}; the connection is ${if (bool("metered")) "metered" else "unmetered"}."
+                }
+            }
+            AgentHardwareNativeTools.LOCATION_FOREGROUND_READ -> {
+                val latitude = number("latitude")
+                val longitude = number("longitude")
+                val accuracy = number("accuracy_meters")
+                "Current location: ${formatCoordinate(latitude)}, ${formatCoordinate(longitude)} (about ${accuracy?.toInt() ?: 0} m accuracy)."
+            }
+            AgentHardwareNativeTools.SENSORS_LIST -> {
+                val sensors = (output["sensors"] as? Iterable<*>)
+                    ?.mapNotNull { (it as? Map<*, *>)?.get("name")?.toString() }
+                    .orEmpty()
+                val names = sensors.take(12).joinToString(", ")
+                val suffix = if (sensors.size > 12) ", and more" else ""
+                "Found ${sensors.size} sensors: $names$suffix."
+            }
+            AgentHardwareNativeTools.SENSOR_SAMPLE -> {
+                val values = (output["values"] as? Iterable<*>)?.joinToString(", ") { it.toString() }.orEmpty()
+                "One ${text("type")} sample: $values."
+            }
+            AgentHardwareNativeTools.FLASHLIGHT_SET -> {
+                val enabled = bool("requested_enabled")
+                if (enabled) "Flashlight turned on." else "Flashlight turned off."
+            }
+            AgentHardwareNativeTools.BLUETOOTH_STATUS ->
+                if (!bool("supported")) "This phone does not support Bluetooth." else "Bluetooth is ${if (bool("enabled")) "on" else "off"}."
+            AgentHardwareNativeTools.BLUETOOTH_DISCOVERY_FOREGROUND -> {
+                val count = long("result_count") ?: 0L
+                "Bluetooth scan finished and found $count devices."
+            }
+            AgentHardwareNativeTools.NFC_STATUS ->
+                if (!bool("supported")) "This phone does not support NFC." else "NFC is ${if (bool("enabled")) "on" else "off"}."
+            AgentHardwareNativeTools.INSTALLED_APPS_LIST -> {
+                val apps = (output["apps"] as? Iterable<*>)
+                    ?.mapNotNull { (it as? Map<*, *>)?.get("label")?.toString() }
+                    .orEmpty()
+                val names = apps.take(12).joinToString(", ")
+                val remaining = (apps.size - 12).coerceAtLeast(0)
+                "Found ${apps.size} query-visible apps: $names${if (remaining > 0) ", and $remaining more" else ""}."
+            }
+            AgentHardwareNativeTools.PACKAGE_DETAIL ->
+                if (!bool("visible")) "Android does not expose this app to SignalASI." else "${text("label").ifBlank { text("package_name") }} ${text("version_name")} (${text("package_name")})."
+            AgentAndroidSystemNativeTools.AUDIO_VOLUME_SET -> {
+                val volume = long("volume") ?: 0L
+                val max = long("max") ?: 0L
+                val actualPercent = if (max > 0L) {
+                    ((volume * 100L + max / 2L) / max).coerceIn(0L, 100L)
+                } else {
+                    long("percent") ?: 0L
+                }
+                val stream = audioStreamLabel(text("stream"), zh)
+                if (zh) "$stream\u97f3\u91cf\u5df2\u8bbe\u4e3a $actualPercent%\u3002" else "$stream volume is now $actualPercent%."
+            }
+            AgentAndroidSystemNativeTools.AUDIO_MUTE_SET -> {
+                val stream = audioStreamLabel(text("stream"), zh)
+                val muted = bool("muted")
+                if (zh) "$stream\u5df2${if (muted) "\u9759\u97f3" else "\u53d6\u6d88\u9759\u97f3"}\u3002"
+                else "$stream is ${if (muted) "muted" else "unmuted"}."
+            }
+            AgentHardwareNativeTools.BLUETOOTH_PAIRING_HANDOFF,
+            AgentAndroidSystemNativeTools.WIFI_PANEL_OPEN,
+            AgentAndroidSystemNativeTools.WIFI_HOTSPOT_PANEL_OPEN,
+            AgentAndroidSystemNativeTools.BIOMETRIC_ENROLLMENT_OPEN,
+            AgentAndroidSystemNativeTools.VPN_CONSENT_OPEN,
+            AgentAndroidSystemNativeTools.TELEPHONY_DIAL_HANDOFF,
+            AgentAndroidSystemNativeTools.SMS_COMPOSE_HANDOFF -> message.trim()
+            else -> if (toolId in AgentAndroidSystemNativeTools.toolIds || toolId in AgentWebMediaNativeTools.toolIds) {
+                renderAndroidSystemToolResult(message, output)
+            } else {
+                message
+            }
+        }
+    }
+
+    private fun renderAndroidSystemSummary(
+        toolId: String,
+        output: AgentNativeJsonObject,
+        zh: Boolean
+    ): String? {
+        fun bool(name: String) = output[name] as? Boolean ?: false
+        fun long(name: String) = (output[name] as? Number)?.toLong()
+        fun text(name: String) = output[name]?.toString().orEmpty()
+        fun maps(name: String) = (output[name] as? Iterable<*>)?.mapNotNull { it as? Map<*, *> }.orEmpty()
+        fun percent(current: Any?, maximum: Any?): Int {
+            val value = (current as? Number)?.toDouble() ?: 0.0
+            val max = (maximum as? Number)?.toDouble() ?: 0.0
+            return if (max <= 0.0) 0 else ((value / max) * 100.0).toInt().coerceIn(0, 100)
+        }
+        return when (toolId) {
+            AgentAndroidSystemNativeTools.TELEPHONY_STATUS -> {
+                val operator = text("network_operator_name").ifBlank { if (zh) "\u672a\u77e5\u8fd0\u8425\u5546" else "unknown carrier" }
+                val data = if (bool("data_enabled")) if (zh) "\u5df2\u5f00\u542f" else "on" else if (zh) "\u5df2\u5173\u95ed" else "off"
+                if (zh) "\u79fb\u52a8\u7f51\u7edc\uff1a$operator\u3002\u901a\u8bdd\u72b6\u6001\uff1a${text("call_state")}\uff1b\u79fb\u52a8\u6570\u636e\uff1a$data\u3002"
+                else "Mobile service: $operator. Call state: ${text("call_state")}; mobile data: $data."
+            }
+            AgentAndroidSystemNativeTools.TELEPHONY_CALL_STATE,
+            AgentAndroidSystemNativeTools.TELEPHONY_CALL_STATE_OBSERVE ->
+                if (zh) "\u5f53\u524d\u901a\u8bdd\u72b6\u6001\uff1a${text("call_state").ifBlank { "idle" }}\u3002"
+                else "Current call state: ${text("call_state").ifBlank { "idle" }}."
+            AgentAndroidSystemNativeTools.SMS_LIST -> {
+                val messages = maps("messages")
+                if (messages.isEmpty()) {
+                    if (zh) "\u6ca1\u6709\u8fd4\u56de\u53ef\u8bfb\u7684\u77ed\u4fe1\u3002" else "No readable SMS messages were returned."
+                } else {
+                    val lines = messages.take(10).map { row ->
+                        val sender = row["address"]?.toString().orEmpty().ifBlank { if (zh) "\u672a\u77e5\u53d1\u4ef6\u4eba" else "Unknown sender" }
+                        val body = row["body"]?.toString().orEmpty().replace(Regex("\\s+"), " ").take(120)
+                        "- $sender: $body"
+                    }
+                    (if (zh) "\u6700\u8fd1\u77ed\u4fe1\uff1a" else "Recent SMS messages:") + "\n" + lines.joinToString("\n")
+                }
+            }
+            AgentAndroidSystemNativeTools.CONTACTS_SEARCH -> {
+                val contacts = maps("contacts")
+                if (contacts.isEmpty()) {
+                    if (zh) "\u6ca1\u6709\u627e\u5230\u5339\u914d\u7684\u8054\u7cfb\u4eba\u3002" else "No matching contacts were found."
+                } else {
+                    val names = contacts.take(20).mapNotNull { it["display_name"]?.toString()?.takeIf(String::isNotBlank) }
+                    if (zh) "\u627e\u5230 ${contacts.size} \u4e2a\u8054\u7cfb\u4eba\uff1a${names.joinToString("\u3001")}\u3002"
+                    else "Found ${contacts.size} contacts: ${names.joinToString(", ")}."
+                }
+            }
+            AgentAndroidSystemNativeTools.CALENDARS_LIST -> {
+                val calendars = maps("calendars")
+                val names = calendars.mapNotNull { it["display_name"]?.toString()?.takeIf(String::isNotBlank) }
+                if (calendars.isEmpty()) {
+                    if (zh) "\u6ca1\u6709\u53ef\u8bfb\u7684\u65e5\u5386\u3002" else "No readable calendars were found."
+                } else if (zh) {
+                    "\u627e\u5230 ${calendars.size} \u4e2a\u65e5\u5386\uff1a${names.joinToString("\u3001")}\u3002"
+                } else "Found ${calendars.size} calendars: ${names.joinToString(", ")}."
+            }
+            AgentAndroidSystemNativeTools.CALENDAR_EVENTS_QUERY -> {
+                val events = maps("events")
+                if (events.isEmpty()) {
+                    if (zh) "\u8be5\u65f6\u95f4\u8303\u56f4\u5185\u6ca1\u6709\u65e5\u7a0b\u3002" else "There are no events in that time range."
+                } else {
+                    val titles = events.take(20).mapNotNull { it["title"]?.toString()?.takeIf(String::isNotBlank) }
+                    if (zh) "\u627e\u5230 ${events.size} \u4e2a\u65e5\u7a0b\uff1a${titles.joinToString("\u3001")}\u3002"
+                    else "Found ${events.size} events: ${titles.joinToString(", ")}."
+                }
+            }
+            AgentAndroidSystemNativeTools.WIFI_STATUS -> {
+                if (!bool("wifi_enabled")) {
+                    if (zh) "Wi-Fi \u5df2\u5173\u95ed\u3002" else "Wi-Fi is off."
+                } else {
+                    val ssid = text("ssid").takeUnless { it.isBlank() || it == "<unknown ssid>" }
+                    val speed = long("link_speed_mbps") ?: 0L
+                    if (zh) "Wi-Fi \u5df2\u5f00\u542f${ssid?.let { "\uff0c\u5df2\u8fde\u63a5 $it" }.orEmpty()}\uff0c\u94fe\u8def\u901f\u7387 $speed Mbps\uff0c\u4e92\u8054\u7f51${if (bool("validated")) "\u53ef\u7528" else "\u5c1a\u672a\u9a8c\u8bc1"}\u3002"
+                    else "Wi-Fi is on${ssid?.let { " and connected to $it" }.orEmpty()}. Link speed is $speed Mbps; internet is ${if (bool("validated")) "available" else "not yet validated"}."
+                }
+            }
+            AgentAndroidSystemNativeTools.WIFI_SCAN_RESULTS -> {
+                val networks = maps("networks")
+                val names = networks.take(20).mapNotNull { it["ssid"]?.toString()?.takeIf(String::isNotBlank) }
+                if (networks.isEmpty()) {
+                    if (zh) "\u6ca1\u6709\u8fd4\u56de\u9644\u8fd1\u7684 Wi-Fi \u7f51\u7edc\u3002" else "No nearby Wi-Fi networks were returned."
+                } else if (zh) {
+                    "\u627e\u5230 ${networks.size} \u4e2a Wi-Fi \u7f51\u7edc\uff1a${names.joinToString("\u3001")}\u3002"
+                } else "Found ${networks.size} Wi-Fi networks: ${names.joinToString(", ")}."
+            }
+            AgentAndroidSystemNativeTools.WIFI_SCAN_START ->
+                if (zh) "\u5df2\u8bf7\u6c42\u5237\u65b0 Wi-Fi \u626b\u63cf\u7ed3\u679c\u3002" else "Requested a Wi-Fi scan refresh."
+            AgentAndroidSystemNativeTools.AUDIO_STATUS -> {
+                val streams = output["streams"] as? Map<*, *> ?: emptyMap<Any, Any>()
+                fun streamPercent(name: String): Int {
+                    val row = streams[name] as? Map<*, *> ?: return 0
+                    return percent(row["current"], row["max"])
+                }
+                if (zh) "\u5a92\u4f53 ${streamPercent("music")}%\uff0c\u94c3\u58f0 ${streamPercent("ring")}%\uff0c\u95f9\u949f ${streamPercent("alarm")}%\uff1b\u9ea6\u514b\u98ce${if (bool("microphone_muted")) "\u5df2\u9759\u97f3" else "\u672a\u9759\u97f3"}\u3002"
+                else "Media ${streamPercent("music")}%, ringer ${streamPercent("ring")}%, alarm ${streamPercent("alarm")}%" +
+                    "; microphone is ${if (bool("microphone_muted")) "muted" else "not muted"}."
+            }
+            AgentAndroidSystemNativeTools.BIOMETRIC_STATUS -> {
+                val code = long("can_authenticate_code")?.toInt()
+                val state = when (code) {
+                    0 -> if (zh) "\u53ef\u7528" else "available"
+                    11 -> if (zh) "\u672a\u5f55\u5165\u751f\u7269\u8bc6\u522b" else "not enrolled"
+                    12 -> if (zh) "\u8bbe\u5907\u4e0d\u652f\u6301" else "not supported"
+                    else -> if (zh) "\u5f53\u524d\u4e0d\u53ef\u7528" else "currently unavailable"
+                }
+                if (zh) "\u751f\u7269\u8bc6\u522b\uff1a$state\uff1b\u8bbe\u5907\u5b89\u5168\u9501${if (bool("device_secure")) "\u5df2\u8bbe\u7f6e" else "\u672a\u8bbe\u7f6e"}\u3002"
+                else "Biometrics are $state; a secure device lock is ${if (bool("device_secure")) "configured" else "not configured"}."
+            }
+            AgentAndroidSystemNativeTools.VPN_STATUS ->
+                if (zh) "VPN ${if (bool("active")) "\u5df2\u8fde\u63a5" else "\u672a\u8fde\u63a5"}\uff0c\u7cfb\u7edf\u6388\u6743${if (bool("consent_granted")) "\u5df2\u6388\u4e88" else "\u672a\u6388\u4e88"}\u3002"
+                else "VPN is ${if (bool("active")) "connected" else "not connected"}; system consent is ${if (bool("consent_granted")) "granted" else "not granted"}."
+            AgentAndroidSystemNativeTools.DEVICE_POLICY_STATUS ->
+                if (zh) "\u8bbe\u5907\u7ba1\u7406\u5458${if (bool("admin_active")) "\u5df2\u542f\u7528" else "\u672a\u542f\u7528"}\uff0c\u8bbe\u5907\u6240\u6709\u8005${if (bool("device_owner")) "\u5df2\u914d\u7f6e" else "\u672a\u914d\u7f6e"}\u3002"
+                else "Device admin is ${if (bool("admin_active")) "active" else "inactive"}; device owner is ${if (bool("device_owner")) "configured" else "not configured"}."
+            else -> null
+        }
+    }
+
+    private fun renderNativeToolResultChinese(
+        toolId: String,
+        message: String,
+        output: AgentNativeJsonObject
+    ): String {
+        fun bool(name: String) = output[name] as? Boolean ?: false
+        fun long(name: String) = (output[name] as? Number)?.toLong()
+        fun number(name: String) = (output[name] as? Number)?.toDouble()
+        fun text(name: String) = output[name]?.toString().orEmpty()
+        return when (toolId) {
+            AgentHardwareNativeTools.BATTERY_STATUS -> {
+                val percent = long("percent")?.toString() ?: "\u672a\u77e5"
+                when {
+                    text("status") == "full" -> "\u624b\u673a\u7535\u91cf $percent%\uff0c\u5df2\u5145\u6ee1\u3002"
+                    bool("charging") -> "\u624b\u673a\u7535\u91cf $percent%\uff0c\u6b63\u5728\u5145\u7535\u3002"
+                    else -> "\u624b\u673a\u7535\u91cf $percent%\u3002"
+                }
+            }
+            AgentHardwareNativeTools.POWER_STATUS ->
+                "\u5c4f\u5e55${if (bool("interactive")) "\u5df2\u70b9\u4eae" else "\u5df2\u7184\u706d"}\uff0c" +
+                    "\u7701\u7535\u6a21\u5f0f${if (bool("power_save_mode")) "\u5df2\u5f00\u542f" else "\u672a\u5f00\u542f"}\uff0c" +
+                    "Doze ${if (bool("device_idle_mode")) "\u5df2\u542f\u7528" else "\u672a\u542f\u7528"}\u3002"
+            AgentHardwareNativeTools.STORAGE_STATUS ->
+                "\u5e94\u7528\u6240\u5728\u5b58\u50a8\u5377\u5269\u4f59 ${formatBytes(long("available_bytes") ?: 0L)}\uff0c" +
+                    "\u5171 ${formatBytes(long("total_bytes") ?: 0L)}\u3002"
+            AgentHardwareNativeTools.NETWORK_STATUS -> {
+                val transports = (output["transports"] as? Iterable<*>)
+                    ?.joinToString(", ") { it.toString() }.orEmpty()
+                if (!bool("connected")) {
+                    "\u624b\u673a\u5f53\u524d\u672a\u8fde\u63a5\u7f51\u7edc\u3002"
+                } else {
+                    "\u624b\u673a\u5df2\u901a\u8fc7${transports.ifBlank { "\u7f51\u7edc" }}\u8fde\u63a5\uff0c" +
+                        "\u4e92\u8054\u7f51${if (bool("validated")) "\u53ef\u7528" else "\u5c1a\u672a\u9a8c\u8bc1"}\uff0c" +
+                        "${if (bool("metered")) "\u6309\u6d41\u91cf\u8ba1\u8d39" else "\u975e\u6309\u6d41\u91cf\u8ba1\u8d39"}\u3002"
+                }
+            }
+            AgentHardwareNativeTools.LOCATION_FOREGROUND_READ ->
+                "\u5f53\u524d\u4f4d\u7f6e\uff1a${formatCoordinate(number("latitude"))}, " +
+                    "${formatCoordinate(number("longitude"))}\uff0c\u7cbe\u5ea6\u7ea6 ${number("accuracy_meters")?.toInt() ?: 0} \u7c73\u3002"
+            AgentHardwareNativeTools.SENSORS_LIST -> {
+                val sensors = (output["sensors"] as? Iterable<*>)
+                    ?.mapNotNull { (it as? Map<*, *>)?.get("name")?.toString() }
+                    .orEmpty()
+                val suffix = if (sensors.size > 12) "\u7b49" else ""
+                "\u68c0\u6d4b\u5230 ${sensors.size} \u4e2a\u4f20\u611f\u5668\uff1a${sensors.take(12).joinToString("\u3001")}$suffix\u3002"
+            }
+            AgentHardwareNativeTools.SENSOR_SAMPLE -> {
+                val values = (output["values"] as? Iterable<*>)?.joinToString(", ") { it.toString() }.orEmpty()
+                "${text("type")} \u5355\u6b21\u91c7\u6837\uff1a$values\u3002"
+            }
+            AgentHardwareNativeTools.FLASHLIGHT_SET ->
+                if (bool("requested_enabled")) "\u5df2\u6253\u5f00\u624b\u7535\u7b52\u3002" else "\u5df2\u5173\u95ed\u624b\u7535\u7b52\u3002"
+            AgentHardwareNativeTools.BLUETOOTH_STATUS ->
+                if (!bool("supported")) "\u8fd9\u53f0\u624b\u673a\u4e0d\u652f\u6301\u84dd\u7259\u3002"
+                else "\u84dd\u7259${if (bool("enabled")) "\u5df2\u5f00\u542f" else "\u672a\u5f00\u542f"}\u3002"
+            AgentHardwareNativeTools.BLUETOOTH_DISCOVERY_FOREGROUND ->
+                "\u84dd\u7259\u626b\u63cf\u7ed3\u675f\uff0c\u53d1\u73b0 ${long("result_count") ?: 0L} \u53f0\u8bbe\u5907\u3002"
+            AgentHardwareNativeTools.NFC_STATUS ->
+                if (!bool("supported")) "\u8fd9\u53f0\u624b\u673a\u4e0d\u652f\u6301 NFC\u3002"
+                else "NFC ${if (bool("enabled")) "\u5df2\u5f00\u542f" else "\u672a\u5f00\u542f"}\u3002"
+            AgentHardwareNativeTools.INSTALLED_APPS_LIST -> {
+                val apps = (output["apps"] as? Iterable<*>)
+                    ?.mapNotNull { (it as? Map<*, *>)?.get("label")?.toString() }
+                    .orEmpty()
+                val remaining = (apps.size - 12).coerceAtLeast(0)
+                "\u53ef\u67e5\u8be2\u5230 ${apps.size} \u4e2a\u5e94\u7528\uff1a${apps.take(12).joinToString("\u3001")}" +
+                    "${if (remaining > 0) "\uff0c\u53e6\u6709 $remaining \u4e2a" else ""}\u3002"
+            }
+            AgentHardwareNativeTools.PACKAGE_DETAIL ->
+                if (!bool("visible")) "Android \u672a\u5411 SignalASI \u66b4\u9732\u8fd9\u4e2a\u5e94\u7528\u3002"
+                else "${text("label").ifBlank { text("package_name") }} ${text("version_name")}\uff08${text("package_name")}\uff09\u3002"
+            AgentAndroidSystemNativeTools.AUDIO_VOLUME_SET -> {
+                val volume = long("volume") ?: 0L
+                val max = long("max") ?: 0L
+                val percent = if (max > 0L) ((volume * 100L + max / 2L) / max).coerceIn(0L, 100L) else 0L
+                "${audioStreamLabel(text("stream"), true)}\u97f3\u91cf\u5df2\u8bbe\u4e3a $percent%\u3002"
+            }
+            AgentAndroidSystemNativeTools.AUDIO_MUTE_SET ->
+                "${audioStreamLabel(text("stream"), true)}\u5df2${if (bool("muted")) "\u9759\u97f3" else "\u53d6\u6d88\u9759\u97f3"}\u3002"
+            AgentHardwareNativeTools.BLUETOOTH_PAIRING_HANDOFF,
+            AgentAndroidSystemNativeTools.WIFI_PANEL_OPEN,
+            AgentAndroidSystemNativeTools.WIFI_HOTSPOT_PANEL_OPEN,
+            AgentAndroidSystemNativeTools.BIOMETRIC_ENROLLMENT_OPEN,
+            AgentAndroidSystemNativeTools.VPN_CONSENT_OPEN,
+            AgentAndroidSystemNativeTools.TELEPHONY_DIAL_HANDOFF,
+            AgentAndroidSystemNativeTools.SMS_COMPOSE_HANDOFF -> message.trim()
+            else -> renderAndroidSystemToolResult(message, output)
+        }
+    }
+
+    private fun renderNativeToolFailure(message: String, zh: Boolean): String {
+        val normalized = message.trim().lowercase(Locale.US)
+        return when {
+            "download record was not found" in normalized -> if (zh) {
+                "\u627e\u4e0d\u5230\u8be5\u4e0b\u8f7d\u8bb0\u5f55\u3002\u8bf7\u68c0\u67e5\u4e0b\u8f7d ID \u540e\u91cd\u8bd5\u3002"
+            } else "That download record was not found. Check the download ID and try again."
+            "bluetooth is disabled" in normalized -> if (zh) {
+                "\u84dd\u7259\u5df2\u5173\u95ed\u3002\u8bf7\u5148\u6253\u5f00\u84dd\u7259\uff0c\u518d\u91cd\u8bd5\u626b\u63cf\u3002"
+            } else "Bluetooth is off. Turn it on, then try the scan again."
+            "location provider" in normalized -> if (zh) {
+                "\u5b9a\u4f4d\u670d\u52a1\u5df2\u5173\u95ed\u3002\u8bf7\u5148\u6253\u5f00\u7cfb\u7edf\u5b9a\u4f4d\uff0c\u518d\u91cd\u8bd5\u3002"
+            } else "Location is off. Turn on Android Location, then try again."
+            "missing permission" in normalized || ("permission" in normalized && "denied" in normalized) -> if (zh) {
+                "\u7f3a\u5c11\u6240\u9700\u6743\u9650\u3002\u8bf7\u5141\u8bb8\u540e\u91cd\u8bd5\u3002"
+            } else "The required permission is missing. Allow it, then try again."
+            "timeout" in normalized || "timed out" in normalized -> if (zh) {
+                "\u64cd\u4f5c\u8d85\u65f6\u3002\u8bf7\u68c0\u67e5\u7f51\u7edc\u6216\u8bbe\u5907\u72b6\u6001\u540e\u91cd\u8bd5\u3002"
+            } else "The operation timed out. Check the network or device state and try again."
+            else -> message.trim().ifBlank {
+                if (zh) "\u64cd\u4f5c\u672a\u5b8c\u6210\u3002\u8bf7\u68c0\u67e5\u5f53\u524d\u8bbe\u5907\u72b6\u6001\u540e\u91cd\u8bd5\u3002"
+                else "The operation did not complete. Check the current device state and try again."
+            }
+        }
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        val gib = bytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+        return if (gib >= 1.0) String.format(Locale.US, "%.1f GB", gib) else String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
+    }
+
+    private fun formatCoordinate(value: Double?): String = value?.let { String.format(Locale.US, "%.6f", it) } ?: "-"
+
+    private fun audioStreamLabel(stream: String, zh: Boolean): String = when (stream.lowercase(Locale.US)) {
+        "music", "media" -> if (zh) "\u5a92\u4f53" else "Media"
+        "ring" -> if (zh) "\u94c3\u58f0" else "Ringer"
+        "alarm" -> if (zh) "\u95f9\u949f" else "Alarm"
+        "notification" -> if (zh) "\u901a\u77e5" else "Notification"
+        "voice_call" -> if (zh) "\u901a\u8bdd" else "Call"
+        else -> if (zh) "\u7cfb\u7edf" else "System"
     }
 
     private fun renderAndroidSystemToolValue(value: Any?): String = when (value) {
@@ -369,12 +737,6 @@ class MobileNativeAgent(
         }
         callableSearchCommandValue(currentGoal)?.let { query ->
             return searchCallableInventoryCommand(query)
-        }
-        if (installedAppsCommand(currentGoal)) {
-            return showInstalledAppsCommand()
-        }
-        installedAppSearchCommandValue(currentGoal)?.let { query ->
-            return searchInstalledAppsCommand(query)
         }
         if (screenOverviewCommand(currentGoal)) {
             return showScreenOverviewCommand()
@@ -1816,28 +2178,6 @@ class MobileNativeAgent(
             normalized == "abort task"
     }
 
-    private fun installedAppsCommand(goal: String): Boolean {
-        val normalized = goal.trim().lowercase(Locale.US)
-        return normalized == "list apps" ||
-            normalized == "show apps" ||
-            normalized == "installed apps" ||
-            normalized == "list installed apps" ||
-            normalized == "show installed apps"
-    }
-
-    private fun installedAppSearchCommandValue(goal: String): String? {
-        val prefixes = listOf(
-            "search installed apps ",
-            "find installed apps ",
-            "search apps ",
-            "find apps ",
-            "search app ",
-            "find app "
-        )
-        val prefix = prefixes.firstOrNull { goal.startsWith(it, ignoreCase = true) } ?: return null
-        return goal.drop(prefix.length).trim().takeIf { it.isNotBlank() }
-    }
-
     private fun notificationInboxCommand(goal: String): Boolean {
         val normalized = goal.trim().lowercase(Locale.US)
         return normalized == "notifications" ||
@@ -2795,102 +3135,6 @@ class MobileNativeAgent(
                 status = if (requiredMissing == 0) AgentConnectorStatus.AVAILABLE else AgentConnectorStatus.NEEDS_SETUP,
                 deliveryMode = "local",
                 capabilities = listOf(AgentCapability.SYSTEM_SETTINGS, AgentCapability.TASK_EXECUTION)
-            ),
-            safetyReview = AgentSafetyReview(
-                risk = AgentRisk.LOW,
-                requiresConfirmation = false,
-                mode = safetyPolicy.permissionMode()
-            )
-        )
-        phase = AgentPhase.COMPLETED
-        lastActionResult = AgentActionResult(action.id, true, result)
-        recordAudit(AgentAuditEvent.GOAL_RECEIVED, goalAuditDetail(currentGoal))
-        recordAudit(AgentAuditEvent.ACTION_EXECUTED, "action:${action.kind}:${AgentActionStatus.COMPLETED}")
-        return snapshot()
-    }
-
-    private fun showInstalledAppsCommand(): AgentUiState {
-        val apps = currentScreen.installedApps
-        val result = if (apps.isEmpty()) {
-            "No launchable apps are visible to SignalASI"
-        } else {
-            buildString {
-                append("Launchable apps: ").append(apps.size)
-                apps.take(30).forEach { app ->
-                    append("\n").append(app.label).append(" | ").append(app.packageName)
-                }
-                if (apps.size > 30) append("\n+").append(apps.size - 30).append(" more")
-            }
-        }
-        return completeInstalledAppsCommand(
-            actionId = "list-installed-apps",
-            description = "List launchable apps on this device",
-            result = result,
-            parameters = mapOf("app_count" to apps.size.toString())
-        )
-    }
-
-    private fun searchInstalledAppsCommand(query: String): AgentUiState {
-        val normalizedQuery = normalizeInstalledAppName(query)
-        val matches = currentScreen.installedApps.filter { app ->
-            normalizedQuery.isNotBlank() &&
-                (normalizeInstalledAppName(app.label).contains(normalizedQuery) ||
-                    normalizeInstalledAppName(app.packageName).contains(normalizedQuery))
-        }
-        val result = if (matches.isEmpty()) {
-            "No launchable apps match '$query'"
-        } else {
-            buildString {
-                append("App matches: ").append(matches.size)
-                matches.take(20).forEach { app ->
-                    append("\n").append(app.label).append(" | ").append(app.packageName)
-                }
-            }
-        }
-        return completeInstalledAppsCommand(
-            actionId = "search-installed-apps",
-            description = "Search launchable apps on this device",
-            result = result,
-            parameters = mapOf("query" to query, "match_count" to matches.size.toString())
-        )
-    }
-
-    private fun normalizeInstalledAppName(value: String): String = value
-        .lowercase(Locale.US)
-        .replace(Regex("[^\\p{L}\\p{N}]+"), "")
-
-    private fun completeInstalledAppsCommand(
-        actionId: String,
-        description: String,
-        result: String,
-        parameters: Map<String, String>
-    ): AgentUiState {
-        val action = AgentAction(
-            id = actionId,
-            kind = AgentActionKind.READ_SCREEN,
-            target = "Installed Apps",
-            risk = AgentRisk.LOW,
-            status = AgentActionStatus.COMPLETED,
-            description = description,
-            parameters = parameters,
-            result = result
-        )
-        currentPlan = AgentPlan(
-            goal = currentGoal,
-            screen = currentScreen,
-            steps = completedSteps(),
-            actions = listOf(action),
-            selectedAgentOrModel = "Android App Inventory",
-            confirmationRequired = false,
-            expectedResult = result,
-            route = AgentRoute(
-                routeId = "android-app-inventory",
-                kind = AgentRouteKind.LOCAL_SYSTEM,
-                targetId = "android-app-inventory",
-                targetTitle = "Android App Inventory",
-                status = AgentConnectorStatus.AVAILABLE,
-                deliveryMode = "local",
-                capabilities = listOf(AgentCapability.APP_NAVIGATION, AgentCapability.SCREEN_READING)
             ),
             safetyReview = AgentSafetyReview(
                 risk = AgentRisk.LOW,
@@ -4875,8 +5119,8 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
     }
 
     fun deterministicLocalAction(request: AgentRequest): AgentAction? =
-        AgentSystemToolPlanner.actionFor(request)
-            ?: androidSystemNativeToolAction(request)
+        androidSystemNativeToolAction(request)
+            ?: AgentSystemToolPlanner.actionFor(request)
             ?: installedAppOpenAction(request)
             ?: directDeviceStatusAction(request)
 
@@ -5051,6 +5295,43 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             ) -> AgentHardwareNativeTools.FLASHLIGHT_SET to JSONObject().put("enabled", false)
             lower.hasAny("battery status", "phone battery", "\u624b\u673a\u7535\u91cf", "\u624b\u673a\u7535\u6c60", "\u7535\u6c60\u7535\u91cf", "\u7535\u91cf\u591a\u5c11", "\u67e5\u770b\u7535\u91cf", "\u67e5\u8be2\u7535\u91cf", "\u67e5\u7535\u91cf") ->
                 AgentHardwareNativeTools.BATTERY_STATUS to JSONObject()
+            lower.hasAny("power status", "battery saver status", "power saving status", "\u7535\u6e90\u72b6\u6001", "\u7701\u7535\u6a21\u5f0f\u72b6\u6001", "\u67e5\u770b\u7701\u7535\u6a21\u5f0f") ->
+                AgentHardwareNativeTools.POWER_STATUS to JSONObject()
+            lower.hasAny("storage status", "phone storage", "available storage", "free storage", "\u624b\u673a\u5b58\u50a8", "\u5b58\u50a8\u72b6\u6001", "\u5269\u4f59\u5b58\u50a8", "\u5269\u4f59\u7a7a\u95f4") ->
+                AgentHardwareNativeTools.STORAGE_STATUS to JSONObject()
+            lower.hasAny("network status", "phone network", "active network", "\u624b\u673a\u7f51\u7edc\u72b6\u6001", "\u5f53\u524d\u7f51\u7edc", "\u7f51\u7edc\u8fde\u63a5\u72b6\u6001") ->
+                AgentHardwareNativeTools.NETWORK_STATUS to JSONObject()
+            lower.hasAny("current location", "phone location", "where am i", "\u5f53\u524d\u4f4d\u7f6e", "\u624b\u673a\u4f4d\u7f6e", "\u6211\u5728\u54ea\u91cc", "\u83b7\u53d6\u4f4d\u7f6e") ->
+                AgentHardwareNativeTools.LOCATION_FOREGROUND_READ to JSONObject().put("timeout_ms", 10_000)
+            lower.hasAny("list sensors", "device sensors", "sensor list", "\u5217\u51fa\u4f20\u611f\u5668", "\u624b\u673a\u4f20\u611f\u5668", "\u4f20\u611f\u5668\u5217\u8868") ->
+                AgentHardwareNativeTools.SENSORS_LIST to JSONObject().put("limit", 64)
+            lower.hasAny("sample sensor", "read sensor", "sensor sample", "\u8bfb\u53d6\u4f20\u611f\u5668", "\u4f20\u611f\u5668\u6570\u636e", "\u91c7\u6837\u4f20\u611f\u5668") ||
+                (lower.contains("\u8bfb\u53d6") && lower.contains("\u4f20\u611f\u5668")) ->
+                AgentHardwareNativeTools.SENSOR_SAMPLE to JSONObject()
+                    .put("type", sensorTypeFromGoal(lower))
+                    .put("timeout_ms", 5_000)
+            lower.hasAny("bluetooth status", "is bluetooth on", "\u84dd\u7259\u72b6\u6001", "\u84dd\u7259\u662f\u5426\u6253\u5f00") ->
+                AgentHardwareNativeTools.BLUETOOTH_STATUS to JSONObject()
+            lower.hasAny("discover bluetooth", "scan bluetooth", "nearby bluetooth", "\u626b\u63cf\u84dd\u7259", "\u9644\u8fd1\u84dd\u7259", "\u53d1\u73b0\u84dd\u7259\u8bbe\u5907") ->
+                AgentHardwareNativeTools.BLUETOOTH_DISCOVERY_FOREGROUND to JSONObject().put("timeout_ms", 10_000).put("limit", 16)
+            lower.hasAny("open bluetooth pairing", "pair bluetooth", "\u6253\u5f00\u84dd\u7259\u914d\u5bf9", "\u914d\u5bf9\u84dd\u7259") ->
+                AgentHardwareNativeTools.BLUETOOTH_PAIRING_HANDOFF to JSONObject()
+            lower.hasAny("nfc status", "is nfc on", "\u67e5\u770bnfc", "nfc\u72b6\u6001", "nfc\u662f\u5426\u6253\u5f00") ->
+                AgentHardwareNativeTools.NFC_STATUS to JSONObject()
+            lower.startsWith("search installed apps ") || lower.startsWith("find installed apps ") ||
+                lower.startsWith("\u641c\u7d22\u5df2\u5b89\u88c5\u5e94\u7528") || lower.startsWith("\u67e5\u627e\u5df2\u5b89\u88c5\u5e94\u7528") -> {
+                val query = goal.replace(
+                    Regex("^(?i:search installed apps|find installed apps)\\s*|^(?:\\u641c\\u7d22\\u5df2\\u5b89\\u88c5\\u5e94\\u7528|\\u67e5\\u627e\\u5df2\\u5b89\\u88c5\\u5e94\\u7528)\\s*"),
+                    ""
+                ).trim()
+                AgentHardwareNativeTools.INSTALLED_APPS_LIST to JSONObject().put("query", query).put("limit", 100)
+            }
+            lower.hasAny("list installed apps", "installed applications", "installed app list", "\u5df2\u5b89\u88c5\u5e94\u7528", "\u5e94\u7528\u5217\u8868", "\u5217\u51fa\u5df2\u5b89\u88c5app") ->
+                AgentHardwareNativeTools.INSTALLED_APPS_LIST to JSONObject().put("query", "").put("limit", 100)
+            Regex("(?:package detail|package info|app package)\\s+([A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+)", RegexOption.IGNORE_CASE).find(goal) != null -> {
+                val packageName = Regex("([A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+)").find(goal)?.value.orEmpty()
+                AgentHardwareNativeTools.PACKAGE_DETAIL to JSONObject().put("package_name", packageName)
+            }
             lower.hasAny("call state", "incoming call", "\u6765\u7535\u72b6\u6001", "\u901a\u8bdd\u72b6\u6001", "\u662f\u5426\u6765\u7535") ->
                 AgentAndroidSystemNativeTools.TELEPHONY_CALL_STATE to JSONObject()
             lower.hasAny("monitor incoming call", "observe call state", "\u76d1\u542c\u6765\u7535", "\u76d1\u542c\u7535\u8bdd", "\u7b49\u5f85\u6765\u7535") ->
@@ -5164,6 +5445,19 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         goal.hasAny("notification", "\u901a\u77e5") -> "notification"
         goal.hasAny("call", "\u901a\u8bdd") -> "voice_call"
         else -> "music"
+    }
+
+    private fun sensorTypeFromGoal(goal: String): String = when {
+        goal.hasAny("gyroscope", "\u9640\u87ba\u4eea") -> "gyroscope"
+        goal.hasAny("gravity", "\u91cd\u529b") -> "gravity"
+        goal.hasAny("light", "\u5149\u7ebf", "\u5149\u7167") -> "light"
+        goal.hasAny("proximity", "\u8ddd\u79bb") -> "proximity"
+        goal.hasAny("pressure", "\u6c14\u538b") -> "pressure"
+        goal.hasAny("magnetic", "compass", "\u78c1\u573a", "\u6307\u5357\u9488") -> "magnetic_field"
+        goal.hasAny("rotation", "\u65cb\u8f6c") -> "rotation_vector"
+        goal.hasAny("temperature", "\u6e29\u5ea6") -> "ambient_temperature"
+        goal.hasAny("humidity", "\u6e7f\u5ea6") -> "relative_humidity"
+        else -> "accelerometer"
     }
 
     private fun informationQueryAction(request: AgentRequest): AgentAction? {
