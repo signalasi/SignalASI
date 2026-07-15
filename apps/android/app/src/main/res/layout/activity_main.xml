@@ -1492,7 +1492,7 @@
                         <View android:layout_width="match_parent" android:layout_height="0.5dp" android:layout_marginStart="56dp" android:background="@color/separator" />
                         <TextView android:id="@+id/settingsRecentTasksButton" android:layout_width="match_parent" android:layout_height="48dp" android:drawableStart="@drawable/ic_agent_history" android:drawableEnd="@drawable/ic_arrow_right" android:drawablePadding="12dp" android:gravity="center_vertical" android:paddingStart="16dp" android:paddingEnd="16dp" android:text="@string/agent_section_recent_tasks" android:textColor="@color/text_primary" android:textSize="15sp" />
                         <View android:layout_width="match_parent" android:layout_height="0.5dp" android:layout_marginStart="56dp" android:background="@color/separator" />
-                        <TextView android:id="@+id/settingsAgentSkillsButton" android:layout_width="match_parent" android:layout_height="48dp" android:drawableStart="@drawable/ic_agent_node" android:drawableEnd="@drawable/ic_arrow_right" android:drawablePadding="12dp" android:gravity="center_vertical" android:paddingStart="16dp" android:paddingEnd="16dp" android:text="@string/agent_skills_title" android:textColor="@color/text_primary" android:textSize="15sp" />
+                        <TextView android:id="@+id/settingsAgentSkillsButton" android:layout_width="match_parent" android:layout_height="48dp" android:drawableStart="@drawable/ic_agent_skill" android:drawableEnd="@drawable/ic_arrow_right" android:drawablePadding="12dp" android:gravity="center_vertical" android:paddingStart="16dp" android:paddingEnd="16dp" android:text="@string/agent_skills_title" android:textColor="@color/text_primary" android:textSize="15sp" />
                     </LinearLayout>
 
                     <TextView
@@ -1822,13 +1822,6 @@
                                 android:textSize="15sp"
                                 android:textStyle="bold" />
 
-                            <TextView
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:layout_marginTop="3dp"
-                                android:text="@string/settings_about_signalasi_subtitle"
-                                android:textColor="@color/text_secondary"
-                                android:textSize="11sp" />
                         </LinearLayout>
 
                         <ImageView
