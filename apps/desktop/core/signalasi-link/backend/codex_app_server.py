@@ -13,6 +13,13 @@ from typing import Callable
 
 TaskEvent = Callable[[str, dict], None]
 CONVERSATION_THREADS_PATH = Path.home() / ".signalasi" / "codex_conversation_threads.json"
+CODEX_TASK_POLICY = """
+SignalASI execution policy:
+- Do not inspect or invoke personal Codex Skills. Execute the request with the model and available tools directly.
+- Preserve the user's requested source, output format, and presentation constraints exactly.
+- When only one component of a webpage is requested, never return the parent page URL. Extract the original media URL or return minimal HTML containing only the original component.
+- If a required source or tool is unavailable, report that failure. Do not synthesize replacement media or data.
+""".strip()
 
 
 @dataclass
@@ -87,7 +94,7 @@ class CodexAppServer:
     def _start_turn(self, thread_id: str, prompt: str, model: str) -> dict:
         return self._request("turn/start", {
             "threadId": thread_id,
-            "input": [{"type": "text", "text": prompt, "text_elements": []}],
+            "input": [{"type": "text", "text": f"{prompt.rstrip()}\n\n{CODEX_TASK_POLICY}", "text_elements": []}],
             "model": model, "effort": "low",
         }, timeout=30)
 
@@ -132,7 +139,11 @@ class CodexAppServer:
         with self._lock:
             if self.process is not None and self.process.poll() is None:
                 return
-            command = [self.executable, "app-server", "--listen", "stdio://"]
+            command = [
+                self.executable,
+                "-c", "sandbox_workspace_write.network_access=true",
+                "app-server", "--listen", "stdio://",
+            ]
             if os.name == "nt" and self.executable.lower().endswith((".cmd", ".bat")):
                 command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", *command]
             self.process = subprocess.Popen(
@@ -144,7 +155,7 @@ class CodexAppServer:
             threading.Thread(target=self._read_stdout, daemon=True).start()
             threading.Thread(target=self._drain_stderr, daemon=True).start()
         self._request("initialize", {
-            "clientInfo": {"name": "signalasi-desktop", "title": "SignalASI Desktop", "version": "0.1.1"},
+            "clientInfo": {"name": "signalasi-desktop", "title": "SignalASI Desktop", "version": "0.1.8"},
             "capabilities": {"experimentalApi": True},
         }, timeout=15)
         self._notify("initialized", {})

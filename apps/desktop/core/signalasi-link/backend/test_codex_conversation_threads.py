@@ -31,6 +31,9 @@ class CodexConversationThreadTests(unittest.TestCase):
             self.assertEqual(second.thread_id, "thread-1")
             self.assertEqual([method for method, _, _ in calls].count("thread/start"), 1)
             self.assertEqual([method for method, _, _ in calls].count("turn/start"), 2)
+            turn_inputs = [params["input"][0]["text"] for method, params, _ in calls if method == "turn/start"]
+            self.assertTrue(turn_inputs[0].startswith("first\n\n"))
+            self.assertIn("Do not synthesize replacement media or data.", turn_inputs[0])
             self.assertTrue(server.delete_conversation("conversation-1"))
             self.assertNotIn("conversation-1", server._conversation_threads)
 

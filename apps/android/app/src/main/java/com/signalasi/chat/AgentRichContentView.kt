@@ -261,6 +261,10 @@ class AgentRichContentView(
             })
             val webView = WebView(activity).apply {
                 setBackgroundColor(Color.WHITE)
+                isVerticalScrollBarEnabled = true
+                isHorizontalScrollBarEnabled = false
+                isNestedScrollingEnabled = true
+                overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = false
                 settings.databaseEnabled = false
@@ -309,8 +313,14 @@ class AgentRichContentView(
 
     private fun coordinatePlayback(webView: WebView) {
         webView.setOnTouchListener { view, event ->
-            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                AgentRichPlaybackCoordinator.activate(view as WebView)
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    AgentRichPlaybackCoordinator.activate(view as WebView)
+                    view.parent?.requestDisallowInterceptTouchEvent(true)
+                }
+                MotionEvent.ACTION_MOVE -> view.parent?.requestDisallowInterceptTouchEvent(true)
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                    view.parent?.requestDisallowInterceptTouchEvent(false)
             }
             false
         }
