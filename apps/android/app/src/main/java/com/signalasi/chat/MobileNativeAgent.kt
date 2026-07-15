@@ -7685,6 +7685,10 @@ class StaticAgentConnectorRegistry : AgentConnectorRegistry {
             kind = AgentConnectorKind.AGENT,
             status = AgentConnectorStatus.AVAILABLE,
             capabilities = listOf(
+                AgentCapability.CHAT,
+                AgentCapability.REASONING,
+                AgentCapability.RESEARCH,
+                AgentCapability.LIVE_DATA,
                 AgentCapability.CODE,
                 AgentCapability.TASK_EXECUTION,
                 AgentCapability.TOOL_USE,
@@ -7798,6 +7802,14 @@ class AppStoreAgentConnectorRegistry(
                 val capabilities = buildList {
                     add(AgentCapability.CHAT)
                     when {
+                        "codex" in search -> {
+                            add(AgentCapability.REASONING)
+                            add(AgentCapability.RESEARCH)
+                            add(AgentCapability.LIVE_DATA)
+                            add(AgentCapability.CODE)
+                            add(AgentCapability.TASK_EXECUTION)
+                            add(AgentCapability.TOOL_USE)
+                        }
                         "mcp" in search -> {
                             add(AgentCapability.MCP)
                             add(AgentCapability.TOOL_USE)

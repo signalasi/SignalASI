@@ -5,6 +5,7 @@ import binascii
 import hashlib
 import json
 import os
+import queue
 import re
 import secrets
 import socket
@@ -529,6 +530,9 @@ def warm_codex_app_server() -> None:
 phone_publish_lock = threading.RLock()
 pending_task_events: dict[str, tuple[dict, dict]] = {}
 pending_task_events_lock = threading.Lock()
+task_event_publish_queue: queue.Queue[tuple[object, dict, dict, list[dict]] | None] = queue.Queue()
+task_event_publisher_started = threading.Event()
+task_event_publisher_lock = threading.Lock()
 
 
 def _trace_event(stage: str, detail: object = "") -> dict:
@@ -594,6 +598,39 @@ def _log_task_latency(task_id: str, trace: list[dict]) -> None:
 
 def _should_publish_task_status(status: str) -> bool:
     return str(status or "").strip().lower() != "queued"
+
+
+def _task_event_publish_loop() -> None:
+    while True:
+        item = task_event_publish_queue.get()
+        try:
+            if item is None:
+                return
+            mqttc, wire_payload, task, trace = item
+            _publish_or_queue_task_event(mqttc, wire_payload, task, trace)
+        except Exception as exc:
+            log.warning("Agent task event publish failed: %s", exc)
+        finally:
+            task_event_publish_queue.task_done()
+
+
+def _ensure_task_event_publisher() -> None:
+    if task_event_publisher_started.is_set():
+        return
+    with task_event_publisher_lock:
+        if task_event_publisher_started.is_set():
+            return
+        threading.Thread(
+            target=_task_event_publish_loop,
+            daemon=True,
+            name="signalasi-task-events",
+        ).start()
+        task_event_publisher_started.set()
+
+
+def _enqueue_task_event(mqttc, wire_payload: dict, task: dict, trace: list[dict]) -> None:
+    _ensure_task_event_publisher()
+    task_event_publish_queue.put((mqttc, dict(wire_payload), dict(task), list(trace)))
 
 
 def _reason_code_value(reason_code):
@@ -905,7 +942,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         # adds UI noise without useful user-facing information.
         if not _should_publish_task_status(str(task.get("status") or "")):
             return
-        _publish_or_queue_task_event(mqttc, wire_payload, task, task_trace_snapshot())
+        _enqueue_task_event(mqttc, wire_payload, task, task_trace_snapshot())
 
     def run_task(task) -> str:
         log.info(f"Agent task running task_id={task.task_id} contact_id={contact_id} agent_id={agent_id}")
@@ -1674,6 +1711,7 @@ def start():
 
 def start_background():
     """Start MQTT in a background thread."""
+    _ensure_task_event_publisher()
     threading.Thread(target=warm_codex_app_server, daemon=True, name="signalasi-codex-prewarm").start()
     t = threading.Thread(target=start, daemon=True)
     t.start()

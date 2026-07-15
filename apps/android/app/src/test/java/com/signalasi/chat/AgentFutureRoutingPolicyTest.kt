@@ -29,4 +29,15 @@ class AgentFutureRoutingPolicyTest {
         assertTrue(requirements.localOnly)
         assertEquals(AgentDataSensitivity.CONFIDENTIAL, requirements.dataSensitivity)
     }
+
+    @Test
+    fun codexAdvertisesTheCapabilitiesRequiredForLiveInformation() {
+        val codex = StaticAgentConnectorRegistry().availableTargets().first { it.id == "codex" }
+        val requirements = AgentTaskRequirementAnalyzer.analyze("What is the current weather in Shanghai today?")
+
+        assertTrue(AgentCapability.CHAT in codex.capabilities)
+        assertTrue(AgentCapability.RESEARCH in codex.capabilities)
+        assertTrue(AgentCapability.LIVE_DATA in codex.capabilities)
+        assertTrue(requirements.capabilities.all { it in codex.capabilities })
+    }
 }

@@ -129,7 +129,6 @@ class AgentTaskManager:
             self._tasks[task.task_id] = task
             self._save_locked()
         self._emit(task, on_event)
-        self.update(task.task_id, "queued", on_event=on_event)
         return task
 
     def update(

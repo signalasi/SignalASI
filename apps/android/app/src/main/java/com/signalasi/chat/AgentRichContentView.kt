@@ -12,6 +12,14 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Build
 import android.os.Looper
+import android.text.Spannable
+import android.text.SpannableStringBuilder
+import android.text.method.LinkMovementMethod
+import android.text.style.BackgroundColorSpan
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
+import android.text.style.TypefaceSpan
+import android.text.style.URLSpan
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -505,12 +513,45 @@ class AgentRichContentView(
     }
 
     private fun selectableText(value: String, sizeSp: Float): TextView = TextView(activity).apply {
-        text = value
+        text = inlineMarkdown(value)
         textSize = sizeSp
         setTextColor(Color.parseColor("#14202B"))
+        setLinkTextColor(Color.parseColor("#087F69"))
         setLineSpacing(dp(4).toFloat(), 1f)
         setTextIsSelectable(true)
+        movementMethod = LinkMovementMethod.getInstance()
+        highlightColor = Color.TRANSPARENT
         onTextViewReady(this)
+    }
+
+    private fun inlineMarkdown(value: String): CharSequence {
+        val output = SpannableStringBuilder()
+        AgentInlineMarkdown.parse(value).forEach { segment ->
+            val start = output.length
+            output.append(segment.text)
+            val end = output.length
+            when (segment.style) {
+                AgentInlineStyle.BOLD -> output.setSpan(
+                    StyleSpan(Typeface.BOLD), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                AgentInlineStyle.CODE -> {
+                    output.setSpan(TypefaceSpan("monospace"), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    output.setSpan(
+                        BackgroundColorSpan(Color.parseColor("#F0F3F6")),
+                        start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                    )
+                }
+                AgentInlineStyle.LINK -> {
+                    output.setSpan(URLSpan(segment.url), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    output.setSpan(
+                        ForegroundColorSpan(Color.parseColor("#087F69")),
+                        start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                    )
+                }
+                AgentInlineStyle.NORMAL -> Unit
+            }
+        }
+        return output
     }
 
     private fun loadImage(uri: String, image: ImageView) {
