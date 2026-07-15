@@ -25,6 +25,15 @@ class RichOutputTests(unittest.TestCase):
         self.assertEqual(document["blocks"][0]["type"], "image")
         self.assertTrue(document["blocks"][0]["uri"].startswith("signalasi-artifact://"))
 
+    def test_preserves_self_contained_html_animation(self):
+        fallback, document = build_rich_output(
+            """```signalasi-rich
+{"blocks":[{"id":"anim","type":"html","text":"<div class='dot'></div>","fallback_text":"Animated result"}]}
+```"""
+        )
+        self.assertEqual(document["blocks"][0]["type"], "html")
+        self.assertEqual(document["blocks"][0]["fallback_text"], "Animated result")
+
 
 if __name__ == "__main__":
     unittest.main()

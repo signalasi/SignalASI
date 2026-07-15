@@ -22,6 +22,9 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import android.widget.VideoView
+import android.webkit.WebResourceRequest
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
@@ -86,6 +89,7 @@ class AgentRichContentView(
         AgentRichBlockType.TOOL -> statusBlock(block)
         AgentRichBlockType.DIFF -> codeBlock(block.copy(language = block.language.ifBlank { "diff" }))
         AgentRichBlockType.CHART -> tableBlock(block)
+        AgentRichBlockType.HTML -> htmlAnimationBlock(block)
         AgentRichBlockType.ACTIONS -> actionBlock(block, approval = false)
         AgentRichBlockType.APPROVAL -> actionBlock(block, approval = true)
         AgentRichBlockType.FORM -> formBlock(block)
@@ -183,6 +187,48 @@ class AgentRichContentView(
             })
         }
     }
+
+    private fun htmlAnimationBlock(block: AgentRichBlock): View = LinearLayout(activity).apply {
+        orientation = LinearLayout.VERTICAL
+        block.title.takeIf(String::isNotBlank)?.let { addView(selectableText(it, 15f).apply {
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, 0, 0, dp(7))
+        }) }
+        val webView = WebView(activity).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = false
+            settings.databaseEnabled = false
+            settings.allowFileAccess = false
+            settings.allowContentAccess = false
+            settings.blockNetworkLoads = true
+            settings.loadsImagesAutomatically = true
+            settings.mediaPlaybackRequiresUserGesture = false
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                settings.safeBrowsingEnabled = true
+            }
+            webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = true
+                @Deprecated("Deprecated in Android")
+                override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean = true
+            }
+            contentDescription = block.title.ifBlank { block.fallbackText.ifBlank { "Animated content" } }
+            loadDataWithBaseURL(null, isolatedHtmlDocument(block.text), "text/html", "utf-8", null)
+        }
+        addView(webView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(280)))
+        if (block.fallbackText.isNotBlank()) addView(selectableText(block.fallbackText, 12f).apply {
+            setTextColor(Color.parseColor("#66717D"))
+            setPadding(0, dp(6), 0, 0)
+        })
+    }
+
+    private fun isolatedHtmlDocument(fragment: String): String = """
+        <!doctype html><html><head>
+        <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; media-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; frame-src 'none'; font-src 'none'; form-action 'none'; base-uri 'none'">
+        <style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:transparent;color:#14202b;font-family:system-ui,sans-serif}*{box-sizing:border-box}</style>
+        </head><body>${fragment.take(32_000)}</body></html>
+    """.trimIndent()
 
     private fun artifactBlock(block: AgentRichBlock, fallbackTitle: String): View =
         LinearLayout(activity).apply {

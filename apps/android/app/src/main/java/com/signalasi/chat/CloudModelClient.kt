@@ -14,7 +14,9 @@ import kotlinx.coroutines.withContext
 
 object CloudModelClient {
     private const val SYSTEM_PROMPT =
-        "You are a helpful AI contact inside SignalASI. Reply naturally in the user's language."
+        "You are a helpful AI contact inside SignalASI. Reply naturally in the user's language. " +
+            "When an answer benefits from tables, media, or an animation, you may append a signalasi-rich fenced JSON document. " +
+            "Use an html block with self-contained HTML/CSS/JavaScript fragments for animations; never use external URLs, network requests, forms, or device APIs in HTML. Always include fallback_text."
 
     fun send(context: Context, contact: JSONObject, prompt: String): String {
         return send(context, contact, listOf(ChatMessage(0L, prompt, true, Contact("me", context.getString(R.string.chat_me), ""))))

@@ -50,26 +50,46 @@ class CodexAppServer:
         self._runs[task_id] = run
         run.thread_id = self._conversation_threads.get(conversation_id, "") if conversation_id else ""
         if not run.thread_id:
-            response = self._request("thread/start", {
-                "cwd": os.path.abspath(cwd), "model": model, "ephemeral": False,
-                "approvalPolicy": "never", "sandbox": "workspace-write",
-            }, timeout=30)
-            run.thread_id = str((response.get("thread") or {}).get("id") or "")
-            if conversation_id and run.thread_id:
-                self._conversation_threads[conversation_id] = run.thread_id
-                self._save_conversation_threads()
+            run.thread_id = self._start_thread(cwd, model, conversation_id)
         if not run.thread_id:
             raise RuntimeError("Codex App Server did not return a thread id")
         self.on_event(task_id, {"status": "starting", "thread_id": run.thread_id, "current_step": "Starting Codex turn"})
-        response = self._request("turn/start", {
-            "threadId": run.thread_id,
-            "input": [{"type": "text", "text": prompt, "text_elements": []}],
-            "model": model, "effort": "low",
-        }, timeout=30)
+        try:
+            response = self._start_turn(run.thread_id, prompt, model)
+        except RuntimeError as exc:
+            if not run.thread_id or "thread not found" not in str(exc).lower():
+                raise
+            if conversation_id:
+                self._conversation_threads.pop(conversation_id, None)
+                self._save_conversation_threads()
+            run.thread_id = self._start_thread(cwd, model, conversation_id)
+            self.on_event(task_id, {
+                "status": "starting", "thread_id": run.thread_id,
+                "current_step": "Starting a fresh Codex thread",
+            })
+            response = self._start_turn(run.thread_id, prompt, model)
         run.turn_id = str((response.get("turn") or {}).get("id") or "")
         if run.turn_id:
             self._turn_tasks[run.turn_id] = task_id
         return run
+
+    def _start_thread(self, cwd: str, model: str, conversation_id: str) -> str:
+        response = self._request("thread/start", {
+            "cwd": os.path.abspath(cwd), "model": model, "ephemeral": False,
+            "approvalPolicy": "never", "sandbox": "workspace-write",
+        }, timeout=30)
+        thread_id = str((response.get("thread") or {}).get("id") or "")
+        if conversation_id and thread_id:
+            self._conversation_threads[conversation_id] = thread_id
+            self._save_conversation_threads()
+        return thread_id
+
+    def _start_turn(self, thread_id: str, prompt: str, model: str) -> dict:
+        return self._request("turn/start", {
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": prompt, "text_elements": []}],
+            "model": model, "effort": "low",
+        }, timeout=30)
 
     def _load_conversation_threads(self) -> dict[str, str]:
         try:

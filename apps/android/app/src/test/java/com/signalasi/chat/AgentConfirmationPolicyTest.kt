@@ -27,6 +27,24 @@ class AgentConfirmationPolicyTest {
         assertEquals(AgentConfirmationTier.CONFIRM_ALWAYS, tier("lock", AgentActionKind.LOCK_SCREEN, "Lock device"))
     }
 
+    @Test
+    fun priorConversationDoesNotEscalateTheCurrentRequest() {
+        val action = AgentAction(
+            id = "connector-codex",
+            kind = AgentActionKind.CALL_CONNECTOR,
+            target = "Codex",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = "Ask Codex",
+            parameters = mapOf(
+                "prompt" to "Show an animated letter",
+                "_signalasi_conversation_context" to "Earlier the user asked to send a message"
+            )
+        )
+
+        assertEquals(AgentConfirmationTier.DIRECT, AgentConfirmationPolicy.tier(action))
+    }
+
     private fun tier(id: String, kind: AgentActionKind, description: String): AgentConfirmationTier =
         AgentConfirmationPolicy.tier(
             AgentAction(

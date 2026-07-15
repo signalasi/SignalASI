@@ -6994,6 +6994,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             if (memoryBlock.isNotBlank()) append("Relevant personal memory:\n").append(memoryBlock).append("\n\n")
             if (knowledgeBlock.isNotBlank()) append("Authorized knowledge results:\n").append(knowledgeBlock).append("\n\n")
             if (screenBlock.isNotBlank()) append("Authorized current screen context:\n").append(screenBlock).append("\n\n")
+            append(RICH_RESPONSE_CONTRACT).append("\n\n")
             append("\n\nCurrent user request:\n")
             append(prompt)
         }.take(24_000)
@@ -7074,6 +7075,11 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         private const val AGENT_NOTIFICATION_CHANNEL_ID = "signalasi_agent_actions"
         private const val AGENT_NOTIFICATION_ID_BASE = 42000
         private const val MAX_KNOWLEDGE_PROMPT_CHARACTERS = 14_000
+        private const val RICH_RESPONSE_CONTRACT =
+            "SignalASI can render optional rich output. When a visual, table, media preview, or animation " +
+                "would answer better than plain text, append one fenced signalasi-rich JSON document. " +
+                "For an animation use a block with type html, self-contained HTML/CSS/JavaScript in text, " +
+                "and fallback_text. Do not use network requests, external assets, forms, or device APIs."
         private val LIVE_DATA_REFUSAL_TERMS = listOf(
             "don't have access to live",
             "do not have access to live",

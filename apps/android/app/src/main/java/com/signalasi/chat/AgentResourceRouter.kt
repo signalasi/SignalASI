@@ -394,10 +394,9 @@ class AgentResourceRouter(context: Context) {
             requirements.mode == AgentRoutingMode.PRIVATE -> listOf("local-llm")
             else -> listOf("cloud-models", "local-llm")
         }
-        val desktopAgents = if (!hasPairedDesktop) emptyList() else when {
-            AgentCapability.CODE in requirements.capabilities -> listOf("codex", "claude-code", "hermes")
-            requirements.liveDataRequired || AgentCapability.REASONING in requirements.capabilities -> listOf("hermes")
-            else -> emptyList()
+        val desktopAgents = if (!hasPairedDesktop) emptyList() else buildList {
+            add("codex")
+            if (AgentCapability.CODE in requirements.capabilities) add("claude-code")
         }
         return (desktopAgents + remainder + if (hasPairedDesktop) listOf("hermes") else emptyList())
             .map(::canonicalTargetId)

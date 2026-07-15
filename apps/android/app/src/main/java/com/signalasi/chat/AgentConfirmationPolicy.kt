@@ -83,8 +83,15 @@ object AgentConfirmationPolicy {
         append(action.kind.name).append(' ')
         append(action.target).append(' ')
         append(action.description).append(' ')
-        action.parameters.forEach { (key, value) -> append(key).append(' ').append(value).append(' ') }
+        action.parameters.forEach { (key, value) ->
+            // Session context is evidence for the model, not part of the current action's risk intent.
+            if (!key.startsWith(INTERNAL_PARAMETER_PREFIX)) {
+                append(key).append(' ').append(value).append(' ')
+            }
+        }
     }.lowercase()
+
+    private const val INTERNAL_PARAMETER_PREFIX = "_signalasi_"
 
     private val ALWAYS_CONFIRM_KINDS = setOf(
         AgentActionKind.REPLY_NOTIFICATION,

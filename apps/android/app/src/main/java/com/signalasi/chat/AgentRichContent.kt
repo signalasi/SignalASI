@@ -22,6 +22,7 @@ enum class AgentRichBlockType {
     TOOL,
     DIFF,
     CHART,
+    HTML,
     ACTIONS,
     APPROVAL,
     FORM,

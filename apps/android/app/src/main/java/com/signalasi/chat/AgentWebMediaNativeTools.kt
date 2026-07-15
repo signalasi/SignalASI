@@ -909,6 +909,7 @@ object AgentWebMediaNativeTools {
                 required = setOf("query")
             ),
             outputSchema = objectSchema(),
+            consents = emptyList(),
             availability = web.availability
         ),
         executor = AgentNativeToolExecutor { invocation ->
@@ -938,6 +939,7 @@ object AgentWebMediaNativeTools {
             description = "Fetches a bounded public HTTPS page and extracts readable text without sharing browser cookies.",
             inputSchema = webGetInputSchema(MAX_FETCH_BYTES),
             outputSchema = objectSchema(),
+            consents = emptyList(),
             availability = web.availability
         ),
         executor = AgentNativeToolExecutor { invocation ->
@@ -1004,6 +1006,7 @@ object AgentWebMediaNativeTools {
                 required = setOf("url", "method")
             ),
             outputSchema = objectSchema(),
+            consents = emptyList(),
             availability = web.availability
         ),
         executor = AgentNativeToolExecutor { invocation ->
