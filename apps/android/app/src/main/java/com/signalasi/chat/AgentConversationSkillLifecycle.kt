@@ -308,6 +308,37 @@ data class AgentSkillMatch(
     val explicit: Boolean = false
 )
 
+object AgentSkillRequestTransformer {
+    private val singleCharacterArgument = Regex("([\u3400-\u9fff])\u5b57")
+
+    fun transform(savedRequest: String, currentRequest: String): String {
+        if (!sameTaskFamily(savedRequest, currentRequest)) return currentRequest.trim()
+        val requested = extractCharacter(currentRequest) ?: return currentRequest.trim()
+        val savedMatch = singleCharacterArgument.find(savedRequest) ?: return currentRequest.trim()
+        val characterGroup = savedMatch.groups[1] ?: return currentRequest.trim()
+        return savedRequest.replaceRange(characterGroup.range, requested.toString())
+    }
+
+    fun sameTaskFamily(left: String, right: String): Boolean {
+        val leftTail = taskTail(left)
+        val rightTail = taskTail(right)
+        if (leftTail.length < MIN_TASK_TAIL_LENGTH || rightTail.length < MIN_TASK_TAIL_LENGTH) return false
+        return leftTail.contains(rightTail) || rightTail.contains(leftTail)
+    }
+
+    fun extractCharacter(value: String): Char? = singleCharacterArgument.find(value)
+        ?.groups?.get(1)?.value?.singleOrNull()
+
+    private fun taskTail(value: String): String {
+        val match = singleCharacterArgument.find(value) ?: return ""
+        return value.substring(match.range.last + 1)
+            .lowercase(Locale.ROOT)
+            .filter { it.isLetterOrDigit() }
+    }
+
+    private const val MIN_TASK_TAIL_LENGTH = 2
+}
+
 class AgentSkillMatcher(private val runtime: AgentSkillRuntime) {
     fun match(request: String): AgentSkillMatch? {
         val normalized = normalize(request)
@@ -338,21 +369,47 @@ class AgentSkillMatcher(private val runtime: AgentSkillRuntime) {
                 )
             }
             .filter { it.explicit || it.confidence >= AUTO_MATCH_THRESHOLD }
-            .maxByOrNull { it.confidence }
+            .maxWithOrNull(
+                compareBy<AgentSkillMatch> { it.confidence }
+                    .thenBy { match -> familyTemplateSpecificity(match, normalized) }
+                    .thenBy { it.installation.installedAtMillis }
+            )
+    }
+
+    private fun familyTemplateSpecificity(match: AgentSkillMatch, request: String): Int {
+        return match.installation.manifest.triggerExamples
+            .filter { AgentSkillRequestTransformer.sameTaskFamily(it, request) }
+            .maxOfOrNull { normalize(it).length }
+            ?: 0
     }
 
     private fun normalize(value: String): String = value.lowercase(Locale.US)
         .replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim()
 
     private fun similarity(left: String, right: String): Double {
+        if (AgentSkillRequestTransformer.sameTaskFamily(left, right)) return 0.97
         if (left == right) return 1.0
         val leftTokens = left.split(' ').filter(String::isNotBlank).toSet()
         val rightTokens = right.split(' ').filter(String::isNotBlank).toSet()
         if (leftTokens.isEmpty() || rightTokens.isEmpty()) return 0.0
         val tokenScore = leftTokens.intersect(rightTokens).size.toDouble() / leftTokens.union(rightTokens).size
         val containsScore = if (left.contains(right) || right.contains(left)) 0.85 else 0.0
-        return maxOf(tokenScore, containsScore)
+        val characterScore = if (left.any(::isCjk) && right.any(::isCjk)) {
+            val leftPairs = characterPairs(left)
+            val rightPairs = characterPairs(right)
+            if (leftPairs.isEmpty() || rightPairs.isEmpty()) 0.0 else {
+                2.0 * leftPairs.intersect(rightPairs).size / (leftPairs.size + rightPairs.size)
+            }
+        } else 0.0
+        return maxOf(tokenScore, containsScore, characterScore)
     }
+
+    private fun characterPairs(value: String): Set<String> {
+        val compact = value.filter { it.isLetterOrDigit() }
+        return compact.windowed(2).toSet()
+    }
+
+    private fun isCjk(value: Char): Boolean = value.code in 0x3400..0x9FFF
 
     companion object {
         const val AUTO_MATCH_THRESHOLD = 0.78
@@ -369,13 +426,26 @@ class AgentConversationSkillCompiler(
         val latest = successful.last()
         val calls = successful.flatMap { it.toolCalls }
             .filter { it.status == AgentToolCallStatus.SUCCEEDED }
-        require(calls.isNotEmpty()) { "The active task has no successful reusable tool calls" }
         val descriptors = availableTools().associateBy { it.id }
-        val toolIds = calls.map { it.toolName }.filter(descriptors::containsKey).distinct()
-        require(toolIds.isNotEmpty()) { "The active task used no installed declarative tools" }
+        val reusableCalls = calls.filter { it.toolName in descriptors }
+        val usesAgentOrchestration = reusableCalls.isEmpty()
+        val toolIds = if (usesAgentOrchestration) {
+            listOf(AGENT_ORCHESTRATION_TOOL_ID)
+        } else {
+            reusableCalls.map { it.toolName }.distinct()
+        }
         val id = "skill_${sha256(successful.first().normalizedIntent.ifBlank { successful.first().originalRequest }).take(16)}"
+        val version = nextVersion(id)
         val title = titleHint.trim().ifBlank { deriveTitle(successful.first().originalRequest) }
-        val steps = calls.filter { it.toolName in toolIds }.mapIndexed { index, call ->
+        val steps = if (usesAgentOrchestration) {
+            listOf(
+                AgentSkillStep(
+                    id = "step_1",
+                    toolId = AGENT_ORCHESTRATION_TOOL_ID,
+                    input = mapOf("request" to "{{parameters.request}}")
+                )
+            )
+        } else reusableCalls.mapIndexed { index, call ->
             AgentSkillStep(
                 id = "step_${index + 1}",
                 toolId = call.toolName,
@@ -388,7 +458,7 @@ class AgentConversationSkillCompiler(
         val renderSpec = runCatching { jsonToMap(JSONObject(latest.renderSpecJson)) }.getOrDefault(emptyMap())
         val manifest = AgentSkillManifest(
             id = id,
-            version = "1.0.0",
+            version = version,
             title = title,
             instructions = buildInstructions(successful),
             nativeTools = toolIds.toSet(),
@@ -417,6 +487,18 @@ class AgentConversationSkillCompiler(
         return manifest
     }
 
+    private fun nextVersion(skillId: String): String {
+        val latest = runtime.list().filter { it.id == skillId }
+            .maxWithOrNull(compareBy<AgentSkillInstallation> { versionPart(it.version, 0) }
+                .thenBy { versionPart(it.version, 1) }
+                .thenBy { versionPart(it.version, 2) })
+            ?: return "1.0.0"
+        return "${versionPart(latest.version, 0)}.${versionPart(latest.version, 1) + 1}.0"
+    }
+
+    private fun versionPart(version: String, index: Int): Int =
+        version.split('.').getOrNull(index)?.toIntOrNull() ?: 0
+
     fun install(runs: List<AgentRecordedRun>, titleHint: String = ""): AgentSkillInstallation =
         runtime.install(compile(runs, titleHint))
 
@@ -426,6 +508,15 @@ class AgentConversationSkillCompiler(
     private fun buildInstructions(runs: List<AgentRecordedRun>): String = buildString {
         append("Complete requests in this task family by following the saved declarative tool workflow. ")
         append("Treat the request parameter as variable input. Never copy credentials, cookies, tokens, or private data into the Skill. ")
+        val examples = runs.filter { it.status == AgentRecordedRunStatus.COMPLETED }
+            .map { it.originalRequest.trim() }
+            .filter(String::isNotBlank)
+            .distinct()
+        if (examples.isNotEmpty()) {
+            append("Learned successful request sequence: ")
+            append(examples.joinToString(" -> ").take(8_000))
+            append(". Preserve the successful interaction and output behavior while substituting the current request. ")
+        }
         val feedback = runs.flatMap { it.userFeedback }.distinct()
         if (feedback.isNotEmpty()) append("User-approved refinements: ").append(feedback.joinToString("; ").take(8_000))
     }
@@ -539,22 +630,33 @@ class AgentSkillExecutionEngine(
 
 object AgentSkillCommandParser {
     fun isSaveCommand(value: String): Boolean {
-        val text = value.trim().lowercase(Locale.US)
-        return text in setOf(
-            "save as skill", "save this as a skill", "save this method", "remember this method",
-            "\u4fdd\u5b58\u6210 skill", "\u4fdd\u5b58\u4e3a skill", "\u628a\u8fd9\u4e2a\u4fdd\u5b58\u4e3a skill",
-            "\u4ee5\u540e\u6309\u8fd9\u4e2a\u65b9\u5f0f\u6267\u884c", "\u628a\u521a\u624d\u7684\u65b9\u6cd5\u4fdd\u5b58\u4e0b\u6765"
-        )
+        val text = normalize(value)
+        if (text.startsWith("\u4e0d\u8981") || text.startsWith("do not ") || text.startsWith("don't ")) return false
+        return SAVE_PREFIXES.any(text::startsWith) || SAVE_PHRASES.any(text::contains)
     }
 
     fun isUpgradeCommand(value: String): Boolean {
-        val text = value.trim().lowercase(Locale.US)
-        return text in setOf(
-            "upgrade skill", "upgrade this skill", "improve this skill",
-            "\u5347\u7ea7 skill", "\u5347\u7ea7\u8fd9\u4e2a skill", "\u6539\u8fdb\u8fd9\u4e2a skill"
-        )
+        val text = normalize(value)
+        return UPGRADE_PREFIXES.any(text::startsWith)
     }
+
+    private fun normalize(value: String): String = value.trim().lowercase(Locale.US)
+        .replace(Regex("\\s+"), " ")
+
+    private val SAVE_PREFIXES = setOf(
+        "save as skill", "save this as a skill", "save this method", "remember this method",
+        "\u4fdd\u5b58\u6210skill", "\u4fdd\u5b58\u6210 skill", "\u4fdd\u5b58\u4e3askill", "\u4fdd\u5b58\u4e3a skill",
+        "\u628a\u8fd9\u4e2a\u4fdd\u5b58\u4e3askill", "\u628a\u8fd9\u4e2a\u4fdd\u5b58\u4e3a skill",
+        "\u628a\u521a\u624d\u7684\u65b9\u6cd5\u4fdd\u5b58\u4e0b\u6765", "\u4ee5\u540e\u6309\u8fd9\u4e2a\u65b9\u5f0f\u6267\u884c"
+    )
+    private val SAVE_PHRASES = setOf("\u628a\u8fd9\u4e2a\u4fdd\u5b58\u6210skill", "\u628a\u8fd9\u4e2a\u4fdd\u5b58\u6210 skill")
+    private val UPGRADE_PREFIXES = setOf(
+        "upgrade skill", "upgrade this skill", "improve this skill",
+        "\u5347\u7ea7skill", "\u5347\u7ea7 skill", "\u5347\u7ea7\u8fd9\u4e2askill", "\u5347\u7ea7\u8fd9\u4e2a skill", "\u6539\u8fdb\u8fd9\u4e2askill", "\u6539\u8fdb\u8fd9\u4e2a skill"
+    )
 }
+
+const val AGENT_ORCHESTRATION_TOOL_ID = "signalasi.agent.orchestrate"
 
 object AgentBuiltInSkills {
     fun installAvailable(runtime: AgentSkillRuntime): List<AgentSkillInstallation> = manifests()

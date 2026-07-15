@@ -1201,6 +1201,10 @@
     <string name="agent_operation_private_text">SignalASI is running a phone action</string>
     <string name="agent_skill_saved_message">Saved as Skill\n\nName: %1$s\nVersion: %2$s\nTools: %3$d\nStatus: Enabled</string>
     <string name="agent_skill_save_failed">Skill was not saved: %1$s</string>
+    <string name="agent_skill_export">Export Skill</string>
+    <string name="agent_skill_export_subtitle">Save this Skill as a portable verified package.</string>
+    <string name="agent_skill_export_success">Skill exported</string>
+    <string name="agent_skill_export_failed">Skill export failed: %1$s</string>
     <string name="agent_skill_result_message">%1$s · Skill v%2$s\n\n%3$s</string>
     <string name="agent_skill_fallback_message">The matched Skill could not complete the task. The standard Agent is continuing.</string>
     <string name="agent_skills_title">Skills</string>

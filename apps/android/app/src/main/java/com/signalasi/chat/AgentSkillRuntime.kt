@@ -845,7 +845,7 @@ object AgentSkillManifestValidator {
 }
 
 private object AgentSkillTemplateExpander {
-    private val REFERENCE = Regex("\\{\\{\\s*([a-zA-Z][a-zA-Z0-9_.-]*)\\s*}}")
+    private val REFERENCE = Regex("\\{\\{\\s*([a-zA-Z][a-zA-Z0-9_.-]*)\\s*\\}\\}")
 
     fun validate(
         template: String,

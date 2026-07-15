@@ -7,6 +7,8 @@ import java.io.InputStream
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.zip.ZipInputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 data class AgentSkillPackageInspection(
     val manifest: AgentSkillManifest,
@@ -17,6 +19,31 @@ data class AgentSkillPackageInspection(
 )
 
 class AgentSkillPackageException(message: String) : IllegalArgumentException(message)
+
+object AgentSkillPackageExporter {
+    fun export(manifest: AgentSkillManifest): ByteArray {
+        val rawManifest = AgentSkillManifestCodec.encode(manifest).toByteArray(Charsets.UTF_8)
+        val integrity = JSONObject()
+            .put("manifest_sha256", sha256(rawManifest))
+            .put("signer", "SignalASI local export")
+            .toString(2)
+            .toByteArray(Charsets.UTF_8)
+        return ByteArrayOutputStream().use { output ->
+            ZipOutputStream(output).use { zip ->
+                zip.putNextEntry(ZipEntry(AgentSkillPackageInstaller.MANIFEST_FILE))
+                zip.write(rawManifest)
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry(AgentSkillPackageInstaller.INTEGRITY_FILE))
+                zip.write(integrity)
+                zip.closeEntry()
+            }
+            output.toByteArray()
+        }
+    }
+
+    private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
+        .digest(bytes).joinToString("") { "%02x".format(it) }
+}
 
 class AgentSkillPackageInstaller(private val runtime: AgentSkillRuntime) {
     fun inspect(input: InputStream): AgentSkillPackageInspection {
@@ -119,6 +146,6 @@ class AgentSkillPackageInstaller(private val runtime: AgentSkillRuntime) {
             ".sh", ".bash", ".cmd", ".bat", ".ps1", ".py", ".pyc", ".js", ".mjs",
             ".ts", ".kt", ".kts", ".java", ".rb", ".php", ".pl", ".lua", ".wasm"
         )
-        private val ALLOWED_PACKAGE_SOURCES = setOf("third_party", "official_store", "repository", "url")
+        private val ALLOWED_PACKAGE_SOURCES = setOf("third_party", "official_store", "repository", "url", "conversation")
     }
 }

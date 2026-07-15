@@ -112,6 +112,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_AGENT_NATIVE_PERMISSIONS = 2010
         private const val REQUEST_AGENT_NOTIFICATIONS = 2011
         private const val REQUEST_IMPORT_SKILL = 2012
+        private const val REQUEST_EXPORT_SKILL = 2013
         private const val UI_PREFS = "signalasi_ui_preferences"
         private const val HISTORY_PREFS = "signalasi_chat_history"
         private const val HISTORY_KEY = "messages"
@@ -301,6 +302,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val renderedAgentTranscriptIds = linkedSetOf<String>()
     private val directoryContacts = mutableListOf<Contact>()
     private var pendingExportPassword: String? = null
+    private var pendingExportSkill: Pair<String, String>? = null
     private var pendingExportIncludeMessages = true
     private var pendingImportUri: Uri? = null
     private var agentInputAttachmentPending = false
@@ -384,7 +386,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentRunRecorder = AgentRunRecorder(this)
         agentSkillRuntime = AgentSkillRuntime(
             store = EncryptedAgentSkillStore(this),
-            availableNativeToolIds = mobileNativeAgent.nativeToolCatalog().map { it.id }
+            availableNativeToolIds = mobileNativeAgent.nativeToolCatalog().map { it.id } + AGENT_ORCHESTRATION_TOOL_ID
         )
         AgentBuiltInSkills.installAvailable(agentSkillRuntime)
         agentSkillMatcher = AgentSkillMatcher(agentSkillRuntime)
@@ -752,6 +754,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             conversationId, response.inputTokens, response.outputTokens, response.costMicros
         )
         renderAgentState(state, conversationId, turnId)
+        if (turnId.isNotBlank()) recordAgentRunFromState(turnId, state)
         if (state.phase == AgentPhase.COMPLETED || state.phase == AgentPhase.FAILED ||
             state.phase == AgentPhase.CANCELLED
         ) {
@@ -1045,6 +1048,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         if (requestCode == REQUEST_IMPORT_SKILL && resultCode == RESULT_OK) {
             importAgentSkillFromUri(data?.data ?: return)
+            return
+        }
+        if (requestCode == REQUEST_EXPORT_SKILL) {
+            if (resultCode == RESULT_OK && data?.data != null) {
+                exportAgentSkillToUri(data.data!!)
+            } else {
+                pendingExportSkill = null
+            }
             return
         }
         if (requestCode == REQUEST_EXPORT_BACKUP) {
@@ -1613,6 +1624,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (!AgentSkillCommandParser.isSaveCommand(goal) && !AgentSkillCommandParser.isUpgradeCommand(goal)) return false
         val context = agentRunRecorder.context(conversationId)
         val runs = context?.let { agentRunRecorder.runsForThread(it.taskThreadId) }.orEmpty()
+            .filter { it.status == AgentRecordedRunStatus.COMPLETED }
+            .takeLast(1)
         val outcome = runCatching {
             if (AgentSkillCommandParser.isUpgradeCommand(goal)) {
                 val skillId = context?.activeSkillId.orEmpty()
@@ -1635,7 +1648,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     installation.manifest.nativeTools.size
                 )
             },
-            onFailure = { error -> getString(R.string.agent_skill_save_failed, error.message ?: "Unknown error") }
+            onFailure = { error ->
+                val detail = generateSequence(error) { it.cause }
+                    .mapNotNull { cause -> cause.message?.takeIf(String::isNotBlank) }
+                    .firstOrNull()
+                    ?: error.javaClass.simpleName
+                getString(R.string.agent_skill_save_failed, detail)
+            }
         )
         agentTranscriptStore.append(
             AgentTranscriptRole.ASSISTANT,
@@ -1656,6 +1675,27 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         goal: String,
         conversationContext: AgentConversationContext
     ): Boolean {
+        if (AGENT_ORCHESTRATION_TOOL_ID in match.installation.manifest.nativeTools) {
+            agentSkillRuntime.recordUse(match.installation.id, match.installation.version)
+            val savedRequest = match.installation.manifest.triggerExamples.firstOrNull().orEmpty()
+            val transformedGoal = AgentSkillRequestTransformer.transform(savedRequest, goal)
+            val learnedGoal = if (transformedGoal != goal.trim()) transformedGoal else buildString {
+                append("Apply the saved Skill named ")
+                append(match.installation.manifest.title)
+                append(". Follow these learned instructions: ")
+                append(match.installation.manifest.instructions)
+                append("\nCurrent user request: ")
+                append(goal)
+            }
+            val isolatedSkillContext = AgentConversationContext(
+                conversationId = "skill:${match.installation.id}:$turnId",
+                summary = "",
+                turns = emptyList(),
+                privateMode = conversationContext.privateMode
+            )
+            executeConcurrentAgentGoal(learnedGoal, isolatedSkillContext, conversationId, turnId)
+            return true
+        }
         thread(name = "signalasi-agent-skill") {
             val result = runCatching {
                 AgentSkillExecutionEngine(agentSkillRuntime, mobileNativeAgent).execute(match)
@@ -3753,6 +3793,23 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
         })
         featureContent.addView(featureRow(
+            getString(R.string.agent_skill_export),
+            getString(R.string.agent_skill_export_subtitle),
+            R.drawable.ic_export,
+            getString(R.string.common_export)
+        ).apply {
+            setOnClickListener {
+                pendingExportSkill = id to version
+                val safeTitle = manifest.title.replace(Regex("[^a-zA-Z0-9._-]+"), "-")
+                    .trim('-').ifBlank { "signalasi-skill" }
+                startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "application/zip"
+                    putExtra(Intent.EXTRA_TITLE, "$safeTitle-v${manifest.version}.skill.zip")
+                }, REQUEST_EXPORT_SKILL)
+            }
+        })
+        featureContent.addView(featureRow(
             getString(R.string.agent_skill_uninstall),
             "${manifest.title} v${manifest.version}",
             R.drawable.ic_delete,
@@ -3816,6 +3873,29 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     .onSuccess { showAgentSkillDetailPage(it.id, it.version) }
                     .onFailure { Toast.makeText(this, it.message ?: getString(R.string.agent_skill_install_failed), Toast.LENGTH_LONG).show() }
             }.show()
+    }
+
+    private fun exportAgentSkillToUri(uri: Uri) {
+        val target = pendingExportSkill
+        pendingExportSkill = null
+        val installation = target?.let { agentSkillRuntime.get(it.first, it.second) }
+        if (installation == null) {
+            Toast.makeText(this, getString(R.string.agent_skill_export_failed, "Skill not found"), Toast.LENGTH_LONG).show()
+            return
+        }
+        runCatching {
+            val archive = AgentSkillPackageExporter.export(installation.manifest)
+            contentResolver.openOutputStream(uri, "w")?.use { it.write(archive) }
+                ?: error("Unable to open export destination")
+        }.onSuccess {
+            Toast.makeText(this, getString(R.string.agent_skill_export_success), Toast.LENGTH_LONG).show()
+        }.onFailure { error ->
+            Toast.makeText(
+                this,
+                getString(R.string.agent_skill_export_failed, error.message ?: error.javaClass.simpleName),
+                Toast.LENGTH_LONG
+            ).show()
+        }
     }
 
     private fun renderAgentActionQueue(state: AgentUiState) {

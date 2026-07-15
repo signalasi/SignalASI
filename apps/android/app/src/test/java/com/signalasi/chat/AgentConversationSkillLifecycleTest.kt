@@ -3,6 +3,7 @@ package com.signalasi.chat
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -13,6 +14,9 @@ class AgentConversationSkillLifecycleTest {
         assertFalse(AgentSkillCommandParser.isSaveCommand("Remember this preference"))
         assertTrue(AgentSkillCommandParser.isSaveCommand("Save this as a Skill"))
         assertTrue(AgentSkillCommandParser.isSaveCommand("\u4fdd\u5b58\u6210 Skill"))
+        assertTrue(AgentSkillCommandParser.isSaveCommand("\u4fdd\u5b58\u6210skill,\u4ee5\u540e\u6211\u8bf4\u67e5\u4ec0\u4e48\u5b57\u7b14\u987a\u7b14\u753b\u5c31\u8c03\u7528\u8fd9\u4e2askill"))
+        assertTrue(AgentSkillCommandParser.isSaveCommand("\u628a\u8fd9\u4e2a\u4fdd\u5b58\u4e3a Skill\uff0c\u4ee5\u540e\u7ee7\u7eed\u4f7f\u7528"))
+        assertFalse(AgentSkillCommandParser.isSaveCommand("\u4e0d\u8981\u4fdd\u5b58\u6210 Skill"))
         assertTrue(AgentSkillCommandParser.isUpgradeCommand("Upgrade this Skill"))
     }
 
@@ -45,4 +49,105 @@ class AgentConversationSkillLifecycleTest {
         assertNotNull(matcher.match("@${installed.id} find AI news"))
         assertNotNull(matcher.match("@Daily news find security news"))
     }
+
+    @Test
+    fun matcherReusesParameterizedSingleCharacterTask() {
+        val argumentMarker = 0x5B57.toChar()
+        val firstArgument = 0x7532.toChar()
+        val secondArgument = 0x4E59.toChar()
+        val savedRequest = "use provider lookup $firstArgument$argumentMarker mode alpha with detailed output"
+        val currentRequest = "lookup $secondArgument$argumentMarker mode alpha"
+        var now = 1_000L
+        val runtime = AgentSkillRuntime(
+            availableNativeToolIds = setOf(AGENT_ORCHESTRATION_TOOL_ID),
+            clock = { now }
+        )
+        runtime.install(
+            AgentSkillManifest(
+                id = "parameterized-task-old",
+                version = "1.0.0",
+                title = "Parameterized task old",
+                instructions = "Run the saved task with the current argument.",
+                nativeTools = setOf(AGENT_ORCHESTRATION_TOOL_ID),
+                steps = listOf(AgentSkillStep("run", AGENT_ORCHESTRATION_TOOL_ID)),
+                autoInvoke = true,
+                triggerExamples = listOf(savedRequest)
+            )
+        )
+
+        now = 2_000L
+        val latest = runtime.install(
+            AgentSkillManifest(
+                id = "parameterized-task-current",
+                version = "1.0.0",
+                title = "Parameterized task current",
+                instructions = "Reuse the latest approved presentation.",
+                nativeTools = setOf(AGENT_ORCHESTRATION_TOOL_ID),
+                steps = listOf(AgentSkillStep("run", AGENT_ORCHESTRATION_TOOL_ID)),
+                autoInvoke = true,
+                triggerExamples = listOf(savedRequest)
+            )
+        )
+
+        assertEquals(latest.id, matcher(runtime).match(currentRequest)?.installation?.id)
+        now = 3_000L
+        runtime.install(
+            AgentSkillManifest(
+                id = "narrow-parameterized-task",
+                version = "1.0.0",
+                title = "Narrow parameterized task",
+                instructions = "Run a narrow task.",
+                nativeTools = setOf(AGENT_ORCHESTRATION_TOOL_ID),
+                steps = listOf(AgentSkillStep("run", AGENT_ORCHESTRATION_TOOL_ID)),
+                autoInvoke = true,
+                triggerExamples = listOf(currentRequest)
+            )
+        )
+        assertEquals(
+            latest.id,
+            matcher(runtime).match(currentRequest)?.installation?.id
+        )
+        listOf(
+            "lookup $secondArgument$argumentMarker mode",
+            "lookup $secondArgument$argumentMarker mode alpha"
+        ).forEach { request ->
+            assertEquals(latest.id, matcher(runtime).match(request)?.installation?.id)
+        }
+        assertEquals(
+            savedRequest.replace(firstArgument, secondArgument),
+            AgentSkillRequestTransformer.transform(savedRequest, currentRequest)
+        )
+    }
+
+    @Test
+    fun remoteAgentRunCompilesAsOrchestrationSkill() {
+        val runtime = AgentSkillRuntime(availableNativeToolIds = setOf(AGENT_ORCHESTRATION_TOOL_ID))
+        val run = AgentRecordedRun(
+            runId = "run-1",
+            conversationId = "conversation-1",
+            taskThreadId = "thread-1",
+            originalRequest = "\u4f60\u5b57\u7b14\u987a\u7b14\u753b",
+            normalizedIntent = "\u4f60\u5b57\u7b14\u987a\u7b14\u753b",
+            finalOutputJson = "{\"text\":\"done\"}",
+            status = AgentRecordedRunStatus.COMPLETED
+        )
+
+        val installed = AgentConversationSkillCompiler(runtime) { emptyList() }.install(listOf(run))
+
+        assertEquals(setOf(AGENT_ORCHESTRATION_TOOL_ID), installed.manifest.nativeTools)
+        assertEquals(AGENT_ORCHESTRATION_TOOL_ID, installed.manifest.steps.single().toolId)
+
+        val next = AgentConversationSkillCompiler(runtime) { emptyList() }.install(listOf(run))
+        assertEquals("1.1.0", next.version)
+
+        val archive = AgentSkillPackageExporter.export(installed.manifest)
+        val restoredRuntime = AgentSkillRuntime(availableNativeToolIds = setOf(AGENT_ORCHESTRATION_TOOL_ID))
+        val inspection = AgentSkillPackageInstaller(restoredRuntime).inspect(archive.inputStream())
+        assertTrue(inspection.integrityVerified)
+        val restored = AgentSkillPackageInstaller(restoredRuntime)
+            .install(archive.inputStream(), allowUnsignedLocalPackage = false)
+        assertEquals(installed.id, restored.id)
+    }
+
+    private fun matcher(runtime: AgentSkillRuntime) = AgentSkillMatcher(runtime)
 }

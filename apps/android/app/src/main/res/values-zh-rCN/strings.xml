@@ -1106,6 +1106,10 @@
     <string name="agent_operation_private_text">SignalASI 正在执行手机操作</string>
     <string name="agent_skill_saved_message">已保存为 Skill\n\n名称：%1$s\n版本：%2$s\n工具：%3$d 个\n状态：已启用</string>
     <string name="agent_skill_save_failed">Skill 未保存：%1$s</string>
+    <string name="agent_skill_export">导出 Skill</string>
+    <string name="agent_skill_export_subtitle">将此 Skill 保存为可移植且带完整性校验的软件包。</string>
+    <string name="agent_skill_export_success">Skill 已导出</string>
+    <string name="agent_skill_export_failed">Skill 导出失败：%1$s</string>
     <string name="agent_skill_result_message">%1$s · Skill v%2$s\n\n%3$s</string>
     <string name="agent_skill_fallback_message">当前 Skill 未能完整完成任务，普通 Agent 已继续处理。</string>
     <string name="agent_skills_title">技能</string>

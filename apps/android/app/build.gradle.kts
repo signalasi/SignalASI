@@ -11,8 +11,8 @@ android {
         applicationId = "com.signalasi.chat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 21
-        versionName = "0.1.20"
+        versionCode = 23
+        versionName = "0.1.22"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
