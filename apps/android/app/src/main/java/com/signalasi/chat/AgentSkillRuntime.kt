@@ -91,6 +91,13 @@ data class AgentSkillStep(
     val dependsOn: List<String> = emptyList()
 )
 
+data class AgentSkillTestCase(
+    val id: String,
+    val input: Map<String, Any?> = emptyMap(),
+    val expectedToolIds: Set<String> = emptySet(),
+    val excludedPhrases: Set<String> = emptySet()
+)
+
 data class AgentSkillManifest(
     val id: String,
     val version: String,
@@ -101,7 +108,15 @@ data class AgentSkillManifest(
     val resources: List<AgentSkillResource> = emptyList(),
     val parameters: AgentSkillParameterSchema = AgentSkillParameterSchema.objectSchema(),
     val steps: List<AgentSkillStep>,
-    val formatVersion: Int = AgentSkillLimits.SUPPORTED_FORMAT_VERSION
+    val formatVersion: Int = AgentSkillLimits.SUPPORTED_FORMAT_VERSION,
+    val description: String = "",
+    val author: String = "SignalASI",
+    val source: String = "built_in",
+    val autoInvoke: Boolean = false,
+    val triggerExamples: List<String> = emptyList(),
+    val negativeExamples: List<String> = emptyList(),
+    val renderSpec: Map<String, Any?> = emptyMap(),
+    val tests: List<AgentSkillTestCase> = emptyList()
 ) {
     val nativeToolIds: Set<String> get() = nativeTools
 }
@@ -110,10 +125,14 @@ data class AgentSkillInstallation(
     val manifest: AgentSkillManifest,
     val enabled: Boolean = true,
     val installedAtMillis: Long = 0L,
-    val updatedAtMillis: Long = installedAtMillis
+    val updatedAtMillis: Long = installedAtMillis,
+    val useCount: Long = 0L,
+    val lastUsedAtMillis: Long = 0L,
+    val autoInvokeOverride: Boolean? = null
 ) {
     val id: String get() = manifest.id
     val version: String get() = manifest.version
+    val autoInvoke: Boolean get() = autoInvokeOverride ?: manifest.autoInvoke
 }
 
 data class AgentSkillValidationIssue(
@@ -172,6 +191,8 @@ object AgentSkillLimits {
     const val MAX_PERMISSIONS = 64
     const val MAX_RESOURCES = 64
     const val MAX_STEPS = 128
+    const val MAX_EXAMPLES = 64
+    const val MAX_TESTS = 64
     const val MAX_SCHEMA_DEPTH = 12
     const val MAX_SCHEMA_PROPERTIES = 128
     const val MAX_INPUT_DEPTH = 16
@@ -317,6 +338,13 @@ class AgentSkillRuntime(
     fun disable(id: String, version: String): AgentSkillInstallation = setEnabled(id, version, false)
 
     @Synchronized
+    fun setAutoInvoke(id: String, version: String, enabled: Boolean): AgentSkillInstallation {
+        val current = get(id, version)
+            ?: throw NoSuchElementException("Agent Skill ${id.trim()}@${version.trim()} is not installed")
+        return current.copy(autoInvokeOverride = enabled, updatedAtMillis = now()).also(store::upsert)
+    }
+
+    @Synchronized
     fun delete(id: String, version: String): Boolean = store.delete(id.trim(), version.trim())
 
     fun list(enabledOnly: Boolean = false): List<AgentSkillInstallation> = store.list()
@@ -326,6 +354,17 @@ class AgentSkillRuntime(
         .toList()
 
     fun get(id: String, version: String): AgentSkillInstallation? = store.find(id.trim(), version.trim())
+
+    @Synchronized
+    fun recordUse(id: String, version: String): AgentSkillInstallation {
+        val current = get(id, version)
+            ?: throw NoSuchElementException("Agent Skill ${id.trim()}@${version.trim()} is not installed")
+        return current.copy(
+            useCount = (current.useCount + 1L).coerceAtMost(Long.MAX_VALUE),
+            lastUsedAtMillis = now(),
+            updatedAtMillis = maxOf(current.updatedAtMillis, now())
+        ).also(store::upsert)
+    }
 
     fun expand(
         id: String,
@@ -413,6 +452,28 @@ object AgentSkillManifestValidator {
             "instructions",
             issues
         )
+        if (manifest.description.length > AgentSkillLimits.MAX_INSTRUCTIONS_CHARS) {
+            issues += issue("$.description", "oversized_description", "Description exceeds the character limit")
+        }
+        boundedText(manifest.author, AgentSkillLimits.MAX_TITLE_CHARS, "$.author", "author", issues)
+        stableToken(manifest.source, AgentSkillLimits.MAX_ID_CHARS, STABLE_ID, "$.source", "source", issues)
+        if (manifest.triggerExamples.size > AgentSkillLimits.MAX_EXAMPLES ||
+            manifest.negativeExamples.size > AgentSkillLimits.MAX_EXAMPLES
+        ) {
+            issues += issue("$.examples", "too_many_examples", "Too many trigger or negative examples")
+        }
+        if (manifest.tests.size > AgentSkillLimits.MAX_TESTS) {
+            issues += issue("$.tests", "too_many_tests", "Too many Skill tests")
+        }
+        manifest.tests.forEachIndexed { index, test ->
+            stableToken(test.id, AgentSkillLimits.MAX_ID_CHARS, STABLE_ID, "$.tests[$index].id", "test id", issues)
+            if (!SkillJson.isCompatible(test.input)) {
+                issues += issue("$.tests[$index].input", "invalid_json_value", "Test input is not JSON-compatible")
+            }
+            test.expectedToolIds.filterNot { it in manifest.nativeTools }.forEach { toolId ->
+                issues += issue("$.tests[$index].expected_tool_ids", "undeclared_tool", "Test expects undeclared tool $toolId")
+            }
+        }
         if (manifest.nativeTools.size > AgentSkillLimits.MAX_NATIVE_TOOLS) {
             issues += issue("$.native_tools", "too_many_tools", "Too many native tool declarations")
         }
@@ -945,6 +1006,21 @@ object AgentSkillManifestCodec {
                 "input" to step.input,
                 "depends_on" to step.dependsOn
             )
+        },
+        "description" to manifest.description,
+        "author" to manifest.author,
+        "source" to manifest.source,
+        "auto_invoke" to manifest.autoInvoke,
+        "trigger_examples" to manifest.triggerExamples,
+        "negative_examples" to manifest.negativeExamples,
+        "render_spec" to manifest.renderSpec,
+        "tests" to manifest.tests.map { test ->
+            linkedMapOf(
+                "id" to test.id,
+                "input" to test.input,
+                "expected_tool_ids" to test.expectedToolIds.sorted(),
+                "excluded_phrases" to test.excludedPhrases.sorted()
+            )
         }
     )
 
@@ -953,7 +1029,8 @@ object AgentSkillManifestCodec {
             root,
             setOf(
                 "format_version", "id", "version", "title", "instructions", "native_tools",
-                "permissions", "resources", "parameters", "steps"
+                "permissions", "resources", "parameters", "steps", "description", "author", "source",
+                "auto_invoke", "trigger_examples", "negative_examples", "render_spec", "tests"
             )
         )
         require(root.keys.containsAll(setOf("id", "version", "title", "instructions", "native_tools", "steps")))
@@ -977,6 +1054,16 @@ object AgentSkillManifestCodec {
                 dependsOn = item.stringList("depends_on")
             )
         }
+        val tests = root.list("tests").map { raw ->
+            val item = raw.stringMap()
+            requireKeys(item, setOf("id", "input", "expected_tool_ids", "excluded_phrases"))
+            AgentSkillTestCase(
+                id = item.string("id"),
+                input = item.map("input"),
+                expectedToolIds = item.stringList("expected_tool_ids").toSet(),
+                excludedPhrases = item.stringList("excluded_phrases").toSet()
+            )
+        }
         AgentSkillManifest(
             id = root.string("id"),
             version = root.string("version"),
@@ -988,7 +1075,15 @@ object AgentSkillManifestCodec {
             parameters = root["parameters"]?.stringMap()?.let(::schemaFromMap)
                 ?: AgentSkillParameterSchema.objectSchema(),
             steps = steps,
-            formatVersion = root.int("format_version", AgentSkillLimits.SUPPORTED_FORMAT_VERSION)
+            formatVersion = root.int("format_version", AgentSkillLimits.SUPPORTED_FORMAT_VERSION),
+            description = root.string("description"),
+            author = root.string("author", "SignalASI"),
+            source = root.string("source", "built_in"),
+            autoInvoke = root.boolean("auto_invoke"),
+            triggerExamples = root.stringList("trigger_examples"),
+            negativeExamples = root.stringList("negative_examples"),
+            renderSpec = root.map("render_spec"),
+            tests = tests
         )
     }.getOrNull()
 
@@ -1057,7 +1152,10 @@ private object AgentSkillStoreCodec {
                         "manifest" to AgentSkillManifestCodec.toMap(installation.manifest),
                         "enabled" to installation.enabled,
                         "installed_at" to installation.installedAtMillis.coerceAtLeast(0L),
-                        "updated_at" to installation.updatedAtMillis.coerceAtLeast(0L)
+                        "updated_at" to installation.updatedAtMillis.coerceAtLeast(0L),
+                        "use_count" to installation.useCount.coerceAtLeast(0L),
+                        "last_used_at" to installation.lastUsedAtMillis.coerceAtLeast(0L),
+                        "auto_invoke_override" to installation.autoInvokeOverride
                     )
                 }
             )
@@ -1083,7 +1181,13 @@ private object AgentSkillStoreCodec {
                     manifest = manifest,
                     enabled = item.boolean("enabled", true),
                     installedAtMillis = item.long("installed_at").coerceAtLeast(0L),
-                    updatedAtMillis = item.long("updated_at").coerceAtLeast(0L)
+                    updatedAtMillis = item.long("updated_at").coerceAtLeast(0L),
+                    useCount = item.long("use_count").coerceAtLeast(0L),
+                    lastUsedAtMillis = item.long("last_used_at").coerceAtLeast(0L),
+                    autoInvokeOverride = when (val value = item["auto_invoke_override"]) {
+                        is Boolean -> value
+                        else -> null
+                    }
                 )
             }.getOrNull()
         }.filterNotNull().distinctBy { it.id to it.version }.take(AgentSkillLimits.MAX_INSTALLED_SKILLS)
@@ -1092,7 +1196,10 @@ private object AgentSkillStoreCodec {
 
 private object SkillJson {
     fun isCompatibleManifest(manifest: AgentSkillManifest): Boolean =
-        manifest.steps.all { isCompatible(it.input) } && schemaCompatible(manifest.parameters)
+        manifest.steps.all { isCompatible(it.input) } &&
+            manifest.tests.all { isCompatible(it.input) } &&
+            isCompatible(manifest.renderSpec) &&
+            schemaCompatible(manifest.parameters)
 
     fun isCompatible(value: Any?): Boolean = isCompatible(value, 0)
 

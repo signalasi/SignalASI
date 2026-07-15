@@ -111,6 +111,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_AGENT_CAMERA_PERMISSION = 2009
         private const val REQUEST_AGENT_NATIVE_PERMISSIONS = 2010
         private const val REQUEST_AGENT_NOTIFICATIONS = 2011
+        private const val REQUEST_IMPORT_SKILL = 2012
         private const val UI_PREFS = "signalasi_ui_preferences"
         private const val HISTORY_PREFS = "signalasi_chat_history"
         private const val HISTORY_KEY = "messages"
@@ -252,6 +253,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val historySaveRunnable = Runnable { enqueueChatHistorySave() }
     private lateinit var mobileNativeAgent: MobileNativeAgent
     private lateinit var agentTranscriptStore: AgentTranscriptStore
+    private lateinit var agentRunRecorder: AgentRunRecorder
+    private lateinit var agentSkillRuntime: AgentSkillRuntime
+    private lateinit var agentSkillMatcher: AgentSkillMatcher
+    private val agentRunIdsByTurn = ConcurrentHashMap<String, String>()
     private var agentSessionsDialog: android.app.Dialog? = null
     private val agentConnectorResponseListener = AgentConnectorResponseListener { response ->
         runOnUiThread { consumeAgentConnectorResponse(response) }
@@ -376,6 +381,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         AppStore.ensureInitialized(this)
         mobileNativeAgent = MobileNativeAgent(this)
         agentTranscriptStore = AgentTranscriptStore(this)
+        agentRunRecorder = AgentRunRecorder(this)
+        agentSkillRuntime = AgentSkillRuntime(
+            store = EncryptedAgentSkillStore(this),
+            availableNativeToolIds = mobileNativeAgent.nativeToolCatalog().map { it.id }
+        )
+        AgentBuiltInSkills.installAvailable(agentSkillRuntime)
+        agentSkillMatcher = AgentSkillMatcher(agentSkillRuntime)
         agentTranscriptStore.removeExactText("Create a safe local task plan")
         agentTranscriptStore.removeExactText("Task plan confirmed")
         microsoftTts = MicrosoftEdgeTts(applicationContext)
@@ -1031,6 +1043,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             return
         }
+        if (requestCode == REQUEST_IMPORT_SKILL && resultCode == RESULT_OK) {
+            importAgentSkillFromUri(data?.data ?: return)
+            return
+        }
         if (requestCode == REQUEST_EXPORT_BACKUP) {
             if (resultCode == RESULT_OK && data?.data != null) {
                 exportBackupToUri(data.data!!)
@@ -1190,6 +1206,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         findViewById<View>(R.id.settingsAgentKnowledgeButton).setOnClickListener { showAgentKnowledgePage() }
         findViewById<View>(R.id.settingsAgentControlButton).setOnClickListener { showOnDeviceAgentFeaturePage() }
         findViewById<View>(R.id.settingsRecentTasksButton).setOnClickListener { showAgentRecentTasksPage() }
+        findViewById<View>(R.id.settingsAgentSkillsButton).setOnClickListener { showAgentSkillsPage() }
         meProfileText.setOnClickListener { showEditNicknameDialog() }
         findViewById<View>(R.id.meProfileCard).setOnClickListener { showEditNicknameDialog() }
         meAvatar.setOnClickListener { pickAvatar() }
@@ -1423,6 +1440,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentGoalInput.clearFocus()
         getSystemService(InputMethodManager::class.java)
             .hideSoftInputFromWindow(agentGoalInput.windowToken, 0)
+        if (handleAgentSkillCommand(goal, conversation.id, turnId)) return
+        val skillMatch = agentSkillMatcher.match(goal)
+        val run = agentRunRecorder.begin(
+            conversationId = conversation.id,
+            request = goal,
+            activeSkillId = skillMatch?.installation?.id.orEmpty()
+        )
+        agentRunIdsByTurn[turnId] = run.runId
+        if (skillMatch != null && executeMatchedSkill(skillMatch, conversation.id, turnId, goal, conversationContext)) {
+            return
+        }
         val deterministicAction = deterministicSystemActionFor(goal, conversationContext)
         if (deterministicAction != null &&
             AgentConfirmationPolicy.tier(deterministicAction) == AgentConfirmationTier.DIRECT
@@ -1494,6 +1522,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     provisionalAgentTasks.remove(runtime)
                 }
                 renderAgentState(state, conversationId, turnId)
+                recordAgentRunFromState(turnId, state)
                 requestMissingAgentNativePermissions(state)
                 consumePendingAgentConnectorResponses()
                 outcome.exceptionOrNull()?.let { error ->
@@ -1575,8 +1604,177 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     AgentActionResult(action.id, false, error.message ?: "Agent operation failed")
                 }
                 appendDirectSystemResult(action, conversationId, turnId, result)
+                recordDirectAgentRun(turnId, action, result)
             }
         }
+    }
+
+    private fun handleAgentSkillCommand(goal: String, conversationId: String, turnId: String): Boolean {
+        if (!AgentSkillCommandParser.isSaveCommand(goal) && !AgentSkillCommandParser.isUpgradeCommand(goal)) return false
+        val context = agentRunRecorder.context(conversationId)
+        val runs = context?.let { agentRunRecorder.runsForThread(it.taskThreadId) }.orEmpty()
+        val outcome = runCatching {
+            if (AgentSkillCommandParser.isUpgradeCommand(goal)) {
+                val skillId = context?.activeSkillId.orEmpty()
+                val current = agentSkillRuntime.list(enabledOnly = true)
+                    .filter { it.id == skillId }
+                    .maxByOrNull { skillVersionParts(it.version) }
+                    ?: error("The active task was not produced by an installed Skill")
+                AgentSkillVersionManager(agentSkillRuntime).upgrade(current, runs)
+            } else {
+                AgentConversationSkillCompiler(agentSkillRuntime, mobileNativeAgent::nativeToolCatalog).install(runs)
+            }
+        }
+        val message = outcome.fold(
+            onSuccess = { installation ->
+                agentRunRecorder.setActiveSkill(conversationId, installation.id)
+                getString(
+                    R.string.agent_skill_saved_message,
+                    installation.manifest.title,
+                    installation.version,
+                    installation.manifest.nativeTools.size
+                )
+            },
+            onFailure = { error -> getString(R.string.agent_skill_save_failed, error.message ?: "Unknown error") }
+        )
+        agentTranscriptStore.append(
+            AgentTranscriptRole.ASSISTANT,
+            message,
+            dedupeKey = "skill-command:$turnId",
+            conversationId = conversationId,
+            turnId = turnId,
+            taskId = turnId
+        )
+        renderAgentTranscript(agentTranscriptStore.list(conversationId))
+        return true
+    }
+
+    private fun executeMatchedSkill(
+        match: AgentSkillMatch,
+        conversationId: String,
+        turnId: String,
+        goal: String,
+        conversationContext: AgentConversationContext
+    ): Boolean {
+        thread(name = "signalasi-agent-skill") {
+            val result = runCatching {
+                AgentSkillExecutionEngine(agentSkillRuntime, mobileNativeAgent).execute(match)
+            }.getOrElse { error ->
+                AgentSkillExecutionResult(false, match.installation.id, match.installation.version, error.message ?: "Skill failed")
+            }
+            runOnUiThread {
+                if (result.success) {
+                    val text = getString(
+                        R.string.agent_skill_result_message,
+                        match.installation.manifest.title,
+                        match.installation.version,
+                        result.message
+                    )
+                    agentTranscriptStore.append(
+                        AgentTranscriptRole.ASSISTANT,
+                        text,
+                        dedupeKey = "skill-result:$turnId",
+                        conversationId = conversationId,
+                        turnId = turnId,
+                        taskId = turnId
+                    )
+                    renderAgentTranscript(agentTranscriptStore.list(conversationId))
+                    recordSkillAgentRun(turnId, result)
+                } else {
+                    agentTranscriptStore.append(
+                        AgentTranscriptRole.PROCESS,
+                        getString(R.string.agent_skill_fallback_message),
+                        dedupeKey = "skill-fallback:$turnId",
+                        conversationId = conversationId,
+                        turnId = turnId,
+                        taskId = turnId
+                    )
+                    executeConcurrentAgentGoal(goal, conversationContext, conversationId, turnId)
+                }
+            }
+        }
+        return true
+    }
+
+    private fun recordDirectAgentRun(turnId: String, action: AgentAction, result: AgentActionResult) {
+        val runId = agentRunIdsByTurn.remove(turnId) ?: return
+        val toolName = action.parameters["tool_id"].orEmpty().ifBlank { "android.${action.kind.name.lowercase()}" }
+        val call = AgentToolCallRecord(
+            id = action.id,
+            toolName = toolName,
+            status = if (result.success) AgentToolCallStatus.SUCCEEDED else AgentToolCallStatus.FAILED,
+            argumentsJson = action.parameters["input_json"].orEmpty().ifBlank { JSONObject(action.parameters).toString() },
+            resultJson = JSONObject(result.metadata).put("message", result.message).toString(),
+            errorMessage = if (result.success) "" else result.message,
+            startedAtMillis = System.currentTimeMillis(),
+            completedAtMillis = System.currentTimeMillis()
+        )
+        agentRunRecorder.complete(
+            runId = runId,
+            planJson = JSONArray().put(JSONObject().put("action", action.id).put("kind", action.kind.name)).toString(),
+            toolCalls = listOf(call),
+            sourcesJson = "[]",
+            finalOutputJson = JSONObject().put("text", result.message).toString(),
+            renderSpecJson = "{}",
+            artifacts = emptyList(),
+            success = result.success
+        )
+    }
+
+    private fun recordSkillAgentRun(turnId: String, result: AgentSkillExecutionResult) {
+        val runId = agentRunIdsByTurn.remove(turnId) ?: return
+        val toolIds = agentSkillRuntime.get(result.skillId, result.version)?.manifest?.steps.orEmpty().map { it.toolId }
+        val calls = result.toolResults.mapIndexed { index, toolResult ->
+            AgentToolCallRecord(
+                id = toolResult.receipt.invocationId.ifBlank { "skill-${index + 1}" },
+                toolName = toolIds.getOrElse(index) { "unknown" },
+                status = if (toolResult.isSuccess) AgentToolCallStatus.SUCCEEDED else AgentToolCallStatus.FAILED,
+                resultJson = AgentNativeJsonCodec.stringify(toolResult.output),
+                errorMessage = if (toolResult.isSuccess) "" else toolResult.message
+            )
+        }
+        agentRunRecorder.complete(
+            runId, "[]", calls, "[]",
+            JSONObject().put("text", result.message).toString(), "{}", emptyList(), result.success
+        )
+    }
+
+    private fun recordAgentRunFromState(turnId: String, state: AgentUiState) {
+        if (state.phase !in setOf(AgentPhase.COMPLETED, AgentPhase.FAILED, AgentPhase.CANCELLED, AgentPhase.BLOCKED)) return
+        val runId = agentRunIdsByTurn.remove(turnId) ?: return
+        val result = state.lastActionResult
+        val nativeActions = (state.plan?.actionHistory.orEmpty() + state.plan?.actions.orEmpty())
+            .distinctBy { it.id }
+            .filter { it.kind == AgentActionKind.CALL_NATIVE_TOOL }
+        val calls = nativeActions.map { action ->
+            val isLast = result?.actionId == action.id
+            val succeeded = action.status == AgentActionStatus.COMPLETED || (isLast && result?.success == true)
+            AgentToolCallRecord(
+                id = action.id,
+                toolName = action.parameters["tool_id"].orEmpty(),
+                status = if (succeeded) AgentToolCallStatus.SUCCEEDED else AgentToolCallStatus.FAILED,
+                argumentsJson = action.parameters["input_json"].orEmpty().ifBlank { "{}" },
+                resultJson = if (isLast) result?.metadata?.get("native_tool_output").orEmpty().ifBlank {
+                    JSONObject().put("message", action.result).toString()
+                } else JSONObject().put("message", action.result).toString(),
+                errorMessage = if (succeeded) "" else action.result
+            )
+        }
+        val planJson = JSONArray().apply {
+            state.plan?.actions.orEmpty().forEach { item ->
+                put(JSONObject().put("id", item.id).put("kind", item.kind.name).put("target", item.target))
+            }
+        }.toString()
+        agentRunRecorder.complete(
+            runId = runId,
+            planJson = planJson,
+            toolCalls = calls,
+            sourcesJson = "[]",
+            finalOutputJson = JSONObject().put("text", result?.message.orEmpty()).toString(),
+            renderSpecJson = "{}",
+            artifacts = emptyList(),
+            success = state.phase == AgentPhase.COMPLETED
+        )
     }
 
     private fun appendDirectSystemResult(
@@ -3417,6 +3615,207 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         state.recentTasks.take(20).forEachIndexed { index, task ->
             featureContent.addView(agentRecentTaskRow(task, index))
         }
+    }
+
+    private fun showAgentSkillsPage() {
+        showFeaturePage(getString(R.string.agent_skills_title))
+        featureBackButton.setOnClickListener { showMainTab(PAGE_SETTINGS) }
+        featureContent.addView(featureHeroCard(
+            getString(R.string.agent_skills_title),
+            getString(R.string.agent_skills_subtitle),
+            R.drawable.ic_agent_node,
+            "#14C66A",
+            agentSkillRuntime.list().size.toString()
+        ))
+        featureContent.addView(featureRow(
+            getString(R.string.agent_skill_install_local),
+            getString(R.string.agent_skill_install_local_subtitle),
+            R.drawable.ic_import,
+            getString(R.string.common_select)
+        ).apply {
+            setOnClickListener {
+                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "application/zip"
+                    putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/zip", "application/octet-stream"))
+                }, REQUEST_IMPORT_SKILL)
+            }
+        })
+        val installations = agentSkillRuntime.list()
+            .groupBy { it.id }
+            .values
+            .mapNotNull { versions -> versions.maxByOrNull { skillVersionParts(it.version) } }
+            .sortedBy { it.manifest.title.lowercase(Locale.ROOT) }
+        if (installations.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.agent_skills_empty),
+                getString(R.string.agent_skills_empty_subtitle),
+                R.drawable.ic_agent_node,
+                ""
+            ))
+            return
+        }
+        listOf(
+            R.string.agent_skill_section_installed to installations.filter { it.manifest.source != "built_in" },
+            R.string.agent_skill_section_built_in to installations.filter { it.manifest.source == "built_in" }
+        ).forEach { (titleRes, skills) ->
+            if (skills.isEmpty()) return@forEach
+            addSectionTitle(getString(titleRes))
+            skills.forEach { installation ->
+                val state = getString(if (installation.enabled) R.string.agent_skill_enabled else R.string.agent_skill_disabled)
+                featureContent.addView(featureRow(
+                    installation.manifest.title,
+                    listOf(installation.manifest.description, "v${installation.version}", getString(R.string.agent_skill_uses, installation.useCount))
+                        .filter(String::isNotBlank).joinToString(" · "),
+                    R.drawable.ic_agent_node,
+                    state
+                ).apply { setOnClickListener { showAgentSkillDetailPage(installation.id, installation.version) } })
+            }
+        }
+    }
+
+    private fun showAgentSkillDetailPage(id: String, version: String) {
+        val installation = agentSkillRuntime.get(id, version) ?: return showAgentSkillsPage()
+        val manifest = installation.manifest
+        showFeaturePage(manifest.title)
+        featureBackButton.setOnClickListener { showAgentSkillsPage() }
+        featureContent.addView(featureHeroCard(
+            manifest.title,
+            manifest.description.ifBlank { manifest.instructions.take(180) },
+            R.drawable.ic_agent_node,
+            "#14C66A",
+            "v${manifest.version}"
+        ))
+        featureContent.addView(featureRow(
+            getString(if (installation.enabled) R.string.agent_skill_enabled else R.string.agent_skill_disabled),
+            manifest.source,
+            R.drawable.ic_agent_control,
+            getString(if (installation.enabled) R.string.common_disable else R.string.common_enable)
+        ).apply {
+            setOnClickListener {
+                if (installation.enabled) agentSkillRuntime.disable(id, version) else agentSkillRuntime.enable(id, version)
+                showAgentSkillDetailPage(id, version)
+            }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.agent_skill_auto_invoke),
+            manifest.triggerExamples.take(3).joinToString(" · "),
+            R.drawable.ic_protocol_link,
+            getString(if (installation.autoInvoke) R.string.status_enabled else R.string.status_disabled)
+        ).apply {
+            setOnClickListener {
+                agentSkillRuntime.setAutoInvoke(id, version, !installation.autoInvoke)
+                showAgentSkillDetailPage(id, version)
+            }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.agent_skill_workflow),
+            manifest.steps.joinToString(" → ") { it.toolId },
+            R.drawable.ic_agent_history,
+            manifest.steps.size.toString()
+        ))
+        featureContent.addView(featureRow(
+            getString(R.string.agent_skill_permissions),
+            (manifest.permissions + manifest.nativeTools).joinToString("\n"),
+            R.drawable.ic_security_shield,
+            manifest.permissions.size.toString()
+        ))
+        val versions = agentSkillRuntime.list().filter { it.id == id }.sortedByDescending { skillVersionParts(it.version) }
+        featureContent.addView(featureRow(
+            getString(R.string.agent_skill_versions),
+            versions.joinToString(" · ") { "v${it.version}" },
+            R.drawable.ic_agent_history,
+            versions.size.toString()
+        ).apply {
+            setOnClickListener {
+                val labels = versions.map { "v${it.version}${if (it.version == version) " · current" else ""}" }
+                android.app.AlertDialog.Builder(this@MainActivity)
+                    .setTitle(getString(R.string.agent_skill_versions))
+                    .setItems(labels.toTypedArray()) { _, index -> showAgentSkillDetailPage(id, versions[index].version) }
+                    .setNegativeButton(getString(R.string.common_cancel), null)
+                    .show()
+            }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.agent_skill_run_test),
+            getString(R.string.agent_skill_test_passed),
+            R.drawable.ic_agent_screen,
+            getString(R.string.common_view)
+        ).apply {
+            setOnClickListener {
+                val result = agentSkillRuntime.validate(manifest)
+                Toast.makeText(
+                    this@MainActivity,
+                    if (result.isValid) getString(R.string.agent_skill_test_passed)
+                    else result.issues.joinToString("; ") { it.message },
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.agent_skill_uninstall),
+            "${manifest.title} v${manifest.version}",
+            R.drawable.ic_delete,
+            getString(R.string.common_delete)
+        ).apply {
+            setOnClickListener {
+                android.app.AlertDialog.Builder(this@MainActivity)
+                    .setTitle(getString(R.string.agent_skill_uninstall))
+                    .setMessage("${manifest.title} v${manifest.version}")
+                    .setNegativeButton(getString(R.string.common_cancel), null)
+                    .setPositiveButton(getString(R.string.common_delete)) { _, _ ->
+                        agentSkillRuntime.delete(id, version)
+                        showAgentSkillsPage()
+                    }.show()
+            }
+        })
+    }
+
+    private fun skillVersionParts(version: String): String = version.split('.')
+        .joinToString(".") { (it.toIntOrNull() ?: 0).toString().padStart(8, '0') }
+
+    private fun importAgentSkillFromUri(uri: Uri) {
+        val bytes = runCatching {
+            contentResolver.openInputStream(uri)?.use { input ->
+                val output = java.io.ByteArrayOutputStream()
+                val buffer = ByteArray(16 * 1024)
+                var total = 0
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    total += count
+                    require(total <= AgentSkillPackageInstaller.MAX_PACKAGE_BYTES) { "Skill package is too large" }
+                    output.write(buffer, 0, count)
+                }
+                output.toByteArray()
+            } ?: error("Unable to open Skill package")
+        }.getOrElse { error ->
+            Toast.makeText(this, error.message ?: getString(R.string.agent_skill_install_failed), Toast.LENGTH_LONG).show()
+            return
+        }
+        val installer = AgentSkillPackageInstaller(agentSkillRuntime)
+        val inspection = runCatching { installer.inspect(bytes.inputStream()) }.getOrElse { error ->
+            Toast.makeText(this, error.message ?: getString(R.string.agent_skill_install_failed), Toast.LENGTH_LONG).show()
+            return
+        }
+        val manifest = inspection.manifest
+        val details = buildString {
+            append(manifest.description.ifBlank { manifest.instructions.take(220) })
+            append("\n\n").append(getString(R.string.agent_skill_workflow)).append(":\n")
+            manifest.nativeTools.forEach { append("• ").append(it).append('\n') }
+            append('\n').append(getString(R.string.agent_skill_permissions)).append(":\n")
+            if (manifest.permissions.isEmpty()) append("• None\n") else manifest.permissions.forEach { append("• ").append(it).append('\n') }
+            append('\n').append(if (inspection.integrityVerified) getString(R.string.agent_skill_integrity_verified) else getString(R.string.agent_skill_integrity_unsigned))
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("${manifest.title} · v${manifest.version}")
+            .setMessage(details.trim())
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .setPositiveButton(getString(R.string.agent_skill_install)) { _, _ ->
+                runCatching { installer.install(bytes.inputStream(), allowUnsignedLocalPackage = true) }
+                    .onSuccess { showAgentSkillDetailPage(it.id, it.version) }
+                    .onFailure { Toast.makeText(this, it.message ?: getString(R.string.agent_skill_install_failed), Toast.LENGTH_LONG).show() }
+            }.show()
     }
 
     private fun renderAgentActionQueue(state: AgentUiState) {

@@ -239,7 +239,7 @@ class MobileNativeAgent(
             )
         )
         val renderedOutput = AgentNativeJsonCodec.stringify(result.output).take(8_000)
-        val userMessage = if (toolId in AgentAndroidSystemNativeTools.toolIds) {
+        val userMessage = if (toolId in AgentAndroidSystemNativeTools.toolIds || toolId in AgentWebMediaNativeTools.toolIds) {
             renderAndroidSystemToolResult(result.message, result.output)
         } else {
             result.message.ifBlank { renderedOutput }
@@ -5426,11 +5426,15 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         routing: AgentRoutingDecision? = null
     ): AgentAction {
         val target = request.targets.firstOrNull { it.id == connectorId }
+        val requirements = AgentTaskRequirementAnalyzer.analyze(request.goal)
+        val executionRisk = AgentCapability.CODE in requirements.capabilities ||
+            AgentCapability.TASK_EXECUTION in requirements.capabilities ||
+            requirements.executionHorizon != AgentExecutionHorizon.INTERACTIVE
         return AgentAction(
             id = "connector-$connectorId",
             kind = AgentActionKind.CALL_CONNECTOR,
             target = target?.title ?: connectorId,
-            risk = AgentRisk.MEDIUM,
+            risk = if (executionRisk) AgentRisk.MEDIUM else AgentRisk.LOW,
             status = AgentActionStatus.PENDING_CONFIRMATION,
             description = description,
             parameters = buildMap {

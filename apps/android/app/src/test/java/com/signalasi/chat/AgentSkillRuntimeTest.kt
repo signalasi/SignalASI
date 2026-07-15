@@ -216,6 +216,20 @@ class AgentSkillRuntimeTest {
         assertTrue("unknown_parameter" in codes(runtime.validate(unknownParameter)))
     }
 
+    @Test
+    fun installationSettingsDoNotMutateTheVersionedManifest() {
+        val store = InMemoryAgentSkillStore()
+        val runtime = AgentSkillRuntime(store, setOf("phone.echo")) { 42L }
+        val installed = runtime.install(manifest())
+
+        val updated = runtime.setAutoInvoke(installed.id, installed.version, true)
+
+        assertTrue(updated.autoInvoke)
+        assertFalse(updated.manifest.autoInvoke)
+        assertTrue(store.list().single().autoInvoke)
+        assertEquals(AgentSkillManifestCodec.encode(installed.manifest), AgentSkillManifestCodec.encode(updated.manifest))
+    }
+
     private fun manifest(
         version: String = "1.0.0",
         title: String = "Echo",

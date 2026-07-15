@@ -2,6 +2,7 @@ package com.signalasi.chat
 
 import android.content.ContentResolver
 import android.content.Context
+import android.text.Html
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
@@ -21,6 +22,7 @@ import java.net.UnknownHostException
 import java.nio.charset.Charset
 import java.security.MessageDigest
 import java.util.Locale
+import java.net.URLEncoder
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.TimeUnit
 import okhttp3.Dns
@@ -800,6 +802,12 @@ data class AgentWebMediaServices(
 )
 
 object AgentWebMediaNativeTools {
+    const val WEB_SEARCH = "web.search"
+    const val WEB_OPEN = "web.open"
+    const val BROWSER_RENDER = "browser.render"
+    const val CONTENT_EXTRACT = "content.extract"
+    const val HTTP_REQUEST = "http.request"
+    const val FILE_DOWNLOAD = "file.download"
     const val WEB_HEAD = "signalasi.web.head"
     const val WEB_FETCH = "signalasi.web.fetch"
     const val WEB_DOWNLOAD = "signalasi.web.download"
@@ -833,6 +841,12 @@ object AgentWebMediaNativeTools {
     )
 
     val toolIds: Set<String> = linkedSetOf(
+        WEB_SEARCH,
+        WEB_OPEN,
+        BROWSER_RENDER,
+        CONTENT_EXTRACT,
+        HTTP_REQUEST,
+        FILE_DOWNLOAD,
         WEB_HEAD,
         WEB_FETCH,
         WEB_DOWNLOAD,
@@ -866,6 +880,12 @@ object AgentWebMediaNativeTools {
     ): AgentNativeToolRegistry = AgentNativeToolRegistry(clock).registerAll(definitions(services))
 
     fun definitions(services: AgentWebMediaServices): List<AgentNativeToolDefinition> = listOf(
+        webSearchDefinition(services.web),
+        webOpenDefinition(services.web, WEB_OPEN, "Open and extract public web page"),
+        webOpenDefinition(services.web, BROWSER_RENDER, "Render isolated public page content"),
+        contentExtractDefinition(),
+        httpRequestDefinition(services.web),
+        aliasDefinition(webDownloadDefinition(services.web, services.contentWriter), FILE_DOWNLOAD, "Download file"),
         webHeadDefinition(services.web),
         webFetchDefinition(services.web),
         webDownloadDefinition(services.web, services.contentWriter),
@@ -874,6 +894,157 @@ object AgentWebMediaNativeTools {
         mediaPlaybackDefinition(services.mediaPlayback),
         ffmpegUnavailableDefinition()
     )
+
+    private fun webSearchDefinition(web: AgentBoundedWebService) = AgentNativeToolDefinition(
+        descriptor = webDescriptor(
+            id = WEB_SEARCH,
+            title = "Search the public web",
+            description = "Searches public web results through a bounded HTTPS endpoint without browser cookies.",
+            inputSchema = objectSchema(
+                properties = mapOf(
+                    "query" to AgentNativeJsonSchema.string(minLength = 1, maxLength = 1_024),
+                    "max_results" to AgentNativeJsonSchema.integer(1, 10),
+                    "timeout_ms" to timeoutSchema()
+                ),
+                required = setOf("query")
+            ),
+            outputSchema = objectSchema(),
+            availability = web.availability
+        ),
+        executor = AgentNativeToolExecutor { invocation ->
+            executeBounded {
+                val query = invocation.input.string("query")
+                val maxResults = invocation.input.long("max_results", 5L).toInt().coerceIn(1, 10)
+                val url = "https://html.duckduckgo.com/html/?q=" + URLEncoder.encode(query, Charsets.UTF_8.name())
+                val resource = web.fetch(url, MAX_FETCH_BYTES, invocation.input.timeout(invocation), invocation.cancellationToken, invocation::checkpoint)
+                val html = resource.body.toString(charset(resource.contentType, resource.selectedHeaders))
+                val results = parseSearchResults(html, maxResults)
+                AgentNativeToolExecutionResult.success(
+                    output = resource.commonValue() + mapOf("query" to query, "results" to results, "result_count" to results.size),
+                    message = "Public web search completed",
+                    metadata = mapOf("network_policy" to "public_https_pinned_dns_v1", "cookies" to "none")
+                )
+            }
+        },
+        executorId = WEB_EXECUTOR_ID,
+        provenanceMetadata = webProvenance() + mapOf("cookies" to "none"),
+        availabilityProvider = AgentNativeToolAvailabilityProvider { web.availability }
+    )
+
+    private fun webOpenDefinition(web: AgentBoundedWebService, id: String, title: String) = AgentNativeToolDefinition(
+        descriptor = webDescriptor(
+            id = id,
+            title = title,
+            description = "Fetches a bounded public HTTPS page and extracts readable text without sharing browser cookies.",
+            inputSchema = webGetInputSchema(MAX_FETCH_BYTES),
+            outputSchema = objectSchema(),
+            availability = web.availability
+        ),
+        executor = AgentNativeToolExecutor { invocation ->
+            executeBounded {
+                val resource = web.fetch(
+                    invocation.input.string("url"),
+                    invocation.input.long("max_bytes", MAX_FETCH_BYTES),
+                    invocation.input.timeout(invocation),
+                    invocation.cancellationToken,
+                    invocation::checkpoint
+                )
+                val html = resource.body.toString(charset(resource.contentType, resource.selectedHeaders))
+                AgentNativeToolExecutionResult.success(
+                    output = resource.commonValue() + mapOf(
+                        "text" to extractText(html),
+                        "html_sha256" to sha256(resource.body),
+                        "render_mode" to if (id == BROWSER_RENDER) "isolated_static_dom" else "bounded_http"
+                    ),
+                    message = "Public page content extracted",
+                    metadata = mapOf("network_policy" to "public_https_pinned_dns_v1", "cookies" to "none", "javascript" to false)
+                )
+            }
+        },
+        executorId = WEB_EXECUTOR_ID,
+        provenanceMetadata = webProvenance() + mapOf("cookies" to "none", "javascript" to "false"),
+        availabilityProvider = AgentNativeToolAvailabilityProvider { web.availability }
+    )
+
+    private fun contentExtractDefinition() = AgentNativeToolDefinition(
+        descriptor = AgentNativeToolDescriptor(
+            id = CONTENT_EXTRACT,
+            version = VERSION,
+            title = "Extract readable content",
+            description = "Extracts bounded readable text from supplied HTML or plain text without executing code.",
+            location = AgentNativeToolLocation.APPLICATION,
+            inputSchema = objectSchema(
+                properties = mapOf("content" to AgentNativeJsonSchema.string(minLength = 1, maxLength = MAX_FETCH_BYTES.toInt())),
+                required = setOf("content")
+            ),
+            outputSchema = objectSchema(),
+            risk = AgentNativeToolRisk.LOW,
+            capabilities = setOf("content.extract", "html.no_script_execution"),
+            timeoutMillis = MAX_TOOL_TIMEOUT_MILLIS,
+            idempotency = AgentNativeToolIdempotency.IDEMPOTENT
+        ),
+        executor = AgentNativeToolExecutor { invocation ->
+            val source = invocation.input.string("content")
+            AgentNativeToolExecutionResult.success(
+                output = mapOf("text" to extractText(source), "source_chars" to source.length),
+                message = "Readable content extracted",
+                metadata = mapOf("script_execution" to false)
+            )
+        },
+        executorId = "signalasi.content_extractor"
+    )
+
+    private fun httpRequestDefinition(web: AgentBoundedWebService) = AgentNativeToolDefinition(
+        descriptor = webDescriptor(
+            id = HTTP_REQUEST,
+            title = "Request public HTTPS resource",
+            description = "Performs a bounded GET or HEAD request to a DNS-validated public HTTPS endpoint.",
+            inputSchema = objectSchema(
+                properties = webInputProperties(MAX_FETCH_BYTES) + ("method" to AgentNativeJsonSchema.string(enumValues = listOf("GET", "HEAD"))),
+                required = setOf("url", "method")
+            ),
+            outputSchema = objectSchema(),
+            availability = web.availability
+        ),
+        executor = AgentNativeToolExecutor { invocation ->
+            executeBounded {
+                val method = invocation.input.string("method").uppercase(Locale.ROOT)
+                val resource = if (method == "HEAD") {
+                    web.head(invocation.input.string("url"), invocation.input.timeout(invocation), invocation.cancellationToken, invocation::checkpoint)
+                } else {
+                    web.fetch(invocation.input.string("url"), invocation.input.long("max_bytes", MAX_FETCH_BYTES), invocation.input.timeout(invocation), invocation.cancellationToken, invocation::checkpoint)
+                }
+                AgentNativeToolExecutionResult.success(
+                    output = resource.commonValue() + if (method == "GET") mapOf("text" to resource.body.toString(charset(resource.contentType, resource.selectedHeaders))) else emptyMap(),
+                    message = "Public HTTPS request completed",
+                    metadata = mapOf("network_policy" to "public_https_pinned_dns_v1", "method" to method)
+                )
+            }
+        },
+        executorId = WEB_EXECUTOR_ID,
+        provenanceMetadata = webProvenance(),
+        availabilityProvider = AgentNativeToolAvailabilityProvider { web.availability }
+    )
+
+    private fun aliasDefinition(source: AgentNativeToolDefinition, id: String, title: String) = AgentNativeToolDefinition(
+        descriptor = source.descriptor.copy(id = id, title = title),
+        executor = source.executor,
+        verifier = source.verifier,
+        validator = source.validator,
+        executorId = source.executorId,
+        provenanceMetadata = source.provenanceMetadata,
+        availabilityProvider = source.availabilityProvider
+    )
+
+    private fun parseSearchResults(html: String, limit: Int): List<Map<String, String>> {
+        val pattern = Regex("""<a[^>]+class=[\"'][^\"']*result__a[^\"']*[\"'][^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        return pattern.findAll(html).take(limit).map { match ->
+            mapOf("title" to extractText(match.groupValues[2]), "url" to Html.fromHtml(match.groupValues[1], Html.FROM_HTML_MODE_LEGACY).toString())
+        }.toList()
+    }
+
+    private fun extractText(source: String): String = Html.fromHtml(source, Html.FROM_HTML_MODE_LEGACY)
+        .toString().replace(Regex("[ \\t]+"), " ").replace(Regex("\\n{3,}"), "\n\n").trim().take(240_000)
 
     private fun webHeadDefinition(web: AgentBoundedWebService) = AgentNativeToolDefinition(
         descriptor = webDescriptor(
