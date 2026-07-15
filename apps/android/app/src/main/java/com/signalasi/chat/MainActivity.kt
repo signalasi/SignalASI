@@ -1428,12 +1428,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 var approvals = 0
                 while (state.pendingAction != null &&
                     state.phase != AgentPhase.WAITING_RESPONSE &&
+                    state.phase != AgentPhase.WAITING_CONFIRMATION &&
                     state.pendingAction.risk != AgentRisk.BLOCKED &&
                     approvals++ < 32
                 ) {
-                    if (state.pendingAction.kind == AgentActionKind.CALL_NATIVE_TOOL &&
-                        state.pendingAction.risk.weight >= AgentRisk.MEDIUM.weight
-                    ) break
                     state = runtime.approveNextAction(highRiskConfirmed = true)
                 }
                 state
@@ -1455,12 +1453,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     provisionalAgentTasks.remove(runtime)
                 }
                 renderAgentState(state, conversationId, turnId)
-                val permissionRequested = requestMissingAgentNativePermissions(state)
-                if (!permissionRequested && state.phase == AgentPhase.WAITING_CONFIRMATION) {
-                    state.pendingAction?.takeIf { it.kind == AgentActionKind.CALL_NATIVE_TOOL }?.let {
-                        showNativeAgentConfirmation(it)
-                    }
-                }
+                requestMissingAgentNativePermissions(state)
                 consumePendingAgentConnectorResponses()
                 outcome.exceptionOrNull()?.let { error ->
                     provisionalAgentTasks.remove(runtime)
@@ -1508,17 +1501,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             return true
         }
         return false
-    }
-
-    private fun showNativeAgentConfirmation(action: AgentAction) {
-        android.app.AlertDialog.Builder(this)
-            .setTitle(getString(R.string.agent_native_confirmation_title))
-            .setMessage(getString(R.string.agent_native_confirmation_message, action.description, action.risk.name))
-            .setPositiveButton(getString(R.string.agent_native_confirmation_execute)) { _, _ ->
-                runAgentOperationAsync { mobileNativeAgent.approveNextAction(highRiskConfirmed = true) }
-            }
-            .setNegativeButton(getString(R.string.common_cancel), null)
-            .show()
     }
 
     private fun refreshAgentConversationHeader() {
@@ -2924,7 +2906,37 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         state.pendingAction?.let { pending ->
             val description = pending.description.trim()
-            if (description.isNotBlank() &&
+            if (state.phase == AgentPhase.WAITING_CONFIRMATION && description.isNotBlank()) {
+                val richOutput = AgentRichContentCodec.encode(listOf(
+                    AgentRichBlock(
+                        id = "approval:${state.sessionId}:${pending.id}",
+                        type = AgentRichBlockType.APPROVAL,
+                        title = agentApprovalTitle(pending),
+                        text = getString(
+                            R.string.agent_inline_approval_detail,
+                            agentRiskLabel(pending.risk)
+                        ),
+                        fallbackText = getString(R.string.agent_inline_approval_waiting),
+                        actions = listOf(
+                            AgentRichAction("cancel", getString(R.string.common_cancel), "reject_task"),
+                            AgentRichAction(
+                                "confirm",
+                                getString(R.string.agent_inline_approval_confirm),
+                                "approve_task"
+                            )
+                        )
+                    )
+                ))
+                agentTranscriptStore.append(
+                    AgentTranscriptRole.ASSISTANT,
+                    description,
+                    dedupeKey = "approval:$planId:${pending.id}",
+                    conversationId = conversationId,
+                    turnId = turnId,
+                    taskId = state.sessionId,
+                    richOutputJson = richOutput
+                )
+            } else if (description.isNotBlank() &&
                 description != "Create a safe local task plan" &&
                 !description.contains(':')
             ) {
@@ -2957,6 +2969,27 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             )
         }
     }
+
+    private fun agentApprovalTitle(action: AgentAction): String {
+        val timerSeconds = action.parameters["timer_seconds"]?.toIntOrNull()
+        return when {
+            timerSeconds != null && timerSeconds % 60 == 0 -> getString(
+                R.string.agent_inline_approval_timer_minutes,
+                timerSeconds / 60
+            )
+            timerSeconds != null -> getString(R.string.agent_inline_approval_timer_seconds, timerSeconds)
+            else -> action.description
+        }
+    }
+
+    private fun agentRiskLabel(risk: AgentRisk): String = getString(
+        when (risk) {
+            AgentRisk.LOW -> R.string.agent_risk_low
+            AgentRisk.MEDIUM -> R.string.agent_risk_medium
+            AgentRisk.HIGH -> R.string.agent_risk_high
+            AgentRisk.BLOCKED -> R.string.agent_risk_blocked
+        }
+    )
 
     private fun isTransientAgentResult(value: String): Boolean {
         val normalized = value.trim().lowercase(Locale.US)
@@ -3145,6 +3178,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             Toast.makeText(this, getString(R.string.agent_task_detail_unavailable), Toast.LENGTH_SHORT).show()
             return
         }
+        agentTranscriptStore.deleteEntry(entry.id)
+        renderedAgentTranscriptIds.clear()
+        agentOutputList.removeAllViews()
+        renderAgentTranscript(agentTranscriptStore.list(entry.conversationId))
         thread(name = "signalasi-rich-decision") {
             val state = if (approved) {
                 runtime.approveNextAction(highRiskConfirmed = true)

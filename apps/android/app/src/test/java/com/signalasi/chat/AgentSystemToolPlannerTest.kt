@@ -19,4 +19,11 @@ class AgentSystemToolPlannerTest {
         assertFalse(AgentSystemToolPlanner.isCameraCaptureGoal("Explain how a camera sensor works"))
         assertFalse(AgentSystemToolPlanner.isCameraCaptureGoal("\u5206\u6790\u6444\u50cf\u5934\u7684\u539f\u7406"))
     }
+
+    @Test
+    fun parsesSpokenTimerDurations() {
+        assertTrue(AgentSystemToolPlanner.timerSecondsForGoal("set timer one minute") == 60)
+        assertTrue(AgentSystemToolPlanner.timerSecondsForGoal("set timer fifteen seconds") == 15)
+        assertTrue(AgentSystemToolPlanner.timerSecondsForGoal("set timer 2 hours") == 7_200)
+    }
 }

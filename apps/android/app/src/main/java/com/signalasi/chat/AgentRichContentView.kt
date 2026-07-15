@@ -46,10 +46,18 @@ class AgentRichContentView(
                 marginEnd = dp(10)
             }
             blocks.forEachIndexed { index, block ->
+                val width = if (block.type == AgentRichBlockType.APPROVAL) {
+                    (activity.resources.displayMetrics.widthPixels * MAX_ASSISTANT_WIDTH_RATIO).toInt()
+                } else {
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                }
                 addView(blockView(block), LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    width,
                     ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { if (index > 0) topMargin = dp(10) })
+                ).apply {
+                    gravity = Gravity.START
+                    if (index > 0) topMargin = dp(10)
+                })
             }
         }
     }
@@ -237,29 +245,75 @@ class AgentRichContentView(
 
     private fun actionBlock(block: AgentRichBlock, approval: Boolean): View = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(13), dp(11), dp(13), dp(11))
-        background = roundedBackground(
-            if (approval) "#FFF8EB" else "#F6F8FA",
-            7f,
-            if (approval) "#E9D4A5" else "#DDE3E8"
-        )
-        val heading = block.title.ifBlank { if (approval) "Approval required" else "Actions" }
-        addView(selectableText(heading, 15f).apply { setTypeface(typeface, Typeface.BOLD) })
-        if (block.text.isNotBlank()) addView(selectableText(block.text, 14f).apply {
-            setPadding(0, dp(5), 0, dp(5))
-        })
-        block.actions.forEach { action ->
-            addView(Button(activity).apply {
+        setPadding(dp(12), dp(11), dp(12), dp(11))
+        background = roundedBackground(if (approval) "#FFFFFF" else "#F6F8FA", 6f, "#DDE3E8")
+        if (approval) {
+            addView(approvalHeader(block))
+        } else {
+            val heading = block.title.ifBlank { "Actions" }
+            addView(selectableText(heading, 15f).apply { setTypeface(typeface, Typeface.BOLD) })
+            if (block.text.isNotBlank()) addView(selectableText(block.text, 14f).apply {
+                setPadding(0, dp(5), 0, dp(5))
+            })
+        }
+        val actionRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        block.actions.forEachIndexed { index, action ->
+            actionRow.addView(Button(activity).apply {
                 text = action.label
                 textSize = 14f
                 isAllCaps = false
-                setTextColor(Color.parseColor(if (action.style == "destructive") "#C63737" else "#087F69"))
-                background = roundedBackground("#FFFFFF", 6f, "#C9D4DD")
+                minWidth = 0
+                minimumWidth = 0
+                setPadding(dp(6), 0, dp(6), 0)
+                val confirm = action.verb == "approve_task"
+                setTextColor(Color.parseColor(if (confirm) "#087F69" else "#33404D"))
+                background = roundedBackground(
+                    if (confirm) "#EFFAF8" else "#F4F6F8",
+                    6f,
+                    if (confirm) "#0A9480" else "#D9E0E7"
+                )
                 setOnClickListener { onAction(action) }
-            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply {
-                topMargin = dp(7)
+            }, LinearLayout.LayoutParams(0, dp(42), 1f).apply {
+                if (index > 0) marginStart = dp(8)
             })
         }
+        addView(actionRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(10)
+        })
+    }
+
+    private fun approvalHeader(block: AgentRichBlock): View = LinearLayout(activity).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(ImageView(activity).apply {
+            setImageResource(android.R.drawable.ic_lock_idle_alarm)
+            imageTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1A2733"))
+            contentDescription = block.title
+            setPadding(dp(2), dp(2), dp(8), dp(2))
+        }, LinearLayout.LayoutParams(dp(38), dp(38)))
+        addView(LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(selectableText(block.title, 14f).apply {
+                setTypeface(typeface, Typeface.BOLD)
+                maxLines = 2
+            })
+            if (block.text.isNotBlank()) addView(selectableText(block.text, 11f).apply {
+                setTextColor(Color.parseColor("#66717D"))
+                maxLines = 2
+                setPadding(0, dp(2), 0, 0)
+            })
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        if (block.fallbackText.isNotBlank()) addView(TextView(activity).apply {
+            text = block.fallbackText
+            textSize = 10f
+            setTextColor(Color.parseColor("#66717D"))
+            gravity = Gravity.CENTER
+            setPadding(dp(7), dp(4), dp(7), dp(4))
+            background = roundedBackground("#F4F6F8", 5f, "#D9E0E7")
+        })
     }
 
     private fun formBlock(block: AgentRichBlock): View = LinearLayout(activity).apply {
@@ -362,6 +416,7 @@ class AgentRichContentView(
     private fun dp(value: Int): Int = (value * activity.resources.displayMetrics.density).toInt()
 
     companion object {
+        private const val MAX_ASSISTANT_WIDTH_RATIO = 0.78f
         private const val MAX_IMAGE_BYTES = 12 * 1024 * 1024
         private val HTTP = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)

@@ -20,6 +20,19 @@ object AgentSystemToolPlanner {
         return lower.contains("\u62cd\u7167") || (hasCamera && hasOpenAction)
     }
 
+    internal fun timerSecondsForGoal(goal: String): Int? {
+        val match = Regex(
+            """(\d+|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty|forty-five|fifty|sixty)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b"""
+        ).find(goal.lowercase()) ?: return null
+        val amount = match.groupValues[1].toIntOrNull() ?: SPOKEN_NUMBERS[match.groupValues[1]] ?: return null
+        val unit = match.groupValues[2]
+        return when {
+            unit.startsWith("h") -> amount * 3_600
+            unit.startsWith("m") -> amount * 60
+            else -> amount
+        }.coerceIn(1, 24 * 60 * 60)
+    }
+
     fun actionFor(request: AgentRequest): AgentAction? {
         val goal = request.goal.trim()
         val lower = goal.lowercase()
@@ -586,16 +599,7 @@ object AgentSystemToolPlanner {
     }
 
     private fun timerAction(goal: String, lower: String): AgentAction {
-        val match = Regex("""(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b""")
-            .find(lower)
-        val amount = match?.groupValues?.getOrNull(1)?.toIntOrNull()
-        val unit = match?.groupValues?.getOrNull(2).orEmpty()
-        val seconds = when {
-            amount == null -> null
-            unit.startsWith("h") -> amount * 3600
-            unit.startsWith("m") -> amount * 60
-            else -> amount
-        }?.coerceIn(1, 24 * 60 * 60)
+        val seconds = timerSecondsForGoal(lower)
         return AgentAction(
             id = if (seconds == null) "open-timer" else "set-timer",
             kind = AgentActionKind.SET_ALARM,
@@ -609,6 +613,13 @@ object AgentSystemToolPlanner {
             }
         )
     }
+
+    private val SPOKEN_NUMBERS = mapOf(
+        "one" to 1, "two" to 2, "three" to 3, "four" to 4, "five" to 5,
+        "six" to 6, "seven" to 7, "eight" to 8, "nine" to 9, "ten" to 10,
+        "fifteen" to 15, "twenty" to 20, "thirty" to 30, "forty" to 40,
+        "forty-five" to 45, "fifty" to 50, "sixty" to 60
+    )
 
     private fun normalizeUrl(value: String): String {
         if (value.isBlank()) return ""
