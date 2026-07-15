@@ -1530,7 +1530,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 append("Use the attached content when completing the request.")
             }
         }
-        continueAgentGoalSubmission(executionGoal, conversation.id, turnId)
+        continueAgentGoalSubmission(
+            executionGoal,
+            conversation.id,
+            turnId,
+            forcedAction = attachmentConnectorAction(executionGoal)
+        )
         if (goal.isNotBlank()) {
             thread(name = "signalasi-agent-attachments") {
                 attachments.filterNot { attachment ->
@@ -1544,12 +1549,37 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
-    private fun continueAgentGoalSubmission(goal: String, conversationId: String, turnId: String) {
+    private fun attachmentConnectorAction(goal: String): AgentAction? {
+        val targets = AppStoreAgentConnectorRegistry(this).availableTargets()
+        val target = listOf("codex", "hermes").firstNotNullOfOrNull { preferredId ->
+            targets.firstOrNull { candidate ->
+                candidate.status == AgentConnectorStatus.AVAILABLE &&
+                    (candidate.id == preferredId || candidate.id.endsWith(":$preferredId"))
+            }
+        } ?: return null
+        return AgentAction(
+            id = "attachment-${target.id}",
+            kind = AgentActionKind.CALL_CONNECTOR,
+            target = target.title,
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = "Process the attached input with ${target.title}",
+            parameters = mapOf("connector_id" to target.id, "prompt" to goal),
+            requiresConfirmation = false
+        )
+    }
+
+    private fun continueAgentGoalSubmission(
+        goal: String,
+        conversationId: String,
+        turnId: String,
+        forcedAction: AgentAction? = null
+    ) {
         val routingStartedAt = SystemClock.elapsedRealtime()
         val conversationContext = agentTranscriptStore.context(conversationId)
         if (handleAgentSkillCommand(goal, conversationId, turnId)) return
         val skillMatch = agentSkillMatcher.match(goal)
-        val deterministicAction = deterministicSystemActionFor(goal, conversationContext)
+        val deterministicAction = forcedAction ?: deterministicSystemActionFor(goal, conversationContext)
         Log.d(
             "SignalASIAgent",
             "route_resolved turn=${turnId.take(8)} tool=${deterministicAction?.parameters?.get("tool_id").orEmpty()} " +
@@ -1566,7 +1596,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "run_recorded turn=${turnId.take(8)} elapsed_ms=${SystemClock.elapsedRealtime() - routingStartedAt}"
         )
         agentRunIdsByTurn[turnId] = run.runId
-        if (deterministicAction != null) {
+        if (forcedAction != null) {
+            Log.d("SignalASIAgent", "route_forced_connector turn=${turnId.take(8)} action=${forcedAction.id}")
+            executeConcurrentAgentGoal(
+                goal,
+                conversationContext,
+                conversationId,
+                turnId,
+                forcedAction
+            )
+        } else if (deterministicAction != null) {
             if (AgentConfirmationPolicy.tier(deterministicAction) == AgentConfirmationTier.DIRECT) {
                 Log.d("SignalASIAgent", "route_direct turn=${turnId.take(8)} action=${deterministicAction.id}")
                 executeDirectSystemAction(deterministicAction, conversationId, turnId)
@@ -3372,15 +3411,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         val planId = state.plan?.planId.orEmpty().ifBlank {
             "${state.sessionId}:${state.currentGoal.hashCode()}"
-        }
-        if (agentTranscriptStore.list(conversationId).isEmpty() && state.currentGoal.isNotBlank()) {
-            agentTranscriptStore.append(
-                AgentTranscriptRole.USER,
-                state.currentGoal,
-                dedupeKey = "legacy-user:$planId",
-                conversationId = conversationId,
-                turnId = turnId
-            )
         }
         state.auditTrail.forEach { entry ->
             val line = agentExecutionLine(state, entry) ?: return@forEach

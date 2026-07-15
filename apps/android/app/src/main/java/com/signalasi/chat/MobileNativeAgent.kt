@@ -5975,7 +5975,7 @@ object AgentPlanFactory {
     }
 
     fun actions(request: AgentRequest, actions: List<AgentAction>): AgentPlan {
-        val plannedActions = actions.ifEmpty {
+        val plannedActions = collapseDuplicateConnectorCalls(actions).ifEmpty {
             listOf(
                 AgentAction(
                     id = "draft-plan",
@@ -6014,6 +6014,35 @@ object AgentPlanFactory {
             routeRationale = routeRationaleFor(routeAction, request)
         )
         return plan.copy(validation = AgentPlanValidator.validate(plan))
+    }
+
+    private fun collapseDuplicateConnectorCalls(actions: List<AgentAction>): List<AgentAction> {
+        val canonicalIds = mutableMapOf<String, String>()
+        val retained = actions.filter { action ->
+            if (action.kind != AgentActionKind.CALL_CONNECTOR || action.id == "knowledge-answer") {
+                canonicalIds[action.id] = action.id
+                true
+            } else {
+                val connector = action.parameters["connector_id"].orEmpty()
+                    .ifBlank { action.target }
+                    .trim()
+                    .lowercase(Locale.US)
+                val key = "${action.kind}:$connector"
+                val canonicalId = canonicalIds[key]
+                if (canonicalId == null) {
+                    canonicalIds[key] = action.id
+                    canonicalIds[action.id] = action.id
+                    true
+                } else {
+                    canonicalIds[action.id] = canonicalId
+                    false
+                }
+            }
+        }
+        val idMap = actions.associate { action ->
+            action.id to canonicalIds[action.id].orEmpty().ifBlank { action.id }
+        }
+        return retained.map { action -> action.remapToolGraphIds(action.id, idMap) }
     }
 
     private fun selectedAgentOrModel(actions: List<AgentAction>): String {

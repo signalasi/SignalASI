@@ -1039,6 +1039,10 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                 workspace = task_workspace(task.task_id, agent_id)
                 task_prompt = content_with_attachments(task.task_id, compact_codex_turn_prompt(content))
                 input_paths = sorted((workspace / "downloads" / "input").glob("*"))
+                agent_task_manager.update(
+                    task.task_id, "running", on_event=publish_event,
+                    current_step="Preparing task",
+                )
                 add_task_trace("desktop_file_tool_checked", f"inputs={len(input_paths)}")
                 try:
                     fast_result = try_execute_explicit_file_task(content, input_paths, workspace / "outputs")
@@ -1046,10 +1050,6 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                     fast_result = None
                     log.warning("Desktop file tool fallback task_id=%s: %s", task.task_id, fast_exc)
                 if fast_result is not None:
-                    agent_task_manager.update(
-                        task.task_id, "running", on_event=publish_event,
-                        current_step="Converting file",
-                    )
                     add_task_trace("desktop_file_tool_completed", f"{fast_result.operation} {fast_result.elapsed_ms}ms")
                     completed = agent_task_manager.update(
                         task.task_id, "completed", on_event=publish_event,
