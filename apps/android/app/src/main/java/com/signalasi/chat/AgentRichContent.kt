@@ -77,6 +77,11 @@ object AgentRichContentCodec {
         return if (blocks.isEmpty()) "" else encode(blocks)
     }
 
+    fun fallbackText(raw: String): String = decode(raw).asSequence()
+        .map { block -> block.text.ifBlank { block.title.ifBlank { block.fallbackText.ifBlank { block.uri } } } }
+        .firstOrNull(String::isNotBlank)
+        .orEmpty()
+
     fun decode(raw: String): List<AgentRichBlock> {
         if (raw.isBlank() || raw.length > MAX_SERIALIZED_SIZE) return emptyList()
         val root = runCatching { JSONObject(raw) }.getOrNull() ?: return emptyList()
@@ -86,8 +91,11 @@ object AgentRichContentCodec {
             for (index in 0 until minOf(array.length(), MAX_BLOCKS)) {
                 val item = array.optJSONObject(index) ?: continue
                 val typeName = item.optString("type").trim().uppercase()
-                val type = runCatching { AgentRichBlockType.valueOf(typeName) }
+                val declaredType = runCatching { AgentRichBlockType.valueOf(typeName) }
                     .getOrDefault(AgentRichBlockType.UNKNOWN)
+                val uri = item.optString("uri").trim().take(4_096)
+                val mimeType = item.optString("mime_type").trim().take(160)
+                val type = normalizedMediaType(declaredType, uri, mimeType)
                 val columns = jsonStrings(item.optJSONArray("columns"), MAX_TABLE_COLUMNS)
                 val rows = buildList {
                     val sourceRows = item.optJSONArray("rows") ?: JSONArray()
@@ -100,8 +108,8 @@ object AgentRichContentCodec {
                     type = type,
                     title = item.optString("title").trim().take(500),
                     text = item.optString("text").trim().take(MAX_BLOCK_TEXT),
-                    uri = item.optString("uri").trim().take(4_096),
-                    mimeType = item.optString("mime_type").trim().take(160),
+                    uri = uri,
+                    mimeType = mimeType,
                     language = item.optString("language").trim().take(80),
                     columns = columns,
                     rows = rows,
@@ -306,6 +314,19 @@ object AgentRichContentCodec {
             fallbackText = uri
         )
     }
+
+    private fun normalizedMediaType(
+        declaredType: AgentRichBlockType,
+        uri: String,
+        mimeType: String
+    ): AgentRichBlockType {
+        if (declaredType != AgentRichBlockType.WEBPAGE) return declaredType
+        if (mimeType.startsWith("image/", ignoreCase = true)) return AgentRichBlockType.IMAGE
+        val path = runCatching { java.net.URI(uri).path.orEmpty() }.getOrDefault(uri).lowercase()
+        return if (IMAGE_EXTENSIONS.any(path::endsWith)) AgentRichBlockType.IMAGE else declaredType
+    }
+
+    private val IMAGE_EXTENSIONS = setOf(".gif", ".png", ".jpg", ".jpeg", ".webp", ".avif")
 
     private fun newId(): String = UUID.randomUUID().toString()
 }

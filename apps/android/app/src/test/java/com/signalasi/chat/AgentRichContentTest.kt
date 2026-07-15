@@ -60,4 +60,14 @@ class AgentRichContentTest {
 
         assertTrue(blocks.none { it.type == AgentRichBlockType.WEBPAGE })
     }
+
+    @Test
+    fun correctsMislabelledWebPageGifToImage() {
+        val encoded = """{"version":1,"blocks":[{"type":"webpage","uri":"https://cdn.example.com/character.gif"}]}"""
+
+        val block = AgentRichContentCodec.decode(encoded).single()
+
+        assertTrue(block.type == AgentRichBlockType.IMAGE)
+        assertTrue(AgentRichContentCodec.fallbackText(encoded).endsWith("character.gif"))
+    }
 }

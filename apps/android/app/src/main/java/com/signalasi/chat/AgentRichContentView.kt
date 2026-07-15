@@ -4,12 +4,16 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.ImageDecoder
 import android.graphics.Typeface
+import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Handler
+import android.os.Build
 import android.os.Looper
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
@@ -30,6 +34,8 @@ import android.webkit.WebViewClient
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
+import java.lang.ref.WeakReference
+import java.nio.ByteBuffer
 import kotlin.concurrent.thread
 
 class AgentRichContentView(
@@ -214,10 +220,14 @@ class AgentRichContentView(
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = true
                 @Deprecated("Deprecated in Android")
                 override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean = true
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    view?.let(AgentRichPlaybackCoordinator::sync)
+                }
             }
             contentDescription = block.title.ifBlank { block.fallbackText.ifBlank { "Animated content" } }
             loadDataWithBaseURL(null, isolatedHtmlDocument(block.text), "text/html", "utf-8", null)
         }
+        coordinatePlayback(webView)
         addView(webView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(280)))
         if (block.fallbackText.isNotBlank()) addView(selectableText(block.fallbackText, 12f).apply {
             setTextColor(Color.parseColor("#66717D"))
@@ -249,7 +259,7 @@ class AgentRichContentView(
                 isFocusable = true
                 setOnClickListener { openUri(block.uri, "text/html") }
             })
-            addView(WebView(activity).apply {
+            val webView = WebView(activity).apply {
                 setBackgroundColor(Color.WHITE)
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = false
@@ -279,16 +289,38 @@ class AgentRichContentView(
                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? =
                         if (request?.url?.scheme == "https") super.shouldInterceptRequest(view, request)
                         else WebResourceResponse("text/plain", "utf-8", null)
+
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        view?.let(AgentRichPlaybackCoordinator::sync)
+                    }
                 }
                 contentDescription = block.title.ifBlank { "Web page preview" }
                 loadUrl(block.uri)
-            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(420)))
+            }
+            coordinatePlayback(webView)
+            addView(webView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(420)))
             addView(selectableText(block.uri, 11f).apply {
                 setTextColor(Color.parseColor("#66717D"))
                 maxLines = 1
                 setPadding(dp(12), dp(7), dp(12), dp(9))
             })
         }
+    }
+
+    private fun coordinatePlayback(webView: WebView) {
+        webView.setOnTouchListener { view, event ->
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                AgentRichPlaybackCoordinator.activate(view as WebView)
+            }
+            false
+        }
+        webView.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(view: View) = Unit
+            override fun onViewDetachedFromWindow(view: View) {
+                AgentRichPlaybackCoordinator.detach(view as WebView)
+            }
+        })
+        webView.post { AgentRichPlaybackCoordinator.activate(webView) }
     }
 
     private fun artifactBlock(block: AgentRichBlock, fallbackTitle: String): View =
@@ -477,7 +509,7 @@ class AgentRichContentView(
             "content", "file", "android.resource" -> runCatching { image.setImageURI(Uri.parse(uri)) }
             "https" -> thread(name = "signalasi-rich-image") {
                 val request = Request.Builder().url(uri).get().build()
-                val bitmap = runCatching {
+                val decoded = runCatching {
                     HTTP.newCall(request).execute().use { response ->
                         if (!response.isSuccessful) return@use null
                         val body = response.body ?: return@use null
@@ -485,14 +517,43 @@ class AgentRichContentView(
                         if (length > MAX_IMAGE_BYTES) return@use null
                         val bytes = body.bytes()
                         if (bytes.size > MAX_IMAGE_BYTES) return@use null
-                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            ImageDecoder.decodeDrawable(ImageDecoder.createSource(ByteBuffer.wrap(bytes)))
+                        } else {
+                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        }
                     }
                 }.getOrNull()
-                if (bitmap != null) Handler(Looper.getMainLooper()).post {
-                    if (!activity.isDestroyed) image.setImageBitmap(bitmap)
+                if (decoded != null) Handler(Looper.getMainLooper()).post {
+                    if (activity.isDestroyed) return@post
+                    when (decoded) {
+                        is AnimatedImageDrawable -> {
+                            decoded.repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
+                            image.setImageDrawable(decoded)
+                            coordinateAnimatedImage(image, decoded)
+                        }
+                        is android.graphics.drawable.Drawable -> image.setImageDrawable(decoded)
+                        is android.graphics.Bitmap -> image.setImageBitmap(decoded)
+                    }
                 }
             }
         }
+    }
+
+    private fun coordinateAnimatedImage(image: ImageView, drawable: AnimatedImageDrawable) {
+        image.setOnTouchListener { view, event ->
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                AgentRichPlaybackCoordinator.activate(view as ImageView, drawable)
+            }
+            false
+        }
+        image.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(view: View) = Unit
+            override fun onViewDetachedFromWindow(view: View) {
+                AgentRichPlaybackCoordinator.detach(view as ImageView)
+            }
+        })
+        image.post { AgentRichPlaybackCoordinator.activate(image, drawable) }
     }
 
     private fun openUri(value: String, mimeType: String) {
@@ -530,4 +591,81 @@ class AgentRichContentView(
             .readTimeout(20, TimeUnit.SECONDS)
             .build()
     }
+}
+
+private object AgentRichPlaybackCoordinator {
+    private var active = WeakReference<WebView>(null)
+    private var activeImage = WeakReference<ImageView>(null)
+    private var activeDrawable = WeakReference<AnimatedImageDrawable>(null)
+
+    fun activate(view: WebView) {
+        activeDrawable.get()?.stop()
+        activeImage.clear()
+        activeDrawable.clear()
+        val previous = active.get()
+        if (previous !== view) previous?.let(::pause)
+        active = WeakReference(view)
+        resume(view)
+    }
+
+    fun sync(view: WebView) {
+        if (active.get() === view && activeDrawable.get() == null) resume(view) else pause(view)
+    }
+
+    fun activate(view: ImageView, drawable: AnimatedImageDrawable) {
+        active.get()?.let(::pause)
+        active.clear()
+        if (activeImage.get() !== view) activeDrawable.get()?.stop()
+        activeImage = WeakReference(view)
+        activeDrawable = WeakReference(drawable)
+        drawable.start()
+    }
+
+    fun detach(view: WebView) {
+        pause(view)
+        if (active.get() === view) active.clear()
+    }
+
+    fun detach(view: ImageView) {
+        if (activeImage.get() !== view) return
+        activeDrawable.get()?.stop()
+        activeImage.clear()
+        activeDrawable.clear()
+    }
+
+    private fun pause(view: WebView) {
+        view.onPause()
+        view.evaluateJavascript(PAUSE_SCRIPT, null)
+    }
+
+    private fun resume(view: WebView) {
+        view.onResume()
+        view.evaluateJavascript(RESUME_SCRIPT, null)
+    }
+
+    private const val PAUSE_SCRIPT = """
+        (() => {
+          let style = document.getElementById('signalasi-playback-pause');
+          if (!style) {
+            style = document.createElement('style');
+            style.id = 'signalasi-playback-pause';
+            style.textContent = '*,*::before,*::after{animation-play-state:paused!important}';
+            document.documentElement.appendChild(style);
+          }
+          document.querySelectorAll('video,audio').forEach(media => {
+            if (!media.paused) media.dataset.signalasiResume = '1';
+            media.pause();
+          });
+        })()
+    """
+
+    private const val RESUME_SCRIPT = """
+        (() => {
+          document.getElementById('signalasi-playback-pause')?.remove();
+          document.querySelectorAll('video,audio[data-signalasi-resume="1"]').forEach(media => {
+            delete media.dataset.signalasiResume;
+            media.play().catch(() => {});
+          });
+        })()
+    """
 }

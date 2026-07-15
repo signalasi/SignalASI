@@ -7,7 +7,7 @@ import mimetypes
 import re
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 
 MAX_BLOCKS = 100
@@ -70,6 +70,9 @@ def _normalize_block(raw: dict) -> dict:
         value = str(raw.get(key) or "").strip()[:limit]
         if value:
             block[key] = value
+    if block_type == "webpage" and _is_image_uri(block.get("uri", ""), block.get("mime_type", "")):
+        block["type"] = "image"
+        block_type = "image"
     if block_type == "table":
         block["columns"] = [str(value)[:2000] for value in list(raw.get("columns") or [])[:MAX_COLUMNS]]
         block["rows"] = [
@@ -138,7 +141,7 @@ def _artifact_block(raw: dict, task_id: str) -> dict:
 def _fallback_text(blocks: list[dict]) -> str:
     values = []
     for block in blocks:
-        value = str(block.get("text") or block.get("title") or block.get("fallback_text") or "").strip()
+        value = str(block.get("text") or block.get("title") or block.get("fallback_text") or block.get("uri") or "").strip()
         if value:
             values.append(value)
     return "\n\n".join(values)[:MAX_TEXT] or "Rich result"
@@ -149,3 +152,10 @@ def _bounded_int(value: Any, minimum: int, maximum: int, fallback: int) -> int:
         return max(minimum, min(maximum, int(value)))
     except (TypeError, ValueError):
         return fallback
+
+
+def _is_image_uri(uri: str, mime_type: str) -> bool:
+    if str(mime_type or "").lower().startswith("image/"):
+        return True
+    path = urlparse(str(uri or "")).path.lower()
+    return path.endswith((".gif", ".png", ".jpg", ".jpeg", ".webp", ".avif"))

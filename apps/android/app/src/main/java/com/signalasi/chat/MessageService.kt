@@ -63,7 +63,8 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
                     AgentConnectorResponse(
                         sourceMessageId = sourceMessageId,
                         contactId = envelope?.optString("contact_id").orEmpty().ifBlank { stored.contactId },
-                        content = stored.content
+                        content = stored.content,
+                        richOutputJson = AgentRichContentCodec.fromEnvelope(envelope)
                     )
                 )
             }

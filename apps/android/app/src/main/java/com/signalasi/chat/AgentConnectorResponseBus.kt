@@ -33,9 +33,15 @@ object AgentConnectorResponseBus {
     }
 
     fun publish(context: Context, response: AgentConnectorResponse) {
-        if (response.sourceMessageId <= 0L || response.content.isBlank()) return
-        AgentConnectorResponseStore.append(context, response)
-        listeners.forEach { listener -> listener.onConnectorResponse(response) }
+        if (response.sourceMessageId <= 0L) return
+        val richOutput = AgentRichContentCodec.normalize(response.richOutputJson)
+        val normalized = response.copy(
+            content = response.content.ifBlank { AgentRichContentCodec.fallbackText(richOutput) },
+            richOutputJson = richOutput
+        )
+        if (normalized.content.isBlank() && normalized.richOutputJson.isBlank()) return
+        AgentConnectorResponseStore.append(context, normalized)
+        listeners.forEach { listener -> listener.onConnectorResponse(normalized) }
     }
 }
 
@@ -66,17 +72,18 @@ object AgentConnectorResponseStore {
                     val sourceMessageId = item.optLong("source_message_id")
                     val content = item.optString("content")
                     val receivedAt = item.optLong("received_at", System.currentTimeMillis())
-                    if (sourceMessageId <= 0L || content.isBlank() || receivedAt < cutoff) continue
+                    val richOutput = AgentRichContentCodec.normalize(item.optString("rich_output"))
+                    if (sourceMessageId <= 0L || (content.isBlank() && richOutput.isBlank()) || receivedAt < cutoff) continue
                     add(
                         AgentConnectorResponse(
                             sourceMessageId = sourceMessageId,
                             contactId = item.optString("contact_id"),
-                            content = content,
+                            content = content.ifBlank { AgentRichContentCodec.fallbackText(richOutput) },
                             success = item.optBoolean("success", true),
                             inputTokens = item.optLong("input_tokens", 0L),
                             outputTokens = item.optLong("output_tokens", 0L),
                             costMicros = item.optLong("cost_micros", 0L),
-                            richOutputJson = AgentRichContentCodec.normalize(item.optString("rich_output")),
+                            richOutputJson = richOutput,
                             receivedAtMillis = receivedAt
                         )
                     )

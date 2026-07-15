@@ -43,6 +43,15 @@ class RichOutputTests(unittest.TestCase):
         self.assertEqual(document["blocks"][0]["type"], "webpage")
         self.assertEqual(document["blocks"][0]["uri"], "https://example.com")
 
+    def test_corrects_mislabelled_webpage_gif_to_image(self):
+        fallback, document = build_rich_output(
+            '''```signalasi-rich
+{"blocks":[{"type":"webpage","uri":"https://cdn.example.com/character.gif"}]}
+```'''
+        )
+        self.assertEqual(document["blocks"][0]["type"], "image")
+        self.assertEqual(fallback, "https://cdn.example.com/character.gif")
+
 
 if __name__ == "__main__":
     unittest.main()
