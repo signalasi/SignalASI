@@ -839,6 +839,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     !it.isMine && it.taskId == msg.taskId && it.content == msg.content
                 }
             ) return@runOnUiThread
+            msg.deliveryTrace.add(newTraceEvent("phone_reply_received", msg.taskId))
             msg.deliveryTrace.add(newTraceEvent("received", "MQTT inbound"))
             msg.deliveryTrace.add(newTraceEvent("decrypted", "SignalASI Link"))
             addMessage(msg, fromIncoming = true)
@@ -915,7 +916,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             message.taskStatusSeq = maxOf(message.taskStatusSeq, statusSeq)
         }
         if (existingMessage != null) {
-            mergeDeliveryTrace(sourceMessageId, contactId, incomingDeliveryTrace(envelope), statusLabel)
+            val eventTrace = incomingDeliveryTrace(envelope).apply {
+                add(newTraceEvent("phone_task_event_received", status))
+            }
+            mergeDeliveryTrace(sourceMessageId, contactId, eventTrace, statusLabel)
         } else {
             ChatHistoryStore.applyAgentTaskEvent(this, envelope)
             reloadChatHistoryIfChanged(force = true)
@@ -935,9 +939,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ?: agentTranscriptStore.activeConversation().id
         val turnId = envelope.optString("turn_id").takeIf { it.isNotBlank() }
             ?: agentRuntimeTurnIds[taskRuntime].orEmpty()
-        val connectorProcessKey = turnId.takeIf { it.isNotBlank() }
-            ?.let { "connector-turn:$it" }
-            ?: "remote-task:$taskId"
+        // A task can gain a Codex turn id after it starts. Keep one stable key so
+        // accepted, running steps, and completion update one process row in place.
+        val connectorProcessKey = "connector-task:$taskId"
+        if (turnId.isNotBlank()) {
+            agentTranscriptStore.deleteByDedupeKey(conversationId, "connector-turn:$turnId")
+        }
         agentTranscriptStore.upsert(
             AgentTranscriptRole.PROCESS,
             "$targetName · $statusLabel",
@@ -6326,9 +6333,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun deliveryTraceText(message: ChatMessage): String {
         if (message.deliveryTrace.isEmpty()) return getString(R.string.delivery_trace_empty)
-        return message.deliveryTrace.takeLast(8).joinToString("\n") { event ->
+        val origin = message.deliveryTrace.first().at
+        return message.deliveryTrace.takeLast(32).joinToString("\n") { event ->
             val detail = event.detail.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
-            "${bubbleTime(event.at)} ${deliveryTraceLabel(event.stage)}$detail"
+            val clock = java.text.SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(java.util.Date(event.at))
+            "$clock +${(event.at - origin).coerceAtLeast(0L)} ms ${deliveryTraceLabel(event.stage)}$detail"
         }
     }
 

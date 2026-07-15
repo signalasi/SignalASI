@@ -32,10 +32,10 @@ class CodexConversationThreadTests(unittest.TestCase):
             self.assertEqual([method for method, _, _ in calls].count("thread/start"), 1)
             self.assertEqual([method for method, _, _ in calls].count("turn/start"), 2)
             turn_inputs = [params["input"][0]["text"] for method, params, _ in calls if method == "turn/start"]
-            self.assertTrue(turn_inputs[0].startswith("first\n\n"))
+            self.assertIn("first", turn_inputs[0])
             self.assertIn("Do not synthesize replacement media or data.", turn_inputs[0])
             self.assertTrue(server.delete_conversation("conversation-1"))
-            self.assertNotIn("conversation-1", server._conversation_threads)
+            self.assertNotIn(server._conversation_key("conversation-1"), server._conversation_threads)
 
     def test_missing_persisted_thread_is_recreated(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
@@ -45,7 +45,8 @@ class CodexConversationThreadTests(unittest.TestCase):
         ):
             server = codex_app_server.CodexAppServer("codex", {}, lambda _task, _event: None)
             server._ensure_started = lambda: None
-            server._conversation_threads["conversation-1"] = "stale-thread"
+            conversation_key = server._conversation_key("conversation-1")
+            server._conversation_threads[conversation_key] = "stale-thread"
             calls = []
 
             def request(method, params, timeout):
@@ -61,7 +62,7 @@ class CodexConversationThreadTests(unittest.TestCase):
 
             self.assertEqual(run.thread_id, "fresh-thread")
             self.assertEqual(run.turn_id, "fresh-turn")
-            self.assertEqual(server._conversation_threads["conversation-1"], "fresh-thread")
+            self.assertEqual(server._conversation_threads[conversation_key], "fresh-thread")
             self.assertEqual([method for method, _, _ in calls], ["turn/start", "thread/start", "turn/start"])
 
 

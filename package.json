@@ -23,6 +23,7 @@
     "smoke:desktop:pairing": "npm --prefix apps/desktop run smoke:pairing",
     "smoke:desktop:agent-push": "npm --prefix apps/desktop run smoke:agent-push",
     "smoke:desktop:agent-lifecycle": "npm --prefix apps/desktop run smoke:agent-lifecycle",
+    "smoke:desktop:codex-style-live": "npm --prefix apps/desktop run smoke:codex-style-live",
     "smoke:desktop:voice-stt": "npm --prefix apps/desktop run smoke:voice-stt",
     "smoke:desktop:mqtt-persistence": "npm --prefix apps/desktop run smoke:mqtt-persistence",
     "smoke:desktop:ui": "npm --prefix apps/desktop run smoke:ui",

@@ -5,6 +5,7 @@ const { execFileSync } = require("node:child_process");
 const { acquireSignalasiLock } = require("./smoke-lock");
 
 const root = path.resolve(__dirname, "..");
+const packageMetadata = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const workspaceRoot = path.resolve(root, "..");
 const electronDistCandidates = [
   path.join(root, ".electron-runtime", "node_modules", "electron", "dist"),
@@ -35,6 +36,7 @@ const backendFiles = [
   "agent_task_manager.py",
   "codex_app_server.py",
   "custom_agent_stdio.py",
+  "desktop_file_tools.py",
   "file_server.py",
   "link_delivery.py",
   "link_protocol.py",
@@ -195,7 +197,7 @@ copyRecursive(path.join(root, "scripts"), path.join(appDir, "scripts"), {
 copyRecursive(path.join(root, "docs"), path.join(appDir, "docs"));
 writeJson(path.join(appDir, "package.json"), {
   name: "signalasi-desktop",
-  version: "0.1.8",
+  version: packageMetadata.version,
   main: "src/main.js",
   private: true,
   scripts: {

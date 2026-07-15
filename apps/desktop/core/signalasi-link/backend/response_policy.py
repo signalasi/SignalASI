@@ -35,7 +35,7 @@ def compact_codex_turn_prompt(prompt: str) -> str:
     return value
 
 
-def sanitize_assistant_response(response: str) -> str:
+def sanitize_assistant_response(response: str, hidden_input_paths: list[str] | None = None) -> str:
     lines = str(response or "").replace("\r\n", "\n").splitlines()
     clean: list[str] = []
     stack_mode = False
@@ -59,6 +59,19 @@ def sanitize_assistant_response(response: str) -> str:
     text = "\n".join(clean).strip()
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"^(?:As an AI(?: language model)?[,，]?\s*)", "", text, flags=re.IGNORECASE)
+    for raw_path in hidden_input_paths or []:
+        path = str(raw_path or "").strip()
+        if not path:
+            continue
+        name = re.sub(r"^\d{2}-", "", path.replace("\\", "/").rsplit("/", 1)[-1])
+        escaped = re.escape(path)
+        text = re.sub(rf"\[[^\]]+\]\({escaped}\)", name, text, flags=re.IGNORECASE)
+        text = text.replace(path, name)
+        slash_path = path.replace("\\", "/")
+        if slash_path != path:
+            escaped_slash = re.escape(slash_path)
+            text = re.sub(rf"\[[^\]]+\]\({escaped_slash}\)", name, text, flags=re.IGNORECASE)
+            text = text.replace(slash_path, name)
     return text[:32_000]
 
 

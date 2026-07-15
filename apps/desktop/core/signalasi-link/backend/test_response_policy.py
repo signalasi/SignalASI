@@ -130,6 +130,11 @@ class ResponsePolicyTest(unittest.TestCase):
         raw = "preparing mcp_fetch\nUseful result\nat com.signalasi.Internal.run(Internal.kt:10)"
         self.assertEqual("Useful result", sanitize_assistant_response(raw))
 
+    def test_sanitizer_hides_internal_input_attachment_path(self):
+        internal = r"C:\Users\agent\SignalASIWorkspace\tasks\abc\downloads\input\01-test.xlsx"
+        raw = f"Received [test.xlsx]({internal})."
+        self.assertEqual("Received test.xlsx.", sanitize_assistant_response(raw, [internal]))
+
     def test_input_artifacts_are_identified(self):
         self.assertTrue(is_input_artifact({"relative_path": "downloads/input/01-test.xlsx"}))
         self.assertFalse(is_input_artifact({"relative_path": "outputs/result.xlsx"}))

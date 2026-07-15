@@ -509,6 +509,23 @@ def _codex_server(executable: str, env: dict) -> CodexAppServer:
         if codex_app_server is None or codex_app_server.executable != executable:
             codex_app_server = CodexAppServer(executable, env, _dispatch_codex_event)
     return codex_app_server
+
+
+def warm_codex_app_server() -> None:
+    """Prewarm Codex so the first phone task does not pay process startup cost."""
+    try:
+        from agent_gateway import BASE_AGENTS, _agent_env, _find_codex_desktop_cli
+
+        executable = _find_codex_desktop_cli() or "codex"
+        result = _codex_server(executable, _agent_env(BASE_AGENTS["codex"])).warm()
+        log.info(
+            "Codex App Server prewarmed pid=%s elapsed_ms=%s executable=%s",
+            result.get("pid", 0), result.get("elapsed_ms", 0), executable,
+        )
+    except Exception as exc:
+        log.warning("Codex App Server prewarm failed; first task will retry: %s", exc)
+
+
 phone_publish_lock = threading.RLock()
 pending_task_events: dict[str, tuple[dict, dict]] = {}
 pending_task_events_lock = threading.Lock()
@@ -548,6 +565,37 @@ def _desktop_trace(*events: dict) -> list[dict]:
     return _delivery_trace({}, *events)
 
 
+def _trace_metrics(trace: list[dict]) -> dict:
+    valid = [item for item in trace if int(item.get("at") or 0) > 0]
+    if not valid:
+        return {"total_ms": 0, "stages": []}
+    origin = int(valid[0]["at"])
+    previous = origin
+    stages = []
+    for item in valid:
+        current = int(item["at"])
+        stages.append({
+            "stage": str(item.get("stage") or ""),
+            "at": current,
+            "from_start_ms": max(0, current - origin),
+            "from_previous_ms": max(0, current - previous),
+        })
+        previous = current
+    return {"total_ms": max(0, previous - origin), "stages": stages[-32:]}
+
+
+def _log_task_latency(task_id: str, trace: list[dict]) -> None:
+    metrics = _trace_metrics(trace)
+    compact = ", ".join(
+        f"{item['stage']}={item['from_start_ms']}ms" for item in metrics["stages"]
+    )
+    log.info("Agent task latency task_id=%s total_ms=%s stages=[%s]", task_id, metrics["total_ms"], compact)
+
+
+def _should_publish_task_status(status: str) -> bool:
+    return str(status or "").strip().lower() != "queued"
+
+
 def _reason_code_value(reason_code):
     try:
         return int(reason_code)
@@ -559,8 +607,26 @@ def on_connect(mqttc, userdata, flags, reason_code, properties=None):
     if _reason_code_value(reason_code) == 0:
         log.info(f"MQTT connected {BROKER}:{PORT}")
         _subscribe_all_routes(mqttc)
-        for recovered_task in agent_task_manager.drain_recovered():
-            _publish_or_queue_task_event(mqttc, {"scheme": "signal", "from": "android"}, recovered_task, [])
+        recovered_tasks = agent_task_manager.drain_recovered()
+        replayed_count = 0
+        retained_count = 0
+        for recovered_task in recovered_tasks:
+            route_id = str(recovered_task.get("client_route_id") or "")
+            if route_id and get_client(route_id) is not None:
+                _publish_or_queue_task_event(
+                    mqttc,
+                    {"scheme": "signal", "_client_route_id": route_id},
+                    recovered_task,
+                    [],
+                )
+                replayed_count += 1
+            else:
+                retained_count += 1
+        if recovered_tasks:
+            log.info(
+                "Recovered task status replay summary total=%s replayed=%s retained=%s",
+                len(recovered_tasks), replayed_count, retained_count,
+            )
         flush_pending_task_events(mqttc)
         flush_outbound_messages(mqttc)
     else:
@@ -746,6 +812,7 @@ def _agent_task_payload(task: dict, trace: list[dict]) -> dict:
         "sender": "system",
         "time": time.time(),
         "delivery_trace": _delivery_trace({"delivery_trace": trace}, _trace_event(stage, task.get("agent_id", ""))),
+        "latency": _trace_metrics(trace),
     }
 
 
@@ -781,6 +848,20 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
     contact_id = str(payload.get("contact_id") or "hermes")
     agent_id = _agent_id_from_contact(contact_id, payload.get("agent_id"))
     source_message_id = str(payload.get("client_message_id") or payload.get("message_id") or "")
+    task_trace = _delivery_trace(
+        {"delivery_trace": trace},
+        _trace_event("desktop_task_dispatch_started", agent_id),
+    )
+    task_trace_lock = threading.Lock()
+
+    def add_task_trace(stage: str, detail: object = "") -> None:
+        with task_trace_lock:
+            task_trace.append(_trace_event(stage, detail))
+            del task_trace[:-32]
+
+    def task_trace_snapshot() -> list[dict]:
+        with task_trace_lock:
+            return list(task_trace)
 
     def content_with_attachments(task_id: str, base_content: str | None = None) -> str:
         task_content = content if base_content is None else base_content
@@ -820,7 +901,11 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         return task_content + "\n".join(details)
 
     def publish_event(task: dict) -> None:
-        _publish_or_queue_task_event(mqttc, wire_payload, task, trace)
+        # accepted already means the task is durably queued; a second queued event
+        # adds UI noise without useful user-facing information.
+        if not _should_publish_task_status(str(task.get("status") or "")):
+            return
+        _publish_or_queue_task_event(mqttc, wire_payload, task, task_trace_snapshot())
 
     def run_task(task) -> str:
         log.info(f"Agent task running task_id={task.task_id} contact_id={contact_id} agent_id={agent_id}")
@@ -835,8 +920,14 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
     def publish_result(task: dict) -> None:
         from rich_output import build_rich_output
         from response_policy import sanitize_assistant_response
+        from task_workspace import task_workspace
+        hidden_inputs = [
+            str(path) for path in (
+                task_workspace(str(task.get("task_id") or ""), agent_id) / "downloads" / "input"
+            ).glob("*")
+        ]
         reply, rich_output = build_rich_output(
-            sanitize_assistant_response(str(task.get("result") or "")),
+            sanitize_assistant_response(str(task.get("result") or ""), hidden_inputs),
             list(task.get("output_files") or []),
             str(task.get("task_id") or ""),
         )
@@ -853,7 +944,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             "conversation_id": task.get("conversation_id", ""),
             "turn_id": task.get("turn_id", ""),
             "delivery_trace": _delivery_trace(
-                {"delivery_trace": trace},
+                {"delivery_trace": task_trace_snapshot()},
                 _trace_event("agent_replied", f"{agent_id} chars={len(reply)}"),
                 _trace_event("desktop_reply_publish_queued", _wire_down_topic(wire_payload)),
             ),
@@ -862,7 +953,9 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         }
         if rich_output:
             reply_payload["rich_output"] = rich_output
+        reply_payload["latency"] = _trace_metrics(reply_payload["delivery_trace"])
         _publish_phone_payload(mqttc, wire_payload, reply_payload)
+        _log_task_latency(str(task.get("task_id") or ""), reply_payload["delivery_trace"])
 
     if agent_id == "codex":
         from agent_gateway import BASE_AGENTS, _agent_env, _find_codex_desktop_cli
@@ -870,11 +963,15 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             agent_id=agent_id, contact_id=contact_id, source_message_id=source_message_id,
             prompt=content, on_event=publish_event, task_id=str(payload.get("task_id") or ""),
             conversation_id=str(payload.get("conversation_id") or ""),
+            client_route_id=str(wire_payload.get("_client_route_id") or ""),
         )
+        add_task_trace("desktop_task_created", task.task_id)
 
         def app_event(task_id: str, event: dict) -> None:
+            event_status = str(event.get("status") or "running")
+            add_task_trace(f"codex_{event_status}", event.get("current_step") or "")
             updated = agent_task_manager.update(
-                task_id, str(event.get("status") or "running"), on_event=publish_event,
+                task_id, event_status, on_event=publish_event,
                 thread_id=event.get("thread_id"), turn_id=event.get("turn_id"),
                 current_step=event.get("current_step"), result=event.get("result"),
                 error=event.get("error"),
@@ -887,16 +984,45 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                 executable = _find_codex_desktop_cli() or "codex"
                 from response_policy import compact_codex_turn_prompt
                 from task_workspace import task_workspace
+                from desktop_file_tools import try_execute_explicit_file_task
 
                 with codex_task_callbacks_lock:
                     codex_task_callbacks[task.task_id] = app_event
+                workspace = task_workspace(task.task_id, agent_id)
+                task_prompt = content_with_attachments(task.task_id, compact_codex_turn_prompt(content))
+                input_paths = sorted((workspace / "downloads" / "input").glob("*"))
+                add_task_trace("desktop_file_tool_checked", f"inputs={len(input_paths)}")
+                try:
+                    fast_result = try_execute_explicit_file_task(content, input_paths, workspace / "outputs")
+                except Exception as fast_exc:
+                    fast_result = None
+                    log.warning("Desktop file tool fallback task_id=%s: %s", task.task_id, fast_exc)
+                if fast_result is not None:
+                    agent_task_manager.update(
+                        task.task_id, "running", on_event=publish_event,
+                        current_step="Converting file",
+                    )
+                    add_task_trace("desktop_file_tool_completed", f"{fast_result.operation} {fast_result.elapsed_ms}ms")
+                    completed = agent_task_manager.update(
+                        task.task_id, "completed", on_event=publish_event,
+                        current_step="", result=fast_result.message,
+                    )
+                    if completed is not None:
+                        publish_result(completed.public())
+                    with codex_task_callbacks_lock:
+                        codex_task_callbacks.pop(task.task_id, None)
+                    return
                 server = _codex_server(executable, _agent_env(BASE_AGENTS["codex"]))
+                server.warm()
+                add_task_trace("codex_server_ready", f"pid={server.process.pid if server.process else 0}")
+                add_task_trace("codex_turn_submit_started", executable)
                 server.start_task(
                     task.task_id,
-                    content_with_attachments(task.task_id, compact_codex_turn_prompt(content)),
-                    str(task_workspace(task.task_id, agent_id)),
+                    task_prompt,
+                    str(workspace),
                     conversation_id=str(payload.get("conversation_id") or ""),
                 )
+                add_task_trace("codex_turn_submitted", task.task_id)
             except Exception as exc:
                 agent_task_manager.update(task.task_id, "failed", on_event=publish_event, error=str(exc)[:500])
 
@@ -913,11 +1039,13 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         on_result=publish_result,
         task_id=str(payload.get("task_id") or ""),
         conversation_id=str(payload.get("conversation_id") or ""),
+        client_route_id=str(wire_payload.get("_client_route_id") or ""),
     )
 
 
 def on_message(mqttc, userdata, msg):
     try:
+        mqtt_received_at = int(time.time() * 1000)
         if len(msg.payload) > 512 * 1024:
             log.warning("MQTT message rejected: envelope exceeds size limit")
             return
@@ -955,6 +1083,7 @@ def on_message(mqttc, userdata, msg):
             if str(wire_payload.get("from") or "") != paired_client["signal_name"]:
                 log.warning("Rejected MQTT message: cryptographic sender does not match route")
                 return
+            decrypt_started_at = int(time.time() * 1000)
             application_envelope = decrypt_signal_envelope(wire_payload, remote_name=paired_client["signal_name"])
             validate_envelope(application_envelope)
             if application_envelope["source_id"] != paired_client["signal_name"]:
@@ -979,7 +1108,12 @@ def on_message(mqttc, userdata, msg):
             payload.setdefault("conversation_id", application_envelope.get("conversation_id", ""))
             payload.setdefault("source_message_id", message_id)
             touch_client(client_route_id)
-            trace = _delivery_trace(payload, _trace_event("desktop_received", msg.topic), _trace_event("desktop_decrypted", "SignalASI Link"))
+            trace = _delivery_trace(
+                payload,
+                {"stage": "desktop_mqtt_received", "at": mqtt_received_at, "detail": msg.topic[:240]},
+                {"stage": "desktop_decrypt_started", "at": decrypt_started_at, "detail": "Signal Protocol"},
+                _trace_event("desktop_decrypted", "SignalASI Link"),
+            )
             if payload.get("type") == "delivery_ack":
                 acknowledged_id = str(payload.get("source_message_id") or application_envelope.get("reply_to") or "")
                 acknowledge_outbound(client_route_id, acknowledged_id)
@@ -1540,18 +1674,24 @@ def start():
 
 def start_background():
     """Start MQTT in a background thread."""
+    threading.Thread(target=warm_codex_app_server, daemon=True, name="signalasi-codex-prewarm").start()
     t = threading.Thread(target=start, daemon=True)
     t.start()
     log.info("MQTT bridge started in background")
 
 
 def stop():
-    global client, running
+    global client, running, codex_app_server
     running = False
     _close_phone_tool_sessions(reason="Desktop MQTT bridge stopped")
     if client:
         client.disconnect()
         client = None
+    if codex_app_server is not None:
+        codex_app_server.close()
+        codex_app_server = None
+    with codex_task_callbacks_lock:
+        codex_task_callbacks.clear()
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import os
 import queue
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -20,6 +21,8 @@ SignalASI execution policy:
 - Preserve the user's requested source, output format, and presentation constraints exactly.
 - When only one component of a webpage is requested, never return the parent page URL. Extract the original media URL or return minimal HTML containing only the original component.
 - If a required source or tool is unavailable, report that failure. Do not synthesize replacement media or data.
+- For current information, verify the date and requested location, prefer primary or authoritative sources, and cite the source concisely.
+- Never expose internal task workspace or attachment download paths. Refer to uploaded inputs by their original filename only.
 """.strip()
 
 
@@ -44,6 +47,23 @@ class CodexAppServer:
         self._runs: dict[str, CodexRun] = {}
         self._turn_tasks: dict[str, str] = {}
         self._conversation_threads: dict[str, str] = self._load_conversation_threads()
+        self._initialized_process_pid = 0
+
+    def warm(self) -> dict[str, object]:
+        """Start and initialize the official Codex App Server without creating a task."""
+        started = time.perf_counter()
+        self._ensure_started()
+        return {
+            "ready": True,
+            "pid": self.process.pid if self.process is not None else 0,
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+
+    def is_ready(self) -> bool:
+        return (
+            self.process is not None and self.process.poll() is None and
+            self._initialized_process_pid == self.process.pid
+        )
 
     def start_task(
         self,
@@ -145,30 +165,49 @@ class CodexAppServer:
         self._request("turn/interrupt", {"threadId": run.thread_id, "turnId": run.turn_id}, timeout=10)
         return True
 
+    def close(self) -> None:
+        with self._lock:
+            process = self.process
+            self.process = None
+            self._initialized_process_pid = 0
+            self._runs.clear()
+            self._turn_tasks.clear()
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+
     def _ensure_started(self) -> None:
         with self._lock:
-            if self.process is not None and self.process.poll() is None:
+            if self.is_ready():
                 return
-            command = [
-                self.executable,
-                "-c", "sandbox_workspace_write.network_access=true",
-                "app-server", "--listen", "stdio://",
-            ]
-            if os.name == "nt" and self.executable.lower().endswith((".cmd", ".bat")):
-                command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", *command]
-            self.process = subprocess.Popen(
-                command,
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace", bufsize=1, env=self.env,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
-            threading.Thread(target=self._read_stdout, daemon=True).start()
-            threading.Thread(target=self._drain_stderr, daemon=True).start()
-        self._request("initialize", {
-            "clientInfo": {"name": "signalasi-desktop", "title": "SignalASI Desktop", "version": "0.1.11"},
-            "capabilities": {"experimentalApi": True},
-        }, timeout=15)
-        self._notify("initialized", {})
+            if self.process is None or self.process.poll() is not None:
+                command = [
+                    self.executable,
+                    "-c", "sandbox_workspace_write.network_access=true",
+                    "app-server", "--listen", "stdio://",
+                ]
+                if os.name == "nt" and self.executable.lower().endswith((".cmd", ".bat")):
+                    command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", *command]
+                self.process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, encoding="utf-8", errors="replace", bufsize=1, env=self.env,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                self._initialized_process_pid = 0
+                threading.Thread(target=self._read_stdout, daemon=True).start()
+                threading.Thread(target=self._drain_stderr, daemon=True).start()
+            self._request("initialize", {
+                "clientInfo": {"name": "signalasi-desktop", "title": "SignalASI Desktop", "version": "0.1.12"},
+                "capabilities": {"experimentalApi": True},
+            }, timeout=15)
+            self._notify("initialized", {})
+            self._initialized_process_pid = self.process.pid
 
     def _request(self, method: str, params: dict, timeout: int) -> dict:
         with self._lock:

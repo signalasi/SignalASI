@@ -447,6 +447,15 @@ object SignalASIMqttClient {
         val targetId = if (usesPcConnectorTunnel(contactId)) {
             appContext?.let { AppStore.desktopIdForContact(it, contactId) }.orEmpty()
         } else contactId
+        val publishStartedAt = System.currentTimeMillis()
+        payload.put("client_sent_at_ms", publishStartedAt)
+        val trace = payload.optJSONArray("delivery_trace") ?: JSONArray().also {
+            payload.put("delivery_trace", it)
+        }
+        trace.put(JSONObject()
+            .put("stage", "phone_publish_started")
+            .put("at", publishStartedAt)
+            .put("detail", contactId))
         val applicationEnvelope = SignalASILinkProtocol.makeEnvelope(
             payload,
             SignalASICrypto.localSignalasiId(),

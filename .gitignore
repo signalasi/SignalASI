@@ -52,6 +52,8 @@ downloads/
 stt_probe.wav
 
 # User Agent task workspaces must live outside the source repository.
+/build/
+/apps/desktop/build/
 SignalASIWorkspace/
 tasks/
 task-workspaces/

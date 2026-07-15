@@ -103,6 +103,7 @@ const backendGateway = fs.readFileSync(path.join(backendDir, "agent_gateway.py")
 const backendTaskManager = fs.readFileSync(path.join(backendDir, "agent_task_manager.py"), "utf8");
 const backendAgentConfig = fs.readFileSync(path.join(backendDir, "agent_config.py"), "utf8");
 const backendCustomAgent = fs.readFileSync(path.join(backendDir, "custom_agent_stdio.py"), "utf8");
+const backendDesktopFileTools = fs.readFileSync(path.join(backendDir, "desktop_file_tools.py"), "utf8");
 const backendMcpWrapper = fs.readFileSync(path.join(backendDir, "mcp_agent_wrapper.py"), "utf8");
 const backendTaskWorkspace = fs.readFileSync(path.join(backendDir, "task_workspace.py"), "utf8");
 const backendPushAuth = fs.readFileSync(path.join(backendDir, "push_auth.py"), "utf8");
@@ -237,10 +238,18 @@ for (const requiredBackendCode of [
 if (!packager.includes("\"api_response.py\"")) {
   throw new Error("Packaged Desktop backend must include api_response.py");
 }
-for (const requiredFile of ["link_protocol.py", "link_delivery.py", "task_workspace.py"]) {
+for (const requiredFile of ["link_protocol.py", "link_delivery.py", "task_workspace.py", "desktop_file_tools.py"]) {
   if (!packager.includes(`"${requiredFile}"`)) {
     throw new Error(`Packaged Desktop backend must include ${requiredFile}`);
   }
+}
+
+if (!backendMqtt.includes("warm_codex_app_server") || !backendMqtt.includes("_trace_metrics")) {
+  throw new Error("Desktop task bridge must prewarm Codex and preserve millisecond latency metrics");
+}
+
+if (!backendDesktopFileTools.includes("try_execute_explicit_file_task") || !backendDesktopFileTools.includes("Excel.Application")) {
+  throw new Error("Desktop explicit file conversion tool is incomplete");
 }
 
 if (!backendMain.includes("custom_agent: dict[str, str]") || !backendAgentConfig.includes("def custom_agent_config") || !backendAgentConfig.includes("def custom_agent_configs")) {

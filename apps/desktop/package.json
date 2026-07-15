@@ -1,6 +1,6 @@
 {
   "name": "signalasi-desktop",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "SignalASI Desktop Connector for pairing local agents with the mobile app.",
   "license": "Apache-2.0",
   "main": "src/main.js",
@@ -27,6 +27,7 @@
     "smoke:mqtt-persistence": "node scripts/smoke-mqtt-persistence.js",
     "smoke:agent-push": "node scripts/smoke-agent-push.js",
     "smoke:agent-lifecycle": "python scripts/smoke-agent-lifecycle.py",
+    "smoke:codex-style-live": "python scripts/codex-style-live-regression.py",
     "smoke:voice-stt": "node scripts/smoke-voice-stt.js",
     "smoke:e2e": "node scripts/smoke-e2e.js",
     "smoke:packaged": "node scripts/smoke-packaged.js",

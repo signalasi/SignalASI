@@ -191,6 +191,19 @@ class AgentTranscriptStore(context: Context) {
     }
 
     @Synchronized
+    fun deleteByDedupeKey(conversationId: String, dedupeKey: String): Boolean {
+        val cleanKey = dedupeKey.trim()
+        if (cleanKey.isBlank()) return false
+        val current = allEntries()
+        val filtered = current.filterNot {
+            it.conversationId == conversationId && it.dedupeKey == cleanKey
+        }
+        if (filtered.size == current.size) return false
+        saveEntries(filtered)
+        return true
+    }
+
+    @Synchronized
     fun context(conversationId: String = activeConversation().id): AgentConversationContext {
         val conversation = conversations(includeArchived = true).firstOrNull { it.id == conversationId }
             ?: activeConversation()

@@ -25,6 +25,7 @@ class AgentTask:
     source_message_id: str
     prompt: str
     conversation_id: str = ""
+    client_route_id: str = ""
     status: str = "accepted"
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
     started_at: int = 0
@@ -48,6 +49,7 @@ class AgentTask:
             "contact_id": self.contact_id,
             "source_message_id": self.source_message_id,
             "conversation_id": self.conversation_id,
+            "client_route_id": self.client_route_id,
             "status": self.status,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -89,6 +91,7 @@ class AgentTaskManager:
         on_result: EventCallback | None = None,
         task_id: str = "",
         conversation_id: str = "",
+        client_route_id: str = "",
     ) -> AgentTask:
         task = AgentTask(
             task_id=task_id.strip() or str(uuid.uuid4()),
@@ -97,6 +100,7 @@ class AgentTaskManager:
             source_message_id=source_message_id,
             prompt=prompt,
             conversation_id=conversation_id,
+            client_route_id=client_route_id,
         )
         with self._lock:
             if task.task_id in self._tasks:
@@ -111,11 +115,13 @@ class AgentTaskManager:
     def create_external(
         self, agent_id: str, contact_id: str, source_message_id: str, prompt: str,
         on_event: EventCallback, task_id: str = "", conversation_id: str = "",
+        client_route_id: str = "",
     ) -> AgentTask:
         task = AgentTask(
             task_id=task_id.strip() or str(uuid.uuid4()), agent_id=agent_id,
             contact_id=contact_id, source_message_id=source_message_id, prompt=prompt,
             conversation_id=conversation_id,
+            client_route_id=client_route_id,
         )
         with self._lock:
             if task.task_id in self._tasks:
@@ -366,6 +372,7 @@ class AgentTaskManager:
                     source_message_id=str(row.get("source_message_id") or ""),
                     prompt=str(row.get("prompt") or ""),
                     conversation_id=str(row.get("conversation_id") or ""),
+                    client_route_id=str(row.get("client_route_id") or ""),
                     status=status,
                     created_at=int(row.get("created_at") or 0),
                     started_at=int(row.get("started_at") or 0),
