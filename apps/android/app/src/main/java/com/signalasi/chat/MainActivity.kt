@@ -2906,7 +2906,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         state.pendingAction?.let { pending ->
             val description = pending.description.trim()
-            if (state.phase == AgentPhase.WAITING_CONFIRMATION && description.isNotBlank()) {
+            if (state.phase == AgentPhase.WAITING_CONFIRMATION &&
+                description.isNotBlank() &&
+                AgentConfirmationPolicy.tier(pending) != AgentConfirmationTier.DIRECT
+            ) {
                 val richOutput = AgentRichContentCodec.encode(listOf(
                     AgentRichBlock(
                         id = "approval:${state.sessionId}:${pending.id}",
@@ -3001,7 +3004,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun renderAgentTranscript(entries: List<AgentTranscriptEntry>) {
-        val incomingIds = entries.map(AgentTranscriptEntry::id)
+        val visibleEntries = entries.filterNot { entry ->
+            val staleApproval = isAgentApprovalEntry(entry) &&
+                (isDirectActionApprovalEntry(entry) || !isAgentApprovalStillWaiting(entry.taskId))
+            if (staleApproval) agentTranscriptStore.deleteEntry(entry.id)
+            staleApproval
+        }
+        val incomingIds = visibleEntries.map(AgentTranscriptEntry::id)
         val renderedIds = renderedAgentTranscriptIds.toList()
         val canAppend = renderedIds.size <= incomingIds.size &&
             incomingIds.take(renderedIds.size) == renderedIds
@@ -3011,7 +3020,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             agentOutputList.removeAllViews()
             renderedAgentTranscriptIds.clear()
         }
-        entries.asSequence()
+        visibleEntries.asSequence()
             .filterNot { it.id in renderedAgentTranscriptIds }
             .forEach { entry ->
                 agentOutputList.addView(agentTranscriptRow(entry))
@@ -3024,6 +3033,40 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             } else if (!canAppend) {
                 agentOutputScroll.scrollTo(0, preservedScrollY)
             }
+        }
+    }
+
+    private fun isAgentApprovalEntry(entry: AgentTranscriptEntry): Boolean =
+        entry.taskId.isNotBlank() && AgentRichContentCodec.decode(entry.richOutputJson).any { block ->
+            block.type == AgentRichBlockType.APPROVAL && block.actions.any { action ->
+                action.verb == "approve_task" || action.verb == "reject_task"
+            }
+        }
+
+    private fun isDirectActionApprovalEntry(entry: AgentTranscriptEntry): Boolean =
+        AgentRichContentCodec.decode(entry.richOutputJson).any { block ->
+            if (block.type != AgentRichBlockType.APPROVAL) return@any false
+            val value = listOf(block.title, block.text, block.fallbackText, entry.text)
+                .joinToString(" ")
+                .lowercase(Locale.US)
+            listOf(
+                "timer", "alarm", "camera", "flashlight", "torch", "volume", "battery status",
+                "device status", "open app", "launch app", "\u8ba1\u65f6\u5668", "\u95f9\u949f", "\u62cd\u7167",
+                "\u624b\u7535\u7b52", "\u97f3\u91cf", "\u7535\u91cf", "\u8bbe\u5907\u72b6\u6001", "\u6253\u5f00 app"
+            ).any(value::contains)
+        }
+
+    private fun isAgentApprovalStillWaiting(taskId: String): Boolean {
+        if (taskId.isBlank()) return false
+        return buildList {
+            add(mobileNativeAgent)
+            addAll(activeAgentTasks.values)
+            addAll(provisionalAgentTasks)
+        }.distinct().any { runtime ->
+            val state = runtime.snapshot()
+            state.sessionId == taskId &&
+                state.phase == AgentPhase.WAITING_CONFIRMATION &&
+                state.pendingAction?.let(AgentConfirmationPolicy::tier) != AgentConfirmationTier.DIRECT
         }
     }
 
