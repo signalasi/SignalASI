@@ -517,10 +517,11 @@ class AgentRichContentView(
                         if (length > MAX_IMAGE_BYTES) return@use null
                         val bytes = body.bytes()
                         if (bytes.size > MAX_IMAGE_BYTES) return@use null
+                        val timedBytes = AgentAnimatedImageTiming.normalizeZeroFrameDelays(bytes)
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                            ImageDecoder.decodeDrawable(ImageDecoder.createSource(ByteBuffer.wrap(bytes)))
+                            ImageDecoder.decodeDrawable(ImageDecoder.createSource(ByteBuffer.wrap(timedBytes)))
                         } else {
-                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            BitmapFactory.decodeByteArray(timedBytes, 0, timedBytes.size)
                         }
                     }
                 }.getOrNull()
