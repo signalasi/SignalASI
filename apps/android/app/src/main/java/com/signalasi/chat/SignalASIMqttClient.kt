@@ -1,8 +1,11 @@
 package com.signalasi.chat
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
 import android.util.Log
 import org.eclipse.paho.client.mqttv3.IMqttActionListener
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
@@ -13,6 +16,8 @@ import org.eclipse.paho.client.mqttv3.MqttConnectOptions
 import org.eclipse.paho.client.mqttv3.MqttMessage
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
 import org.json.JSONObject
+import org.json.JSONArray
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -21,6 +26,7 @@ object SignalASIMqttClient {
     private const val TAG = "SignalASILink"
     private const val SERVER_URI = "ssl://broker.emqx.io:8883"
     private const val MQTT_QOS = 1
+    private const val MAX_INLINE_ATTACHMENT_BYTES = 190 * 1024
 
     private val connecting = AtomicBoolean(false)
     private val retryHandler = Handler(Looper.getMainLooper())
@@ -198,7 +204,11 @@ object SignalASIMqttClient {
             .put("time", System.currentTimeMillis())
         clientMessageId?.let { payload.put("client_message_id", it) }
         if (conversationId.isNotBlank()) payload.put("conversation_id", conversationId)
-        if (turnId.isNotBlank()) payload.put("turn_id", turnId)
+        if (turnId.isNotBlank()) {
+            payload.put("turn_id", turnId)
+            inlineTurnAttachments(context, turnId).takeIf { it.length() > 0 }
+                ?.let { payload.put("attachments", it) }
+        }
         deliveryTrace?.let { payload.put("delivery_trace", it) }
         if (context != null) {
             AppStore.contactById(context, contactId)?.let { contact ->
@@ -210,6 +220,75 @@ object SignalASIMqttClient {
         }
         return publishJson(payload, topicOverride ?: outgoingTopic(contactId), contactId)
     }
+
+    private fun inlineTurnAttachments(context: Context?, turnId: String): JSONArray {
+        if (context == null) return JSONArray()
+        var remaining = MAX_INLINE_ATTACHMENT_BYTES
+        val result = JSONArray()
+        AgentTurnAttachmentRegistry.get(turnId).forEach { attachment ->
+            val item = attachment.descriptor()
+            item.remove("uri")
+            val bytes = when {
+                attachment.isImage -> compressedImageBytes(context, attachment, remaining)
+                attachment.sizeBytes in 1..remaining.toLong() -> readBoundedBytes(context, attachment, remaining)
+                else -> null
+            }
+            if (bytes != null && bytes.isNotEmpty() && bytes.size <= remaining) {
+                item.put("data_b64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                remaining -= bytes.size
+            } else {
+                item.put("inline_status", "metadata_only")
+            }
+            result.put(item)
+        }
+        return result
+    }
+
+    private fun readBoundedBytes(
+        context: Context,
+        attachment: AgentInputAttachment,
+        limit: Int
+    ): ByteArray? = runCatching {
+        context.contentResolver.openInputStream(attachment.uri)?.use { input ->
+            val output = ByteArrayOutputStream()
+            val buffer = ByteArray(16 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                if (output.size() + read > limit) return@use null
+                output.write(buffer, 0, read)
+            }
+            output.toByteArray()
+        }
+    }.getOrNull()
+
+    private fun compressedImageBytes(
+        context: Context,
+        attachment: AgentInputAttachment,
+        limit: Int
+    ): ByteArray? = runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(attachment.uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        var sample = 1
+        while (bounds.outWidth / sample > 1280 || bounds.outHeight / sample > 1280) sample *= 2
+        val bitmap = context.contentResolver.openInputStream(attachment.uri)?.use {
+            BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
+        } ?: return@runCatching null
+        try {
+            var quality = 86
+            var bytes: ByteArray
+            do {
+                bytes = ByteArrayOutputStream().use { output ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)
+                    output.toByteArray()
+                }
+                quality -= 10
+            } while (bytes.size > limit && quality >= 36)
+            bytes.takeIf { it.size <= limit }
+        } finally {
+            bitmap.recycle()
+        }
+    }.getOrNull()
 
     fun publishAgentTaskCancel(
         taskId: String,

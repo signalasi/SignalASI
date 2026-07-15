@@ -155,7 +155,7 @@ class CodexAppServer:
             threading.Thread(target=self._read_stdout, daemon=True).start()
             threading.Thread(target=self._drain_stderr, daemon=True).start()
         self._request("initialize", {
-            "clientInfo": {"name": "signalasi-desktop", "title": "SignalASI Desktop", "version": "0.1.8"},
+            "clientInfo": {"name": "signalasi-desktop", "title": "SignalASI Desktop", "version": "0.1.9"},
             "capabilities": {"experimentalApi": True},
         }, timeout=15)
         self._notify("initialized", {})

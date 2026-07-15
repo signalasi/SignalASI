@@ -386,6 +386,7 @@
     <string name="common_cancel">取消</string>
     <string name="common_send">发送</string>
     <string name="agent_attachment_take_photo">拍照</string>
+    <string name="agent_attachment_add_photos">添加照片</string>
     <string name="agent_attachment_new_task">新建会话</string>
     <string name="common_select_all">全选</string>
     <string name="agent_message_all_selected">已选中整条消息</string>
@@ -426,6 +427,10 @@
     <string name="agent_session_cost">已报告费用</string>
     <string name="agent_session_cost_unavailable">混合或本地路由无法统计</string>
     <string name="agent_attachment_add_file">添加文件</string>
+    <string name="agent_attachment_remove">移除附件</string>
+    <string name="agent_attachment_count">%1$d 个附件</string>
+    <string name="agent_attachment_default_goal">查看并使用附件内容。</string>
+    <string name="agent_attachment_rejected">部分附件未添加。最多可添加 10 个文件，每个不超过 20 MB。</string>
     <string name="agent_attachment_hide_navigation">隐藏导航栏</string>
     <string name="agent_attachment_show_navigation">显示导航栏</string>
     <string name="agent_attachment_camera_unavailable">无法打开相机</string>

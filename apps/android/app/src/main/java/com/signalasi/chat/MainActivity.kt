@@ -113,6 +113,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_AGENT_NOTIFICATIONS = 2011
         private const val REQUEST_IMPORT_SKILL = 2012
         private const val REQUEST_EXPORT_SKILL = 2013
+        private const val REQUEST_AGENT_ATTACHMENTS = 2014
+        private const val REQUEST_AGENT_IMAGES = 2015
+        private const val MAX_AGENT_ATTACHMENTS = 10
+        private const val MAX_AGENT_ATTACHMENT_BYTES = 20L * 1024L * 1024L
         private const val UI_PREFS = "signalasi_ui_preferences"
         private const val HISTORY_PREFS = "signalasi_chat_history"
         private const val HISTORY_KEY = "messages"
@@ -203,6 +207,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentHoldToTalkController: AppleHoldToTalkController
     private lateinit var agentAttachButton: ImageButton
     private lateinit var agentSubmitButton: ImageButton
+    private lateinit var agentAttachmentPreviewScroll: HorizontalScrollView
+    private lateinit var agentAttachmentPreviewList: LinearLayout
     private lateinit var contactPage: LinearLayout
     private lateinit var directoryPage: LinearLayout
     private lateinit var discoverPage: LinearLayout
@@ -305,7 +311,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var pendingExportSkill: Pair<String, String>? = null
     private var pendingExportIncludeMessages = true
     private var pendingImportUri: Uri? = null
-    private var agentInputAttachmentPending = false
+    private val agentInputAttachments = mutableListOf<AgentInputAttachment>()
     private var pendingAgentCameraUri: Uri? = null
     @Volatile private var fileServerBaseUrl: String? = null
     private var voiceOverlay: Dialog? = null
@@ -445,6 +451,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentRecordingTimer = findViewById(R.id.agentRecordingTimer)
         agentAttachButton = findViewById(R.id.agentAttachButton)
         agentSubmitButton = findViewById(R.id.agentSubmitButton)
+        agentAttachmentPreviewScroll = findViewById(R.id.agentAttachmentPreviewScroll)
+        agentAttachmentPreviewList = findViewById(R.id.agentAttachmentPreviewList)
         contactPage = findViewById(R.id.contactPage)
         directoryPage = findViewById(R.id.directoryPage)
         discoverPage = findViewById(R.id.discoverPage)
@@ -1019,13 +1027,26 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             val uri = pendingAgentCameraUri
             pendingAgentCameraUri = null
             if (resultCode == RESULT_OK && uri != null) {
-                val existing = agentGoalInput.text?.toString()?.trim().orEmpty()
-                val marker = getString(R.string.agent_attachment_photo_marker)
-                agentGoalInput.setText(listOf(marker, existing).filter(String::isNotBlank).joinToString(" "))
-                agentGoalInput.setSelection(agentGoalInput.text?.length ?: 0)
-                agentGoalInput.requestFocus()
+                addAgentInputUris(listOf(uri))
             } else if (uri != null) {
                 contentResolver.delete(uri, null, null)
+            }
+            return
+        }
+        if (requestCode == REQUEST_AGENT_ATTACHMENTS || requestCode == REQUEST_AGENT_IMAGES) {
+            if (resultCode == RESULT_OK && data != null) {
+                val uris = buildList {
+                    data.clipData?.let { clips ->
+                        for (index in 0 until clips.itemCount) add(clips.getItemAt(index).uri)
+                    }
+                    data.data?.let { if (it !in this) add(it) }
+                }
+                uris.forEach { uri ->
+                    runCatching {
+                        contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                }
+                addAgentInputUris(uris)
             }
             return
         }
@@ -1039,10 +1060,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             return
         }
         if (requestCode == REQUEST_IMPORT_KNOWLEDGE) {
-            val attachToInput = agentInputAttachmentPending
-            agentInputAttachmentPending = false
             if (resultCode == RESULT_OK) {
-                importAgentKnowledgeFromUri(data?.data ?: return, attachToInput)
+                importAgentKnowledgeFromUri(data?.data ?: return)
             }
             return
         }
@@ -1292,11 +1311,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentGoalInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                updateAgentSubmitButtonAppearance(s?.isNotBlank() == true)
+                updateAgentSubmitButtonAppearance(s?.isNotBlank() == true || agentInputAttachments.isNotEmpty())
             }
             override fun afterTextChanged(s: Editable?) = Unit
         })
-        updateAgentSubmitButtonAppearance(agentGoalInput.text?.isNotBlank() == true)
+        updateAgentSubmitButtonAppearance(agentGoalInput.text?.isNotBlank() == true || agentInputAttachments.isNotEmpty())
         agentScreenSearchInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -1370,7 +1389,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun handleAgentPrimaryAction() {
-        if (!agentGoalInput.text?.toString()?.trim().isNullOrBlank()) {
+        if (!agentGoalInput.text?.toString()?.trim().isNullOrBlank() || agentInputAttachments.isNotEmpty()) {
             submitAgentGoal()
             return
         }
@@ -1431,44 +1450,82 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun submitAgentGoal() {
         val goal = agentGoalInput.text?.toString()?.trim().orEmpty()
-        if (goal.isBlank()) {
+        val attachments = agentInputAttachments.toList()
+        if (goal.isBlank() && attachments.isEmpty()) {
             Toast.makeText(this, getString(R.string.agent_empty_goal), Toast.LENGTH_SHORT).show()
             return
         }
         val conversation = agentTranscriptStore.activeConversation()
-        val conversationContext = agentTranscriptStore.context(conversation.id)
         val turnId = UUID.randomUUID().toString()
+        val attachmentLabel = when (attachments.size) {
+            0 -> ""
+            1 -> "[${attachments.first().displayName}]"
+            else -> getString(R.string.agent_attachment_count, attachments.size)
+        }
         agentTranscriptStore.append(
             AgentTranscriptRole.USER,
-            goal,
+            goal.ifBlank { attachmentLabel },
             conversationId = conversation.id,
             turnId = turnId,
-            taskId = turnId
+            taskId = turnId,
+            richOutputJson = AgentRichContentCodec.encode(attachments.map(AgentInputAttachment::richBlock))
         )
+        AgentTurnAttachmentRegistry.put(turnId, attachments)
         refreshAgentConversationHeader()
         renderAgentTranscript(agentTranscriptStore.list())
         agentGoalInput.setText("")
+        agentInputAttachments.clear()
+        renderAgentInputAttachments()
         agentGoalInput.clearFocus()
         getSystemService(InputMethodManager::class.java)
             .hideSoftInputFromWindow(agentGoalInput.windowToken, 0)
-        if (handleAgentSkillCommand(goal, conversation.id, turnId)) return
+        val baseGoal = goal.ifBlank { getString(R.string.agent_attachment_default_goal) }
+        if (attachments.isEmpty()) {
+            continueAgentGoalSubmission(baseGoal, conversation.id, turnId)
+            return
+        }
+        val executionGoal = buildString {
+            append(baseGoal)
+            append("\n\nAttached input:\n")
+            attachments.forEach { attachment ->
+                append("- ").append(attachment.displayName)
+                append(" (").append(attachment.mimeType).append(", ")
+                append(AgentInputAttachment.humanSize(attachment.sizeBytes)).append(")\n")
+            }
+            append("Use the attached content when completing the request.")
+        }
+        continueAgentGoalSubmission(executionGoal, conversation.id, turnId)
+        thread(name = "signalasi-agent-attachments") {
+            attachments.filterNot { attachment ->
+                attachment.mimeType.startsWith("image/") ||
+                    attachment.mimeType.startsWith("video/") ||
+                    attachment.mimeType.startsWith("audio/")
+            }.forEach { attachment ->
+                runCatching { AgentKnowledgeImporter(applicationContext).importDocument(attachment.uri) }
+            }
+        }
+    }
+
+    private fun continueAgentGoalSubmission(goal: String, conversationId: String, turnId: String) {
+        val conversationContext = agentTranscriptStore.context(conversationId)
+        if (handleAgentSkillCommand(goal, conversationId, turnId)) return
         val skillMatch = agentSkillMatcher.match(goal)
         val run = agentRunRecorder.begin(
-            conversationId = conversation.id,
+            conversationId = conversationId,
             request = goal,
             activeSkillId = skillMatch?.installation?.id.orEmpty()
         )
         agentRunIdsByTurn[turnId] = run.runId
-        if (skillMatch != null && executeMatchedSkill(skillMatch, conversation.id, turnId, goal, conversationContext)) {
+        if (skillMatch != null && executeMatchedSkill(skillMatch, conversationId, turnId, goal, conversationContext)) {
             return
         }
         val deterministicAction = deterministicSystemActionFor(goal, conversationContext)
         if (deterministicAction != null &&
             AgentConfirmationPolicy.tier(deterministicAction) == AgentConfirmationTier.DIRECT
         ) {
-            executeDirectSystemAction(deterministicAction, conversation.id, turnId)
+            executeDirectSystemAction(deterministicAction, conversationId, turnId)
         } else {
-            executeConcurrentAgentGoal(goal, conversationContext, conversation.id, turnId)
+            executeConcurrentAgentGoal(goal, conversationContext, conversationId, turnId)
         }
     }
 
@@ -1883,6 +1940,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (conversation.title == "New session") getString(R.string.agent_session_new) else conversation.title
 
     private fun createAgentConversation() {
+        agentInputAttachments.clear()
+        renderAgentInputAttachments()
+        agentGoalInput.setText("")
         agentTranscriptStore.createConversation()
         renderedAgentTranscriptIds.clear()
         agentOutputList.removeAllViews()
@@ -3433,25 +3493,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun agentTranscriptRow(entry: AgentTranscriptEntry): View = when (entry.role) {
-        AgentTranscriptRole.USER -> LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(14) }
-            addView(TextView(this@MainActivity).apply {
-                text = entry.text
-                setTextColor(getColorCompat(R.color.text_primary))
-                textSize = 16f
-                setLineSpacing(dp(3).toFloat(), 1f)
-                setTextIsSelectable(true)
-                maxWidth = (resources.displayMetrics.widthPixels * 0.78f).toInt()
-                setPadding(dp(15), dp(10), dp(15), dp(10))
-                setBackgroundResource(R.drawable.bubble_self_background)
-                attachAgentTranscriptActions(this, entry)
-            })
-        }
+        AgentTranscriptRole.USER -> agentUserTranscriptRow(entry)
         AgentTranscriptRole.ASSISTANT -> AgentRichContentView(
             activity = this,
             onTextViewReady = { textView -> attachAgentTranscriptActions(textView, entry) },
@@ -3486,6 +3528,102 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ).apply {
                 topMargin = dp(12)
                 marginEnd = dp(32)
+            }
+        }
+    }
+
+    private fun agentUserTranscriptRow(entry: AgentTranscriptEntry): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.END
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(14) }
+        val blocks = AgentRichContentCodec.decode(entry.richOutputJson)
+            .filter { it.type == AgentRichBlockType.IMAGE || it.type == AgentRichBlockType.FILE }
+        blocks.forEach { block ->
+            addView(agentUserAttachmentBlock(block), LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(6) })
+        }
+        val attachmentOnlyLabel = blocks.isNotEmpty() && (
+            entry.text == "[${blocks.firstOrNull()?.title.orEmpty()}]" ||
+                entry.text == getString(R.string.agent_attachment_count, blocks.size)
+            )
+        if (!attachmentOnlyLabel) {
+            addView(TextView(this@MainActivity).apply {
+                text = entry.text
+                setTextColor(getColorCompat(R.color.text_primary))
+                textSize = 16f
+                setLineSpacing(dp(3).toFloat(), 1f)
+                setTextIsSelectable(true)
+                maxWidth = (resources.displayMetrics.widthPixels * 0.78f).toInt()
+                setPadding(dp(15), dp(10), dp(15), dp(10))
+                setBackgroundResource(R.drawable.bubble_self_background)
+                attachAgentTranscriptActions(this, entry)
+            })
+        }
+    }
+
+    private fun agentUserAttachmentBlock(block: AgentRichBlock): View {
+        val uri = Uri.parse(block.uri)
+        if (block.type == AgentRichBlockType.IMAGE) {
+            return ImageView(this).apply {
+                setImageURI(uri)
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                contentDescription = block.title
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(8).toFloat()
+                    setColor(Color.parseColor("#F4F6F8"))
+                }
+                clipToOutline = true
+                setOnClickListener {
+                    runCatching {
+                        startActivity(Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(uri, block.mimeType.ifBlank { "image/*" })
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        })
+                    }
+                }
+                layoutParams = LinearLayout.LayoutParams(dp(184), dp(138))
+            }
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(8).toFloat()
+                setColor(Color.parseColor("#F4F6F8"))
+                setStroke(dp(1), Color.parseColor("#DDE2E7"))
+            }
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(R.drawable.ic_agent_attach)
+                imageTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#53606D"))
+            }, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(9) })
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(TextView(this@MainActivity).apply {
+                    text = block.title
+                    textSize = 14f
+                    setTextColor(getColorCompat(R.color.text_primary))
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                })
+                if (block.text.isNotBlank()) addView(TextView(this@MainActivity).apply {
+                    text = block.text
+                    textSize = 11f
+                    setTextColor(getColorCompat(R.color.text_secondary))
+                })
+            }, LinearLayout.LayoutParams(dp(190), ViewGroup.LayoutParams.WRAP_CONTENT))
+            setOnClickListener {
+                runCatching {
+                    startActivity(Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, block.mimeType.ifBlank { "application/octet-stream" })
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    })
+                }
             }
         }
     }
@@ -10523,10 +10661,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         addRow(getString(R.string.agent_attachment_new_task)) { createAgentConversation() }
         addRow(getString(R.string.agent_attachment_take_photo)) { openAgentCamera() }
-        addRow(getString(R.string.agent_attachment_add_file)) {
-            agentInputAttachmentPending = true
-            openAgentKnowledgeImportPicker()
-        }
+        addRow(getString(R.string.agent_attachment_add_photos)) { openAgentAttachmentPicker(imagesOnly = true) }
+        addRow(getString(R.string.agent_attachment_add_file)) { openAgentAttachmentPicker(imagesOnly = false) }
         if (content.childCount > 0) content.removeViewAt(content.childCount - 1)
         dialog.setContentView(content)
         dialog.window?.apply {
@@ -10590,7 +10726,139 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         startActivityForResult(intent, REQUEST_IMPORT_KNOWLEDGE)
     }
 
-    private fun importAgentKnowledgeFromUri(uri: Uri, attachToInput: Boolean = false) {
+    private fun openAgentAttachmentPicker(imagesOnly: Boolean) {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            type = if (imagesOnly) "image/*" else "*/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
+        startActivityForResult(intent, if (imagesOnly) REQUEST_AGENT_IMAGES else REQUEST_AGENT_ATTACHMENTS)
+    }
+
+    private fun addAgentInputUris(uris: List<Uri>) {
+        var rejected = 0
+        uris.distinct().forEach { uri ->
+            if (agentInputAttachments.size >= MAX_AGENT_ATTACHMENTS) {
+                rejected++
+                return@forEach
+            }
+            val metadata = agentAttachmentMetadata(uri)
+            if (metadata.sizeBytes > MAX_AGENT_ATTACHMENT_BYTES || metadata.sizeBytes < 0L) {
+                rejected++
+                return@forEach
+            }
+            if (agentInputAttachments.any { it.uri == uri }) return@forEach
+            agentInputAttachments += metadata
+        }
+        renderAgentInputAttachments()
+        if (rejected > 0) {
+            Toast.makeText(this, getString(R.string.agent_attachment_rejected), Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun agentAttachmentMetadata(uri: Uri): AgentInputAttachment {
+        var name = uri.lastPathSegment?.substringAfterLast('/').orEmpty().ifBlank { "attachment" }
+        var size = 0L
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
+            ?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }
+                        ?.let { name = cursor.getString(it).orEmpty().ifBlank { name } }
+                    cursor.getColumnIndex(OpenableColumns.SIZE).takeIf { it >= 0 }
+                        ?.let { if (!cursor.isNull(it)) size = cursor.getLong(it) }
+                }
+            }
+        val mimeType = contentResolver.getType(uri).orEmpty().ifBlank {
+            android.webkit.MimeTypeMap.getSingleton()
+                .getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase(Locale.US))
+                ?: "application/octet-stream"
+        }
+        return AgentInputAttachment(
+            id = UUID.randomUUID().toString(),
+            uri = uri,
+            displayName = name.take(180),
+            mimeType = mimeType.take(160),
+            sizeBytes = size
+        )
+    }
+
+    private fun renderAgentInputAttachments() {
+        agentAttachmentPreviewList.removeAllViews()
+        agentInputAttachments.forEach { attachment ->
+            agentAttachmentPreviewList.addView(agentInputAttachmentCard(attachment))
+        }
+        agentAttachmentPreviewScroll.visibility = if (agentInputAttachments.isEmpty()) View.GONE else View.VISIBLE
+        updateAgentSubmitButtonAppearance(
+            agentGoalInput.text?.toString()?.isNotBlank() == true || agentInputAttachments.isNotEmpty()
+        )
+        if (agentInputAttachments.isNotEmpty()) {
+            agentAttachmentPreviewScroll.post { agentAttachmentPreviewScroll.fullScroll(View.FOCUS_RIGHT) }
+        }
+    }
+
+    private fun agentInputAttachmentCard(attachment: AgentInputAttachment): View {
+        val cardBackground = GradientDrawable().apply {
+            cornerRadius = dp(8).toFloat()
+            setColor(Color.parseColor("#F4F6F8"))
+            setStroke(dp(1), Color.parseColor("#DDE2E7"))
+        }
+        val container = FrameLayout(this).apply {
+            background = cardBackground
+            clipToOutline = true
+        }
+        if (attachment.isImage) {
+            container.addView(ImageView(this).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                contentDescription = attachment.displayName
+                setImageURI(attachment.uri)
+            }, FrameLayout.LayoutParams(dp(70), dp(66)))
+        } else {
+            container.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(10), dp(7), dp(30), dp(7))
+                addView(ImageView(this@MainActivity).apply {
+                    setImageResource(R.drawable.ic_agent_attach)
+                    imageTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#53606D"))
+                }, LinearLayout.LayoutParams(dp(26), dp(26)).apply { marginEnd = dp(8) })
+                addView(LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(TextView(this@MainActivity).apply {
+                        text = attachment.displayName
+                        textSize = 13f
+                        setTextColor(getColorCompat(R.color.text_primary))
+                        maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                    }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    addView(TextView(this@MainActivity).apply {
+                        text = AgentInputAttachment.humanSize(attachment.sizeBytes)
+                        textSize = 11f
+                        setTextColor(getColorCompat(R.color.text_secondary))
+                    })
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            }, FrameLayout.LayoutParams(dp(190), dp(66)))
+        }
+        container.addView(ImageButton(this).apply {
+            setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
+            imageTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#59636E"))
+            setBackgroundColor(Color.TRANSPARENT)
+            contentDescription = getString(R.string.agent_attachment_remove)
+            setPadding(dp(5), dp(5), dp(5), dp(5))
+            setOnClickListener {
+                agentInputAttachments.removeAll { it.id == attachment.id }
+                renderAgentInputAttachments()
+            }
+        }, FrameLayout.LayoutParams(dp(28), dp(28), Gravity.TOP or Gravity.END))
+        val width = if (attachment.isImage) dp(70) else dp(190)
+        return container.apply {
+            layoutParams = LinearLayout.LayoutParams(width, dp(66)).apply { marginEnd = dp(8) }
+        }
+    }
+
+    private fun importAgentKnowledgeFromUri(uri: Uri) {
         runCatching {
             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
@@ -10599,13 +10867,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             runOnUiThread {
                 renderAgentState(mobileNativeAgent.recordKnowledgeImport(result))
                 Toast.makeText(this, result.message, Toast.LENGTH_LONG).show()
-                if (result.success && attachToInput) {
-                    val existing = agentGoalInput.text?.toString()?.trim().orEmpty()
-                    val attachment = "[${result.title}]"
-                    agentGoalInput.setText(listOf(attachment, existing).filter(String::isNotBlank).joinToString(" "))
-                    agentGoalInput.setSelection(agentGoalInput.text?.length ?: 0)
-                    agentGoalInput.requestFocus()
-                } else if (result.success) {
+                if (result.success) {
                     showAgentKnowledgePage()
                 }
             }

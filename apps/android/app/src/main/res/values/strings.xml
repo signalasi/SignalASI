@@ -626,6 +626,7 @@
     <string name="common_cancel">Cancel</string>
     <string name="common_send">Send</string>
     <string name="agent_attachment_take_photo">Take photo</string>
+    <string name="agent_attachment_add_photos">Add photos</string>
     <string name="agent_attachment_new_task">New session</string>
     <string name="common_select_all">Select all</string>
     <string name="agent_message_all_selected">All message text selected</string>
@@ -666,6 +667,10 @@
     <string name="agent_session_cost">Reported cost</string>
     <string name="agent_session_cost_unavailable">Unavailable for mixed/local routes</string>
     <string name="agent_attachment_add_file">Add file</string>
+    <string name="agent_attachment_remove">Remove attachment</string>
+    <string name="agent_attachment_count">%1$d attachments</string>
+    <string name="agent_attachment_default_goal">Review and use the attached content.</string>
+    <string name="agent_attachment_rejected">Some attachments were skipped. You can add up to 10 files, 20 MB each.</string>
     <string name="agent_attachment_hide_navigation">Hide navigation bar</string>
     <string name="agent_attachment_show_navigation">Show navigation bar</string>
     <string name="agent_attachment_camera_unavailable">Camera is unavailable</string>

@@ -55,6 +55,7 @@ object AgentConfirmationPolicy {
             return AgentConfirmationTier.CONFIRM_ONCE
         }
         if (action.kind == AgentActionKind.SET_ALARM || action.kind == AgentActionKind.OPEN_APP ||
+            action.kind == AgentActionKind.CALL_CONNECTOR ||
             action.id in DIRECT_ACTION_IDS || DIRECT_TERMS.any(value::contains)
         ) return AgentConfirmationTier.DIRECT
         return when (action.risk) {

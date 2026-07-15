@@ -879,13 +879,8 @@ class MobileNativeAgent(
         val hasPendingActions = responsePlan.actions.any {
             it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
         }
-        val plannerSettings = AgentModelPlannerSettingsStore(appContext).load()
         val preservesToolGraph = success && responsePlan.hasOutputHandoffFrom(actionId)
-        val closesAutonomousLoop = success &&
-            !hasPendingActions &&
-            plannerSettings.multiAgentCoordination &&
-            plannerSettings.shareAgentOutputsWithPlanner
-        val continuedPlan = if ((hasPendingActions && !preservesToolGraph) || !success || closesAutonomousLoop) {
+        val continuedPlan = if ((hasPendingActions && !preservesToolGraph) || !success) {
             currentScreen = captureScreen()
             replanFromCurrentState(
                 responsePlan,

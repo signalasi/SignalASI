@@ -1,6 +1,7 @@
 ﻿"""SignalASI Link MQTT bridge - connects the public broker and mobile app."""
 import asyncio
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -781,12 +782,48 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
     agent_id = _agent_id_from_contact(contact_id, payload.get("agent_id"))
     source_message_id = str(payload.get("client_message_id") or payload.get("message_id") or "")
 
+    def content_with_attachments(task_id: str) -> str:
+        attachments = payload.get("attachments") or []
+        if not isinstance(attachments, list) or not attachments:
+            return content
+        from task_workspace import task_workspace
+        attachment_root = task_workspace(task_id, agent_id) / "downloads" / "input"
+        attachment_root.mkdir(parents=True, exist_ok=True)
+        materialized: list[str] = []
+        metadata_only: list[str] = []
+        for index, attachment in enumerate(attachments[:10]):
+            if not isinstance(attachment, dict):
+                continue
+            name = Path(str(attachment.get("name") or f"attachment-{index + 1}")).name[:180]
+            encoded = str(attachment.get("data_b64") or "")
+            if not encoded:
+                metadata_only.append(name)
+                continue
+            try:
+                raw = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error):
+                metadata_only.append(name)
+                continue
+            if not raw or len(raw) > 200 * 1024:
+                metadata_only.append(name)
+                continue
+            target = attachment_root / f"{index + 1:02d}-{name}"
+            target.write_bytes(raw)
+            materialized.append(str(target))
+        if not materialized and not metadata_only:
+            return content
+        details = ["\n\nInput attachments available for this task:"]
+        details.extend(f"- {path}" for path in materialized)
+        details.extend(f"- {name} (content indexed on the phone; binary was not transferred)" for name in metadata_only)
+        details.append("Inspect the available files when they are relevant to the user's request.")
+        return content + "\n".join(details)
+
     def publish_event(task: dict) -> None:
         _publish_or_queue_task_event(mqttc, wire_payload, task, trace)
 
     def run_task(task) -> str:
         log.info(f"Agent task running task_id={task.task_id} contact_id={contact_id} agent_id={agent_id}")
-        reply = ask_agent_sync(agent_id, content, task_id=task.task_id)
+        reply = ask_agent_sync(agent_id, content_with_attachments(task.task_id), task_id=task.task_id)
         if msg_type in {"audio", "voice"}:
             marker = "Voice message received."
             if marker in reply:
@@ -853,7 +890,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                 server = _codex_server(executable, _agent_env(BASE_AGENTS["codex"]))
                 server.start_task(
                     task.task_id,
-                    content,
+                    content_with_attachments(task.task_id),
                     str(task_workspace(task.task_id, agent_id)),
                     conversation_id=str(payload.get("conversation_id") or ""),
                 )
