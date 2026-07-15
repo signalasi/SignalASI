@@ -10,6 +10,16 @@ import android.provider.Settings
 object AgentSystemToolPlanner {
     fun availableTools(): List<AgentSystemTool> = SYSTEM_TOOLS
 
+    internal fun isCameraCaptureGoal(goal: String): Boolean {
+        val lower = goal.trim().lowercase()
+        if (lower.contains("open camera") || lower.contains("take photo") || lower.contains("take a photo") ||
+            lower.contains("launch camera") || lower.contains("use phone camera")) return true
+        val hasCamera = lower.contains("\u76f8\u673a") || lower.contains("\u6444\u50cf\u5934")
+        val hasOpenAction = lower.contains("\u6253\u5f00") || lower.contains("\u542f\u52a8") ||
+            lower.contains("\u8c03\u7528") || lower.contains("\u4f7f\u7528")
+        return lower.contains("\u62cd\u7167") || (hasCamera && hasOpenAction)
+    }
+
     fun actionFor(request: AgentRequest): AgentAction? {
         val goal = request.goal.trim()
         val lower = goal.lowercase()
@@ -282,7 +292,7 @@ object AgentSystemToolPlanner {
             packageName = "com.tencent.mm",
             risk = AgentRisk.MEDIUM
         )
-        lower.contains("open camera") || lower.contains("take photo") -> intentAction(
+        isCameraCaptureGoal(goal) -> intentAction(
             id = "open-camera",
             target = "Camera",
             description = "Open camera",
