@@ -93,6 +93,12 @@ private class BaselineShiftSpan(private val shiftPx: Int) : CharacterStyle(), Up
 
 class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
+    private data class PendingDirectSystemAction(
+        val action: AgentAction,
+        val conversationId: String,
+        val turnId: String
+    )
+
     companion object {
         private const val REQUEST_IMAGE = 2001
         private const val REQUEST_RECORD_AUDIO = 2002
@@ -177,6 +183,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val agentRuntimeConversationIds = ConcurrentHashMap<MobileNativeAgent, String>()
     private val agentRuntimeTurnIds = ConcurrentHashMap<MobileNativeAgent, String>()
     private val agentConnectorResponsesInFlight = ConcurrentHashMap.newKeySet<String>()
+    private var pendingDirectSystemAction: PendingDirectSystemAction? = null
     private lateinit var agentScreenSearchInput: EditText
     private lateinit var agentScreenDetailList: LinearLayout
     private lateinit var agentActionQueueList: LinearLayout
@@ -1055,6 +1062,20 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         if (requestCode == REQUEST_AGENT_NATIVE_PERMISSIONS) {
             val granted = grantResults.count { it == PackageManager.PERMISSION_GRANTED }
+            val pending = pendingDirectSystemAction
+            pendingDirectSystemAction = null
+            if (pending != null) {
+                if (grantResults.isNotEmpty() && granted == grantResults.size) {
+                    executeDirectSystemAction(pending.action, pending.conversationId, pending.turnId)
+                } else {
+                    appendDirectSystemResult(
+                        pending.action,
+                        pending.conversationId,
+                        pending.turnId,
+                        AgentActionResult(pending.action.id, false, "Required Android permission was not granted")
+                    )
+                }
+            }
             Toast.makeText(
                 this,
                 getString(R.string.agent_native_permissions_result, granted, grantResults.size),
@@ -1497,7 +1518,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         conversationContext: AgentConversationContext
     ): AgentAction? {
         val state = mobileNativeAgent.snapshot()
-        return AgentSystemToolPlanner.actionFor(
+        return RuleBasedAgentPlanner(this).deterministicLocalAction(
             AgentRequest(
                 goal = goal,
                 screen = state.currentScreen,
@@ -1514,32 +1535,65 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         conversationId: String,
         turnId: String
     ) {
+        val missingPermissions = if (action.kind == AgentActionKind.CALL_NATIVE_TOOL) {
+            val toolId = action.parameters["tool_id"].orEmpty()
+            mobileNativeAgent.snapshot().runtimeContext.nativeTools
+                .firstOrNull { it.id == toolId }
+                ?.requiredPermissions
+                .orEmpty()
+                .filter { it.required && checkSelfPermission(it.id) != PackageManager.PERMISSION_GRANTED }
+                .map { it.id }
+                .distinct()
+        } else {
+            emptyList()
+        }
+        if (missingPermissions.isNotEmpty()) {
+            pendingDirectSystemAction = PendingDirectSystemAction(action, conversationId, turnId)
+            requestPermissions(missingPermissions.toTypedArray(), REQUEST_AGENT_NATIVE_PERMISSIONS)
+            return
+        }
         val screen = mobileNativeAgent.snapshot().currentScreen
         thread(name = "signalasi-agent-system-action") {
             val outcome = runCatching {
-                PhoneExecutionAuthority.guarded(
-                    NotifyingAgentActionExecutor(
-                        this@MainActivity,
-                        AndroidAgentActionExecutor(this@MainActivity)
-                    )
-                )
-                    .execute(action, screen)
+                if (action.kind == AgentActionKind.CALL_NATIVE_TOOL) {
+                    val notifications = AgentActionNotificationCenter(this@MainActivity)
+                    notifications.showRunning(action)
+                    mobileNativeAgent.executeDirectAction(action).also { result ->
+                        notifications.showResult(action, result)
+                    }
+                } else {
+                    PhoneExecutionAuthority.guarded(
+                        NotifyingAgentActionExecutor(
+                            this@MainActivity,
+                            AndroidAgentActionExecutor(this@MainActivity)
+                        )
+                    ).execute(action, screen)
+                }
             }
             runOnUiThread {
                 val result = outcome.getOrElse { error ->
                     AgentActionResult(action.id, false, error.message ?: "Agent operation failed")
                 }
-                agentTranscriptStore.append(
-                    AgentTranscriptRole.ASSISTANT,
-                    result.message,
-                    dedupeKey = "direct-system:$turnId:${action.id}",
-                    conversationId = conversationId,
-                    turnId = turnId,
-                    taskId = turnId
-                )
-                renderAgentTranscript(agentTranscriptStore.list(conversationId))
+                appendDirectSystemResult(action, conversationId, turnId, result)
             }
         }
+    }
+
+    private fun appendDirectSystemResult(
+        action: AgentAction,
+        conversationId: String,
+        turnId: String,
+        result: AgentActionResult
+    ) {
+        agentTranscriptStore.append(
+            AgentTranscriptRole.ASSISTANT,
+            result.message,
+            dedupeKey = "direct-system:$turnId:${action.id}",
+            conversationId = conversationId,
+            turnId = turnId,
+            taskId = turnId
+        )
+        renderAgentTranscript(agentTranscriptStore.list(conversationId))
     }
 
     private fun requestMissingAgentNativePermissions(state: AgentUiState): Boolean {

@@ -21,6 +21,15 @@ object AgentSystemToolPlanner {
     }
 
     internal fun timerSecondsForGoal(goal: String): Int? {
+        val chineseMatch = Regex("""(\d+)\s*(\u79d2\u949f?|\u5206\u949f?|\u5c0f\u65f6)""").find(goal)
+        if (chineseMatch != null) {
+            val amount = chineseMatch.groupValues[1].toIntOrNull() ?: return null
+            return when {
+                chineseMatch.groupValues[2].startsWith("\u5c0f\u65f6") -> amount * 3_600
+                chineseMatch.groupValues[2].startsWith("\u5206") -> amount * 60
+                else -> amount
+            }.coerceIn(1, 24 * 60 * 60)
+        }
         val match = Regex(
             """(\d+|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty|forty-five|fifty|sixty)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\b"""
         ).find(goal.lowercase()) ?: return null
@@ -276,11 +285,14 @@ object AgentSystemToolPlanner {
                     risk = AgentRisk.MEDIUM
                 )
             }
-            lower.contains("set alarm") || lower.contains("open alarms") || lower.contains("open alarm") -> alarmAction(goal, lower)
+            lower.contains("set alarm") || lower.contains("open alarms") || lower.contains("open alarm") ||
+                lower.contains("\u95f9\u949f") -> alarmAction(goal, lower)
             lower.contains("set timer") ||
                 lower.contains("start timer") ||
                 lower.contains("open timers") ||
-                lower.contains("open timer") -> timerAction(goal, lower)
+                lower.contains("open timer") ||
+                lower.contains("\u8ba1\u65f6\u5668") ||
+                lower.contains("\u5012\u8ba1\u65f6") -> timerAction(goal, lower)
             lower.contains("long press first") || lower.contains("press and hold first") -> {
                 val firstElement = request.screen.clickableElements.firstOrNull()
                 AgentAction(

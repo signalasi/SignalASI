@@ -32,7 +32,7 @@ class NotifyingAgentActionExecutor(
     )
 }
 
-private class AgentActionNotificationCenter(private val context: Context) {
+internal class AgentActionNotificationCenter(private val context: Context) {
     private val manager = context.getSystemService(NotificationManager::class.java)
 
     fun showRunning(action: AgentAction) {
@@ -146,7 +146,13 @@ private class AgentActionNotificationCenter(private val context: Context) {
             )
             action.kind == AgentActionKind.SET_ALARM -> context.getString(R.string.agent_operation_alarm)
             "camera" in value || "photo" in value -> context.getString(R.string.agent_operation_camera)
-            "flashlight" in value || "torch" in value -> context.getString(R.string.agent_operation_flashlight)
+            "flashlight" in value || "torch" in value -> if (
+                "\"enabled\":false" in value || "enabled false" in value
+            ) {
+                context.getString(R.string.agent_operation_flashlight_off)
+            } else {
+                context.getString(R.string.agent_operation_flashlight)
+            }
             "volume" in value || "audio mute" in value -> context.getString(R.string.agent_operation_volume)
             "battery" in value -> context.getString(R.string.agent_operation_battery)
             "device status" in value -> context.getString(R.string.agent_operation_device_status)

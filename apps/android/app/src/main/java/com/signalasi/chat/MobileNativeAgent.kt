@@ -180,6 +180,13 @@ class MobileNativeAgent(
 
     fun nativeToolCatalog(): List<AgentNativeToolDescriptor> = nativeToolRegistry.descriptors()
 
+    fun executeDirectAction(action: AgentAction): AgentActionResult {
+        require(AgentConfirmationPolicy.tier(action) == AgentConfirmationTier.DIRECT) {
+            "Only direct-tier actions may bypass the Agent planning loop"
+        }
+        return executeAction(action, currentScreen, userConfirmed = true)
+    }
+
     fun invokeNativeTool(
         toolId: String,
         input: AgentNativeJsonObject,
@@ -4872,6 +4879,12 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         return AgentPlanFactory.actions(request, actions)
     }
 
+    fun deterministicLocalAction(request: AgentRequest): AgentAction? =
+        AgentSystemToolPlanner.actionFor(request)
+            ?: androidSystemNativeToolAction(request)
+            ?: installedAppOpenAction(request)
+            ?: directDeviceStatusAction(request)
+
     private fun actionsFor(request: AgentRequest): List<AgentAction> {
         val segments = splitGoalSegments(request.goal)
         if (segments.size <= 1) return listOf(actionFor(request))
@@ -4891,9 +4904,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         val lower = goal.lowercase()
         val taskRequirements = AgentTaskRequirementAnalyzer.analyze(goal)
         notificationReplyAction(request)?.let { return it }
-        AgentSystemToolPlanner.actionFor(request)?.let { return it }
-        installedAppOpenAction(request)?.let { return it }
-        androidSystemNativeToolAction(request)?.let { return it }
+        deterministicLocalAction(request)?.let { return it }
         explicitCallableTargetAction(request)?.let { return it }
         return when {
             lower == "back" || lower.contains("go back") -> AgentAction(
@@ -5035,6 +5046,14 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         val lower = goal.lowercase(Locale.US)
         val now = System.currentTimeMillis()
         val selected: Pair<String, JSONObject> = when {
+            lower.hasAny(
+                "turn on flashlight", "open flashlight", "flashlight on", "turn on torch", "torch on",
+                "\u6253\u5f00\u624b\u7535\u7b52", "\u5f00\u542f\u624b\u7535\u7b52", "\u6253\u5f00\u95ea\u5149\u706f", "\u5f00\u542f\u95ea\u5149\u706f"
+            ) -> AgentHardwareNativeTools.FLASHLIGHT_SET to JSONObject().put("enabled", true)
+            lower.hasAny(
+                "turn off flashlight", "close flashlight", "flashlight off", "turn off torch", "torch off",
+                "\u5173\u95ed\u624b\u7535\u7b52", "\u5173\u6389\u624b\u7535\u7b52", "\u5173\u95ed\u95ea\u5149\u706f", "\u5173\u6389\u95ea\u5149\u706f"
+            ) -> AgentHardwareNativeTools.FLASHLIGHT_SET to JSONObject().put("enabled", false)
             lower.hasAny("battery status", "phone battery", "\u624b\u673a\u7535\u91cf", "\u624b\u673a\u7535\u6c60", "\u7535\u6c60\u7535\u91cf", "\u7535\u91cf\u591a\u5c11", "\u67e5\u770b\u7535\u91cf", "\u67e5\u8be2\u7535\u91cf", "\u67e5\u7535\u91cf") ->
                 AgentHardwareNativeTools.BATTERY_STATUS to JSONObject()
             lower.hasAny("call state", "incoming call", "\u6765\u7535\u72b6\u6001", "\u901a\u8bdd\u72b6\u6001", "\u662f\u5426\u6765\u7535") ->
@@ -5181,6 +5200,23 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             target.id,
             if (currentInformation) "Get current information from ${target.title}" else "Ask ${target.title}",
             routing
+        )
+    }
+
+    private fun directDeviceStatusAction(request: AgentRequest): AgentAction? {
+        val lower = request.goal.lowercase(Locale.US)
+        if (!lower.hasAny(
+                "device status", "phone status", "storage status", "network status",
+                "\u8bbe\u5907\u72b6\u6001", "\u624b\u673a\u72b6\u6001", "\u5b58\u50a8\u72b6\u6001", "\u7f51\u7edc\u72b6\u6001"
+            )
+        ) return null
+        return AgentAction(
+            id = "read-device-status",
+            kind = AgentActionKind.READ_SCREEN,
+            target = "Device Status",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = "Read current device status"
         )
     }
 
@@ -5489,9 +5525,15 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 trimmed.removePrefixIgnoreCase("launch ").removeSuffixIgnoreCase(" app").trim()
             trimmed.startsWith("start ", ignoreCase = true) ->
                 trimmed.removePrefixIgnoreCase("start ").removeSuffixIgnoreCase(" app").trim()
+            trimmed.startsWith("\u6253\u5f00") -> trimmed.removePrefix("\u6253\u5f00").trim()
+            trimmed.startsWith("\u542f\u52a8") -> trimmed.removePrefix("\u542f\u52a8").trim()
+            trimmed.startsWith("\u8fd0\u884c") -> trimmed.removePrefix("\u8fd0\u884c").trim()
             else -> ""
         }
-        val query = rawQuery.removePrefixIgnoreCase("app ").trim()
+        val query = rawQuery
+            .removePrefixIgnoreCase("app ")
+            .removeSuffix("\u5e94\u7528")
+            .trim()
         return if (query.equals("app", ignoreCase = true)) "" else query
     }
 
