@@ -23,6 +23,8 @@ import android.widget.TextView
 import android.widget.Toast
 import android.widget.VideoView
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import okhttp3.OkHttpClient
@@ -90,6 +92,7 @@ class AgentRichContentView(
         AgentRichBlockType.DIFF -> codeBlock(block.copy(language = block.language.ifBlank { "diff" }))
         AgentRichBlockType.CHART -> tableBlock(block)
         AgentRichBlockType.HTML -> htmlAnimationBlock(block)
+        AgentRichBlockType.WEBPAGE -> webPageBlock(block)
         AgentRichBlockType.ACTIONS -> actionBlock(block, approval = false)
         AgentRichBlockType.APPROVAL -> actionBlock(block, approval = true)
         AgentRichBlockType.FORM -> formBlock(block)
@@ -229,6 +232,64 @@ class AgentRichContentView(
         <style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:transparent;color:#14202b;font-family:system-ui,sans-serif}*{box-sizing:border-box}</style>
         </head><body>${fragment.take(32_000)}</body></html>
     """.trimIndent()
+
+    private fun webPageBlock(block: AgentRichBlock): View {
+        val uri = Uri.parse(block.uri)
+        if (uri.scheme != "https" || uri.host.isNullOrBlank()) return artifactBlock(block, "Web page")
+        return LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedBackground("#FFFFFF", 7f, "#DDE3E8")
+            addView(TextView(activity).apply {
+                text = block.title.ifBlank { uri.host.orEmpty() }
+                textSize = 14f
+                setTextColor(Color.parseColor("#14202B"))
+                setTypeface(typeface, Typeface.BOLD)
+                setPadding(dp(12), dp(9), dp(12), dp(8))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { openUri(block.uri, "text/html") }
+            })
+            addView(WebView(activity).apply {
+                setBackgroundColor(Color.WHITE)
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = false
+                settings.databaseEnabled = false
+                settings.allowFileAccess = false
+                settings.allowContentAccess = false
+                settings.blockNetworkLoads = false
+                settings.loadsImagesAutomatically = true
+                settings.mediaPlaybackRequiresUserGesture = true
+                settings.setGeolocationEnabled(false)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                    settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
+                }
+                CookieManager.getInstance().setAcceptCookie(false)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    settings.safeBrowsingEnabled = true
+                }
+                webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean =
+                        request?.url?.scheme != "https"
+
+                    @Deprecated("Deprecated in Android")
+                    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean =
+                        Uri.parse(url.orEmpty()).scheme != "https"
+
+                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? =
+                        if (request?.url?.scheme == "https") super.shouldInterceptRequest(view, request)
+                        else WebResourceResponse("text/plain", "utf-8", null)
+                }
+                contentDescription = block.title.ifBlank { "Web page preview" }
+                loadUrl(block.uri)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(420)))
+            addView(selectableText(block.uri, 11f).apply {
+                setTextColor(Color.parseColor("#66717D"))
+                maxLines = 1
+                setPadding(dp(12), dp(7), dp(12), dp(9))
+            })
+        }
+    }
 
     private fun artifactBlock(block: AgentRichBlock, fallbackTitle: String): View =
         LinearLayout(activity).apply {

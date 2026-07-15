@@ -42,4 +42,22 @@ class AgentRichContentTest {
         assertTrue(block.text.contains("animation:pulse"))
         assertTrue(block.fallbackText == "Animated explanation")
     }
+
+    @Test
+    fun promotesFirstMarkdownHttpsLinkToInlineWebPage() {
+        val blocks = AgentRichContentCodec.fromText(
+            "Open [animated result](https://example.com/animation) in the output area."
+        )
+
+        val page = blocks.single { it.type == AgentRichBlockType.WEBPAGE }
+        assertTrue(page.title == "animated result")
+        assertTrue(page.uri == "https://example.com/animation")
+    }
+
+    @Test
+    fun doesNotEmbedInsecureMarkdownLinks() {
+        val blocks = AgentRichContentCodec.fromText("Open [result](http://example.com).")
+
+        assertTrue(blocks.none { it.type == AgentRichBlockType.WEBPAGE })
+    }
 }

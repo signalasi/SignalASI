@@ -17,7 +17,7 @@ MAX_COLUMNS = 24
 ALLOWED_TYPES = {
     "text", "heading", "quote", "code", "table", "image", "video", "audio",
     "file", "link", "citation", "status", "progress", "metric", "actions",
-    "approval", "form", "tool", "diff", "chart", "html",
+    "approval", "form", "tool", "diff", "chart", "html", "webpage",
 }
 RICH_FENCE = re.compile(r"```signalasi-rich\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 

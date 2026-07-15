@@ -34,6 +34,15 @@ class RichOutputTests(unittest.TestCase):
         self.assertEqual(document["blocks"][0]["type"], "html")
         self.assertEqual(document["blocks"][0]["fallback_text"], "Animated result")
 
+    def test_preserves_https_webpage_preview(self):
+        fallback, document = build_rich_output(
+            '''```signalasi-rich
+{"blocks":[{"id":"page","type":"webpage","title":"Result","uri":"https://example.com"}]}
+```'''
+        )
+        self.assertEqual(document["blocks"][0]["type"], "webpage")
+        self.assertEqual(document["blocks"][0]["uri"], "https://example.com")
+
 
 if __name__ == "__main__":
     unittest.main()

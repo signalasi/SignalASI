@@ -7076,10 +7076,11 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         private const val AGENT_NOTIFICATION_ID_BASE = 42000
         private const val MAX_KNOWLEDGE_PROMPT_CHARACTERS = 14_000
         private const val RICH_RESPONSE_CONTRACT =
-            "SignalASI can render optional rich output. When a visual, table, media preview, or animation " +
+            "SignalASI can render optional rich output. When a visual, table, media preview, animation, or public web page " +
                 "would answer better than plain text, append one fenced signalasi-rich JSON document. " +
                 "For an animation use a block with type html, self-contained HTML/CSS/JavaScript in text, " +
-                "and fallback_text. Do not use network requests, external assets, forms, or device APIs."
+                "and fallback_text. Do not use network requests, external assets, forms, or device APIs in html blocks. " +
+                "To show an actual public page inline, use a block with type webpage and an HTTPS uri."
         private val LIVE_DATA_REFUSAL_TERMS = listOf(
             "don't have access to live",
             "do not have access to live",
