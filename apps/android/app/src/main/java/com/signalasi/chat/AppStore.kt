@@ -901,6 +901,7 @@ object AppStore {
         AgentEncryptedDatabase(context, AgentTranscriptStore.PREFS).clear()
         context.getSharedPreferences("signalasi_ui_preferences", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_safety", Context.MODE_PRIVATE).edit().clear().commit()
+        SharedPreferencesAgentConfirmationConsentStore(context).clear()
         context.getSharedPreferences("signalasi_agent_workflows", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_workflow_schedules", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_workflow_triggers", Context.MODE_PRIVATE).edit().clear().commit()

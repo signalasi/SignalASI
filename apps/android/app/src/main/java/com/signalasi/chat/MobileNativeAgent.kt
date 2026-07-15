@@ -70,7 +70,12 @@ class MobileNativeAgent(
     private val perceptionProvider: ScreenPerceptionProvider = AndroidScreenPerceptionProvider(context),
     private val planner: AgentPlanner = GuardedModelAgentPlanner(context),
     private val safetySettingsStore: AgentSafetySettingsStore = SharedPreferencesAgentSafetySettingsStore(context),
-    private val safetyPolicy: AgentSafetyPolicy = DefaultAgentSafetyPolicy(safetySettingsStore),
+    private val confirmationConsentStore: AgentConfirmationConsentStore =
+        SharedPreferencesAgentConfirmationConsentStore(context),
+    private val safetyPolicy: AgentSafetyPolicy = DefaultAgentSafetyPolicy(
+        safetySettingsStore,
+        confirmationConsentStore
+    ),
     private val actionExecutor: AgentActionExecutor = PhoneExecutionAuthority.guarded(AndroidAgentActionExecutor(context)),
     private val observationController: AgentContinuousObservationController = AgentContinuousObservationController(),
     private val recoveryController: AgentActionRecoveryController = AgentActionRecoveryController(),
@@ -658,6 +663,7 @@ class MobileNativeAgent(
             persistSession()
             return snapshot()
         }
+        safetyPolicy.recordApproval(nextAction)
         return executePlannedAction(preparedPlan, nextAction, userConfirmed = true)
     }
 
@@ -6035,10 +6041,12 @@ interface AgentSafetyPolicy {
     fun permissionMode(): PermissionMode
     fun highRiskGuardEnabled(): Boolean
     fun review(plan: AgentPlan): AgentSafetyReview
+    fun recordApproval(action: AgentAction) = Unit
 }
 
 class DefaultAgentSafetyPolicy(
-    private val settingsStore: AgentSafetySettingsStore? = null
+    private val settingsStore: AgentSafetySettingsStore? = null,
+    private val confirmationConsentStore: AgentConfirmationConsentStore? = null
 ) : AgentSafetyPolicy {
     override fun permissionMode(): PermissionMode =
         settingsStore?.load()?.permissionMode ?: PermissionMode.ASK_BEFORE_ACTION
@@ -6088,11 +6096,22 @@ class DefaultAgentSafetyPolicy(
             ?.get("blocked_reason")
             .orEmpty()
         val blocked = deniedPermissions.isNotEmpty() || blocksScreenAction || blocksExecution || blocksHighRisk
+        val pendingActions = plan.actions.filter {
+            it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
+        }
+        val requiresTierConfirmation = pendingActions.any { action ->
+            when (AgentConfirmationPolicy.tier(action)) {
+                AgentConfirmationTier.DIRECT -> false
+                AgentConfirmationTier.CONFIRM_ALWAYS -> true
+                AgentConfirmationTier.CONFIRM_ONCE ->
+                    confirmationConsentStore?.isRemembered(AgentConfirmationPolicy.consentKey(action)) != true
+            }
+        }
         val requiresConfirmation = when (mode) {
             PermissionMode.OBSERVE_ONLY,
-            PermissionMode.SUGGEST_ONLY,
-            PermissionMode.ASK_BEFORE_ACTION -> true
-            PermissionMode.AUTO_LOW_RISK -> highestRisk.weight >= AgentRisk.MEDIUM.weight
+            PermissionMode.SUGGEST_ONLY -> true
+            PermissionMode.ASK_BEFORE_ACTION,
+            PermissionMode.AUTO_LOW_RISK -> requiresTierConfirmation
         }
         val warnings = buildList {
             if (highestRisk == AgentRisk.BLOCKED) add("blocked_action")
@@ -6118,6 +6137,12 @@ class DefaultAgentSafetyPolicy(
             warnings = warnings,
             reason = reason
         )
+    }
+
+    override fun recordApproval(action: AgentAction) {
+        if (AgentConfirmationPolicy.tier(action) == AgentConfirmationTier.CONFIRM_ONCE) {
+            confirmationConsentStore?.remember(AgentConfirmationPolicy.consentKey(action))
+        }
     }
 }
 

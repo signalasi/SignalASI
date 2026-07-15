@@ -595,7 +595,7 @@
     <string name="settings_on_device_agent">On-device Agent &amp; Permissions</string>
     <string name="settings_destroy_data">Reset Data</string>
     <string name="settings_about_signalasi">About SignalASI</string>
-    <string name="settings_about_signalasi_subtitle">Version 0.1.10 · Security and open-source information</string>
+    <string name="settings_about_signalasi_subtitle">Version 0.1.11 · Security and open-source information</string>
     <string name="about_product_subtitle">A secure superintelligent agent for people, agents, models, and devices</string>
     <string name="about_section_product">Product</string>
     <string name="about_version">Version</string>
