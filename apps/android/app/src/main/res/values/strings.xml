@@ -669,7 +669,7 @@
     <string name="agent_attachment_add_file">Add file</string>
     <string name="agent_attachment_remove">Remove attachment</string>
     <string name="agent_attachment_count">%1$d attachments</string>
-    <string name="agent_attachment_default_goal">The user attached files without stating a task. Ask one concise question about what to do. Mention only the file names; do not inspect, summarize, or return the attachments.</string>
+    <string name="agent_attachment_default_goal">The user attached files without stating a task. Ask one concise question about what to do and offer four to six concrete actions suited to the file types. Mention only the file names; do not inspect, summarize, or return the attachments.</string>
     <string name="agent_attachment_rejected">Some attachments were skipped. You can add up to 10 files, 20 MB each.</string>
     <string name="agent_attachment_hide_navigation">Hide navigation bar</string>
     <string name="agent_attachment_show_navigation">Show navigation bar</string>

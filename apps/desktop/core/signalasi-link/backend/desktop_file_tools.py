@@ -41,6 +41,14 @@ def _requested_conversion(prompt: str) -> str:
 
 def _requested_csv_summary(prompt: str) -> bool:
     value = str(prompt or "").strip().lower()
+    # Attachment-only turns carry policy text that names actions the assistant
+    # must not perform. Those words are constraints, not an explicit file task.
+    if re.search(
+        r"(?:files?\s+without\s+stating\s+a\s+task|do\s+not\s+(?:inspect|summari[sz]e|return)|"
+        r"\u53ea\u4e0a\u4f20\u4e86?\u9644\u4ef6|\u6ca1\u6709\u8bf4\u660e\u4efb\u52a1|\u4e0d\u8981(?:\u8bfb\u53d6|\u603b\u7ed3|\u56de\u4f20))",
+        value,
+    ):
+        return False
     return bool(re.search(
         r"(?:summari[sz]e|summary|analy[sz]e|overview|calculate|total|revenue|statistics|"
         r"\u6c47\u603b|\u603b\u7ed3|\u5206\u6790|\u7edf\u8ba1|\u5408\u8ba1|\u6536\u5165|\u8425\u6536)",

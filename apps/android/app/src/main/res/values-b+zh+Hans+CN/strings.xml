@@ -367,7 +367,7 @@
     <string name="agent_attachment_add_file">添加文件</string>
     <string name="agent_attachment_remove">移除附件</string>
     <string name="agent_attachment_count">%1$d 个附件</string>
-    <string name="agent_attachment_default_goal">用户只上传了附件，没有说明任务。请只问一个简短问题确认要做什么；仅提文件名，不要读取、总结或回传附件。</string>
+    <string name="agent_attachment_default_goal">用户只上传了附件，没有说明任务。请只问一个简短问题，并根据文件类型给出四到六个可直接执行的选项；仅提文件名，不要读取、总结或回传附件。</string>
     <string name="agent_attachment_rejected">部分附件未添加。最多可添加 10 个文件，每个不超过 20 MB。</string>
     <string name="agent_attachment_hide_navigation">隐藏导航栏</string>
     <string name="agent_attachment_show_navigation">显示导航栏</string>

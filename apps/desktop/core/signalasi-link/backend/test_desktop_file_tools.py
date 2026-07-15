@@ -51,6 +51,31 @@ class DesktopFileToolTests(unittest.TestCase):
             result = try_execute_explicit_file_task("\u5904\u7406\u4e00\u4e0b", [source], Path(temporary) / "outputs")
         self.assertIsNone(result)
 
+    def test_attachment_only_policy_does_not_trigger_csv_summary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "phone-test.csv"
+            source.write_text("name,value\nAlpha,1\n", encoding="utf-8")
+            prompt = (
+                "The user attached files without stating a task. Ask one concise question about what to do. "
+                "Mention only the file names; do not inspect, summarize, or return the attachments.\n\n"
+                "Attached input:\n- phone-test.csv (text/csv, 19 B)\n"
+                "Do not inspect the attached content until the user provides a task."
+            )
+            result = try_execute_explicit_file_task(prompt, [source], Path(temporary) / "outputs")
+        self.assertIsNone(result)
+
+    def test_chinese_attachment_only_policy_does_not_trigger_csv_summary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "phone-test.csv"
+            source.write_text("name,value\nAlpha,1\n", encoding="utf-8")
+            prompt = (
+                "\u7528\u6237\u53ea\u4e0a\u4f20\u4e86\u9644\u4ef6\uff0c\u6ca1\u6709\u8bf4\u660e\u4efb\u52a1\u3002"
+                "\u8bf7\u53ea\u95ee\u4e00\u4e2a\u7b80\u77ed\u95ee\u9898\u786e\u8ba4\u8981\u505a\u4ec0\u4e48\uff1b"
+                "\u4ec5\u63d0\u6587\u4ef6\u540d\uff0c\u4e0d\u8981\u8bfb\u53d6\u3001\u603b\u7ed3\u6216\u56de\u4f20\u9644\u4ef6\u3002"
+            )
+            result = try_execute_explicit_file_task(prompt, [source], Path(temporary) / "outputs")
+        self.assertIsNone(result)
+
     def test_multiple_files_stay_on_model_route(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
