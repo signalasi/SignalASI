@@ -19,6 +19,16 @@ class GuardedModelAgentPlanner(
         val fallbackPlan = fallback.plan(request)
         val requirements = AgentTaskRequirementAnalyzer.analyze(request.goal)
         if (fallbackPlan.plannerProfile.startsWith("specialized-adapter:")) return fallbackPlan
+        val deterministicSystemAction = AgentSystemToolPlanner.actionFor(request)
+        if (deterministicSystemAction != null && fallbackPlan.actions.any {
+                it.id == deterministicSystemAction.id && it.kind == deterministicSystemAction.kind
+            }
+        ) {
+            return fallbackPlan.copy(
+                plannerProfile = "rule-based-phone-system",
+                routeRationale = "A deterministic Android system tool matched the request and runs locally without model planning."
+            )
+        }
         if (fallbackPlan.actions.isNotEmpty() && fallbackPlan.actions.all {
                 it.id == "read-device-status" || it.kind == AgentActionKind.CALL_NATIVE_TOOL
             }) {

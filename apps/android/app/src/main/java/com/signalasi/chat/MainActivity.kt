@@ -104,6 +104,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_AGENT_CAMERA = 2008
         private const val REQUEST_AGENT_CAMERA_PERMISSION = 2009
         private const val REQUEST_AGENT_NATIVE_PERMISSIONS = 2010
+        private const val REQUEST_AGENT_NOTIFICATIONS = 2011
         private const val UI_PREFS = "signalasi_ui_preferences"
         private const val HISTORY_PREFS = "signalasi_chat_history"
         private const val HISTORY_KEY = "messages"
@@ -474,6 +475,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         refreshMePage()
         startMessageService()
         showMainTab(PAGE_AGENT)
+        requestAgentNotificationPermissionIfNeeded()
 
         SignalASIMqttClient.addListener(this)
         SignalASIMqttClient.connect(this)
@@ -501,6 +503,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             startForegroundService(intent)
         } else {
             startService(intent)
+        }
+    }
+
+    private fun requestAgentNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(
+                arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                REQUEST_AGENT_NOTIFICATIONS
+            )
         }
     }
 
@@ -1389,7 +1402,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentGoalInput.clearFocus()
         getSystemService(InputMethodManager::class.java)
             .hideSoftInputFromWindow(agentGoalInput.windowToken, 0)
-        executeConcurrentAgentGoal(goal, conversationContext, conversation.id, turnId)
+        val deterministicAction = deterministicSystemActionFor(goal, conversationContext)
+        if (deterministicAction != null &&
+            AgentConfirmationPolicy.tier(deterministicAction) == AgentConfirmationTier.DIRECT
+        ) {
+            executeDirectSystemAction(deterministicAction, conversation.id, turnId)
+        } else {
+            executeConcurrentAgentGoal(goal, conversationContext, conversation.id, turnId)
+        }
     }
 
     private fun updateAgentSubmitButtonAppearance(hasInput: Boolean) {
@@ -1468,6 +1488,56 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 AgentPhase.FAILED -> error(state.lastActionResult?.message.orEmpty().ifBlank { "Agent task failed" })
                 AgentPhase.CANCELLED -> cancellationSource.cancel("Agent task cancelled")
                 else -> Unit
+            }
+        }
+    }
+
+    private fun deterministicSystemActionFor(
+        goal: String,
+        conversationContext: AgentConversationContext
+    ): AgentAction? {
+        val state = mobileNativeAgent.snapshot()
+        return AgentSystemToolPlanner.actionFor(
+            AgentRequest(
+                goal = goal,
+                screen = state.currentScreen,
+                targets = state.callableTargets,
+                memories = emptyList(),
+                runtimeContext = state.runtimeContext,
+                conversationContext = conversationContext
+            )
+        )
+    }
+
+    private fun executeDirectSystemAction(
+        action: AgentAction,
+        conversationId: String,
+        turnId: String
+    ) {
+        val screen = mobileNativeAgent.snapshot().currentScreen
+        thread(name = "signalasi-agent-system-action") {
+            val outcome = runCatching {
+                PhoneExecutionAuthority.guarded(
+                    NotifyingAgentActionExecutor(
+                        this@MainActivity,
+                        AndroidAgentActionExecutor(this@MainActivity)
+                    )
+                )
+                    .execute(action, screen)
+            }
+            runOnUiThread {
+                val result = outcome.getOrElse { error ->
+                    AgentActionResult(action.id, false, error.message ?: "Agent operation failed")
+                }
+                agentTranscriptStore.append(
+                    AgentTranscriptRole.ASSISTANT,
+                    result.message,
+                    dedupeKey = "direct-system:$turnId:${action.id}",
+                    conversationId = conversationId,
+                    turnId = turnId,
+                    taskId = turnId
+                )
+                renderAgentTranscript(agentTranscriptStore.list(conversationId))
             }
         }
     }

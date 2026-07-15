@@ -595,7 +595,7 @@
     <string name="settings_on_device_agent">On-device Agent &amp; Permissions</string>
     <string name="settings_destroy_data">Reset Data</string>
     <string name="settings_about_signalasi">About SignalASI</string>
-    <string name="settings_about_signalasi_subtitle">Version 0.1.12 · Security and open-source information</string>
+    <string name="settings_about_signalasi_subtitle">Version 0.1.13 · Security and open-source information</string>
     <string name="about_product_subtitle">A secure superintelligent agent for people, agents, models, and devices</string>
     <string name="about_section_product">Product</string>
     <string name="about_version">Version</string>
@@ -1181,4 +1181,21 @@
     <string name="agent_session_context_compacted">Older context summarized</string>
     <string name="settings_pages">Pages</string>
     <string name="settings_agent_tools">Agent tools</string>
+    <string name="agent_operation_channel_name">Phone operations</string>
+    <string name="agent_operation_channel_description">Progress and results for actions performed on this phone</string>
+    <string name="agent_operation_status_running">Running · On this phone</string>
+    <string name="agent_operation_status_success">Succeeded · On this phone</string>
+    <string name="agent_operation_status_failure">Failed · On this phone</string>
+    <string name="agent_operation_timer_minutes">%1$d-minute timer</string>
+    <string name="agent_operation_timer_seconds">%1$d-second timer</string>
+    <string name="agent_operation_alarm_time">Alarm · %1$s</string>
+    <string name="agent_operation_alarm">Alarm</string>
+    <string name="agent_operation_camera">Camera</string>
+    <string name="agent_operation_flashlight">Open flashlight</string>
+    <string name="agent_operation_volume">Volume</string>
+    <string name="agent_operation_battery">Battery status</string>
+    <string name="agent_operation_device_status">Device status</string>
+    <string name="agent_operation_open_app">Open %1$s</string>
+    <string name="agent_operation_subtext">SignalASI · Phone</string>
+    <string name="agent_operation_private_text">SignalASI is running a phone action</string>
 </resources>

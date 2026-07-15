@@ -76,7 +76,9 @@ class MobileNativeAgent(
         safetySettingsStore,
         confirmationConsentStore
     ),
-    private val actionExecutor: AgentActionExecutor = PhoneExecutionAuthority.guarded(AndroidAgentActionExecutor(context)),
+    private val actionExecutor: AgentActionExecutor = PhoneExecutionAuthority.guarded(
+        NotifyingAgentActionExecutor(context, AndroidAgentActionExecutor(context))
+    ),
     private val observationController: AgentContinuousObservationController = AgentContinuousObservationController(),
     private val recoveryController: AgentActionRecoveryController = AgentActionRecoveryController(),
     private val memoryStore: AgentMemoryStore = SharedPreferencesAgentMemoryStore(context),
@@ -6582,7 +6584,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 .putExtra(AlarmClock.EXTRA_MESSAGE, "SignalASI")
             else -> Intent(AlarmClock.ACTION_SHOW_ALARMS)
         }
-        return launchIntent(
+        val result = launchIntent(
             actionId = action.id,
             intent = intent,
             successMessage = when {
@@ -6592,6 +6594,15 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 else -> "Opened alarm app"
             }
         )
+        if (result.success && timerSeconds != null) {
+            runCatching {
+                context.startActivity(
+                    Intent(AlarmClock.ACTION_SHOW_TIMERS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            }
+        }
+        return result
     }
 
     private fun launchIntent(actionId: String, intent: Intent, successMessage: String): AgentActionResult {
