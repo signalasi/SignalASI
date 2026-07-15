@@ -38,7 +38,12 @@ def build_rich_output(content: str, output_files: list[dict] | None = None, task
 
     clean_content = RICH_FENCE.sub("", source).strip()
     blocks = [item for item in blocks if item]
-    blocks.extend(_artifact_block(item, task_id) for item in (output_files or []) if isinstance(item, dict))
+    from response_policy import is_input_artifact
+    blocks.extend(
+        _artifact_block(item, task_id)
+        for item in (output_files or [])
+        if isinstance(item, dict) and not is_input_artifact(item)
+    )
     blocks = [item for item in blocks if item][:MAX_BLOCKS]
 
     if not blocks:

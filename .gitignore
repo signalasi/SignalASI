@@ -57,6 +57,7 @@ tasks/
 task-workspaces/
 
 # SignalASI sidecar local build cache
+apps/desktop/core/signalasi-link/backend/build/
 apps/desktop/core/signalasi-link/backend/signal_sidecar/.gradle/
 apps/desktop/core/signalasi-link/backend/signal_sidecar/build/
 

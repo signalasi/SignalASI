@@ -92,9 +92,11 @@ class CodexAppServer:
         return thread_id
 
     def _start_turn(self, thread_id: str, prompt: str, model: str) -> dict:
+        from response_policy import apply_response_policy
+        styled_prompt = apply_response_policy(prompt)
         return self._request("turn/start", {
             "threadId": thread_id,
-            "input": [{"type": "text", "text": f"{prompt.rstrip()}\n\n{CODEX_TASK_POLICY}", "text_elements": []}],
+            "input": [{"type": "text", "text": f"{styled_prompt.rstrip()}\n\n{CODEX_TASK_POLICY}", "text_elements": []}],
             "model": model, "effort": "low",
         }, timeout=30)
 
@@ -155,7 +157,7 @@ class CodexAppServer:
             threading.Thread(target=self._read_stdout, daemon=True).start()
             threading.Thread(target=self._drain_stderr, daemon=True).start()
         self._request("initialize", {
-            "clientInfo": {"name": "signalasi-desktop", "title": "SignalASI Desktop", "version": "0.1.9"},
+            "clientInfo": {"name": "signalasi-desktop", "title": "SignalASI Desktop", "version": "0.1.10"},
             "capabilities": {"experimentalApi": True},
         }, timeout=15)
         self._notify("initialized", {})

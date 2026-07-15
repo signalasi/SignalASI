@@ -833,8 +833,9 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
 
     def publish_result(task: dict) -> None:
         from rich_output import build_rich_output
+        from response_policy import sanitize_assistant_response
         reply, rich_output = build_rich_output(
-            str(task.get("result") or ""),
+            sanitize_assistant_response(str(task.get("result") or "")),
             list(task.get("output_files") or []),
             str(task.get("task_id") or ""),
         )

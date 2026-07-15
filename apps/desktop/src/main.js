@@ -20,6 +20,8 @@ if (UI_SMOKE) {
 
 let mainWindow;
 let backendProcess;
+let backendRestartTimer;
+let appIsQuitting = false;
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
@@ -299,6 +301,12 @@ async function startBackend() {
 
   backendProcess.on("exit", () => {
     backendProcess = undefined;
+    if (appIsQuitting || backendRestartTimer) return;
+    backendRestartTimer = setTimeout(async () => {
+      backendRestartTimer = undefined;
+      const status = await backendStatus();
+      if (!status.running && !appIsQuitting) startBackend();
+    }, 1500);
   });
 
   for (let attempt = 0; attempt < 12; attempt += 1) {
@@ -593,6 +601,11 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  appIsQuitting = true;
+  if (backendRestartTimer) {
+    clearTimeout(backendRestartTimer);
+    backendRestartTimer = undefined;
+  }
   if (backendProcess && !backendProcess.killed) {
     if (process.platform === "win32" && backendProcess.pid) {
       spawnSync("taskkill", ["/pid", String(backendProcess.pid), "/T", "/F"], {

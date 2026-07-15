@@ -613,7 +613,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 sourceMessageId = sourceMessageId,
                 contactId = envelope?.optString("contact_id").orEmpty().ifBlank { message.contact.id },
                 content = message.content,
-                richOutputJson = AgentRichContentCodec.fromEnvelope(envelope)
+                richOutputJson = CodexStyleResponsePolicy.filterAssistantRichOutput(
+                    AgentRichContentCodec.fromEnvelope(envelope)
+                )
             )
         )
     }
@@ -933,10 +935,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ?: agentTranscriptStore.activeConversation().id
         val turnId = envelope.optString("turn_id").takeIf { it.isNotBlank() }
             ?: agentRuntimeTurnIds[taskRuntime].orEmpty()
+        val connectorProcessKey = turnId.takeIf { it.isNotBlank() }
+            ?.let { "connector-turn:$it" }
+            ?: "remote-task:$taskId"
         agentTranscriptStore.upsert(
             AgentTranscriptRole.PROCESS,
             "$targetName · $statusLabel",
-            dedupeKey = "remote-task:$taskId",
+            dedupeKey = connectorProcessKey,
             timestampMillis = envelope.optLong("updated_at", System.currentTimeMillis()),
             conversationId = conversationId,
             turnId = turnId,
@@ -1492,16 +1497,22 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 append(" (").append(attachment.mimeType).append(", ")
                 append(AgentInputAttachment.humanSize(attachment.sizeBytes)).append(")\n")
             }
-            append("Use the attached content when completing the request.")
+            if (goal.isBlank()) {
+                append("Do not inspect the attached content until the user provides a task.")
+            } else {
+                append("Use the attached content when completing the request.")
+            }
         }
         continueAgentGoalSubmission(executionGoal, conversation.id, turnId)
-        thread(name = "signalasi-agent-attachments") {
-            attachments.filterNot { attachment ->
-                attachment.mimeType.startsWith("image/") ||
-                    attachment.mimeType.startsWith("video/") ||
-                    attachment.mimeType.startsWith("audio/")
-            }.forEach { attachment ->
-                runCatching { AgentKnowledgeImporter(applicationContext).importDocument(attachment.uri) }
+        if (goal.isNotBlank()) {
+            thread(name = "signalasi-agent-attachments") {
+                attachments.filterNot { attachment ->
+                    attachment.mimeType.startsWith("image/") ||
+                        attachment.mimeType.startsWith("video/") ||
+                        attachment.mimeType.startsWith("audio/")
+                }.forEach { attachment ->
+                    runCatching { AgentKnowledgeImporter(applicationContext).importDocument(attachment.uri) }
+                }
             }
         }
     }
@@ -3365,17 +3376,36 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 description != "Create a safe local task plan" &&
                 !description.contains(':')
             ) {
-                agentTranscriptStore.append(
-                    AgentTranscriptRole.PROCESS,
-                    description,
-                    dedupeKey = "pending:$planId:${pending.id}:${description.hashCode()}",
-                    conversationId = conversationId,
-                    turnId = turnId,
-                    taskId = state.sessionId
-                )
+                val connectorProcess = pending.kind == AgentActionKind.CALL_CONNECTOR && turnId.isNotBlank()
+                val processKey = if (connectorProcess) {
+                    "connector-turn:$turnId"
+                } else {
+                    "pending:$planId:${pending.id}:${description.hashCode()}"
+                }
+                if (connectorProcess) {
+                    agentTranscriptStore.upsert(
+                        AgentTranscriptRole.PROCESS,
+                        description,
+                        dedupeKey = processKey,
+                        conversationId = conversationId,
+                        turnId = turnId,
+                        taskId = state.sessionId
+                    )
+                } else {
+                    agentTranscriptStore.append(
+                        AgentTranscriptRole.PROCESS,
+                        description,
+                        dedupeKey = processKey,
+                        conversationId = conversationId,
+                        turnId = turnId,
+                        taskId = state.sessionId
+                    )
+                }
             }
         }
-        val result = state.lastActionResult?.message?.trim().orEmpty()
+        val result = CodexStyleResponsePolicy.sanitizeAssistantText(
+            state.lastActionResult?.message.orEmpty()
+        )
         val settledConnectorResult = state.lastActionResult?.metadata?.get("awaiting_response") == "false"
         val terminal = state.phase == AgentPhase.COMPLETED ||
             state.phase == AgentPhase.FAILED ||
@@ -3390,7 +3420,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 conversationId = conversationId,
                 turnId = turnId,
                 taskId = state.sessionId,
-                richOutputJson = state.lastActionResult?.metadata?.get("rich_output").orEmpty()
+                richOutputJson = CodexStyleResponsePolicy.filterAssistantRichOutput(
+                    state.lastActionResult?.metadata?.get("rich_output").orEmpty()
+                )
             )
         }
     }
@@ -3426,11 +3458,20 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun renderAgentTranscript(entries: List<AgentTranscriptEntry>) {
-        val visibleEntries = entries.filterNot { entry ->
+        val filteredEntries = entries.filterNot { entry ->
             val staleApproval = isAgentApprovalEntry(entry) &&
                 (isDirectActionApprovalEntry(entry) || !isAgentApprovalStillWaiting(entry.taskId))
             if (staleApproval) agentTranscriptStore.deleteEntry(entry.id)
             staleApproval
+        }
+        val visibleEntries = buildList<AgentTranscriptEntry> {
+            filteredEntries.forEach { entry ->
+                if (entry.role == AgentTranscriptRole.PROCESS && lastOrNull()?.role == AgentTranscriptRole.PROCESS) {
+                    set(lastIndex, entry)
+                } else {
+                    add(entry)
+                }
+            }
         }
         val incomingIds = visibleEntries.map(AgentTranscriptEntry::id)
         val renderedIds = renderedAgentTranscriptIds.toList()
@@ -3562,7 +3603,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 setPadding(dp(15), dp(10), dp(15), dp(10))
                 setBackgroundResource(R.drawable.bubble_self_background)
                 attachAgentTranscriptActions(this, entry)
-            })
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
         }
     }
 

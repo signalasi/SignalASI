@@ -46,6 +46,7 @@ const backendFiles = [
   "phone_tool_broker.py",
   "push_auth.py",
   "requirements.txt",
+  "response_policy.py",
   "rich_output.py",
   "signalasi_client.py",
   "signalasi_notify.py",

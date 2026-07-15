@@ -517,8 +517,12 @@ def _cloud_model_available() -> tuple[bool, str]:
 def ask_agent_sync(contact_id: str, text: str, task_id: str = "") -> str:
     spec = all_agent_specs().get(contact_id)
     start = time.perf_counter()
+    from response_policy import apply_response_policy, sanitize_assistant_response
+    styled_text = apply_response_policy(text)
     try:
-        reply = _ask_agent_sync_inner(contact_id, text, spec, task_id=task_id)
+        reply = sanitize_assistant_response(
+            _ask_agent_sync_inner(contact_id, styled_text, spec, task_id=task_id)
+        )
         _append_execution_log(
             spec=spec,
             contact_id=contact_id,

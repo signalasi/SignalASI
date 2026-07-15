@@ -11,6 +11,7 @@ const resources = path.join(packageDir, "resources");
 const bundledPython = path.join(resources, "python", "venv", "Scripts", "python.exe");
 const backendMain = path.join(resources, "signalasi-link", "backend", "main.py");
 const packagedTaskWorkspace = path.join(resources, "signalasi-link", "backend", "task_workspace.py");
+const packagedResponsePolicy = path.join(resources, "signalasi-link", "backend", "response_policy.py");
 const packagedBackendDir = path.dirname(backendMain);
 const packagedCustomAgent = path.join(packagedBackendDir, "custom_agent_stdio.py");
 const packagedMcpWrapper = path.join(packagedBackendDir, "mcp_agent_wrapper.py");
@@ -128,6 +129,7 @@ async function main() {
   assertExists(exe, "SignalASI Desktop exe");
   assertExists(backendMain, "Packaged backend");
   assertExists(packagedTaskWorkspace, "Packaged task workspace module");
+  assertExists(packagedResponsePolicy, "Packaged response policy module");
   assertExists(packagedCustomAgent, "Packaged Custom Agent wrapper");
   assertExists(packagedMcpWrapper, "Packaged MCP wrapper");
   assertExists(packagedPhoneToolBroker, "Packaged phone tool broker");

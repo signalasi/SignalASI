@@ -86,6 +86,8 @@ def task_artifacts(task_id: str, limit: int = 50) -> list[dict]:
             if not file_path.is_file() or file_path.is_symlink():
                 continue
             relative = file_path.relative_to(directory).as_posix()
+            if relative.lower().startswith("downloads/input/"):
+                continue
             artifacts.append({
                 "name": file_path.name,
                 "relative_path": relative,

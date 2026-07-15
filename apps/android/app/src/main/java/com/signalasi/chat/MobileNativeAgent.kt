@@ -6985,6 +6985,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         ].orEmpty()
         val screenBlock = action.parameters[INTERNAL_SCREEN_CONTEXT].orEmpty()
         return buildString {
+            append(CodexStyleResponsePolicy.PROMPT).append("\n\n")
             if (contextBlock.isNotBlank()) append(contextBlock).append("\n\n")
             if (memoryBlock.isNotBlank()) append("Relevant personal memory:\n").append(memoryBlock).append("\n\n")
             if (knowledgeBlock.isNotBlank()) append("Authorized knowledge results:\n").append(knowledgeBlock).append("\n\n")
