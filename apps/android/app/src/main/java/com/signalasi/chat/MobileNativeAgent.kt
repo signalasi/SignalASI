@@ -6395,6 +6395,13 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
     }
 
     private fun openApp(action: AgentAction): AgentActionResult {
+        if (action.id == "open-camera") {
+            return launchIntent(
+                actionId = action.id,
+                intent = Intent(context, AgentAutoCaptureActivity::class.java),
+                successMessage = "Opened camera and started automatic focus capture"
+            )
+        }
         val intentAction = action.parameters["intent_action"].orEmpty()
         val packageName = action.parameters["package"].orEmpty()
         val uri = action.parameters["uri"].orEmpty()

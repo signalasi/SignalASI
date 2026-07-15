@@ -8,6 +8,8 @@ class AgentSystemToolPlannerTest {
     @Test
     fun recognizesChinesePhoneCameraCommands() {
         assertTrue(AgentSystemToolPlanner.isCameraCaptureGoal("\u8c03\u7528\u624b\u673a\u6444\u50cf\u5934\u62cd\u7167"))
+        assertTrue(AgentSystemToolPlanner.isCameraCaptureGoal("\u6253\u5f00\u76f8\u673a\u62cd\u7167"))
+        assertTrue(AgentSystemToolPlanner.isCameraCaptureGoal("\u4f7f\u7528\u6444\u50cf\u5934\u62cd\u7167"))
         assertTrue(AgentSystemToolPlanner.isCameraCaptureGoal("\u6253\u5f00\u76f8\u673a"))
         assertTrue(AgentSystemToolPlanner.isCameraCaptureGoal("\u62cd\u7167"))
     }

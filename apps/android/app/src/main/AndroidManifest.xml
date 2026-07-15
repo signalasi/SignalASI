@@ -60,6 +60,12 @@
             </intent-filter>
         </activity>
         <activity
+            android:name=".AgentAutoCaptureActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.SignalASI.Camera" />
+        <activity
             android:name="com.journeyapps.barcodescanner.CaptureActivity"
             android:screenOrientation="portrait"
             android:stateNotNeeded="true"
