@@ -165,10 +165,10 @@ class AgentRichContentView(
         block.title.takeIf(String::isNotBlank)?.let { addView(selectableText(it, 15f)) }
         val image = ImageView(activity).apply {
             adjustViewBounds = true
-            scaleType = ImageView.ScaleType.CENTER_CROP
+            scaleType = ImageView.ScaleType.FIT_CENTER
             contentDescription = block.title.ifBlank { block.text }
-            setBackgroundColor(Color.parseColor("#EEF2F5"))
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(220)).apply {
+            setBackgroundColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(340)).apply {
                 if (block.title.isNotBlank()) topMargin = dp(7)
             }
         }
@@ -600,6 +600,7 @@ private object AgentRichPlaybackCoordinator {
 
     fun activate(view: WebView) {
         activeDrawable.get()?.stop()
+        activeImage.get()?.visibility = View.GONE
         activeImage.clear()
         activeDrawable.clear()
         val previous = active.get()
@@ -615,9 +616,13 @@ private object AgentRichPlaybackCoordinator {
     fun activate(view: ImageView, drawable: AnimatedImageDrawable) {
         active.get()?.let(::pause)
         active.clear()
-        if (activeImage.get() !== view) activeDrawable.get()?.stop()
+        if (activeImage.get() !== view) {
+            activeDrawable.get()?.stop()
+            activeImage.get()?.visibility = View.GONE
+        }
         activeImage = WeakReference(view)
         activeDrawable = WeakReference(drawable)
+        view.visibility = View.VISIBLE
         drawable.start()
     }
 
@@ -636,9 +641,11 @@ private object AgentRichPlaybackCoordinator {
     private fun pause(view: WebView) {
         view.onPause()
         view.evaluateJavascript(PAUSE_SCRIPT, null)
+        view.visibility = View.GONE
     }
 
     private fun resume(view: WebView) {
+        view.visibility = View.VISIBLE
         view.onResume()
         view.evaluateJavascript(RESUME_SCRIPT, null)
     }
