@@ -186,6 +186,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     @Volatile private var agentOperationInFlight = false
     private val activeAgentTasks = ConcurrentHashMap<Long, MobileNativeAgent>()
     private val provisionalAgentTasks = ConcurrentHashMap.newKeySet<MobileNativeAgent>()
+    private val completedConnectorTaskIds = ConcurrentHashMap.newKeySet<String>()
     private val agentRuntimeConversationIds = ConcurrentHashMap<MobileNativeAgent, String>()
     private val agentRuntimeTurnIds = ConcurrentHashMap<MobileNativeAgent, String>()
     private val agentConnectorResponsesInFlight = ConcurrentHashMap.newKeySet<String>()
@@ -855,6 +856,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 )
             val responseConversationId = envelope?.optString("conversation_id").orEmpty()
             val responseTurnId = envelope?.optString("turn_id").orEmpty()
+            val responseTaskId = envelope?.optString("task_id").orEmpty()
+            if (responseTaskId.isNotBlank()) {
+                completedConnectorTaskIds.add(responseTaskId)
+                val processConversationId = responseConversationId.ifBlank {
+                    agentTranscriptStore.activeConversation().id
+                }
+                agentTranscriptStore.upsert(
+                    AgentTranscriptRole.PROCESS,
+                    "${contactById(msg.contact.id).name} · ${getString(R.string.agent_task_status_completed)}",
+                    dedupeKey = "connector-task:$responseTaskId",
+                    conversationId = processConversationId,
+                    turnId = responseTurnId,
+                    taskId = responseTaskId
+                )
+            }
             publishAgentConnectorResponse(envelope, msg)
             if (!nativeAgentResponse && responseConversationId.isNotBlank() &&
                 agentTranscriptStore.conversations(includeArchived = true).any { it.id == responseConversationId }
@@ -887,6 +903,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ?: selectedContact?.id
             ?: return true
         val status = envelope.optString("task_status")
+        val taskId = envelope.optString("task_id")
+        if (taskId in completedConnectorTaskIds && status !in setOf("completed", "failed", "cancelled", "timed_out")) {
+            return true
+        }
         val statusSeq = envelope.optLong("status_seq", 0L)
         val existingMessage = messages[contactId]?.firstOrNull { it.id == sourceMessageId }
         if (existingMessage != null && statusSeq > 0L && statusSeq < existingMessage.taskStatusSeq) return true
@@ -924,7 +944,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ChatHistoryStore.applyAgentTaskEvent(this, envelope)
             reloadChatHistoryIfChanged(force = true)
         }
-        val taskId = envelope.optString("task_id")
         val taskRuntime = runtimeForConnectorResponse(sourceMessageId, contactId)
         val nativeState = taskRuntime.recordConnectorTaskStatus(
             sourceMessageId = sourceMessageId,

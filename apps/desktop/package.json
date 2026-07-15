@@ -1,6 +1,6 @@
 {
   "name": "signalasi-desktop",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "SignalASI Desktop Connector for pairing local agents with the mobile app.",
   "license": "Apache-2.0",
   "main": "src/main.js",

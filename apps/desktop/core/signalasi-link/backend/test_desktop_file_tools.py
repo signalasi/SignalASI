@@ -7,6 +7,25 @@ from desktop_file_tools import try_execute_explicit_file_task
 
 
 class DesktopFileToolTests(unittest.TestCase):
+    def test_explicit_csv_summary_calculates_revenue_without_model(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "sales.csv"
+            source.write_text(
+                "product,units,price\nAlpha,3,12.50\nBeta,2,8.00\nGamma,5,4.20\n",
+                encoding="utf-8",
+            )
+
+            result = try_execute_explicit_file_task(
+                "Summarize this CSV and calculate total revenue", [source], root / "outputs"
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual("csv_summary", result.operation)
+        self.assertIn("| Alpha | 3 | 12.50 | 37.50 |", result.message)
+        self.assertIn("**Total revenue: 74.50**", result.message)
+        self.assertIsNone(result.output_path)
+
     def test_explicit_excel_pdf_conversion_uses_deterministic_tool(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

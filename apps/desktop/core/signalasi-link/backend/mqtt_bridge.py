@@ -597,7 +597,9 @@ def _log_task_latency(task_id: str, trace: list[dict]) -> None:
 
 
 def _should_publish_task_status(status: str) -> bool:
-    return str(status or "").strip().lower() != "queued"
+    return str(status or "").strip().lower() not in {
+        "accepted", "queued", "starting", "completed"
+    }
 
 
 def _task_event_publish_loop() -> None:
@@ -938,11 +940,20 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         return task_content + "\n".join(details)
 
     def publish_event(task: dict) -> None:
-        # accepted already means the task is durably queued; a second queued event
-        # adds UI noise without useful user-facing information.
-        if not _should_publish_task_status(str(task.get("status") or "")):
+        nonlocal progress_event_published
+        status = str(task.get("status") or "").strip().lower()
+        # A successful task needs one live progress row. The final reply is the
+        # authoritative completion signal, so transport-only lifecycle events do
+        # not delay the useful answer or create a stack of status messages.
+        if not _should_publish_task_status(status):
             return
+        if status == "running":
+            if progress_event_published:
+                return
+            progress_event_published = True
         _enqueue_task_event(mqttc, wire_payload, task, task_trace_snapshot())
+
+    progress_event_published = False
 
     def run_task(task) -> str:
         log.info(f"Agent task running task_id={task.task_id} contact_id={contact_id} agent_id={agent_id}")
