@@ -218,7 +218,7 @@ class AgentScreenCaptureService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val notification = Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_tab_agent_filled)
+            .setSmallIcon(R.drawable.ic_tab_chat_filled)
             .setContentTitle(getString(R.string.agent_screen_capture_notification_title))
             .setContentText(getString(R.string.agent_screen_capture_notification_text))
             .setContentIntent(pendingIntent)

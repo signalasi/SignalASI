@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.os.Build
@@ -18,6 +19,11 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         private const val NOTIFICATION_ID = 1001
         private const val MESSAGE_NOTIFICATION_ID = 1002
         private const val AGENT_SCHEDULE_NOTIFICATION_ID = 1003
+        const val ACTION_REFRESH_LANGUAGE = "com.signalasi.chat.action.REFRESH_NOTIFICATION_LANGUAGE"
+    }
+
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(AppLanguage.wrap(newBase))
     }
 
     override fun onCreate() {
@@ -29,6 +35,11 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        AppLanguage.applyToResources(this)
+        if (intent?.action == ACTION_REFRESH_LANGUAGE) {
+            ensureNotificationChannel()
+            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, serviceNotification())
+        }
         handleDebugIncoming(intent)
         when (intent?.action) {
             AgentWorkflowScheduler.ACTION_RUN_SCHEDULE -> executeScheduledWorkflow(
@@ -252,7 +263,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val notification = Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_tab_agent_filled)
+            .setSmallIcon(R.drawable.ic_tab_chat_filled)
             .setContentTitle(getString(R.string.agent_schedule_notification_title, workflowName))
             .setContentText(detail.take(160))
             .setStyle(Notification.BigTextStyle().bigText(detail))

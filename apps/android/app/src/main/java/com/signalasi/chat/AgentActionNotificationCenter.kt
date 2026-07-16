@@ -32,7 +32,8 @@ class NotifyingAgentActionExecutor(
     )
 }
 
-internal class AgentActionNotificationCenter(private val context: Context) {
+internal class AgentActionNotificationCenter(baseContext: Context) {
+    private val context = AppLanguage.wrap(baseContext)
     private val manager = context.getSystemService(NotificationManager::class.java)
 
     fun showRunning(action: AgentAction) {
@@ -84,12 +85,12 @@ internal class AgentActionNotificationCenter(private val context: Context) {
             @Suppress("DEPRECATION")
             Notification.Builder(context)
         }
-            .setSmallIcon(R.drawable.ic_tab_agent_filled)
+            .setSmallIcon(R.drawable.ic_tab_chat_filled)
             .setContentTitle(context.getString(R.string.app_name))
             .setContentText(context.getString(R.string.agent_operation_private_text))
             .build()
         return builder
-            .setSmallIcon(R.drawable.ic_tab_agent_filled)
+            .setSmallIcon(R.drawable.ic_tab_chat_filled)
             .setColor(
                 Color.parseColor(
                     when (successful) {

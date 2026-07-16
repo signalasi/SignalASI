@@ -212,6 +212,23 @@ class MobileNativeAgent(
         return snapshot()
     }
 
+    fun startNewConversation(conversationId: String): AgentUiState {
+        PhoneExecutionAuthority.requestCancellation(sessionId)
+        sessionId = UUID.randomUUID().toString()
+        PhoneExecutionAuthority.clearCancellation(sessionId)
+        activeConversationContext = AgentConversationContext(conversationId, "", emptyList(), false)
+        activeConversationTurnId = ""
+        phase = AgentPhase.OBSERVING
+        currentGoal = ""
+        currentScreen = captureScreen()
+        currentPlan = null
+        lastActionResult = null
+        activeWorkflowExecutionId = null
+        auditTrail.clear()
+        persistSession()
+        return snapshot()
+    }
+
     fun knowledgeSourceGroups(): List<AgentKnowledgeSourceGroup> =
         AgentKnowledgeRetriever.sourceGroups(knowledgeStore)
 
@@ -7076,7 +7093,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             @Suppress("DEPRECATION")
             Notification.Builder(context)
         }
-            .setSmallIcon(R.drawable.ic_agent_node)
+            .setSmallIcon(R.drawable.ic_tab_chat_filled)
             .setContentTitle(title)
             .setContentText(text.take(120))
             .setStyle(Notification.BigTextStyle().bigText(text))

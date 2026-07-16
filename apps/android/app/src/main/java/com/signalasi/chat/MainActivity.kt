@@ -2147,7 +2147,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentInputAttachments.clear()
         renderAgentInputAttachments()
         agentGoalInput.setText("")
-        agentTranscriptStore.createConversation()
+        val conversation = agentTranscriptStore.createConversation()
+        lastRenderedAgentState = null
+        renderAgentState(mobileNativeAgent.startNewConversation(conversation.id), conversation.id, syncTranscript = false)
         renderedAgentTranscriptIds.clear()
         agentOutputList.removeAllViews()
         refreshAgentConversationHeader()
@@ -9893,6 +9895,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             setOnClickListener {
                 if (!selected) {
                     AppLanguage.set(this@MainActivity, language)
+                    val refreshIntent = Intent(this@MainActivity, MessageService::class.java).apply {
+                        action = MessageService.ACTION_REFRESH_LANGUAGE
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(refreshIntent)
+                    } else {
+                        startService(refreshIntent)
+                    }
                     Toast.makeText(this@MainActivity, getString(R.string.language_changed), Toast.LENGTH_SHORT).show()
                     recreate()
                 }

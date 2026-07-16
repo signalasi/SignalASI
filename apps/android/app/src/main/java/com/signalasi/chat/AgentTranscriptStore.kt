@@ -79,6 +79,10 @@ class AgentTranscriptStore(context: Context) {
     @Synchronized
     fun activeConversation(): AgentConversation {
         draftConversation?.let { return it }
+        loadDraftConversation()?.let {
+            draftConversation = it
+            return it
+        }
         val all = conversations(includeArchived = true)
         val activeId = preferences.readString(KEY_ACTIVE_CONVERSATION, "")
         return all.firstOrNull { it.id == activeId && it.status == AgentConversationStatus.ACTIVE }
@@ -96,6 +100,7 @@ class AgentTranscriptStore(context: Context) {
             updatedAt = now
         )
         draftConversation = conversation
+        saveDraftConversation(conversation)
         preferences.remove(KEY_ACTIVE_CONVERSATION)
         return conversation
     }
@@ -106,6 +111,7 @@ class AgentTranscriptStore(context: Context) {
             .firstOrNull { it.id == conversationId && it.status == AgentConversationStatus.ACTIVE }
             ?: return false
         draftConversation = null
+        preferences.remove(KEY_DRAFT_CONVERSATION)
         preferences.writeString(KEY_ACTIVE_CONVERSATION, match.id)
         return true
     }
@@ -367,6 +373,40 @@ class AgentTranscriptStore(context: Context) {
         }
         preferences.writeString(KEY_ACTIVE_CONVERSATION, draft.id)
         draftConversation = null
+        preferences.remove(KEY_DRAFT_CONVERSATION)
+    }
+
+    private fun saveDraftConversation(conversation: AgentConversation) {
+        preferences.writeString(
+            KEY_DRAFT_CONVERSATION,
+            JSONObject()
+                .put("id", conversation.id)
+                .put("title", conversation.title)
+                .put("created_at", conversation.createdAt)
+                .put("updated_at", conversation.updatedAt)
+                .put("selected_model_or_agent", conversation.selectedModelOrAgent)
+                .put("context_policy", conversation.contextPolicy)
+                .put("private_mode", conversation.privateMode)
+                .toString()
+        )
+    }
+
+    private fun loadDraftConversation(): AgentConversation? {
+        val raw = preferences.readString(KEY_DRAFT_CONVERSATION, "").takeIf(String::isNotBlank) ?: return null
+        return runCatching {
+            val item = JSONObject(raw)
+            val id = item.optString("id")
+            if (id.isBlank()) return@runCatching null
+            AgentConversation(
+                id = id,
+                title = item.optString("title", "New session").take(MAX_TITLE_CHARACTERS),
+                createdAt = item.optLong("created_at"),
+                updatedAt = item.optLong("updated_at"),
+                selectedModelOrAgent = item.optString("selected_model_or_agent", "Automatic"),
+                contextPolicy = item.optString("context_policy", "balanced"),
+                privateMode = item.optBoolean("private_mode")
+            )
+        }.getOrNull()
     }
 
     private fun prunePersistedEmptyConversations() {
@@ -538,6 +578,7 @@ class AgentTranscriptStore(context: Context) {
         const val KEY_ITEMS = "items"
         const val KEY_CONVERSATIONS = "conversations"
         const val KEY_ACTIVE_CONVERSATION = "active_conversation"
+        const val KEY_DRAFT_CONVERSATION = "draft_conversation"
         private const val MAX_CONVERSATIONS = 100
         private const val MAX_ITEMS_PER_CONVERSATION = 300
         private const val MAX_TOTAL_ITEMS = 2_000
