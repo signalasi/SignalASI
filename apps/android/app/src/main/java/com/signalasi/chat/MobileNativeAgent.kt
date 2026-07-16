@@ -84,6 +84,17 @@ internal fun renderPhoneWebSearchResult(output: AgentNativeJsonObject, zh: Boole
     return heading + "\n" + lines.joinToString("\n")
 }
 
+internal fun renderPackageUnavailable(packageName: String, zh: Boolean): String {
+    val displayName = packageName.ifBlank { if (zh) "\u8be5\u5e94\u7528" else "that app" }
+    return if (zh) {
+        "\u6211\u5728\u8fd9\u53f0\u624b\u673a\u4e0a\u627e\u4e0d\u5230\u6216\u65e0\u6cd5\u8bbf\u95ee $displayName\u3002\n\n" +
+            "\u8bf7\u68c0\u67e5\u5305\u540d\uff0c\u6216\u786e\u8ba4\u5e94\u7528\u5df2\u7ecf\u5b89\u88c5\u3002"
+    } else {
+        "I couldn't find or access $displayName on this phone.\n\n" +
+            "Check the package name or confirm the app is installed."
+    }
+}
+
 /**
  * Phone-native Agent runtime scaffold.
  *
@@ -378,7 +389,8 @@ class MobileNativeAgent(
                 "Found ${apps.size} query-visible apps: $names${if (remaining > 0) ", and $remaining more" else ""}."
             }
             AgentHardwareNativeTools.PACKAGE_DETAIL ->
-                if (!bool("visible")) "Android does not expose this app to SignalASI." else "${text("label").ifBlank { text("package_name") }} ${text("version_name")} (${text("package_name")})."
+                if (!bool("visible")) renderPackageUnavailable(text("package_name"), false)
+                else "${text("label").ifBlank { text("package_name") }} ${text("version_name")} (${text("package_name")})."
             AgentAndroidSystemNativeTools.AUDIO_VOLUME_SET -> {
                 val volume = long("volume") ?: 0L
                 val max = long("max") ?: 0L
@@ -599,7 +611,7 @@ class MobileNativeAgent(
                     "${if (remaining > 0) "\uff0c\u53e6\u6709 $remaining \u4e2a" else ""}\u3002"
             }
             AgentHardwareNativeTools.PACKAGE_DETAIL ->
-                if (!bool("visible")) "Android \u672a\u5411 SignalASI \u66b4\u9732\u8fd9\u4e2a\u5e94\u7528\u3002"
+                if (!bool("visible")) renderPackageUnavailable(text("package_name"), true)
                 else "${text("label").ifBlank { text("package_name") }} ${text("version_name")}\uff08${text("package_name")}\uff09\u3002"
             AgentAndroidSystemNativeTools.AUDIO_VOLUME_SET -> {
                 val volume = long("volume") ?: 0L

@@ -9,6 +9,18 @@ import org.junit.Test
 
 class AgentSystemToolPlannerTest {
     @Test
+    fun rendersUnavailablePackageAsNaturalActionableFailure() {
+        val english = renderPackageUnavailable("com.signalasi.missing", zh = false)
+        assertTrue(english.contains("com.signalasi.missing"))
+        assertTrue(english.contains("Check the package name"))
+        assertFalse(english.contains("expose"))
+
+        val chinese = renderPackageUnavailable("com.signalasi.missing", zh = true)
+        assertTrue(chinese.contains("com.signalasi.missing"))
+        assertFalse(chinese.contains("SignalASI"))
+    }
+
+    @Test
     fun rendersPhoneWebSearchAsConciseLinkedResults() {
         val rendered = renderPhoneWebSearchResult(
             mapOf(
