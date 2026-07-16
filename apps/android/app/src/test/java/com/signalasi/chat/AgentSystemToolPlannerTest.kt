@@ -127,6 +127,14 @@ class AgentSystemToolPlannerTest {
         assertTrue(JSONObject(flashlight?.parameters?.get("input_json").orEmpty()).getBoolean("enabled"))
         assertEquals(AgentConfirmationTier.DIRECT, AgentConfirmationPolicy.tier(requireNotNull(flashlight)))
 
+        val englishFlashlightOn = planner.deterministicLocalAction(request("Turn on the flashlight", screen, nativeTools))
+        assertEquals(AgentHardwareNativeTools.FLASHLIGHT_SET, englishFlashlightOn?.parameters?.get("tool_id"))
+        assertTrue(JSONObject(englishFlashlightOn?.parameters?.get("input_json").orEmpty()).getBoolean("enabled"))
+
+        val englishFlashlightOff = planner.deterministicLocalAction(request("Turn off the flashlight", screen, nativeTools))
+        assertEquals(AgentHardwareNativeTools.FLASHLIGHT_SET, englishFlashlightOff?.parameters?.get("tool_id"))
+        assertFalse(JSONObject(englishFlashlightOff?.parameters?.get("input_json").orEmpty()).getBoolean("enabled"))
+
         assertEquals(
             AgentHardwareNativeTools.BATTERY_STATUS,
             planner.deterministicLocalAction(request("\u67e5\u770b\u624b\u673a\u7535\u91cf", screen, nativeTools))?.parameters?.get("tool_id")

@@ -5487,11 +5487,13 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         val phoneWebSearchQuery = phoneWebSearchQuery(goal, lower)
         val selected: Pair<String, JSONObject> = when {
             lower.hasAny(
-                "turn on flashlight", "open flashlight", "flashlight on", "turn on torch", "torch on",
+                "turn on flashlight", "turn on the flashlight", "switch on flashlight", "switch on the flashlight",
+                "open flashlight", "flashlight on", "turn on torch", "turn on the torch", "switch on torch", "torch on",
                 "\u6253\u5f00\u624b\u7535\u7b52", "\u5f00\u542f\u624b\u7535\u7b52", "\u6253\u5f00\u95ea\u5149\u706f", "\u5f00\u542f\u95ea\u5149\u706f"
             ) -> AgentHardwareNativeTools.FLASHLIGHT_SET to JSONObject().put("enabled", true)
             lower.hasAny(
-                "turn off flashlight", "close flashlight", "flashlight off", "turn off torch", "torch off",
+                "turn off flashlight", "turn off the flashlight", "switch off flashlight", "switch off the flashlight",
+                "close flashlight", "flashlight off", "turn off torch", "turn off the torch", "switch off torch", "torch off",
                 "\u5173\u95ed\u624b\u7535\u7b52", "\u5173\u6389\u624b\u7535\u7b52", "\u5173\u95ed\u95ea\u5149\u706f", "\u5173\u6389\u95ea\u5149\u706f"
             ) -> AgentHardwareNativeTools.FLASHLIGHT_SET to JSONObject().put("enabled", false)
             lower.hasAny("battery status", "phone battery", "\u624b\u673a\u7535\u91cf", "\u624b\u673a\u7535\u6c60", "\u7535\u6c60\u7535\u91cf", "\u7535\u91cf\u591a\u5c11", "\u67e5\u770b\u7535\u91cf", "\u67e5\u8be2\u7535\u91cf", "\u67e5\u7535\u91cf") ->
