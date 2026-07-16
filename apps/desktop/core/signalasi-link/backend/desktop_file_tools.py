@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -142,6 +143,11 @@ def _powershell_executable() -> str:
 
 
 def _run_excel_conversion(source: Path, target: Path, output_format: str, timeout: int = 45) -> None:
+    suffix = source.suffix.lower()
+    if suffix == ".xlsx" and not zipfile.is_zipfile(source):
+        raise ValueError("not a valid XLSX archive")
+    if suffix == ".xls" and source.read_bytes()[:8] != bytes.fromhex("D0CF11E0A1B11AE1"):
+        raise ValueError("not a valid XLS workbook")
     format_code = "0" if output_format == "pdf" else "6"
     action = (
         f"$book.ExportAsFixedFormat({format_code}, $env:SIGNALASI_OUTPUT)"
@@ -216,7 +222,22 @@ def try_execute_explicit_file_task(
 
     import time
     started = time.perf_counter()
-    _run_excel_conversion(source, target, output_format)
+    try:
+        _run_excel_conversion(source, target, output_format)
+    except Exception:
+        target.unlink(missing_ok=True)
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        if _contains_chinese(prompt):
+            message = (
+                f"\u65e0\u6cd5\u8f6c\u6362 `{source.name}`\uff1a\u5b83\u4e0d\u662f\u6709\u6548\u6216\u53ef\u8bfb\u53d6\u7684 Excel \u5de5\u4f5c\u7c3f\u3002"
+                "\u8bf7\u4e0a\u4f20\u6709\u6548\u6587\u4ef6\uff0c\u6216\u8ba9\u6211\u5c1d\u8bd5\u4fee\u590d\u5b83\u3002"
+            )
+        else:
+            message = (
+                f"I couldn't convert `{source.name}` because it isn't a valid or readable Excel workbook. "
+                "Upload a valid file, or ask me to try repairing it."
+            )
+        return DesktopFileToolResult(message, None, "excel_conversion_failed", elapsed_ms)
     elapsed_ms = round((time.perf_counter() - started) * 1000)
     if _contains_chinese(prompt):
         message = f"\u5df2\u8f6c\u6362\u4e3a {target.name}\u3002"

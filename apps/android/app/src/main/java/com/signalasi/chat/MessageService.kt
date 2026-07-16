@@ -64,6 +64,9 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
                         sourceMessageId = sourceMessageId,
                         contactId = envelope?.optString("contact_id").orEmpty().ifBlank { stored.contactId },
                         content = stored.content,
+                        conversationId = envelope?.optString("conversation_id").orEmpty(),
+                        turnId = envelope?.optString("turn_id").orEmpty(),
+                        taskId = envelope?.optString("task_id").orEmpty(),
                         richOutputJson = AgentRichContentCodec.fromEnvelope(envelope)
                     )
                 )

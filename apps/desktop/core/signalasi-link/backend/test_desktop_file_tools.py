@@ -86,6 +86,22 @@ class DesktopFileToolTests(unittest.TestCase):
             result = try_execute_explicit_file_task("convert to PDF", [first, second], root / "outputs")
         self.assertIsNone(result)
 
+    def test_invalid_excel_returns_actionable_error_without_model_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "corrupt-test.xlsx"
+            source.write_bytes(b"not an xlsx archive")
+
+            result = try_execute_explicit_file_task(
+                "Convert this spreadsheet to CSV", [source], root / "outputs"
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual("excel_conversion_failed", result.operation)
+        self.assertIn("isn't a valid or readable Excel workbook", result.message)
+        self.assertIn("try repairing it", result.message)
+        self.assertIsNone(result.output_path)
+
 
 if __name__ == "__main__":
     unittest.main()

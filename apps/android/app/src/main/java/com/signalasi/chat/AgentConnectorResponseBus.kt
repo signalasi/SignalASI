@@ -9,6 +9,9 @@ data class AgentConnectorResponse(
     val sourceMessageId: Long,
     val contactId: String,
     val content: String,
+    val conversationId: String = "",
+    val turnId: String = "",
+    val taskId: String = "",
     val success: Boolean = true,
     val inputTokens: Long = 0L,
     val outputTokens: Long = 0L,
@@ -79,6 +82,9 @@ object AgentConnectorResponseStore {
                             sourceMessageId = sourceMessageId,
                             contactId = item.optString("contact_id"),
                             content = content.ifBlank { AgentRichContentCodec.fallbackText(richOutput) },
+                            conversationId = item.optString("conversation_id"),
+                            turnId = item.optString("turn_id"),
+                            taskId = item.optString("task_id"),
                             success = item.optBoolean("success", true),
                             inputTokens = item.optLong("input_tokens", 0L),
                             outputTokens = item.optLong("output_tokens", 0L),
@@ -115,6 +121,9 @@ object AgentConnectorResponseStore {
                     .put("source_message_id", response.sourceMessageId)
                     .put("contact_id", response.contactId)
                     .put("content", response.content.take(24_000))
+                    .put("conversation_id", response.conversationId)
+                    .put("turn_id", response.turnId)
+                    .put("task_id", response.taskId)
                     .put("success", response.success)
                     .put("input_tokens", response.inputTokens)
                     .put("output_tokens", response.outputTokens)

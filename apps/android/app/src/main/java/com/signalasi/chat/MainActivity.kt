@@ -615,6 +615,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 sourceMessageId = sourceMessageId,
                 contactId = envelope?.optString("contact_id").orEmpty().ifBlank { message.contact.id },
                 content = message.content,
+                conversationId = envelope?.optString("conversation_id").orEmpty(),
+                turnId = envelope?.optString("turn_id").orEmpty(),
+                taskId = envelope?.optString("task_id").orEmpty(),
                 richOutputJson = CodexStyleResponsePolicy.filterAssistantRichOutput(
                     AgentRichContentCodec.fromEnvelope(envelope)
                 )
@@ -636,9 +639,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         responseKey: String,
         attempt: Int = 0
     ) {
-        val conversationId = agentRuntimeConversationIds[runtime]
-            ?: agentTranscriptStore.activeConversation().id
-        val turnId = agentRuntimeTurnIds[runtime].orEmpty()
+        val explicitConversationId = response.conversationId.trim()
+        val conversationId = if (explicitConversationId.isNotBlank()) {
+            val exists = agentTranscriptStore.conversations(includeArchived = true)
+                .any { it.id == explicitConversationId }
+            if (!exists) {
+                AgentConnectorResponseStore.remove(this, response)
+                activeAgentTasks.remove(response.sourceMessageId)
+                agentConnectorResponsesInFlight.remove(responseKey)
+                return
+            }
+            explicitConversationId
+        } else {
+            agentRuntimeConversationIds[runtime] ?: agentTranscriptStore.activeConversation().id
+        }
+        val turnId = response.turnId.ifBlank { agentRuntimeTurnIds[runtime].orEmpty() }
         val supervisor = AgentTaskRuntime.supervisor(this)
         if (turnId.isBlank()) {
             consumeLegacyAgentConnectorResponse(response, runtime, responseKey, conversationId)
@@ -1032,6 +1047,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         sourceMessageId = sourceMessageId,
                         contactId = contactId,
                         content = envelope.optString("error").ifBlank { statusLabel },
+                        conversationId = conversationId,
+                        turnId = turnId,
+                        taskId = taskId,
                         success = false
                     )
                 )
