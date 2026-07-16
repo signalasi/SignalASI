@@ -302,8 +302,12 @@ object AgentRichContentCodec {
         line.trim().trim('|').split('|').map { it.trim().take(2_000) }.take(MAX_TABLE_COLUMNS)
 
     private fun markdownWebPage(text: String): AgentRichBlock? {
-        val match = Regex("""\[([^]]+)]\((https://[^)\s]+)\)""", RegexOption.IGNORE_CASE).find(text)
-            ?: return null
+        val matches = Regex("""\[([^]]+)]\((https://[^)\s]+)\)""", RegexOption.IGNORE_CASE)
+            .findAll(text)
+            .take(2)
+            .toList()
+        if (matches.size != 1) return null
+        val match = matches.single()
         val title = match.groupValues[1].trim().take(500)
         val uri = match.groupValues[2].trim().take(4_096)
         return AgentRichBlock(

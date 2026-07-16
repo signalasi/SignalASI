@@ -106,6 +106,21 @@ class LinkPairingIntegrationTests(unittest.TestCase):
         self.assertIsNone(pairing_state.get_client(first_route))
         self.assertIsNotNone(pairing_state.get_client(second_route))
 
+    def test_mqtt_reconnect_publishes_one_recovery_presence(self):
+        with (
+            patch.object(mqtt_bridge, "_subscribe_all_routes") as subscribe,
+            patch.object(mqtt_bridge.agent_task_manager, "drain_recovered", return_value=[]),
+            patch.object(mqtt_bridge, "flush_pending_task_events") as flush_events,
+            patch.object(mqtt_bridge, "flush_outbound_messages") as flush_messages,
+            patch.object(mqtt_bridge, "publish_connector_status", return_value={"ok": True}) as publish_status,
+        ):
+            mqtt_bridge.on_connect(self.mqtt, None, None, 0)
+
+        subscribe.assert_called_once_with(self.mqtt)
+        flush_events.assert_called_once_with(self.mqtt)
+        flush_messages.assert_called_once_with(self.mqtt)
+        publish_status.assert_called_once_with(self.mqtt, reason="mqtt_connected")
+
 
 class _ImmediateTimer:
     def __init__(self, interval, function, args=(), kwargs=None):

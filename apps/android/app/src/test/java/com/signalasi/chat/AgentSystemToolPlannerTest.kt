@@ -9,6 +9,69 @@ import org.junit.Test
 
 class AgentSystemToolPlannerTest {
     @Test
+    fun rendersPhoneWebSearchAsConciseLinkedResults() {
+        val rendered = renderPhoneWebSearchResult(
+            mapOf(
+                "results" to listOf(
+                    mapOf("title" to "First headline", "url" to "https://example.com/first"),
+                    mapOf("title" to "Second headline", "url" to "https://example.com/second")
+                )
+            ),
+            zh = false
+        )
+
+        assertEquals(
+            "Latest web results:\n- [First headline](https://example.com/first)\n- [Second headline](https://example.com/second)",
+            rendered
+        )
+        assertFalse(rendered.contains("provider"))
+        assertFalse(rendered.contains("retrieved_at"))
+    }
+
+    @Test
+    fun runsGenericWebToolsAtTheReasoningExecutionSite() {
+        val screen = ScreenContext(foregroundApp = "com.signalasi.chat", pageTitle = "SignalASI")
+        val webTool = nativeDescriptor(AgentWebMediaNativeTools.WEB_SEARCH, "Search the public web", AgentNativeToolRisk.LOW)
+        val codex = AgentCallableTarget(
+            id = "codex",
+            title = "Codex",
+            kind = AgentConnectorKind.AGENT,
+            status = AgentConnectorStatus.AVAILABLE,
+            capabilities = listOf(AgentCapability.CHAT, AgentCapability.RESEARCH, AgentCapability.LIVE_DATA, AgentCapability.TOOL_USE)
+        )
+        val remotePlan = RuleBasedAgentPlanner().plan(request("Latest technology news today", screen, listOf(webTool), listOf(codex)))
+        assertEquals(1, remotePlan.actions.size)
+        assertEquals(AgentActionKind.CALL_CONNECTOR, remotePlan.actions.single().kind)
+        assertEquals("agent_host", remotePlan.actions.single().parameters["web_execution_location"])
+
+        val cloud = codex.copy(id = "cloud-models", title = "Cloud Models", kind = AgentConnectorKind.MODEL)
+        val cloudPlan = RuleBasedAgentPlanner().plan(request("Shanghai weather today", screen, listOf(webTool), listOf(cloud)))
+        assertEquals(1, cloudPlan.actions.size)
+        assertEquals("phone", cloudPlan.actions.single().parameters["web_execution_location"])
+
+        val toolLessModel = cloud.copy(id = "local-llm", title = "Local LLM", capabilities = listOf(AgentCapability.CHAT))
+        val fallbackPlan = RuleBasedAgentPlanner().plan(request("Latest technology news today", screen, listOf(webTool), listOf(toolLessModel)))
+        assertEquals(listOf(AgentActionKind.CALL_NATIVE_TOOL, AgentActionKind.CALL_CONNECTOR), fallbackPlan.actions.map { it.kind })
+        assertEquals(fallbackPlan.actions.first().id, fallbackPlan.actions.last().parameters["depends_on"])
+        assertEquals(fallbackPlan.actions.first().id, fallbackPlan.actions.last().parameters["use_outputs_from"])
+    }
+
+    @Test
+    fun ordinaryConnectorResearchDoesNotInheritPhoneToolConsentTerms() {
+        val action = AgentAction(
+            id = "connector-codex",
+            kind = AgentActionKind.CALL_CONNECTOR,
+            target = "Codex",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = "Research current information",
+            parameters = mapOf("connector_id" to "codex", "prompt" to "Find the current location of the event")
+        )
+
+        assertEquals(AgentConfirmationTier.DIRECT, AgentConfirmationPolicy.tier(action))
+    }
+
+    @Test
     fun recognizesChinesePhoneCameraCommands() {
         assertTrue(AgentSystemToolPlanner.isCameraCaptureGoal("\u8c03\u7528\u624b\u673a\u6444\u50cf\u5934\u62cd\u7167"))
         assertTrue(AgentSystemToolPlanner.isCameraCaptureGoal("\u6253\u5f00\u76f8\u673a\u62cd\u7167"))
@@ -39,7 +102,7 @@ class AgentSystemToolPlannerTest {
             nativeDescriptor(AgentHardwareNativeTools.POWER_STATUS, "Read power status", AgentNativeToolRisk.LOW),
             nativeDescriptor(AgentHardwareNativeTools.STORAGE_STATUS, "Read storage status", AgentNativeToolRisk.LOW),
             nativeDescriptor(AgentHardwareNativeTools.NETWORK_STATUS, "Read network status", AgentNativeToolRisk.LOW),
-            nativeDescriptor(AgentWebMediaNativeTools.WEATHER_FORECAST, "Get current weather forecast", AgentNativeToolRisk.LOW),
+            nativeDescriptor(AgentWebMediaNativeTools.WEB_SEARCH, "Search the public web", AgentNativeToolRisk.LOW),
             nativeDescriptor(AgentHardwareNativeTools.LOCATION_FOREGROUND_READ, "Read location", AgentNativeToolRisk.HIGH),
             nativeDescriptor(AgentHardwareNativeTools.SENSORS_LIST, "List sensors", AgentNativeToolRisk.LOW),
             nativeDescriptor(AgentHardwareNativeTools.SENSOR_SAMPLE, "Read sensor", AgentNativeToolRisk.MEDIUM),
@@ -72,17 +135,6 @@ class AgentSystemToolPlannerTest {
             AgentAndroidSystemNativeTools.AUDIO_VOLUME_SET,
             planner.deterministicLocalAction(request("\u628a\u97f3\u91cf\u8bbe\u7f6e\u4e3a50", screen, nativeTools))?.parameters?.get("tool_id")
         )
-        val weather = requireNotNull(
-            planner.deterministicLocalAction(request("What is the weather in Shanghai today?", screen, nativeTools))
-        )
-        assertEquals(AgentWebMediaNativeTools.WEATHER_FORECAST, weather.parameters["tool_id"])
-        assertEquals("Shanghai", JSONObject(weather.parameters.getValue("input_json")).getString("location"))
-        assertEquals(AgentConfirmationTier.DIRECT, AgentConfirmationPolicy.tier(weather))
-        val chineseWeather = requireNotNull(
-            planner.deterministicLocalAction(request("\u4eca\u5929\u4e0a\u6d77\u5929\u6c14\u600e\u4e48\u6837？", screen, nativeTools))
-        )
-        assertEquals("\u4e0a\u6d77", JSONObject(chineseWeather.parameters.getValue("input_json")).getString("location"))
-        assertEquals("zh", JSONObject(chineseWeather.parameters.getValue("input_json")).getString("language"))
         val englishVolume = requireNotNull(
             planner.deterministicLocalAction(request("Set media volume 30", screen, nativeTools))
         )
@@ -134,11 +186,12 @@ class AgentSystemToolPlannerTest {
     private fun request(
         goal: String,
         screen: ScreenContext,
-        nativeTools: List<AgentNativeToolDescriptor>
+        nativeTools: List<AgentNativeToolDescriptor>,
+        targets: List<AgentCallableTarget> = emptyList()
     ): AgentRequest = AgentRequest(
         goal = goal,
         screen = screen,
-        targets = emptyList(),
+        targets = targets,
         memories = emptyList(),
         runtimeContext = AgentRuntimeContextBuilder.build(
             sessionId = "test",
@@ -147,7 +200,7 @@ class AgentSystemToolPlannerTest {
             permissionMode = PermissionMode.AUTO_LOW_RISK,
             highRiskGuard = true,
             memoryCapture = false,
-            callableTargets = emptyList(),
+            callableTargets = targets,
             memories = emptyList(),
             nativeTools = nativeTools
         )

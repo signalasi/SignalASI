@@ -62,6 +62,15 @@ class AgentRichContentTest {
     }
 
     @Test
+    fun doesNotExpandMultiLinkResultListsIntoAWebPage() {
+        val blocks = AgentRichContentCodec.fromText(
+            "Latest news:\n- [One](https://example.com/one)\n- [Two](https://example.com/two)"
+        )
+
+        assertTrue(blocks.none { it.type == AgentRichBlockType.WEBPAGE })
+    }
+
+    @Test
     fun correctsMislabelledWebPageGifToImage() {
         val encoded = """{"version":1,"blocks":[{"type":"webpage","uri":"https://cdn.example.com/character.gif"}]}"""
 

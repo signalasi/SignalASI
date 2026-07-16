@@ -668,6 +668,9 @@ def on_connect(mqttc, userdata, flags, reason_code, properties=None):
             )
         flush_pending_task_events(mqttc)
         flush_outbound_messages(mqttc)
+        status = publish_connector_status(mqttc, reason="mqtt_connected")
+        if not status.get("ok"):
+            log.warning("Desktop recovery presence publish skipped: %s", status)
     else:
         log.warning(f"MQTT connection failed rc={reason_code}")
 

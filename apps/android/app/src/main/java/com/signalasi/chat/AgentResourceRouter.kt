@@ -54,7 +54,8 @@ data class AgentResourceDescriptor(
     val contextWindowTokens: Int = 8_192,
     val supportsStreaming: Boolean = false,
     val supportsBackground: Boolean = false,
-    val maxParallelTasks: Int = 1
+    val maxParallelTasks: Int = 1,
+    val failureDomain: String = ""
 )
 
 data class AgentTaskRequirements(
@@ -96,10 +97,37 @@ data class AgentRoutingDecision(
             fallbacks.mapNotNull { it.resource.targetId.takeIf(String::isNotBlank) }
 }
 
+object AgentFailoverPolicy {
+    fun fallbackTier(primary: AgentResourceDescriptor?, candidate: AgentResourceDescriptor): Int {
+        if (primary?.location != AgentResourceLocation.TRUSTED_DESKTOP) return 0
+        return when {
+            candidate.location == AgentResourceLocation.CLOUD -> 0
+            candidate.location == AgentResourceLocation.PHONE -> 0
+            candidate.failureDomain != primary.failureDomain -> 1
+            else -> 2
+        }
+    }
+
+    fun shouldFailOver(stage: AgentConnectorTimeoutStage, status: String, liveReadOnly: Boolean): Boolean = when (stage) {
+        AgentConnectorTimeoutStage.NOT_ACCEPTED -> status.isBlank()
+        AgentConnectorTimeoutStage.NOT_RUNNING -> status.isBlank() || status in setOf("accepted", "queued", "starting")
+        AgentConnectorTimeoutStage.READ_ONLY_STALE -> liveReadOnly && status == "running"
+    }
+
+    fun domainCooldownMs(consecutiveFailures: Int): Long = when (consecutiveFailures.coerceAtLeast(1)) {
+        1 -> 60_000L
+        2 -> 5 * 60_000L
+        3 -> 15 * 60_000L
+        else -> 60 * 60_000L
+    }
+}
+
 object AgentTaskRequirementAnalyzer {
     private val liveTerms = listOf(
         "weather", "forecast", "today", "current", "latest", "news", "price", "traffic", "score", "now", "live",
-        "\u5929\u6c14", "\u9884\u62a5", "\u4eca\u5929", "\u5f53\u524d", "\u6700\u65b0", "\u65b0\u95fb", "\u4ef7\u683c", "\u8def\u51b5", "\u6bd4\u5206", "\u73b0\u5728", "\u5b9e\u65f6"
+        "search the web", "web search", "search online", "look up online",
+        "\u5929\u6c14", "\u9884\u62a5", "\u4eca\u5929", "\u5f53\u524d", "\u6700\u65b0", "\u65b0\u95fb", "\u4ef7\u683c", "\u8def\u51b5", "\u6bd4\u5206", "\u73b0\u5728", "\u5b9e\u65f6",
+        "\u8054\u7f51\u641c\u7d22", "\u7f51\u4e0a\u641c\u7d22", "\u7f51\u7edc\u641c\u7d22"
     )
     private val codeTerms = listOf("code", "debug", "repository", "compile", "build", "codex", "\u4ee3\u7801", "\u7f16\u8bd1", "\u9879\u76ee", "\u4fee\u590d bug")
     private val deviceTerms = listOf("home assistant", "smart home", "light", "scene", "device", "\u667a\u80fd\u5bb6\u5c45", "\u5f00\u706f", "\u5173\u706f", "\u8bbe\u5907", "\u573a\u666f")
@@ -220,6 +248,36 @@ class AgentResourceHealthStore(context: Context) {
             .put("last_updated_at", System.currentTimeMillis())
             .toString()).apply()
     }
+
+    fun markAvailable(id: String) {
+        val current = snapshot(id)
+        prefs.edit().putString(id, JSONObject()
+            .put("successes", current.successes)
+            .put("failures", current.failures)
+            .put("consecutive_failures", 0)
+            .put("average_latency_ms", current.averageLatencyMs)
+            .put("circuit_open_until", 0L)
+            .put("last_updated_at", System.currentTimeMillis())
+            .toString()).apply()
+    }
+
+    fun recordFailureDomainTimeout(id: String, latencyMs: Long) {
+        val current = snapshot(id)
+        val consecutive = current.consecutiveFailures + 1
+        val failures = current.failures + 1
+        val samples = max(1, current.successes + failures)
+        val average = if (current.averageLatencyMs <= 0) latencyMs else
+            ((current.averageLatencyMs * (samples - 1)) + latencyMs) / samples
+        val cooldown = AgentFailoverPolicy.domainCooldownMs(consecutive)
+        prefs.edit().putString(id, JSONObject()
+            .put("successes", current.successes)
+            .put("failures", failures)
+            .put("consecutive_failures", consecutive)
+            .put("average_latency_ms", average)
+            .put("circuit_open_until", System.currentTimeMillis() + cooldown)
+            .put("last_updated_at", System.currentTimeMillis())
+            .toString()).apply()
+    }
 }
 
 data class AgentResourceHealth(
@@ -275,7 +333,8 @@ object AgentResourceCatalog {
                 contextWindowTokens = 0,
                 supportsStreaming = false,
                 supportsBackground = false,
-                maxParallelTasks = 4
+                maxParallelTasks = 4,
+                failureDomain = "phone"
             )
         }
         return callable + localTools
@@ -352,6 +411,14 @@ object AgentResourceCatalog {
                 AgentResourceType.CLOUD_MODEL -> 3
                 AgentResourceType.REMOTE_LOCAL_MODEL -> 2
                 else -> 1
+            },
+            failureDomain = target.failureDomain.ifBlank {
+                when (location) {
+                    AgentResourceLocation.PHONE -> "phone"
+                    AgentResourceLocation.CLOUD -> "cloud:${target.id}"
+                    AgentResourceLocation.TRUSTED_DESKTOP -> "desktop:${target.id.substringBefore(':')}"
+                    AgentResourceLocation.PRIVATE_NETWORK -> "private:${target.id}"
+                }
             }
         )
     }
@@ -369,15 +436,27 @@ class AgentResourceRouter(context: Context) {
         val candidates = AgentResourceCatalog.build(targets, tools)
             .asSequence()
             .filter { it.targetId.isNotBlank() }
-            .map { resource -> score(resource, requirements, environment) }
+            .distinctBy { resource -> "${canonicalTargetId(resource.targetId)}|${resource.failureDomain}" }
+            .map { resource ->
+                val candidate = score(resource, requirements, environment)
+                val preference = preferenceBonus(resource.targetId, preferredTargets)
+                candidate.copy(
+                    score = candidate.score + preference,
+                    reasons = candidate.reasons + "preference_bonus:$preference"
+                )
+            }
             .filter { it.score > -1_000 }
-            .sortedWith(
-                compareBy<AgentResourceCandidate> { preferredRank(it.resource.targetId, preferredTargets) }
-                    .thenByDescending { it.score }
-            )
+            .sortedByDescending { it.score }
             .toList()
         val fallbackLimit = 6
-        return AgentRoutingDecision(requirements, candidates.firstOrNull(), candidates.drop(1).take(fallbackLimit), environment)
+        val primary = candidates.firstOrNull()
+        val fallbacks = candidates.drop(1)
+            .sortedWith(
+                compareBy<AgentResourceCandidate> { AgentFailoverPolicy.fallbackTier(primary?.resource, it.resource) }
+                    .thenByDescending { it.score }
+            )
+            .take(fallbackLimit)
+        return AgentRoutingDecision(requirements, primary, fallbacks, environment)
     }
 
     private fun preferredTargetOrder(
@@ -403,9 +482,16 @@ class AgentResourceRouter(context: Context) {
             .distinct()
     }
 
-    private fun preferredRank(targetId: String, preferredTargets: List<String>): Int {
+    private fun preferenceBonus(targetId: String, preferredTargets: List<String>): Int {
         val index = preferredTargets.indexOf(canonicalTargetId(targetId))
-        return if (index >= 0) index else preferredTargets.size + 1
+        return when (index) {
+            0 -> 180
+            1 -> 130
+            2 -> 90
+            3 -> 50
+            in 4..Int.MAX_VALUE -> 20
+            else -> 0
+        }
     }
 
     private fun canonicalTargetId(targetId: String): String {
@@ -431,6 +517,12 @@ class AgentResourceRouter(context: Context) {
         }
         val health = healthStore.snapshot(resource.id)
         if (health.circuitOpen) return AgentResourceCandidate(resource, -9_000, listOf("circuit_open"))
+        val domainHealth = resource.failureDomain.takeIf { it.isNotBlank() }
+            ?.let { healthStore.snapshot("domain:$it") }
+            ?: AgentResourceHealth()
+        if (domainHealth.circuitOpen) {
+            return AgentResourceCandidate(resource, -9_100, listOf("failure_domain_circuit_open:${resource.failureDomain}"))
+        }
         if (requirements.localOnly && resource.location == AgentResourceLocation.CLOUD) {
             return AgentResourceCandidate(resource, -8_000, listOf("privacy_boundary"))
         }
@@ -455,12 +547,16 @@ class AgentResourceRouter(context: Context) {
         }
         var score = 500 - (missing.size * 180)
         score += health.reliabilityPercent
+        score += domainHealth.reliabilityPercent / 2
         score += resource.quality.ordinal * if (requirements.complexReasoning || requirements.mode == AgentRoutingMode.QUALITY) 55 else 22
         score -= resource.latency.ordinal * if (requirements.mode == AgentRoutingMode.FAST) 75 else 25
         score -= resource.cost.ordinal * if (requirements.mode == AgentRoutingMode.ECONOMY) 80 else 20
         if (health.averageLatencyMs > 0) {
             val latencyDivisor = if (requirements.mode == AgentRoutingMode.FAST) 40L else 120L
             score -= (health.averageLatencyMs / latencyDivisor).coerceAtMost(180L).toInt()
+        }
+        if (domainHealth.averageLatencyMs > 0) {
+            score -= (domainHealth.averageLatencyMs / 180L).coerceAtMost(120L).toInt()
         }
         if (requirements.dataSensitivity == AgentDataSensitivity.CONFIDENTIAL) {
             score += when (resource.trust) {
@@ -492,6 +588,8 @@ class AgentResourceRouter(context: Context) {
         if (requirements.mode == AgentRoutingMode.QUALITY && resource.quality == AgentResourceQuality.FRONTIER) score += 160
         if (missing.isEmpty()) reasons += "capability_match" else reasons += "partial_match:${missing.joinToString(",") { it.name }}"
         reasons += "health:${health.reliabilityPercent}"
+        reasons += "domain:${resource.failureDomain.ifBlank { "none" }}"
+        reasons += "domain_health:${domainHealth.reliabilityPercent}"
         if (health.averageLatencyMs > 0) reasons += "observed_latency_ms:${health.averageLatencyMs}"
         reasons += "latency:${resource.latency.name.lowercase(Locale.US)}"
         reasons += "cost:${resource.cost.name.lowercase(Locale.US)}"

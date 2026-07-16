@@ -52,11 +52,14 @@ object AgentConfirmationPolicy {
         if (nativeToolId in CONFIRM_ONCE_NATIVE_TOOL_IDS) {
             return AgentConfirmationTier.CONFIRM_ONCE
         }
-        if (nativeToolId == AgentWebMediaNativeTools.WEATHER_FORECAST) {
+        if (nativeToolId == AgentWebMediaNativeTools.WEB_SEARCH) {
             return AgentConfirmationTier.DIRECT
         }
         if (action.kind in ALWAYS_CONFIRM_KINDS || ALWAYS_CONFIRM_TERMS.any(value::contains)) {
             return AgentConfirmationTier.CONFIRM_ALWAYS
+        }
+        if (action.kind == AgentActionKind.CALL_CONNECTOR) {
+            return AgentConfirmationTier.DIRECT
         }
         if (CONFIRM_ONCE_TERMS.any(value::contains) ||
             action.kind == AgentActionKind.CONTROL_DEVICE
@@ -64,7 +67,6 @@ object AgentConfirmationPolicy {
             return AgentConfirmationTier.CONFIRM_ONCE
         }
         if (action.kind == AgentActionKind.SET_ALARM || action.kind == AgentActionKind.OPEN_APP ||
-            action.kind == AgentActionKind.CALL_CONNECTOR ||
             action.id in DIRECT_ACTION_IDS || nativeToolId in DIRECT_NATIVE_TOOL_IDS ||
             DIRECT_TERMS.any(value::contains)
         ) return AgentConfirmationTier.DIRECT
@@ -133,7 +135,7 @@ object AgentConfirmationPolicy {
         AgentHardwareNativeTools.BLUETOOTH_STATUS,
         AgentHardwareNativeTools.NFC_STATUS,
         AgentHardwareNativeTools.FLASHLIGHT_SET,
-        AgentWebMediaNativeTools.WEATHER_FORECAST,
+        AgentWebMediaNativeTools.WEB_SEARCH,
         AgentHardwareNativeTools.BLUETOOTH_PAIRING_HANDOFF,
         AgentAndroidSystemNativeTools.AUDIO_STATUS,
         AgentAndroidSystemNativeTools.AUDIO_VOLUME_SET,

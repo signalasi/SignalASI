@@ -37,6 +37,20 @@ class GuardedModelAgentPlanner(
                 routeRationale = "A deterministic phone-native tool matched the request and cannot be overridden by a remote planner."
             )
         }
+        val directInformationRoute = fallbackPlan.actions.isNotEmpty() && fallbackPlan.actions.all { action ->
+            action.kind == AgentActionKind.CALL_CONNECTOR ||
+                (action.kind == AgentActionKind.CALL_NATIVE_TOOL &&
+                    action.parameters["tool_id"] == AgentWebMediaNativeTools.WEB_SEARCH)
+        }
+        if (directInformationRoute &&
+            AgentCapability.CODE !in requirements.capabilities &&
+            AgentCapability.TASK_EXECUTION !in requirements.capabilities
+        ) {
+            return fallbackPlan.copy(
+                plannerProfile = "rule-based-information-route",
+                routeRationale = "A read-only information request was routed directly to its execution site without an extra planning-model call."
+            )
+        }
         if (!settings.enabled || !safetySettingsStore.load().connectorCallsAllowed) {
             return fallbackPlan.copy(plannerProfile = "rule-based-local")
         }

@@ -188,6 +188,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val activeAgentTasks = ConcurrentHashMap<Long, MobileNativeAgent>()
     private val provisionalAgentTasks = ConcurrentHashMap.newKeySet<MobileNativeAgent>()
     private val completedConnectorTaskIds = ConcurrentHashMap.newKeySet<String>()
+    private val supersededConnectorSourceIds = ConcurrentHashMap.newKeySet<Long>()
     private val agentRuntimeConversationIds = ConcurrentHashMap<MobileNativeAgent, String>()
     private val agentRuntimeTurnIds = ConcurrentHashMap<MobileNativeAgent, String>()
     private val agentConnectorResponsesInFlight = ConcurrentHashMap.newKeySet<String>()
@@ -849,9 +850,20 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     override fun onMessage(payload: String) {
         runOnUiThread {
             val envelope = runCatching { JSONObject(payload) }.getOrNull()
+            envelope?.optString("desktop_id")?.takeIf(String::isNotBlank)?.let(::markDesktopDomainAvailableById)
+            if (envelope?.optString("type") == "delivery_ack") {
+                val acknowledgedId = envelope.optString("source_message_id")
+                    .ifBlank { envelope.optString("reply_to") }
+                    .toLongOrNull()
+                if (acknowledgedId != null) {
+                    runtimeForConnectorResponse(acknowledgedId, "")
+                        .recordConnectorTransportAccepted(acknowledgedId)
+                }
+            }
             if (handleAgentTaskEvent(envelope)) return@runOnUiThread
             val msg = parseIncomingMessage(payload)
             if (msg.content.isBlank()) return@runOnUiThread
+            markDesktopDomainAvailable(msg.contact.id)
             if (msg.taskId.isNotBlank() && messages[msg.contact.id].orEmpty().any {
                     !it.isMine && it.taskId == msg.taskId && it.content == msg.content
                 }
@@ -863,13 +875,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             val sourceMessageId = envelope?.optString("source_message_id")?.toLongOrNull()
                 ?: envelope?.optLong("source_message_id", 0L)
                 ?: 0L
-            val nativeAgentResponse = sourceMessageId > 0L && (
+            val supersededResponse = sourceMessageId > 0L && sourceMessageId in supersededConnectorSourceIds
+            val nativeAgentResponse = supersededResponse || sourceMessageId > 0L && (
                 activeAgentTasks[sourceMessageId]?.canAcceptConnectorResponse(sourceMessageId, msg.contact.id) == true ||
                     provisionalAgentTasks.any {
                         it.canAcceptConnectorResponse(sourceMessageId, msg.contact.id)
                     } ||
                     mobileNativeAgent.canAcceptConnectorResponse(sourceMessageId, msg.contact.id)
                 )
+            if (supersededResponse) supersededConnectorSourceIds.remove(sourceMessageId)
             val responseConversationId = envelope?.optString("conversation_id").orEmpty()
             val responseTurnId = envelope?.optString("turn_id").orEmpty()
             val responseTaskId = envelope?.optString("task_id").orEmpty()
@@ -918,6 +932,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val contactId = envelope.optString("contact_id").takeIf { it.isNotBlank() }
             ?: selectedContact?.id
             ?: return true
+        markDesktopDomainAvailable(contactId)
+        if (sourceMessageId in supersededConnectorSourceIds) return true
         val status = envelope.optString("task_status")
         val taskId = envelope.optString("task_id")
         if (taskId in completedConnectorTaskIds && status !in setOf("completed", "failed", "cancelled", "timed_out")) {
@@ -1056,6 +1072,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
         }
         return true
+    }
+
+    private fun markDesktopDomainAvailable(contactId: String) {
+        val desktopId = AppStore.desktopIdForContact(this, contactId)
+        if (desktopId.isNotBlank()) markDesktopDomainAvailableById(desktopId)
+    }
+
+    private fun markDesktopDomainAvailableById(desktopId: String) {
+        AgentResourceHealthStore(this).markAvailable("domain:$desktopId")
     }
 
     override fun onPcInfo(ip: String, port: Int) {
@@ -1713,6 +1738,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 state.lastActionResult?.metadata?.get("source_message_id")?.toLongOrNull()?.let { sourceId ->
                     activeAgentTasks[sourceId] = runtime
                     provisionalAgentTasks.remove(runtime)
+                    scheduleConnectorTimeouts(runtime, sourceId, conversationId, turnId)
                 }
                 renderAgentState(state, conversationId, turnId)
                 recordAgentRunFromState(turnId, state)
@@ -1733,6 +1759,59 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 else -> Unit
             }
         }
+    }
+
+    private fun scheduleConnectorTimeouts(
+        runtime: MobileNativeAgent,
+        sourceMessageId: Long,
+        conversationId: String,
+        turnId: String
+    ) {
+        val metadata = runtime.pendingConnectorMetadata(sourceMessageId)
+        if (metadata["resource_location"] != "desktop") return
+        scheduleConnectorTimeout(runtime, sourceMessageId, conversationId, turnId, 3_000L, AgentConnectorTimeoutStage.NOT_ACCEPTED)
+        scheduleConnectorTimeout(runtime, sourceMessageId, conversationId, turnId, 8_000L, AgentConnectorTimeoutStage.NOT_RUNNING)
+        if (metadata["routing_requires_live_data"] == "true") {
+            scheduleConnectorTimeout(runtime, sourceMessageId, conversationId, turnId, 15_000L, AgentConnectorTimeoutStage.READ_ONLY_STALE)
+        }
+    }
+
+    private fun scheduleConnectorTimeout(
+        runtime: MobileNativeAgent,
+        sourceMessageId: Long,
+        conversationId: String,
+        turnId: String,
+        delayMs: Long,
+        stage: AgentConnectorTimeoutStage
+    ) {
+        handler.postDelayed({
+            thread(name = "signalasi-connector-timeout-${stage.name.lowercase(Locale.US)}") {
+                val before = runtime.pendingConnectorMetadata(sourceMessageId)
+                val state = runtime.handleConnectorTimeout(sourceMessageId, stage) ?: return@thread
+                val remoteTaskId = before["remote_task_id"].orEmpty()
+                val contactId = before["contact_id"].orEmpty()
+                if (remoteTaskId.isNotBlank() && contactId.isNotBlank()) {
+                    SignalASIMqttClient.publishAgentTaskCancel(
+                        taskId = remoteTaskId,
+                        contactId = contactId,
+                        sourceMessageId = sourceMessageId,
+                        topicOverride = AppStore.outgoingTopicForContact(this, contactId)
+                    )
+                }
+                val replacementSourceId = state.lastActionResult?.metadata
+                    ?.get("source_message_id")?.toLongOrNull()
+                runOnUiThread {
+                    supersededConnectorSourceIds.add(sourceMessageId)
+                    activeAgentTasks.remove(sourceMessageId)
+                    if (replacementSourceId != null && replacementSourceId != sourceMessageId) {
+                        activeAgentTasks[replacementSourceId] = runtime
+                        scheduleConnectorTimeouts(runtime, replacementSourceId, conversationId, turnId)
+                    }
+                    renderAgentState(state, conversationId, turnId)
+                    recordAgentRunFromState(turnId, state)
+                }
+            }
+        }, delayMs)
     }
 
     private fun deterministicSystemActionFor(

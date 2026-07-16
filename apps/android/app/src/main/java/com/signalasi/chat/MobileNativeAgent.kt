@@ -22,6 +22,7 @@ import android.os.StatFs
 import android.provider.AlarmClock
 import android.provider.CalendarContract
 import android.provider.ContactsContract
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
@@ -57,6 +58,31 @@ private val SENSITIVE_MEMORY_TERMS = listOf(
     "\u79c1\u94a5",
     "\u652f\u4ed8"
 )
+
+internal fun renderPhoneWebSearchResult(output: AgentNativeJsonObject, zh: Boolean): String {
+    val results = (output["results"] as? Iterable<*>)
+        ?.mapNotNull { it as? Map<*, *> }
+        ?.mapNotNull { row ->
+            val title = row["title"]?.toString()?.trim().orEmpty()
+            val url = row["url"]?.toString()?.trim().orEmpty()
+            if (title.isBlank() || !url.startsWith("https://", ignoreCase = true)) null else title to url
+        }
+        .orEmpty()
+    if (results.isEmpty()) {
+        return if (zh) {
+            "\u6ca1\u6709\u627e\u5230\u53ef\u8bfb\u7684\u7f51\u9875\u7ed3\u679c\u3002\u8bf7\u6362\u4e2a\u5173\u952e\u8bcd\u540e\u91cd\u8bd5\u3002"
+        } else {
+            "No readable web results were found. Try a more specific query."
+        }
+    }
+    val heading = if (zh) "\u6700\u65b0\u641c\u7d22\u7ed3\u679c\uff1a" else "Latest web results:"
+    val lines = results.take(6).map { (rawTitle, rawUrl) ->
+        val title = rawTitle.replace("[", "\\[").replace("]", "\\]").take(240)
+        val url = rawUrl.replace(")", "%29").take(2_048)
+        "- [$title]($url)"
+    }
+    return heading + "\n" + lines.joinToString("\n")
+}
 
 /**
  * Phone-native Agent runtime scaffold.
@@ -280,7 +306,7 @@ class MobileNativeAgent(
     ): String {
         val zh = currentGoal.any { it in '\u3400'..'\u9fff' }
         if (output.isEmpty()) return renderNativeToolFailure(message, zh)
-        if (toolId == AgentWebMediaNativeTools.WEATHER_FORECAST) return message.trim()
+        if (toolId == AgentWebMediaNativeTools.WEB_SEARCH) return renderPhoneWebSearchResult(output, zh)
         renderAndroidSystemSummary(toolId, output, zh)?.let { return it }
         if (zh) return renderNativeToolResultChinese(toolId, message, output)
         fun bool(name: String) = output[name] as? Boolean ?: false
@@ -1222,6 +1248,13 @@ class MobileNativeAgent(
                 latencyMs = (System.currentTimeMillis() - resourceStartedAt).coerceAtLeast(0L)
             )
         }
+        pendingResult.metadata["failure_domain"].orEmpty().takeIf(String::isNotBlank)?.let { domain ->
+            AgentResourceHealthStore(appContext).record(
+                id = "domain:$domain",
+                success = success,
+                latencyMs = (System.currentTimeMillis() - resourceStartedAt).coerceAtLeast(0L)
+            )
+        }
         if (!success) {
             continueWithConnectorFallback(plan, pendingResult)?.let { return it }
         }
@@ -1289,11 +1322,17 @@ class MobileNativeAgent(
         plan: AgentPlan,
         failedResult: AgentActionResult
     ): AgentUiState? {
+        val failedDomain = failedResult.metadata["failure_domain"].orEmpty()
+        val timeoutFailure = failedResult.metadata["timeout_stage"].orEmpty().isNotBlank()
         val fallbackIds = failedResult.metadata["remaining_fallback_ids"].orEmpty()
             .split(',')
             .map(String::trim)
             .filter(String::isNotBlank)
             .distinct()
+            .filterNot { connectorId ->
+                timeoutFailure && failedDomain.isNotBlank() &&
+                    connectorFailureDomain(connectorId) == failedDomain
+            }
         if (fallbackIds.isEmpty()) return null
         val action = plan.actions.firstOrNull { it.id == failedResult.actionId } ?: return null
         val retryAction = action.copy(
@@ -1312,6 +1351,29 @@ class MobileNativeAgent(
         phase = AgentPhase.WAITING_RESPONSE
         saveTaskRecord()
         return snapshot()
+    }
+
+    private fun connectorFailureDomain(connectorId: String): String {
+        if (connectorId == "cloud-models" || connectorId.startsWith("cloud-model:") ||
+            AppStore.isCloudApiContact(appContext, connectorId)
+        ) {
+            return "cloud:$connectorId"
+        }
+        val direct = AppStore.contactById(appContext, connectorId)
+        val contactId = direct?.optString("id").orEmpty().ifBlank {
+            val contacts = AppStore.contacts(appContext)
+            (0 until contacts.length()).asSequence()
+                .mapNotNull(contacts::optJSONObject)
+                .firstOrNull { contact ->
+                    contact.optString("agent_id") == connectorId ||
+                        contact.optString("signalasi_id") == connectorId ||
+                        contact.optString("id").endsWith(":$connectorId")
+                }
+                ?.optString("id")
+                .orEmpty()
+        }
+        if (contactId.isBlank()) return "resource:$connectorId"
+        return AppStore.desktopIdForContact(appContext, contactId).ifBlank { "peer:$contactId" }
     }
 
     fun canAcceptConnectorResponse(sourceMessageId: Long, contactId: String): Boolean {
@@ -1333,16 +1395,97 @@ class MobileNativeAgent(
         val pendingResult = lastActionResult ?: return null
         val previousSeq = pendingResult.metadata["remote_task_status_seq"]?.toLongOrNull() ?: -1L
         if (statusSeq > 0L && statusSeq < previousSeq) return snapshot()
+        val now = System.currentTimeMillis()
+        pendingResult.metadata["failure_domain"].orEmpty().takeIf(String::isNotBlank)?.let { domain ->
+            AgentResourceHealthStore(appContext).markAvailable("domain:$domain")
+        }
         lastActionResult = pendingResult.copy(
             metadata = pendingResult.metadata + mapOf(
                 "remote_task_id" to taskId,
                 "remote_task_status" to taskStatus,
-                "remote_task_status_seq" to maxOf(previousSeq, statusSeq).toString()
+                "remote_task_status_seq" to maxOf(previousSeq, statusSeq).toString(),
+                "remote_task_status_updated_at" to now.toString()
             )
         )
         saveTaskRecord()
         return snapshot()
     }
+
+    fun recordConnectorTransportAccepted(sourceMessageId: Long): AgentUiState? {
+        if (sourceMessageId <= 0L || phase != AgentPhase.WAITING_RESPONSE) return null
+        val pending = lastActionResult ?: return null
+        if (pending.metadata["source_message_id"]?.toLongOrNull() != sourceMessageId) return null
+        val now = System.currentTimeMillis()
+        pending.metadata["failure_domain"].orEmpty().takeIf(String::isNotBlank)?.let { domain ->
+            AgentResourceHealthStore(appContext).markAvailable("domain:$domain")
+        }
+        lastActionResult = pending.copy(
+            metadata = pending.metadata + mapOf(
+                "remote_task_status" to pending.metadata["remote_task_status"].orEmpty().ifBlank { "accepted" },
+                "remote_task_status_updated_at" to now.toString(),
+                "transport_accepted_at" to now.toString()
+            )
+        )
+        saveTaskRecord()
+        return snapshot()
+    }
+
+    fun handleConnectorTimeout(
+        sourceMessageId: Long,
+        stage: AgentConnectorTimeoutStage
+    ): AgentUiState? {
+        if (sourceMessageId <= 0L || phase != AgentPhase.WAITING_RESPONSE) return null
+        val pending = lastActionResult ?: return null
+        if (pending.metadata["source_message_id"]?.toLongOrNull() != sourceMessageId) return null
+        val status = pending.metadata["remote_task_status"].orEmpty()
+        val liveReadOnly = pending.metadata["routing_requires_live_data"] == "true"
+        val timedOut = AgentFailoverPolicy.shouldFailOver(stage, status, liveReadOnly)
+        if (!timedOut) return null
+        val targetId = pending.metadata["resource_id"].orEmpty()
+        val failureDomain = pending.metadata["failure_domain"].orEmpty()
+        if (stage == AgentConnectorTimeoutStage.READ_ONLY_STALE) {
+            val hasDifferentDomainFallback = pending.metadata["remaining_fallback_ids"].orEmpty()
+                .split(',')
+                .map(String::trim)
+                .filter(String::isNotBlank)
+                .distinct()
+                .any { connectorFailureDomain(it) != failureDomain }
+            if (!hasDifferentDomainFallback) return null
+        }
+        val elapsed = (System.currentTimeMillis() - (pending.metadata["resource_started_at"]?.toLongOrNull()
+            ?: System.currentTimeMillis())).coerceAtLeast(0L)
+        val health = AgentResourceHealthStore(appContext)
+        if (targetId.isNotBlank()) health.record("target:$targetId", false, elapsed)
+        if (failureDomain.isNotBlank() && stage != AgentConnectorTimeoutStage.READ_ONLY_STALE) {
+            health.recordFailureDomainTimeout("domain:$failureDomain", elapsed)
+        }
+        val failed = pending.copy(
+            success = false,
+            message = "${pending.metadata["target"].orEmpty().ifBlank { "Selected resource" }} timed out",
+            metadata = pending.metadata + mapOf(
+                "awaiting_response" to "false",
+                "timeout_stage" to stage.name,
+                "timeout_elapsed_ms" to elapsed.toString()
+            )
+        )
+        recordAudit(
+            AgentAuditEvent.INVOCATION_AUDIT,
+            "connector_timeout:$stage:resource=$targetId:domain=$failureDomain:elapsed_ms=$elapsed"
+        )
+        val plan = currentPlan ?: return null
+        continueWithConnectorFallback(plan, failed)?.let { return it }
+        lastActionResult = failed
+        currentPlan = plan.markAction(failed.actionId, AgentActionStatus.FAILED, failed)
+        phase = AgentPhase.FAILED
+        saveTaskRecord(result = failed.message)
+        return snapshot()
+    }
+
+    fun pendingConnectorMetadata(sourceMessageId: Long): Map<String, String> =
+        lastActionResult?.takeIf {
+            phase == AgentPhase.WAITING_RESPONSE &&
+                it.metadata["source_message_id"]?.toLongOrNull() == sourceMessageId
+        }?.metadata.orEmpty()
 
     private fun captureVerificationScreen(
         action: AgentAction,
@@ -5126,11 +5269,64 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             ?: directDeviceStatusAction(request)
 
     private fun actionsFor(request: AgentRequest): List<AgentAction> {
+        genericWebResearchActions(request)?.let { return it }
         val segments = splitGoalSegments(request.goal)
         if (segments.size <= 1) return listOf(actionFor(request))
         return segments.mapIndexed { index, segment ->
             actionFor(request.copy(goal = segment)).copy(id = "queue-${index + 1}-${segment.stableActionId()}")
         }
+    }
+
+    private fun genericWebResearchActions(request: AgentRequest): List<AgentAction>? {
+        val requirements = AgentTaskRequirementAnalyzer.analyze(request.goal)
+        val explicitSearch = phoneWebSearchQuery(request.goal, request.goal.lowercase(Locale.US)) != null
+        if (!requirements.liveDataRequired && !explicitSearch) return null
+        if (requirements.localOnly) return null
+        val synthesis = informationQueryAction(request) ?: return null
+        if (synthesis.kind != AgentActionKind.CALL_CONNECTOR) return null
+        val connectorId = synthesis.parameters["connector_id"].orEmpty()
+        val target = request.targets.firstOrNull { it.id == connectorId }
+        val isPhoneCloudApi = connectorId == "cloud-models" ||
+            (context != null && AppStore.isCloudApiContact(context, connectorId))
+        val canRetrieveAtExecutionSite = isPhoneCloudApi || (
+            target?.kind == AgentConnectorKind.AGENT &&
+                AgentCapability.LIVE_DATA in target.capabilities &&
+                AgentCapability.TOOL_USE in target.capabilities
+            )
+        if (canRetrieveAtExecutionSite) {
+            return listOf(
+                synthesis.copy(parameters = synthesis.parameters + mapOf(
+                    "research_mode" to if (isPhoneCloudApi) "phone_cloud_tool_loop_v1" else "remote_agent_tool_loop_v1",
+                    "web_execution_location" to if (isPhoneCloudApi) "phone" else "agent_host"
+                ))
+            )
+        }
+        val search = nativeToolAction(
+            request,
+            AgentWebMediaNativeTools.WEB_SEARCH,
+            JSONObject()
+                .put("query", request.goal.replace("%27", "'", ignoreCase = true).trim())
+                .put("max_results", 6)
+                .put("timeout_ms", 10_000)
+        ) ?: return null
+        val synthesisId = "research-synthesis-${request.goal.hashCode().toUInt()}"
+        return listOf(
+            search,
+            synthesis.copy(
+                id = synthesisId,
+                description = "Answer from current public web evidence",
+                parameters = synthesis.parameters + mapOf(
+                    "prompt" to buildString {
+                        append(request.goal.trim())
+                        append("\n\nUse the phone-retrieved public web evidence below to answer directly. ")
+                        append("Prefer current facts, cite source URLs, distinguish uncertainty, and do not describe internal tool steps.")
+                    },
+                    "depends_on" to search.id,
+                    "use_outputs_from" to search.id,
+                    "research_mode" to "generic_phone_web_v1"
+                )
+            )
+        )
     }
 
     private fun splitGoalSegments(goal: String): List<String> =
@@ -5285,6 +5481,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         val goal = request.goal.trim()
         val lower = goal.lowercase(Locale.US)
         val now = System.currentTimeMillis()
+        val phoneWebSearchQuery = phoneWebSearchQuery(goal, lower)
         val selected: Pair<String, JSONObject> = when {
             lower.hasAny(
                 "turn on flashlight", "open flashlight", "flashlight on", "turn on torch", "torch on",
@@ -5302,15 +5499,11 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 AgentHardwareNativeTools.STORAGE_STATUS to JSONObject()
             lower.hasAny("network status", "phone network", "active network", "\u624b\u673a\u7f51\u7edc\u72b6\u6001", "\u5f53\u524d\u7f51\u7edc", "\u7f51\u7edc\u8fde\u63a5\u72b6\u6001") ->
                 AgentHardwareNativeTools.NETWORK_STATUS to JSONObject()
-            lower.hasAny("weather", "forecast", "\u5929\u6c14", "\u6c14\u6e29") -> {
-                val location = weatherLocationFromGoal(goal)
-                if (location.isBlank()) return null
-                AgentWebMediaNativeTools.WEATHER_FORECAST to JSONObject()
-                    .put("location", location)
-                    .put("language", if (goal.any { it.code in 0x3400..0x9fff }) "zh" else "en")
-                    .put("day_offset", weatherDayOffset(lower))
+            phoneWebSearchQuery != null ->
+                AgentWebMediaNativeTools.WEB_SEARCH to JSONObject()
+                    .put("query", phoneWebSearchQuery)
+                    .put("max_results", 6)
                     .put("timeout_ms", 10_000)
-            }
             lower.hasAny("current location", "phone location", "where am i", "\u5f53\u524d\u4f4d\u7f6e", "\u624b\u673a\u4f4d\u7f6e", "\u6211\u5728\u54ea\u91cc", "\u83b7\u53d6\u4f4d\u7f6e") ->
                 AgentHardwareNativeTools.LOCATION_FOREGROUND_READ to JSONObject().put("timeout_ms", 10_000)
             lower.hasAny("list sensors", "device sensors", "sensor list", "\u5217\u51fa\u4f20\u611f\u5668", "\u624b\u673a\u4f20\u611f\u5668", "\u4f20\u611f\u5668\u5217\u8868") ->
@@ -5470,21 +5663,12 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         else -> "accelerometer"
     }
 
-    private fun weatherDayOffset(goal: String): Int = when {
-        goal.contains("day after tomorrow") || goal.contains("\u540e\u5929") -> 2
-        goal.contains("tomorrow") || goal.contains("\u660e\u5929") -> 1
-        else -> 0
-    }
-
-    private fun weatherLocationFromGoal(goal: String): String {
-        Regex(
-            "\\b(?:weather|forecast)\\s+(?:in|for)\\s+([A-Za-z][A-Za-z .'-]{1,60}?)(?=\\s+(?:today|tomorrow|the day after tomorrow|now)\\b|[?.!,]|$)",
-            RegexOption.IGNORE_CASE
-        ).find(goal)?.groupValues?.getOrNull(1)?.trim()?.takeIf(String::isNotBlank)?.let { return it }
-        Regex(
-            "(?:\u4eca\u5929|\u4eca\u65e5|\u660e\u5929|\u540e\u5929)?\\s*([\u3400-\u9fff]{2,16}?)(?:\u4eca\u5929|\u4eca\u65e5|\u660e\u5929|\u540e\u5929)?(?:\u7684)?(?:\u5929\u6c14|\u6c14\u6e29)"
-        ).find(goal)?.groupValues?.getOrNull(1)?.trim()?.takeIf(String::isNotBlank)?.let { return it }
-        return ""
+    private fun phoneWebSearchQuery(goal: String, lower: String): String? {
+        val explicitSearch = lower.hasAny(
+            "search the web", "web search", "search online", "look up online",
+            "\u8054\u7f51\u641c\u7d22", "\u7f51\u4e0a\u641c\u7d22", "\u7f51\u7edc\u641c\u7d22", "\u767e\u5ea6\u641c\u7d22"
+        )
+        return if (explicitSearch) goal.replace("%27", "'", ignoreCase = true).trim() else null
     }
 
     private fun informationQueryAction(request: AgentRequest): AgentAction? {
@@ -6500,6 +6684,12 @@ class DefaultAgentSafetyPolicy(
                     confirmationConsentStore?.isRemembered(AgentConfirmationPolicy.consentKey(action)) != true
             }
         }
+        Log.d(
+            "SignalASISafety",
+            "review mode=${mode.name} actions=${pendingActions.joinToString(",") { action ->
+                "${action.kind.name}:${AgentConfirmationPolicy.tier(action).name}"
+            }} tier_confirmation=$requiresTierConfirmation blocked=$blocked"
+        )
         val requiresConfirmation = when (mode) {
             PermissionMode.OBSERVE_ONLY,
             PermissionMode.SUGGEST_ONLY -> true
@@ -7022,6 +7212,8 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         val prompt = if (action.id == "knowledge-answer") {
             buildKnowledgeAnswerPrompt(action)
                 ?: return AgentActionResult(action.id, false, "Knowledge evidence is no longer available")
+        } else if (action.outputSourceIds().isNotEmpty() && action.parameters["prompt"].orEmpty().isNotBlank()) {
+            action.parameters.getValue("prompt")
         } else {
             action.parameters["original_goal"].orEmpty().ifBlank {
                 action.parameters["prompt"].orEmpty().ifBlank { action.description }
@@ -7195,7 +7387,10 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                     "contact_id" to contactId,
                 "target" to action.target,
                 "resource_id" to action.parameters["connector_id"].orEmpty().ifBlank { contactId },
+                "failure_domain" to AppStore.desktopIdForContact(context, contactId).ifBlank { "peer:$contactId" },
+                "resource_location" to if (AppStore.usesPcConnectorTunnel(context, contactId)) "desktop" else "peer",
                 "resource_started_at" to System.currentTimeMillis().toString(),
+                "routing_requires_live_data" to action.parameters["routing_requires_live_data"].orEmpty(),
                 "remaining_fallback_ids" to action.parameters["routing_fallback_ids"].orEmpty()
             )
             } else {
@@ -7316,7 +7511,10 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 "contact_id" to contactId,
                 "target" to contact.optString("name", contactId),
                 "resource_id" to preferredContactId.ifBlank { contactId },
+                "failure_domain" to "cloud:${selectedModel.optString("cloud_provider").ifBlank { contactId }}",
+                "resource_location" to "cloud",
                 "resource_started_at" to System.currentTimeMillis().toString(),
+                "routing_requires_live_data" to action.parameters["routing_requires_live_data"].orEmpty(),
                 "remaining_fallback_ids" to remainingFallbackIds.joinToString(","),
                 "cloud_health_recorded" to "true"
             )
@@ -8076,7 +8274,17 @@ class AppStoreAgentConnectorRegistry(
     private val appContext = context.applicationContext
 
     override fun availableTargets(): List<AgentCallableTarget> {
-        val builtIn = fallback.availableTargets().map { target -> target.copy(status = statusFor(target)) }
+        val builtIn = fallback.availableTargets().map { target ->
+            val desktopDomain = matchingContactIds(target.id)
+                .asSequence()
+                .map { AppStore.desktopIdForContact(appContext, it) }
+                .firstOrNull(String::isNotBlank)
+                .orEmpty()
+            target.copy(
+                status = statusFor(target),
+                failureDomain = target.failureDomain.ifBlank { desktopDomain }
+            )
+        }
         val cloudProviders = cloudProviderTargets()
         val desktopExtensions = desktopConnectorTargets()
         val customDevices = CustomDeviceConnectorStore(appContext).list().filter { it.enabled }.map { connector ->
@@ -8120,6 +8328,7 @@ class AppStoreAgentConnectorRegistry(
                             .ifBlank { id },
                         kind = AgentConnectorKind.MODEL,
                         status = if (ready) AgentConnectorStatus.AVAILABLE else AgentConnectorStatus.NEEDS_SETUP,
+                        failureDomain = "cloud:${selected.optString("cloud_provider").ifBlank { id }}",
                         capabilities = buildList {
                             add(AgentCapability.CHAT)
                             add(AgentCapability.REASONING)
@@ -8187,6 +8396,7 @@ class AppStoreAgentConnectorRegistry(
                             .ifBlank { id },
                         kind = kind,
                         status = if (contactReady(id)) AgentConnectorStatus.AVAILABLE else AgentConnectorStatus.DISCONNECTED,
+                        failureDomain = contact.optString("desktop_id").ifBlank { "desktop:$id" },
                         capabilities = capabilities
                     )
                 )
@@ -9025,7 +9235,8 @@ data class AgentCallableTarget(
     val title: String,
     val kind: AgentConnectorKind,
     val status: AgentConnectorStatus,
-    val capabilities: List<AgentCapability>
+    val capabilities: List<AgentCapability>,
+    val failureDomain: String = ""
 )
 
 data class ScreenContext(
@@ -9335,6 +9546,12 @@ data class AgentActionResult(
     val message: String,
     val metadata: Map<String, String> = emptyMap()
 )
+
+enum class AgentConnectorTimeoutStage {
+    NOT_ACCEPTED,
+    NOT_RUNNING,
+    READ_ONLY_STALE
+}
 
 data class AgentVerificationResult(
     val actionId: String,
