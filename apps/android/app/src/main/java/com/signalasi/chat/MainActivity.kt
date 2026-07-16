@@ -503,6 +503,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         configureMessages()
         configureInput()
         configureWakePage()
+        configureSettingsControlCenter()
         styleSettingsRows()
         refreshMePage()
         startMessageService()
@@ -3457,6 +3458,113 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
+    private fun configureSettingsControlCenter() {
+        val content = findViewById<LinearLayout>(R.id.settingsContent)
+        val orderedViews = listOf(
+            R.id.meProfileCard,
+            R.id.settingsLocalAgentTitle, R.id.settingsLocalAgentCard,
+            R.id.settingsAgentToolsTitle, R.id.settingsAgentToolsCard,
+            R.id.settingsProtocolTitle, R.id.settingsProtocolCard,
+            R.id.settingsIdentityTitle, R.id.settingsIdentityCard,
+            R.id.settingsDataTitle, R.id.settingsDataCard,
+            R.id.settingsGeneralTitle, R.id.settingsGeneralCard,
+            R.id.settingsPagesTitle, R.id.settingsPagesCard,
+            R.id.destroyDataButton, R.id.aboutSignalASIButton
+        ).map { findViewById<View>(it) }
+        orderedViews.forEach { (it.parent as? ViewGroup)?.removeView(it) }
+        orderedViews.forEach(content::addView)
+        content.setPadding(dp(12), dp(10), dp(12), dp(24))
+
+        sectionTitle(R.id.settingsLocalAgentTitle, R.string.settings_control_agent)
+        sectionTitle(R.id.settingsAgentToolsTitle, R.string.settings_control_knowledge)
+        sectionTitle(R.id.settingsProtocolTitle, R.string.settings_control_trust)
+        sectionTitle(R.id.settingsIdentityTitle, R.string.settings_identity_security)
+        sectionTitle(R.id.settingsDataTitle, R.string.settings_control_data)
+        sectionTitle(R.id.settingsGeneralTitle, R.string.settings_control_general)
+        sectionTitle(R.id.settingsPagesTitle, R.string.settings_control_pages)
+
+        findViewById<TextView>(R.id.advancedOptionsButton).text = getString(R.string.settings_developer_options)
+        findViewById<ViewGroup>(R.id.settingsProtocolCard).getChildAt(1)?.visibility = View.GONE
+        meIdText.setOnClickListener {
+            copyText(SignalASICrypto.localIdentitySha256(), getString(R.string.security_copied_phone_fingerprint))
+        }
+        refreshSettingsControlCenter()
+    }
+
+    private fun sectionTitle(viewId: Int, textId: Int) {
+        findViewById<TextView>(viewId).apply {
+            setText(textId)
+            setTextColor(getColorCompat(R.color.text_secondary))
+            textSize = 12f
+            setTypeface(typeface, android.graphics.Typeface.NORMAL)
+        }
+    }
+
+    private fun settingsStatusRow(viewId: Int, titleId: Int, status: String) {
+        findViewById<TextView>(viewId).apply {
+            val title = getString(titleId)
+            text = SpannableString("$title\n$status").apply {
+                setSpan(RelativeSizeSpan(0.78f), title.length + 1, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                setSpan(ForegroundColorSpan(getColorCompat(R.color.text_secondary)), title.length + 1, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            layoutParams = layoutParams.apply { height = dp(62) }
+            gravity = Gravity.CENTER_VERTICAL
+            includeFontPadding = false
+            setLineSpacing(dp(2).toFloat(), 1f)
+        }
+    }
+
+    private fun refreshSettingsControlCenter() {
+        val state = mobileNativeAgent.snapshot()
+        val voice = VoiceAssistantSettings.get(this)
+        val memoryCount = mobileNativeAgent.memorySnapshot().activeCount
+        val knowledgeCount = mobileNativeAgent.knowledgeSourceGroups().size
+        val connectionStatus = if (SignalASIMqttClient.isConnected() && SignalASIMqttClient.isSecureReady()) {
+            getString(R.string.settings_status_link_on)
+        } else {
+            getString(R.string.settings_status_link_off)
+        }
+        settingsStatusRow(R.id.localModelSettingsButton, R.string.settings_local_model, getString(R.string.settings_status_local_model))
+        settingsStatusRow(
+            R.id.onDeviceAgentButton,
+            R.string.on_device_agent_title,
+            getString(R.string.settings_status_agent_permission, permissionModeLabel(state.permissionMode))
+        )
+        settingsStatusRow(
+            R.id.voiceAssistantSettingsButton,
+            R.string.voice_settings_title,
+            getString(if (voice.enabled) R.string.settings_status_voice_on else R.string.settings_status_voice_off)
+        )
+        settingsStatusRow(
+            R.id.settingsUnderstandScreenButton,
+            R.string.agent_quick_understand,
+            getString(if (state.currentScreen.isAccessibilityEnabled) R.string.settings_status_screen_on else R.string.settings_status_screen_off)
+        )
+        settingsStatusRow(R.id.settingsAgentMemoryButton, R.string.agent_quick_save_screen, getString(R.string.settings_status_memory_count, memoryCount))
+        settingsStatusRow(R.id.settingsAgentKnowledgeButton, R.string.agent_quick_search_knowledge, getString(R.string.settings_status_knowledge_count, knowledgeCount))
+        settingsStatusRow(R.id.settingsAgentControlButton, R.string.agent_quick_permissions, getString(R.string.settings_status_agent_permission, permissionModeLabel(state.permissionMode)))
+        settingsStatusRow(R.id.settingsRecentTasksButton, R.string.agent_section_recent_tasks, getString(R.string.settings_status_recent_count, state.recentTasks.size))
+        settingsStatusRow(R.id.settingsAgentSkillsButton, R.string.agent_skills_title, getString(R.string.settings_status_skills))
+        settingsStatusRow(R.id.protocolQualityButton, R.string.settings_control_trust, connectionStatus)
+        settingsStatusRow(R.id.advancedOptionsButton, R.string.settings_developer_options, getString(R.string.settings_status_developer))
+        settingsStatusRow(R.id.exportBackupButton, R.string.settings_backup_chat, getString(R.string.settings_status_backup))
+        settingsStatusRow(R.id.importBackupButton, R.string.settings_import_backup, getString(R.string.settings_status_backup))
+        settingsStatusRow(R.id.languageSettingsButton, R.string.settings_language, getString(R.string.settings_status_language))
+
+        val profile = AppStore.profile(this)
+        val id = profile.optString("signalasi_id", "").takeLast(8).ifBlank { getString(R.string.profile_id_unavailable) }
+        meIdSubtitleText.text = "${getString(R.string.settings_signalasi_id)}: $id · ${getString(R.string.settings_status_agent_ready)}"
+        val fingerprint = SignalASICrypto.localIdentitySha256().filter { it.isLetterOrDigit() }
+        meIdText.text = if (fingerprint.length > 16) {
+            "${fingerprint.take(8)}…${fingerprint.takeLast(8)}  ·  ${getString(R.string.settings_status_identity)}"
+        } else {
+            fingerprint
+        }
+        findViewById<View>(R.id.meProfileCard).layoutParams = findViewById<View>(R.id.meProfileCard).layoutParams.apply {
+            height = dp(86)
+        }
+    }
+
     private fun renderAgentState(
         state: AgentUiState,
         conversationId: String = agentTranscriptStore.activeConversation().id,
@@ -5591,6 +5699,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         directoryPage.visibility = if (tab == PAGE_CONTACTS) View.VISIBLE else View.GONE
         discoverPage.visibility = if (tab == PAGE_DISCOVER) View.VISIBLE else View.GONE
         mePage.visibility = if (tab == PAGE_SETTINGS) View.VISIBLE else View.GONE
+        if (tab == PAGE_SETTINGS) refreshSettingsControlCenter()
 
     }
 
@@ -7835,7 +7944,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         } else {
             SignalASICrypto.localIdentitySha256()
         }
-        meProfileText.text = name
+        meProfileText.text = if (name == "Me") getString(R.string.settings_profile_me) else name
         meProfileText.textSize = 17f
         meProfileText.setTypeface(meProfileText.typeface, android.graphics.Typeface.BOLD)
         meProfileText.gravity = Gravity.CENTER_VERTICAL
@@ -7847,6 +7956,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (savedAvatar.isNotBlank()) {
             try { meAvatar.setImageURI(Uri.parse(savedAvatar)) } catch (_: Exception) {}
         }
+        refreshSettingsControlCenter()
     }
 
     private fun showEditNicknameDialog() {

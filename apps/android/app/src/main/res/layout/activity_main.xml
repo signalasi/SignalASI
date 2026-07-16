@@ -1363,6 +1363,7 @@
                 android:visibility="gone">
 
                 <LinearLayout
+                    android:id="@+id/settingsContent"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
@@ -1428,6 +1429,7 @@
                     </LinearLayout>
 
                     <TextView
+                        android:id="@+id/settingsPagesTitle"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="14dp"
@@ -1438,6 +1440,7 @@
                         android:textStyle="bold" />
 
                     <LinearLayout
+                        android:id="@+id/settingsPagesCard"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
@@ -1492,6 +1495,7 @@
                     </LinearLayout>
 
                     <TextView
+                        android:id="@+id/settingsAgentToolsTitle"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="14dp"
@@ -1502,6 +1506,7 @@
                         android:textStyle="bold" />
 
                     <LinearLayout
+                        android:id="@+id/settingsAgentToolsCard"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
@@ -1522,6 +1527,7 @@
                     </LinearLayout>
 
                     <TextView
+                        android:id="@+id/settingsGeneralTitle"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="14dp"
@@ -1532,6 +1538,7 @@
                         android:textStyle="bold" />
 
                     <LinearLayout
+                        android:id="@+id/settingsGeneralCard"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
@@ -1552,6 +1559,7 @@
                     </LinearLayout>
 
                     <TextView
+                        android:id="@+id/settingsIdentityTitle"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="14dp"
@@ -1562,6 +1570,7 @@
                         android:textStyle="bold" />
 
                     <LinearLayout
+                        android:id="@+id/settingsIdentityCard"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
@@ -1606,6 +1615,7 @@
                     </LinearLayout>
 
                     <TextView
+                        android:id="@+id/settingsDataTitle"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="14dp"
@@ -1616,6 +1626,7 @@
                         android:textStyle="bold" />
 
                     <LinearLayout
+                        android:id="@+id/settingsDataCard"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
@@ -1654,6 +1665,7 @@
                     </LinearLayout>
 
                     <TextView
+                        android:id="@+id/settingsProtocolTitle"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="14dp"
@@ -1664,6 +1676,7 @@
                         android:textStyle="bold" />
 
                     <LinearLayout
+                        android:id="@+id/settingsProtocolCard"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
@@ -1693,7 +1706,7 @@
                         <TextView
                             android:id="@+id/signalLinkProtocolButton"
                             android:layout_width="match_parent"
-                            android:layout_height="46dp"
+                            android:layout_height="0dp"
                             android:drawableEnd="@drawable/ic_arrow_right"
                             android:drawablePadding="12dp"
                             android:drawableStart="@drawable/ic_protocol_link"
@@ -1702,7 +1715,8 @@
                             android:paddingEnd="16dp"
                             android:text="@string/settings_signal_link_protocol"
                             android:textColor="@color/text_primary"
-                            android:textSize="14sp" />
+                            android:textSize="14sp"
+                            android:visibility="gone" />
 
                         <View
                             android:layout_width="match_parent"
@@ -1726,6 +1740,7 @@
                     </LinearLayout>
 
                     <TextView
+                        android:id="@+id/settingsLocalAgentTitle"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="14dp"
@@ -1736,6 +1751,7 @@
                         android:textStyle="bold" />
 
                     <LinearLayout
+                        android:id="@+id/settingsLocalAgentCard"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
