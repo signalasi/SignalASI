@@ -3462,29 +3462,45 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val content = findViewById<LinearLayout>(R.id.settingsContent)
         val orderedViews = listOf(
             R.id.meProfileCard,
-            R.id.settingsLocalAgentTitle, R.id.settingsLocalAgentCard,
             R.id.settingsAgentToolsTitle, R.id.settingsAgentToolsCard,
+            R.id.settingsLocalAgentTitle, R.id.settingsLocalAgentCard,
             R.id.settingsProtocolTitle, R.id.settingsProtocolCard,
-            R.id.settingsIdentityTitle, R.id.settingsIdentityCard,
             R.id.settingsDataTitle, R.id.settingsDataCard,
+            R.id.settingsIdentityTitle, R.id.settingsIdentityCard,
             R.id.settingsGeneralTitle, R.id.settingsGeneralCard,
             R.id.settingsPagesTitle, R.id.settingsPagesCard,
-            R.id.destroyDataButton, R.id.aboutSignalASIButton
+            R.id.aboutSignalASIButton, R.id.destroyDataButton
         ).map { findViewById<View>(it) }
         orderedViews.forEach { (it.parent as? ViewGroup)?.removeView(it) }
+        content.removeAllViews()
         orderedViews.forEach(content::addView)
-        content.setPadding(dp(12), dp(10), dp(12), dp(24))
+        content.addView(settingsSectionTitleView(R.string.settings_about_section), content.indexOfChild(findViewById(R.id.aboutSignalASIButton)))
+        content.setPadding(dp(14), dp(12), dp(14), dp(28))
 
-        sectionTitle(R.id.settingsLocalAgentTitle, R.string.settings_control_agent)
-        sectionTitle(R.id.settingsAgentToolsTitle, R.string.settings_control_knowledge)
+        sectionTitle(R.id.settingsAgentToolsTitle, R.string.settings_agent_capabilities)
+        sectionTitle(R.id.settingsLocalAgentTitle, R.string.settings_local_intelligence)
         sectionTitle(R.id.settingsProtocolTitle, R.string.settings_control_trust)
+        sectionTitle(R.id.settingsDataTitle, R.string.settings_data_backup)
         sectionTitle(R.id.settingsIdentityTitle, R.string.settings_identity_security)
-        sectionTitle(R.id.settingsDataTitle, R.string.settings_control_data)
         sectionTitle(R.id.settingsGeneralTitle, R.string.settings_control_general)
         sectionTitle(R.id.settingsPagesTitle, R.string.settings_control_pages)
 
-        findViewById<TextView>(R.id.advancedOptionsButton).text = getString(R.string.settings_developer_options)
-        findViewById<ViewGroup>(R.id.settingsProtocolCard).getChildAt(1)?.visibility = View.GONE
+        findViewById<View>(R.id.settingsPagesCard).visibility = View.VISIBLE
+        val agentCard = findViewById<ViewGroup>(R.id.settingsAgentToolsCard)
+        findViewById<View>(R.id.settingsUnderstandScreenButton).visibility = View.VISIBLE
+        agentCard.getChildAt(1)?.visibility = View.VISIBLE
+
+        val protocolCard = findViewById<ViewGroup>(R.id.settingsProtocolCard)
+        for (index in 0 until protocolCard.childCount) protocolCard.getChildAt(index).visibility = View.VISIBLE
+        findViewById<TextView>(R.id.signalLinkProtocolButton).layoutParams =
+            findViewById<TextView>(R.id.signalLinkProtocolButton).layoutParams.apply { height = dp(62) }
+
+        rebuildProfileStatusBadges()
+        rebuildIdentitySecurityCard()
+        rebuildGeneralCard()
+        findViewById<TextView>(R.id.exportBackupButton).setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_settings_upload, 0, R.drawable.ic_arrow_right, 0)
+        findViewById<TextView>(R.id.importBackupButton).setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_settings_download, 0, R.drawable.ic_arrow_right, 0)
+        applySettingsCardSurfaces()
         meIdText.setOnClickListener {
             copyText(SignalASICrypto.localIdentitySha256(), getString(R.string.security_copied_phone_fingerprint))
         }
@@ -3494,23 +3510,132 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun sectionTitle(viewId: Int, textId: Int) {
         findViewById<TextView>(viewId).apply {
             setText(textId)
-            setTextColor(getColorCompat(R.color.text_secondary))
-            textSize = 12f
-            setTypeface(typeface, android.graphics.Typeface.NORMAL)
+            setTextColor(getColorCompat(R.color.text_primary))
+            textSize = 13f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(dp(3), dp(2), 0, 0)
         }
+    }
+
+    private fun settingsSectionTitleView(textId: Int): TextView = TextView(this).apply {
+        setText(textId)
+        setTextColor(getColorCompat(R.color.text_primary))
+        textSize = 13f
+        setTypeface(typeface, android.graphics.Typeface.BOLD)
+        setPadding(dp(3), dp(14), 0, dp(6))
+    }
+
+    private fun rebuildProfileStatusBadges() {
+        val textColumn = meProfileText.parent as LinearLayout
+        if (textColumn.childCount > 2) return
+        textColumn.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(6), 0, 0)
+            addView(settingsBadge(R.string.settings_badge_agent_enabled, "#E8F8EF", "#27885A"))
+            addView(settingsBadge(R.string.settings_badge_connection_ok, "#EAF2FF", "#3678D4").apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    dp(24)
+                ).apply { marginStart = dp(7) }
+            })
+        })
+    }
+
+    private fun settingsBadge(textId: Int, backgroundColor: String, textColor: String): TextView =
+        TextView(this).apply {
+            setText(textId)
+            setTextColor(Color.parseColor(textColor))
+            textSize = 11f
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            setPadding(dp(9), 0, dp(9), 0)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(12).toFloat()
+                setColor(Color.parseColor(backgroundColor))
+            }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(24))
+        }
+
+    private fun rebuildIdentitySecurityCard() {
+        val card = findViewById<LinearLayout>(R.id.settingsIdentityCard)
+        (meIdText.parent as? ViewGroup)?.removeView(meIdText)
+        card.removeAllViews()
+        card.addView(meIdText)
+        card.addView(settingsDivider())
+        card.addView(dynamicSettingsRow(
+            R.string.settings_trusted_devices,
+            R.string.settings_trusted_devices_subtitle,
+            R.drawable.ic_settings_devices
+        ) { showSecurityFeaturePage() })
+        card.addView(settingsDivider())
+        card.addView(dynamicSettingsRow(
+            R.string.settings_permission_audit,
+            R.string.settings_permission_audit_subtitle,
+            R.drawable.ic_security_shield
+        ) { showOnDeviceAgentFeaturePage() })
+    }
+
+    private fun rebuildGeneralCard() {
+        val card = findViewById<LinearLayout>(R.id.settingsGeneralCard)
+        val language = findViewById<TextView>(R.id.languageSettingsButton)
+        (language.parent as? ViewGroup)?.removeView(language)
+        card.removeAllViews()
+        card.addView(language)
+        card.addView(settingsDivider())
+        card.addView(dynamicSettingsRow(
+            R.string.settings_notifications,
+            R.string.settings_notifications_subtitle,
+            R.drawable.ic_settings_notification
+        ) {
+            startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+            })
+        })
+    }
+
+    private fun dynamicSettingsRow(titleId: Int, subtitleId: Int, iconId: Int, action: () -> Unit): TextView =
+        TextView(this).apply {
+            setCompoundDrawablesWithIntrinsicBounds(iconId, 0, R.drawable.ic_arrow_right, 0)
+            compoundDrawablePadding = dp(14)
+            setPadding(dp(16), 0, dp(16), 0)
+            setOnClickListener { action() }
+            settingsText(getString(titleId), getString(subtitleId))
+        }
+
+    private fun settingsDivider(): View = View(this).apply {
+        setBackgroundColor(getColorCompat(R.color.separator))
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply {
+            marginStart = dp(56)
+        }
+    }
+
+    private fun TextView.settingsText(title: String, subtitle: String) {
+        text = SpannableString("$title\n$subtitle").apply {
+            setSpan(RelativeSizeSpan(0.76f), title.length + 1, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            setSpan(ForegroundColorSpan(getColorCompat(R.color.text_secondary)), title.length + 1, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62))
+        gravity = Gravity.CENTER_VERTICAL
+        includeFontPadding = false
+        textSize = 15f
+        setTextColor(getColorCompat(R.color.text_primary))
+        setLineSpacing(dp(2).toFloat(), 1f)
+    }
+
+    private fun applySettingsCardSurfaces() {
+        listOf(
+            R.id.meProfileCard, R.id.settingsAgentToolsCard, R.id.settingsLocalAgentCard,
+            R.id.settingsProtocolCard, R.id.settingsDataCard, R.id.settingsIdentityCard,
+            R.id.settingsGeneralCard, R.id.settingsPagesCard,
+            R.id.aboutSignalASIButton, R.id.destroyDataButton
+        ).forEach { findViewById<View>(it).setBackgroundResource(R.drawable.settings_control_card_background) }
     }
 
     private fun settingsStatusRow(viewId: Int, titleId: Int, status: String) {
         findViewById<TextView>(viewId).apply {
-            val title = getString(titleId)
-            text = SpannableString("$title\n$status").apply {
-                setSpan(RelativeSizeSpan(0.78f), title.length + 1, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                setSpan(ForegroundColorSpan(getColorCompat(R.color.text_secondary)), title.length + 1, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            }
-            layoutParams = layoutParams.apply { height = dp(62) }
-            gravity = Gravity.CENTER_VERTICAL
-            includeFontPadding = false
-            setLineSpacing(dp(2).toFloat(), 1f)
+            settingsText(getString(titleId), status)
         }
     }
 
@@ -3542,28 +3667,55 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         )
         settingsStatusRow(R.id.settingsAgentMemoryButton, R.string.agent_quick_save_screen, getString(R.string.settings_status_memory_count, memoryCount))
         settingsStatusRow(R.id.settingsAgentKnowledgeButton, R.string.agent_quick_search_knowledge, getString(R.string.settings_status_knowledge_count, knowledgeCount))
-        settingsStatusRow(R.id.settingsAgentControlButton, R.string.agent_quick_permissions, getString(R.string.settings_status_agent_permission, permissionModeLabel(state.permissionMode)))
+        settingsStatusRow(R.id.settingsAgentControlButton, R.string.settings_device_control, getString(R.string.settings_device_control_subtitle))
         settingsStatusRow(R.id.settingsRecentTasksButton, R.string.agent_section_recent_tasks, getString(R.string.settings_status_recent_count, state.recentTasks.size))
         settingsStatusRow(R.id.settingsAgentSkillsButton, R.string.agent_skills_title, getString(R.string.settings_status_skills))
-        settingsStatusRow(R.id.protocolQualityButton, R.string.settings_control_trust, connectionStatus)
-        settingsStatusRow(R.id.advancedOptionsButton, R.string.settings_developer_options, getString(R.string.settings_status_developer))
-        settingsStatusRow(R.id.exportBackupButton, R.string.settings_backup_chat, getString(R.string.settings_status_backup))
-        settingsStatusRow(R.id.importBackupButton, R.string.settings_import_backup, getString(R.string.settings_status_backup))
-        settingsStatusRow(R.id.languageSettingsButton, R.string.settings_language, getString(R.string.settings_status_language))
+        settingsStatusRow(R.id.protocolQualityButton, R.string.settings_protocol_quality, getString(R.string.settings_protocol_quality_subtitle))
+        settingsStatusRow(R.id.signalLinkProtocolButton, R.string.settings_signal_link_title, getString(R.string.settings_signal_link_version))
+        settingsStatusRow(R.id.advancedOptionsButton, R.string.settings_advanced_options, getString(R.string.settings_advanced_options_subtitle))
+        settingsStatusRow(R.id.exportBackupButton, R.string.settings_backup_chat, getString(R.string.settings_backup_scope))
+        settingsStatusRow(R.id.importBackupButton, R.string.settings_import_backup, getString(R.string.settings_import_scope))
+        settingsStatusRow(R.id.languageSettingsButton, R.string.settings_language, getString(R.string.settings_current_language_value))
 
         val profile = AppStore.profile(this)
         val id = profile.optString("signalasi_id", "").takeLast(8).ifBlank { getString(R.string.profile_id_unavailable) }
-        meIdSubtitleText.text = "${getString(R.string.settings_signalasi_id)}: $id · ${getString(R.string.settings_status_agent_ready)}"
+        meIdSubtitleText.text = "${getString(R.string.settings_signalasi_id)}: $id"
         val fingerprint = SignalASICrypto.localIdentitySha256().filter { it.isLetterOrDigit() }
         meIdText.text = if (fingerprint.length > 16) {
-            "${fingerprint.take(8)}…${fingerprint.takeLast(8)}  ·  ${getString(R.string.settings_status_identity)}"
+            "${getString(R.string.settings_identity_fingerprint)}\n${fingerprint.take(6)}…${fingerprint.takeLast(5)}"
         } else {
             fingerprint
         }
         findViewById<View>(R.id.meProfileCard).layoutParams = findViewById<View>(R.id.meProfileCard).layoutParams.apply {
-            height = dp(86)
+            height = dp(108)
+        }
+        meAvatar.setImageResource(R.drawable.signalasi_mark_large)
+        meAvatar.background = null
+        meAvatar.scaleType = ImageView.ScaleType.CENTER_INSIDE
+        meAvatar.layoutParams = meAvatar.layoutParams.apply { width = dp(64); height = dp(64) }
+        meIdText.setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_settings_fingerprint, 0, R.drawable.ic_arrow_right, 0)
+        meIdText.compoundDrawablePadding = dp(14)
+        meIdText.setPadding(dp(16), 0, dp(16), 0)
+        meIdText.settingsText(getString(R.string.settings_identity_fingerprint), "${fingerprint.take(6)}…${fingerprint.takeLast(5)}")
+        findViewById<TextView>(R.id.destroyDataButton).apply {
+            settingsText(getString(R.string.settings_reset_signalasi), getString(R.string.settings_reset_scope))
+            setTextColor(Color.parseColor("#E53935"))
+            compoundDrawableTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#E53935"))
+        }
+        val aboutTextColumn = (findViewById<ViewGroup>(R.id.aboutSignalASIButton).getChildAt(1) as? LinearLayout)
+        if (aboutTextColumn != null && aboutTextColumn.childCount == 1) {
+            aboutTextColumn.addView(TextView(this).apply {
+                text = getString(R.string.settings_about_version_summary, installedVersionName())
+                textSize = 11f
+                setTextColor(getColorCompat(R.color.text_secondary))
+                setPadding(0, dp(3), 0, 0)
+            })
         }
     }
+
+    private fun installedVersionName(): String = runCatching {
+        packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
+    }.getOrDefault("").ifBlank { "0.1" }
 
     private fun renderAgentState(
         state: AgentUiState,
@@ -5688,7 +5840,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 PAGE_MESSAGES -> getString(R.string.title_messages)
                 PAGE_CONTACTS -> getString(R.string.tab_contacts)
                 PAGE_DISCOVER -> getString(R.string.tab_discover)
-                PAGE_SETTINGS -> getString(R.string.tab_settings)
+                PAGE_SETTINGS -> getString(R.string.settings_control_center_title)
                 else -> ""
             }
         } else {
