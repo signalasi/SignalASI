@@ -8,5 +8,9 @@
                 <action android:name="com.signalasi.chat.DEBUG_NATIVE_TOOL_AUDIT" />
             </intent-filter>
         </receiver>
+        <provider
+            android:name=".AgentNativeToolTestContentProvider"
+            android:authorities="${applicationId}.native-tool-test"
+            android:exported="false" />
     </application>
 </manifest>

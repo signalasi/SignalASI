@@ -444,8 +444,8 @@ class AgentAndroidHardwarePlatformFacade(
             ?: throw AgentHardwareNativeException("location_unavailable", "Location service is unavailable")
         val enabledProviders = manager.getProviders(true)
         val provider = listOf(
-            LocationManager.GPS_PROVIDER,
             LocationManager.NETWORK_PROVIDER,
+            LocationManager.GPS_PROVIDER,
             LocationManager.PASSIVE_PROVIDER
         ).firstOrNull(enabledProviders::contains) ?: enabledProviders.firstOrNull()
         ?: throw AgentHardwareNativeException(
@@ -453,7 +453,12 @@ class AgentAndroidHardwarePlatformFacade(
             "No enabled Android location provider is available",
             retryable = true
         )
-        val location = currentLocation(manager, provider, timeoutMillis, cancellationToken)
+        val now = clock.nowEpochMillis()
+        val recent = enabledProviders.asSequence()
+            .mapNotNull { enabled -> runCatching { manager.getLastKnownLocation(enabled) }.getOrNull() }
+            .filter { candidate -> now - candidate.time in 0..MAX_CACHED_LOCATION_AGE_MILLIS }
+            .maxByOrNull(Location::getTime)
+        val location = recent ?: currentLocation(manager, provider, timeoutMillis, cancellationToken)
             ?: throw AgentHardwareNativeException(
                 "location_fix_unavailable",
                 "A foreground location fix was not available within the requested time",
@@ -1002,6 +1007,7 @@ class AgentAndroidHardwarePlatformFacade(
 
     companion object {
         private const val SETUP_PREFIX = "setup:"
+        private const val MAX_CACHED_LOCATION_AGE_MILLIS = 5 * 60 * 1_000L
         private const val MAX_SENSOR_VALUES = 16
         private const val MAX_PACKAGE_PERMISSIONS = 128
 
