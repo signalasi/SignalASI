@@ -114,9 +114,23 @@ function cloudContact(store, provider) {
 }
 
 function dumpWindowTo(fileName, remoteName) {
-  adb(["shell", "uiautomator", "dump", `/sdcard/${remoteName}`]);
-  adb(["pull", `/sdcard/${remoteName}`, fileName]);
-  return fs.readFileSync(fileName, "utf8");
+  const remotePath = `/sdcard/${remoteName}`;
+  let lastError = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      adb(["shell", "rm", "-f", remotePath]);
+      adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"]);
+      adb(["shell", "wm", "dismiss-keyguard"]);
+      adb(["shell", "uiautomator", "dump", remotePath]);
+      adb(["pull", remotePath, fileName]);
+      const xml = fs.readFileSync(fileName, "utf8");
+      if (xml.includes("<hierarchy")) return xml;
+    } catch (error) {
+      lastError = error;
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);
+  }
+  throw lastError || new Error(`Could not capture ${remoteName}`);
 }
 
 function startFakeOpenAiServer(replyToken, promptToken) {
@@ -271,6 +285,7 @@ async function main() {
     adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_contact", "cloud:deepseek", "--es", "signalasi_debug_text", promptToken]);
     const directHistory = await waitForHistoryToken(replyToken);
     fs.writeFileSync(directHistoryDump, directHistory || "");
+    await sleep(700);
     const directXml = dumpWindowTo(directCallDump, "signalasi-cloud-models-direct-call.xml");
     const request = fakeServer.requests.find((entry) => entry.url === "/v1/chat/completions");
     if (!request) {

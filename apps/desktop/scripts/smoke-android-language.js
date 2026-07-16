@@ -46,9 +46,23 @@ function restoreAppFile(file, snapshot) {
 }
 
 function dumpWindowTo(fileName, remoteName) {
-  adb(["shell", "uiautomator", "dump", `/sdcard/${remoteName}`]);
-  adb(["pull", `/sdcard/${remoteName}`, fileName]);
-  return fs.readFileSync(fileName, "utf8");
+  const remotePath = `/sdcard/${remoteName}`;
+  let lastError = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      adb(["shell", "rm", "-f", remotePath]);
+      adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"]);
+      adb(["shell", "wm", "dismiss-keyguard"]);
+      adb(["shell", "uiautomator", "dump", remotePath]);
+      adb(["pull", remotePath, fileName]);
+      const xml = fs.readFileSync(fileName, "utf8");
+      if (xml.includes("<hierarchy")) return xml;
+    } catch (error) {
+      lastError = error;
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);
+  }
+  throw lastError || new Error(`Could not capture ${remoteName}`);
 }
 
 function requireText(xml, text, label, dumpPath) {

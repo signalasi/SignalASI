@@ -78,6 +78,15 @@ async function tapText(labels, name, scroll = false) {
 }
 
 async function openPage(page) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const focus = adb(["shell", "dumpsys", "window"]);
+    const match = focus.match(/mCurrentFocus=.*?\s([\w.]+)\//);
+    if (!match || match[1] === packageName) break;
+    adb(["shell", "input", "keyevent", "KEYCODE_BACK"]);
+    await sleep(180);
+  }
+  try { adb(["shell", "am", "force-stop", "com.google.android.documentsui"]); } catch (_) {}
+  try { adb(["shell", "am", "force-stop", "com.google.android.permissioncontroller"]); } catch (_) {}
   adb(["shell", "am", "force-stop", packageName]);
   adb([
     "shell", "am", "start", "-n", activityName,
@@ -101,6 +110,12 @@ function ensureHealthy() {
   if (/FATAL EXCEPTION|Process: com\.signalasi\.chat.*has died/i.test(fatal)) {
     throw new Error("AndroidRuntime reported a fatal exception");
   }
+}
+
+function permissionGranted(permission) {
+  const output = adb(["shell", "dumpsys", "package", packageName]);
+  const escaped = permission.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`${escaped}: granted=true`).test(output);
 }
 
 async function runCase(name, body) {
@@ -175,9 +190,20 @@ async function main() {
       await expectText(["ASR Provider", "ASR \u63d0\u4f9b\u65b9"], "voice-asr-open");
     }],
     ["voice-listening-roundtrip", async () => {
-      await openPage("voice");
-      await tapText(["Low-power listening", "\u4f4e\u529f\u8017\u76d1\u542c"], "voice-listening-off");
-      await tapText(["Low-power listening", "\u4f4e\u529f\u8017\u76d1\u542c"], "voice-listening-on");
+      const microphoneWasGranted = permissionGranted("android.permission.RECORD_AUDIO");
+      if (!microphoneWasGranted) {
+        adb(["shell", "pm", "grant", packageName, "android.permission.RECORD_AUDIO"]);
+      }
+      try {
+        await openPage("voice");
+        await tapText(["Low-power listening", "\u4f4e\u529f\u8017\u76d1\u542c"], "voice-listening-off");
+        await tapText(["Low-power listening", "\u4f4e\u529f\u8017\u76d1\u542c"], "voice-listening-on");
+      } finally {
+        if (!microphoneWasGranted) {
+          adb(["shell", "pm", "revoke", packageName, "android.permission.RECORD_AUDIO"]);
+          await openPage("voice");
+        }
+      }
     }],
     ["backup-export-navigation", async () => {
       await openPage("data_backup");

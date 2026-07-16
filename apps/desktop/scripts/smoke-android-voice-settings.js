@@ -138,7 +138,7 @@ async function main() {
     if (!result.ok) {
       fail(`Voice settings roundtrip failed: ${JSON.stringify(result)}. Dump saved at ${debugDump}`);
     }
-    if (result.wake_provider !== "android_asr" || result.asr_provider !== "android_asr" || result.tts_provider !== "android") {
+    if (result.wake_provider !== "android_asr" || result.asr_provider !== "local_whisper_cpp" || result.tts_provider !== "android") {
       fail(`Voice providers were not persisted: ${JSON.stringify(result)}`);
     }
     if (result.asr_language !== "en-US" || result.speak_replies !== false) {
@@ -150,7 +150,7 @@ async function main() {
 
     const prefsXml = readAppFile(voicePrefs);
     fs.writeFileSync(voicePrefsDump, prefsXml || "");
-    for (const text of ["android_asr", "en-US", "android", "zh-CN-XiaoxiaoNeural", token]) {
+    for (const text of ["android_asr", "local_whisper_cpp", "en-US", "android", "zh-CN-XiaoxiaoNeural", token]) {
       requireText(prefsXml, text, voicePrefsDump);
     }
 

@@ -906,8 +906,8 @@
     <string name="advanced_options_subtitle">调试连接和协议细节</string>
     <string name="advanced_badge_careful">谨慎</string>
     <string name="advanced_section_diagnostics">诊断</string>
-    <string name="advanced_protocol_logs">协议日志</string>
-    <string name="advanced_protocol_logs_subtitle">查看密钥握手和送达状态</string>
+    <string name="advanced_protocol_logs">协议诊断</string>
+    <string name="advanced_protocol_logs_subtitle">检查实时传输、安全会话和端点状态</string>
     <string name="advanced_agent_permission_audit">Agent 权限审计</string>
     <string name="advanced_agent_permission_audit_subtitle">检查手机和设备权限</string>
     <string name="common_view">查看</string>

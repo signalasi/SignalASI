@@ -121,6 +121,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_EXPORT_SKILL = 2013
         private const val REQUEST_AGENT_ATTACHMENTS = 2014
         private const val REQUEST_AGENT_IMAGES = 2015
+        private const val REQUEST_CONTROL_CENTER_PERMISSION = 2016
         private const val MAX_AGENT_ATTACHMENTS = 10
         private const val MAX_AGENT_ATTACHMENT_BYTES = 20L * 1024L * 1024L
         private const val UI_PREFS = "signalasi_ui_preferences"
@@ -264,6 +265,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val controlCenterBackStack = ArrayDeque<ControlCenterDestination>()
     private var controlCenterDestination: ControlCenterDestination? = null
     private var renderingControlCenterDestination = false
+    private var featureBackAction: (() -> Unit)? = null
+    private var pendingVoiceEnableFromControlCenter = false
 
     // State
     private val handler = Handler(Looper.getMainLooper())
@@ -828,11 +831,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     override fun onBackPressed() {
         if (featurePage.visibility == View.VISIBLE) {
-            if (controlCenterDestination != null || controlCenterBackStack.isNotEmpty()) {
-                navigateControlCenterBack()
-            } else {
-                hideFeaturePage()
-            }
+            performFeatureBack()
             return
         }
         if (chatPage.visibility == View.VISIBLE) {
@@ -1196,6 +1195,19 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         ) {
             openAgentCamera()
         }
+        if (requestCode == REQUEST_CONTROL_CENTER_PERMISSION) {
+            if (pendingVoiceEnableFromControlCenter) {
+                if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                    VoiceAssistantSettings.setEnabled(this, true)
+                }
+                pendingVoiceEnableFromControlCenter = false
+            }
+            if (featurePage.visibility == View.VISIBLE) {
+                if (controlCenterDestination != null) renderCurrentControlCenterDestination()
+                else showOnDeviceAgentFeaturePage()
+            }
+            return
+        }
         if (requestCode == REQUEST_AGENT_NATIVE_PERMISSIONS) {
             val granted = grantResults.count { it == PackageManager.PERMISSION_GRANTED }
             val pending = pendingDirectSystemAction
@@ -1355,7 +1367,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         findViewById<View>(R.id.destroyDataButton).setOnClickListener { confirmDestroyAllData() }
         findViewById<View>(R.id.aboutSignalASIButton).setOnClickListener { showAboutSignalASIPage() }
         backButton.setOnClickListener { showContactPage() }
-        featureBackButton.setOnClickListener { hideFeaturePage() }
+        setFeatureBackAction()
     }
 
     private fun configureAgentPage() {
@@ -2554,7 +2566,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val contextPreview = agentTranscriptStore.context(conversation.id)
         val sessionTasks = SharedPreferencesAgentTaskStore(this).forSession(conversation.id)
         showFeaturePage(getString(R.string.agent_session_details))
-        featureBackButton.setOnClickListener { showAgentSessionsPage() }
+        setFeatureBackAction { showAgentSessionsPage() }
         featureContent.addView(featureHeroCard(
             conversation.title,
             conversation.selectedModelOrAgent,
@@ -3855,15 +3867,20 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "routing.target" -> Unit
             "permissions.accessibility" -> startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             "permissions.notifications" -> startActivity(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"))
-            "permissions.microphone" -> requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_RECORD_AUDIO)
-            "permissions.camera" -> requestPermissions(arrayOf(android.Manifest.permission.CAMERA), REQUEST_AGENT_CAMERA_PERMISSION)
+            "permissions.microphone" -> requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_CONTROL_CENTER_PERMISSION)
+            "permissions.camera" -> requestPermissions(arrayOf(android.Manifest.permission.CAMERA), REQUEST_CONTROL_CENTER_PERMISSION)
             "audit.operations" -> openExistingControlCenterPage { showAgentAuditOperationsPage() }
             "voice.settings" -> openExistingControlCenterPage { showVoiceAssistantSettingsPage() }
             "voice.asr" -> openExistingControlCenterPage { showAsrProviderPage() }
             "voice.toggle_enabled" -> {
                 val next = !VoiceAssistantSettings.get(this).enabled
-                VoiceAssistantSettings.setEnabled(this, next)
-                renderCurrentControlCenterDestination()
+                if (next && checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    pendingVoiceEnableFromControlCenter = true
+                    requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_CONTROL_CENTER_PERMISSION)
+                } else {
+                    VoiceAssistantSettings.setEnabled(this, next)
+                    renderCurrentControlCenterDestination()
+                }
             }
             "data.export" -> openExistingControlCenterPage { showExportBackupDialog() }
             "data.import" -> openBackupImportPicker()
@@ -3960,7 +3977,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         } finally {
             renderingControlCenterDestination = false
         }
-        featureBackButton.setOnClickListener { navigateControlCenterBack() }
+        setFeatureBackAction()
     }
 
     private fun openExistingControlCenterPage(render: () -> Unit) {
@@ -3972,7 +3989,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         } finally {
             renderingControlCenterDestination = false
         }
-        featureBackButton.setOnClickListener { navigateControlCenterBack() }
+        setFeatureBackAction()
     }
 
     private fun navigateControlCenterBack() {
@@ -4646,6 +4663,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun renderControlCenterVoicePage() {
         val config = VoiceAssistantSettings.get(this)
         val selectedModel = WhisperModelManager.model(config.asrModel)
+        val microphoneAllowed = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val modelAvailable = WhisperModelManager.isAvailable(this, selectedModel)
+        val asrReady = microphoneAllowed && modelAvailable
         showControlCenterFeature(
             getString(R.string.cc_voice_title),
             ControlCenterPageSpec(
@@ -4656,7 +4676,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     actionId = "voice.settings",
                     badges = listOf(
                         ControlCenterBadgeSpec(getString(if (config.enabled) R.string.status_enabled else R.string.common_off), if (config.enabled) ControlCenterTone.GREEN else ControlCenterTone.NEUTRAL),
-                        ControlCenterBadgeSpec("ASR", ControlCenterTone.BLUE),
+                        ControlCenterBadgeSpec(getString(if (asrReady) R.string.cc_status_ready else R.string.status_needs_setup), if (asrReady) ControlCenterTone.BLUE else ControlCenterTone.AMBER),
                         ControlCenterBadgeSpec("TTS", ControlCenterTone.VIOLET)
                     )
                 ),
@@ -4672,7 +4692,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     ControlCenterSectionSpec(
                         getString(R.string.voice_section_asr),
                         listOf(
-                            ControlCenterRowSpec("voice.asr", getString(R.string.voice_asr_provider), selectedModel.displayName, R.drawable.ic_settings_voice, getString(R.string.cc_status_ready), ControlCenterTone.GREEN),
+                            ControlCenterRowSpec(
+                                "voice.asr",
+                                getString(R.string.voice_asr_provider),
+                                selectedModel.displayName,
+                                R.drawable.ic_settings_voice,
+                                getString(if (asrReady) R.string.cc_status_ready else R.string.status_needs_setup),
+                                if (asrReady) ControlCenterTone.GREEN else ControlCenterTone.AMBER
+                            ),
                             ControlCenterRowSpec("voice.settings", getString(R.string.voice_tts_provider), ttsProviderLabel(config.ttsProvider), R.drawable.ic_send_plane, getString(R.string.cc_status_available), ControlCenterTone.VIOLET)
                         )
                     ),
@@ -4911,7 +4938,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 )
             )
         )
-        featureBackButton.setOnClickListener { showNativeToolCatalogPage() }
+        setFeatureBackAction { showNativeToolCatalogPage() }
     }
 
     private fun nativeToolLocationLabel(location: AgentNativeToolLocation): String = getString(
@@ -5080,7 +5107,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 sections = emptyList()
             )
         )
-        featureBackButton.setOnClickListener {
+        setFeatureBackAction {
             showHomeAssistantCollectionPage(if (parentTitle == getString(R.string.cc_home_automations_title)) "automations" else "entities")
         }
         thread(name = "signalasi-home-assistant-entity") {
@@ -5722,7 +5749,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun showAgentSkillsPage() {
         showFeaturePage(getString(R.string.agent_skills_title))
-        featureBackButton.setOnClickListener { showMainTab(PAGE_SETTINGS) }
+        setFeatureBackAction()
         featureContent.addView(featureHeroCard(
             getString(R.string.agent_skills_title),
             getString(R.string.agent_skills_subtitle),
@@ -5781,7 +5808,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val installation = agentSkillRuntime.get(id, version) ?: return showAgentSkillsPage()
         val manifest = installation.manifest
         showFeaturePage(manifest.title)
-        featureBackButton.setOnClickListener { showAgentSkillsPage() }
+        setFeatureBackAction { showAgentSkillsPage() }
         featureContent.addView(featureHeroCard(
             manifest.title,
             manifest.description.ifBlank { manifest.instructions.take(180) },
@@ -7562,6 +7589,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val backupRoundtripToken = intent?.getStringExtra("signalasi_debug_backup_roundtrip")?.trim().orEmpty()
         val cloudModelsRoundtripToken = intent?.getStringExtra("signalasi_debug_cloud_models_roundtrip")?.trim().orEmpty()
         val voiceSettingsRoundtripToken = intent?.getStringExtra("signalasi_debug_voice_settings_roundtrip")?.trim().orEmpty()
+        val controlCenterRoundtripToken = intent?.getStringExtra("signalasi_debug_control_center_roundtrip")?.trim().orEmpty()
+        val homeAssistantTestUrl = intent?.getStringExtra("signalasi_debug_home_assistant_url")?.trim().orEmpty()
         val controlCenterPage = intent?.getStringExtra("signalasi_debug_control_center_page")?.trim().orEmpty()
         val scanPayload = intent?.getStringExtra("signalasi_debug_scan_payload")?.trim().orEmpty()
         val scanPayloadB64 = intent?.getStringExtra("signalasi_debug_scan_payload_b64")?.trim().orEmpty()
@@ -7573,6 +7602,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     openControlCenterDestination(ControlCenterDestination(it))
                 }
             }
+            return
+        }
+        if (homeAssistantTestUrl.isNotBlank()) {
+            intent?.removeExtra("signalasi_debug_home_assistant_url")
+            HomeAssistantSettingsStore.save(
+                this,
+                HomeAssistantSettings(
+                    enabled = true,
+                    baseUrl = homeAssistantTestUrl,
+                    accessToken = "signalasi-control-center-test",
+                    defaultEntityId = "light.qa_lamp"
+                )
+            )
+            showMainTab(PAGE_SETTINGS)
+            openControlCenterDestination(ControlCenterDestination(ControlCenterRoute.SMART_SPACES))
             return
         }
         if (approveFriendId.isNotBlank()) {
@@ -7627,6 +7671,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (voiceSettingsRoundtripToken.isNotBlank()) {
             intent?.removeExtra("signalasi_debug_voice_settings_roundtrip")
             runDebugVoiceSettingsRoundtrip(voiceSettingsRoundtripToken)
+            return
+        }
+        if (controlCenterRoundtripToken.isNotBlank()) {
+            intent?.removeExtra("signalasi_debug_control_center_roundtrip")
+            runDebugControlCenterRoundtrip(controlCenterRoundtripToken)
             return
         }
         if (destroyAllData) {
@@ -8024,11 +8073,25 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val prefs = getSharedPreferences("signalasi_debug", MODE_PRIVATE)
         runCatching {
             val desktopId = "desktop_voice_settings_smoke"
+            val serverRouteId = SignalASILinkProtocol.newRouteId()
+            val pairingSecret = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                ByteArray(32) { index -> (index + 1).toByte() }
+            )
             val pairing = JSONObject()
+                .put("type", "signalasi_verify")
+                .put("protocol", SignalASILinkProtocol.NAME)
+                .put("version", SignalASILinkProtocol.VERSION)
+                .put("role", "server")
                 .put("desktop_id", desktopId)
                 .put("desktop_name", "VOICE-PC")
-                .put("identity_key_sha256", "VOICE_SETTINGS_SMOKE_FINGERPRINT_0000000000000000000000000000")
+                .put("identity_key_sha256", "ab".repeat(32))
+                .put("server_route_id", serverRouteId)
+                .put("pairing_topic", "${SignalASILinkProtocol.TOPIC_ROOT}/$serverRouteId/pair")
+                .put("pairing_token", UUID.randomUUID().toString().replace("-", "") + token.take(12))
+                .put("pairing_secret", pairingSecret)
+                .put("created_at", System.currentTimeMillis())
             AppStore.markDesktopVerified(this, pairing)
+            checkNotNull(SignalASILinkProtocol.markPaired(this, desktopId))
             val codexId = "$desktopId:codex"
             val welcome = "VOICE_SETTINGS_WELCOME_$token"
             VoiceAssistantSettings.setEnabled(this, true)
@@ -8094,6 +8157,93 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
+    private fun runDebugControlCenterRoundtrip(token: String) {
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
+        val debugPreferences = getSharedPreferences("signalasi_debug", MODE_PRIVATE)
+        val safetyStore = SharedPreferencesAgentSafetySettingsStore(this)
+        val plannerStore = AgentModelPlannerSettingsStore(this)
+        val deviceStore = CustomDeviceConnectorStore(this)
+        val originalSafety = safetyStore.load()
+        val originalPlanner = plannerStore.load()
+        val originalHomeAssistant = HomeAssistantSettingsStore.load(this)
+        val originalDevices = deviceStore.exportJson()
+        var settingsPersisted = false
+        var devicesPersisted = false
+        var errorMessage = ""
+        try {
+            val nextMode = PermissionMode.entries.first { it != originalSafety.permissionMode }
+            val changedSafety = originalSafety.copy(
+                permissionMode = nextMode,
+                highRiskGuard = !originalSafety.highRiskGuard,
+                memoryCapture = !originalSafety.memoryCapture,
+                screenObservationAllowed = !originalSafety.screenObservationAllowed,
+                localActionsAllowed = !originalSafety.localActionsAllowed,
+                connectorCallsAllowed = !originalSafety.connectorCallsAllowed,
+                deviceControlAllowed = !originalSafety.deviceControlAllowed,
+                executionPaused = !originalSafety.executionPaused
+            )
+            val changedPlanner = originalPlanner.copy(
+                enabled = !originalPlanner.enabled,
+                shareScreenText = !originalPlanner.shareScreenText,
+                maxActions = if (originalPlanner.maxActions == 12) 7 else 12,
+                cloudContactId = "control-center-$token".take(120),
+                dynamicReplanning = !originalPlanner.dynamicReplanning,
+                maxReplans = if (originalPlanner.maxReplans == 5) 2 else 5,
+                multiAgentCoordination = !originalPlanner.multiAgentCoordination,
+                shareAgentOutputsWithPlanner = !originalPlanner.shareAgentOutputsWithPlanner,
+                maxAgentHops = if (originalPlanner.maxAgentHops == 8) 3 else 8,
+                maxToolCalls = if (originalPlanner.maxToolCalls == 32) 12 else 32
+            )
+            val changedHomeAssistant = HomeAssistantSettings(
+                enabled = true,
+                baseUrl = "https://control-center.invalid/",
+                accessToken = "temporary-$token",
+                defaultEntityId = "light.control_center_test"
+            )
+            val temporaryDevice = CustomDeviceConnector(
+                id = "control-center-$token".take(80),
+                name = "Control Center Test Device",
+                transport = CustomDeviceTransport.HTTP_REST,
+                endpoint = "https://device.invalid/api",
+                commandTarget = "test",
+                risk = AgentRisk.LOW
+            )
+            safetyStore.save(changedSafety)
+            plannerStore.save(changedPlanner)
+            HomeAssistantSettingsStore.save(this, changedHomeAssistant)
+            deviceStore.upsert(temporaryDevice)
+            settingsPersisted = safetyStore.load() == changedSafety &&
+                plannerStore.load() == changedPlanner &&
+                HomeAssistantSettingsStore.load(this) == changedHomeAssistant.copy(baseUrl = changedHomeAssistant.baseUrl.trimEnd('/'))
+            devicesPersisted = deviceStore.find(temporaryDevice.id) == temporaryDevice
+        } catch (error: Throwable) {
+            errorMessage = error.message ?: error.javaClass.simpleName
+        } finally {
+            safetyStore.save(originalSafety)
+            plannerStore.save(originalPlanner)
+            HomeAssistantSettingsStore.save(this, originalHomeAssistant)
+            deviceStore.restoreJson(originalDevices)
+        }
+        val restored = safetyStore.load() == originalSafety &&
+            plannerStore.load() == originalPlanner &&
+            HomeAssistantSettingsStore.load(this) == originalHomeAssistant.copy(baseUrl = originalHomeAssistant.baseUrl.trim().trimEnd('/')) &&
+            deviceStore.exportJson().toString() == originalDevices.toString()
+        debugPreferences.edit()
+            .putString(
+                "control_center_roundtrip_result",
+                JSONObject()
+                    .put("ok", settingsPersisted && devicesPersisted && restored && errorMessage.isBlank())
+                    .put("token", token)
+                    .put("settings_persisted", settingsPersisted)
+                    .put("devices_persisted", devicesPersisted)
+                    .put("restored", restored)
+                    .put("error", errorMessage)
+                    .toString()
+            )
+            .commit()
+        renderControlCenterHome()
+    }
+
     private fun scheduleDebugOutgoing(contactId: String, content: String, attempt: Int) {
         val key = "$contactId|$content"
         if (attempt == 0) {
@@ -8105,6 +8255,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             val contact = contactById(contactId)
             val raw = AppStore.contactById(this, contact.id)
             if (raw?.optString("delivery_mode") == "cloud_api") {
+                showChatPage(contact)
                 sendOutgoingText(contact, content)
                 Toast.makeText(this, getString(R.string.debug_message_sent_to, contact.name), Toast.LENGTH_SHORT).show()
                 return@postDelayed
@@ -9077,6 +9228,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun showCloudModelPage(provider: String) {
         showFeaturePage(provider)
+        setFeatureBackAction { showCloudProviderPage() }
         featureContent.addView(featureHeroCard(provider, providerSubtitle(provider), providerIcon(provider), providerColor(provider), getString(R.string.cloud_select_model)))
         addSectionTitle(getString(R.string.cloud_section_model))
         modelsForProvider(provider).forEach { preset ->
@@ -9125,6 +9277,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun showCloudModelConfigPage(preset: CloudModelPreset) {
         showFeaturePage(getString(R.string.cloud_config_title))
+        setFeatureBackAction { showCloudModelPage(preset.provider) }
         featureContent.addView(featureHeroCard(
             preset.name,
             "${preset.provider} · ${preset.apiStyle}",
@@ -9178,7 +9331,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val provider = raw.optString("cloud_provider", contact.name)
         val selected = AppStore.selectedCloudModelId(this, contact.id)
         showFeaturePage(getString(R.string.cloud_switch_model_title))
-        featureBackButton.setOnClickListener { showChatPage(contact) }
+        setFeatureBackAction { showChatPage(contact) }
         addSectionTitle(getString(R.string.cloud_section_model))
         val models = AppStore.cloudModels(this, contact.id)
         val modelRows = LinkedHashMap<String, JSONObject>()
@@ -9867,11 +10020,27 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun showDeviceFeaturePage() {
         val homeAssistant = HomeAssistantSettingsStore.load(this)
         val customDevices = CustomDeviceConnectorStore(this).list()
+        val pairedDesktopCount = desktopSecuritySummaries(activePcConnectorContacts()).size
+        val desktopOnline = pairedDesktopCount > 0 && SignalASIMqttClient.isConnected()
+        val visibleDeviceCount = 1 + customDevices.size +
+            (if (pairedDesktopCount > 0) pairedDesktopCount else 0) +
+            (if (homeAssistant.configured) 1 else 0)
         showFeaturePage(getString(R.string.device_management_title))
-        featureContent.addView(featureHeroCard(getString(R.string.device_management_title), getString(R.string.device_management_subtitle), R.drawable.ic_device_node, "#5B6CFF", getString(R.string.count_devices, customDevices.size + 3)))
+        featureContent.addView(featureHeroCard(getString(R.string.device_management_title), getString(R.string.device_management_subtitle), R.drawable.ic_device_node, "#5B6CFF", getString(R.string.count_devices, visibleDeviceCount)))
         addSectionTitle(getString(R.string.section_my_devices))
         featureContent.addView(featureRow("Phone Agent", getString(R.string.device_phone_agent_subtitle), R.drawable.ic_device_node, getString(R.string.status_online)))
-        featureContent.addView(featureRow("PC Agent", getString(R.string.device_pc_agent_subtitle), R.drawable.ic_device_node, getString(R.string.status_online)))
+        featureContent.addView(featureRow(
+            "PC Agent",
+            getString(R.string.device_pc_agent_subtitle),
+            R.drawable.ic_device_node,
+            getString(
+                when {
+                    desktopOnline -> R.string.status_online
+                    pairedDesktopCount > 0 -> R.string.status_disconnected
+                    else -> R.string.status_needs_setup
+                }
+            )
+        ))
         featureContent.addView(featureRow(
             getString(R.string.device_home_assistant),
             getString(R.string.device_home_assistant_subtitle),
@@ -9936,12 +10105,23 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
         })
         addSectionTitle(getString(R.string.section_device_capabilities))
-        featureContent.addView(featureRow(getString(R.string.device_file_sync), getString(R.string.device_file_sync_subtitle), R.drawable.ic_import, getString(R.string.status_enabled)))
-        featureContent.addView(featureRow(getString(R.string.device_remote_control), getString(R.string.device_remote_control_subtitle), R.drawable.ic_security_shield, getString(R.string.status_protected)))
+        featureContent.addView(featureRow(
+            getString(R.string.device_file_sync),
+            getString(R.string.device_file_sync_subtitle),
+            R.drawable.ic_import,
+            getString(if (desktopOnline) R.string.status_enabled else R.string.status_needs_setup)
+        ))
+        featureContent.addView(featureRow(
+            getString(R.string.device_remote_control),
+            getString(R.string.device_remote_control_subtitle),
+            R.drawable.ic_security_shield,
+            getString(if (mobileNativeAgent.safetySettings().highRiskGuard) R.string.status_protected else R.string.common_off)
+        ))
     }
 
     private fun showCustomDeviceConnectorEditor(connector: CustomDeviceConnector) {
         showFeaturePage(getString(R.string.device_custom_editor_title))
+        setFeatureBackAction { showDeviceFeaturePage() }
         featureContent.addView(featureHeroCard(
             connector.name,
             getString(R.string.device_custom_editor_subtitle),
@@ -10382,6 +10562,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 contact.optString("id").ifBlank { jsonSignalasiId(contact) }.startsWith("${device.id}:")
         }
         showFeaturePage(getString(R.string.security_device_detail_title))
+        setFeatureBackAction { showSecurityFeaturePage() }
         featureContent.addView(featureHeroCard(device.name, getString(R.string.security_verified_desktop_connector), R.drawable.ic_device_node, "#14C66A", getString(R.string.count_items, device.agentCount)))
         addSectionTitle(getString(R.string.security_section_identity))
         featureContent.addView(featureRow("Desktop ID", device.id, R.drawable.ic_protocol_link, getString(R.string.common_copy)).apply {
@@ -10495,14 +10676,37 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun showSignalLinkProtocolPage() {
+        val transportConnected = SignalASIMqttClient.isConnected()
+        val secureSessionReady = transportConnected && SignalASIMqttClient.isSecureReady()
         showFeaturePage("Signal Link Protocol")
-        featureContent.addView(featureHeroCard("Signal Link Protocol", getString(R.string.protocol_version_subtitle), R.drawable.ic_protocol_link, "#5B6CFF", getString(R.string.protocol_badge_stable)))
+        featureContent.addView(featureHeroCard(
+            "Signal Link Protocol",
+            getString(if (secureSessionReady) R.string.cc_service_link_connected else R.string.cc_service_link_offline),
+            R.drawable.ic_protocol_link,
+            if (secureSessionReady) "#14C66A" else "#F0A500",
+            getString(if (secureSessionReady) R.string.protocol_badge_stable else R.string.status_disconnected)
+        ))
         addSectionTitle(getString(R.string.protocol_section_layers))
         featureContent.addView(featureRow(getString(R.string.protocol_identity_layer), getString(R.string.protocol_identity_layer_subtitle), R.drawable.ic_security_shield, getString(R.string.protocol_badge_enabled)))
-        featureContent.addView(featureRow(getString(R.string.protocol_session_layer), getString(R.string.protocol_session_layer_subtitle), R.drawable.ic_protocol_link, getString(R.string.protocol_badge_enabled)))
-        featureContent.addView(featureRow(getString(R.string.protocol_transport_layer), getString(R.string.protocol_transport_layer_subtitle), R.drawable.ic_device_node, "MQTT"))
+        featureContent.addView(featureRow(
+            getString(R.string.protocol_session_layer),
+            getString(R.string.protocol_session_layer_subtitle),
+            R.drawable.ic_protocol_link,
+            getString(if (secureSessionReady) R.string.protocol_badge_enabled else R.string.status_disconnected)
+        ))
+        featureContent.addView(featureRow(
+            getString(R.string.protocol_transport_layer),
+            getString(R.string.protocol_transport_layer_subtitle),
+            R.drawable.ic_device_node,
+            if (transportConnected) "MQTT" else getString(R.string.status_disconnected)
+        ))
         addSectionTitle(getString(R.string.protocol_section_current_endpoint))
-        featureContent.addView(featureRow(getString(R.string.protocol_pc_endpoint), getString(R.string.protocol_pc_endpoint_subtitle), R.drawable.ic_avatar_hermes, getString(R.string.protocol_badge_online)))
+        featureContent.addView(featureRow(
+            getString(R.string.protocol_pc_endpoint),
+            getString(if (secureSessionReady) R.string.cc_service_link_connected else R.string.cc_service_link_offline),
+            R.drawable.ic_device_node,
+            getString(if (secureSessionReady) R.string.protocol_badge_online else R.string.status_disconnected)
+        ))
     }
 
     private fun showAdvancedOptionsFeaturePage() {
@@ -10678,7 +10882,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val config = VoiceAssistantSettings.get(this)
         val selected = WhisperModelManager.model(config.asrModel)
         showFeaturePage(getString(R.string.voice_asr_provider))
-        featureBackButton.setOnClickListener { showVoiceAssistantSettingsPage() }
+        setFeatureBackAction { showVoiceAssistantSettingsPage() }
         featureContent.addView(featureHeroCard(
             getString(R.string.voice_asr_local_title),
             getString(R.string.voice_asr_local_subtitle),
@@ -10829,7 +11033,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             R.drawable.ic_agent_node,
             getString(R.string.agent_memory_value, memorySnapshot.activeCount, memorySnapshot.conflicts.size)
         ).apply {
-            setOnClickListener { showAgentMemoryPage() }
+            setOnClickListener {
+                showAgentMemoryPage()
+                setFeatureBackAction { showOnDeviceAgentFeaturePage() }
+            }
         })
         featureContent.addView(featureSwitchRow(
             getString(R.string.on_device_agent_execution_pause),
@@ -10936,7 +11143,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             R.drawable.ic_protocol_link,
             getString(R.string.agent_app_adapters_count, 5)
         ).apply {
-            setOnClickListener { showAgentAppAdaptersPage() }
+            setOnClickListener {
+                showAgentAppAdaptersPage()
+                setFeatureBackAction { showOnDeviceAgentFeaturePage() }
+            }
         })
         featureContent.addView(featureSwitchRow(
             getString(R.string.on_device_agent_allow_screen_observation),
@@ -10973,6 +11183,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         addSectionTitle(getString(R.string.on_device_agent_section_permissions))
         val screenAccessAllowed = SignalASIAccessibilityService.isActive()
         val notificationAccessAllowed = SignalASINotificationListenerService.currentContext().hasAccess
+        val microphoneAllowed = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val cameraAllowed = checkSelfPermission(android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        val locationAllowed = checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         featureContent.addView(featureRow(
             getString(R.string.on_device_agent_screen_access),
             getString(R.string.on_device_agent_screen_access_subtitle),
@@ -10997,9 +11211,42 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
             }
         })
-        featureContent.addView(featureRow(getString(R.string.on_device_agent_microphone), getString(R.string.on_device_agent_microphone_subtitle), R.drawable.ic_agent_node, getString(R.string.permission_allowed)))
-        featureContent.addView(featureRow(getString(R.string.on_device_agent_camera), getString(R.string.on_device_agent_camera_subtitle), R.drawable.ic_scan, getString(R.string.permission_allowed)))
-        featureContent.addView(featureRow(getString(R.string.on_device_agent_location), getString(R.string.on_device_agent_location_subtitle), R.drawable.ic_device_node, getString(R.string.permission_while_using)))
+        featureContent.addView(featureRow(
+            getString(R.string.on_device_agent_microphone),
+            getString(R.string.on_device_agent_microphone_subtitle),
+            R.drawable.ic_agent_node,
+            getString(if (microphoneAllowed) R.string.permission_allowed else R.string.permission_needs_setup)
+        ).apply {
+            if (!microphoneAllowed) setOnClickListener {
+                requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_CONTROL_CENTER_PERMISSION)
+            }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.on_device_agent_camera),
+            getString(R.string.on_device_agent_camera_subtitle),
+            R.drawable.ic_scan,
+            getString(if (cameraAllowed) R.string.permission_allowed else R.string.permission_needs_setup)
+        ).apply {
+            if (!cameraAllowed) setOnClickListener {
+                requestPermissions(arrayOf(android.Manifest.permission.CAMERA), REQUEST_CONTROL_CENTER_PERMISSION)
+            }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.on_device_agent_location),
+            getString(R.string.on_device_agent_location_subtitle),
+            R.drawable.ic_device_node,
+            getString(if (locationAllowed) R.string.permission_while_using else R.string.permission_needs_setup)
+        ).apply {
+            if (!locationAllowed) setOnClickListener {
+                requestPermissions(
+                    arrayOf(
+                        android.Manifest.permission.ACCESS_FINE_LOCATION,
+                        android.Manifest.permission.ACCESS_COARSE_LOCATION
+                    ),
+                    REQUEST_CONTROL_CENTER_PERMISSION
+                )
+            }
+        })
         featureContent.addView(featureRow(
             getString(R.string.on_device_agent_notifications),
             getString(R.string.on_device_agent_notifications_subtitle),
@@ -11066,7 +11313,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     R.drawable.ic_security_shield,
                     getString(R.string.agent_memory_review)
                 ).apply {
-                    setOnClickListener { showAgentMemoryConflictDialog(conflict) }
+                    setOnClickListener { showAgentMemoryConflictDialog(conflict, filterKinds) }
                 })
             }
         }
@@ -11096,7 +11343,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     R.drawable.ic_agent_node,
                     action
                 ).apply {
-                    setOnClickListener { showAgentMemoryItemActions(item) }
+                    setOnClickListener { showAgentMemoryItemActions(item, filterKinds) }
                 })
             }
         }
@@ -11361,7 +11608,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     )
 
-    private fun showAgentMemoryConflictDialog(conflict: AgentMemoryConflict) {
+    private fun showAgentMemoryConflictDialog(
+        conflict: AgentMemoryConflict,
+        filterKinds: Set<AgentMemoryKind> = emptySet()
+    ) {
         val candidates = conflict.candidates.sortedBy { it.version }
         val options = candidates.map { item ->
             getString(
@@ -11374,11 +11624,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .setTitle(conflict.key.ifBlank { getString(R.string.agent_memory_conflict_title) })
             .setItems(options.toTypedArray()) { _, which ->
                 if (which < candidates.size) {
-                    resolveAgentMemoryConflict(conflict, candidates[which], null)
+                    resolveAgentMemoryConflict(conflict, candidates[which], null, filterKinds)
                 } else {
                     val initial = candidates.joinToString("\n") { it.value }
                     showTextSettingDialog(getString(R.string.agent_memory_merge_title), initial) { merged ->
-                        resolveAgentMemoryConflict(conflict, candidates.last(), merged)
+                        resolveAgentMemoryConflict(conflict, candidates.last(), merged, filterKinds)
                     }
                 }
             }
@@ -11389,7 +11639,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun resolveAgentMemoryConflict(
         conflict: AgentMemoryConflict,
         selected: AgentMemoryItem,
-        mergedValue: String?
+        mergedValue: String?,
+        filterKinds: Set<AgentMemoryKind> = emptySet()
     ) {
         val resolved = mobileNativeAgent.resolveMemoryConflict(conflict.groupId, selected.id, mergedValue)
         Toast.makeText(
@@ -11400,10 +11651,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ),
             Toast.LENGTH_SHORT
         ).show()
-        showAgentMemoryPage()
+        showAgentMemoryPage(filterKinds)
     }
 
-    private fun showAgentMemoryItemActions(item: AgentMemoryItem) {
+    private fun showAgentMemoryItemActions(
+        item: AgentMemoryItem,
+        filterKinds: Set<AgentMemoryKind> = emptySet()
+    ) {
         val options = listOf(
             getString(R.string.common_edit),
             getString(
@@ -11432,20 +11686,23 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             ),
                             Toast.LENGTH_SHORT
                         ).show()
-                        showAgentMemoryPage()
+                        showAgentMemoryPage(filterKinds)
                     }
                     1 -> {
                         mobileNativeAgent.setMemoryItemImportant(item.id, !item.important)
-                        showAgentMemoryPage()
+                        showAgentMemoryPage(filterKinds)
                     }
-                    2 -> confirmAgentMemoryDeletion(item)
+                    2 -> confirmAgentMemoryDeletion(item, filterKinds)
                 }
             }
             .setNegativeButton(getString(R.string.common_cancel), null)
             .show()
     }
 
-    private fun confirmAgentMemoryDeletion(item: AgentMemoryItem) {
+    private fun confirmAgentMemoryDeletion(
+        item: AgentMemoryItem,
+        filterKinds: Set<AgentMemoryKind> = emptySet()
+    ) {
         android.app.AlertDialog.Builder(this)
             .setTitle(getString(R.string.agent_memory_delete_title))
             .setMessage(getString(R.string.agent_memory_delete_message, item.value.take(120)))
@@ -11453,7 +11710,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 if (mobileNativeAgent.deleteMemoryItem(item.id)) {
                     Toast.makeText(this, getString(R.string.agent_memory_deleted), Toast.LENGTH_SHORT).show()
                 }
-                showAgentMemoryPage()
+                showAgentMemoryPage(filterKinds)
             }
             .setNegativeButton(getString(R.string.common_cancel), null)
             .show()
@@ -11717,16 +11974,28 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         featureTitle.text = title
         featureContent.removeAllViews()
         featureContent.gravity = Gravity.NO_GRAVITY
-        featureBackButton.setOnClickListener {
-            if (controlCenterDestination != null || controlCenterBackStack.isNotEmpty()) {
-                navigateControlCenterBack()
-            } else {
-                hideFeaturePage()
-            }
+        setFeatureBackAction()
+    }
+
+    private fun setFeatureBackAction(action: (() -> Unit)? = null) {
+        featureBackAction = action
+        featureBackButton.setOnClickListener { performFeatureBack() }
+    }
+
+    private fun performFeatureBack() {
+        val action = featureBackAction
+        featureBackAction = null
+        if (action != null) {
+            action()
+        } else if (controlCenterDestination != null || controlCenterBackStack.isNotEmpty()) {
+            navigateControlCenterBack()
+        } else {
+            hideFeaturePage()
         }
     }
 
     private fun hideFeaturePage() {
+        featureBackAction = null
         controlCenterDestination = null
         controlCenterBackStack.clear()
         featurePage.visibility = View.GONE
@@ -12583,7 +12852,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             getString(R.string.about_security_subtitle),
             R.drawable.ic_security_shield,
             getString(R.string.common_view)
-        ))
+        ).apply {
+            setOnClickListener {
+                showSecurityFeaturePage()
+                setFeatureBackAction { showAboutSignalASIPage() }
+            }
+        })
         featureContent.addView(featureRow(
             getString(R.string.about_open_source),
             getString(R.string.about_open_source_subtitle),

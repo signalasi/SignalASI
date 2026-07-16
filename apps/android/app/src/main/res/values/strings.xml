@@ -1158,8 +1158,8 @@
     <string name="advanced_options_subtitle">Debug connection and protocol details</string>
     <string name="advanced_badge_careful">Careful</string>
     <string name="advanced_section_diagnostics">Diagnostics</string>
-    <string name="advanced_protocol_logs">Protocol Logs</string>
-    <string name="advanced_protocol_logs_subtitle">View key handshakes and delivery status</string>
+    <string name="advanced_protocol_logs">Protocol Diagnostics</string>
+    <string name="advanced_protocol_logs_subtitle">Inspect the live transport, secure session, and endpoint state</string>
     <string name="advanced_agent_permission_audit">Agent Permission Audit</string>
     <string name="advanced_agent_permission_audit_subtitle">Check phone and device permissions</string>
     <string name="common_view">View</string>
