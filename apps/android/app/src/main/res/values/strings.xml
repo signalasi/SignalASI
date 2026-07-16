@@ -585,8 +585,8 @@
     <string name="settings_language_selected">Selected</string>
     <string name="settings_language_use">Use</string>
     <string name="settings_data_backup">Data &amp; Backup</string>
-    <string name="settings_backup_chat">Back Up Chat History</string>
-    <string name="settings_import_backup">Import from Backup</string>
+    <string name="settings_backup_chat">Backup</string>
+    <string name="settings_import_backup">Import</string>
     <string name="settings_protocol_quality">Protocol &amp; Quality</string>
     <string name="settings_signal_link_protocol">Signal Link Protocol        v1.0.3</string>
     <string name="settings_advanced_options">Advanced Options</string>
@@ -646,6 +646,8 @@
     <string name="settings_reset_signalasi">Reset SignalASI</string>
     <string name="settings_reset_scope">Clear identity, contacts, chats, keys, and cache</string>
     <string name="settings_about_section">About</string>
+    <string name="settings_about_short">About</string>
+    <string name="settings_reset_short">Reset</string>
     <string name="about_product_subtitle">A secure superintelligent agent for people, agents, models, and devices</string>
     <string name="about_section_product">Product</string>
     <string name="about_version">Version</string>

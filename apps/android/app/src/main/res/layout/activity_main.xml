@@ -931,13 +931,13 @@
                             android:textColor="@color/text_primary"
                             android:textSize="16sp" />
 
-                        <TextView
+                        <ImageView
+                            android:id="@+id/meProfileArrow"
                             android:layout_width="wrap_content"
                             android:layout_height="match_parent"
-                            android:gravity="center"
-                            android:text="›"
-                            android:textColor="#C7C7CC"
-                            android:textSize="24sp" />
+                            android:contentDescription="@null"
+                            android:paddingStart="8dp"
+                            android:src="@drawable/ic_arrow_right" />
                     </LinearLayout>
 
                     <View
@@ -1867,6 +1867,7 @@
                         </LinearLayout>
 
                         <ImageView
+                            android:id="@+id/aboutSignalASIArrow"
                             android:layout_width="24dp"
                             android:layout_height="24dp"
                             android:contentDescription="@null"

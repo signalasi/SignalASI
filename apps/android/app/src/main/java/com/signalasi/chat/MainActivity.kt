@@ -1304,10 +1304,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         findViewById<View>(R.id.settingsMessagesButton).setOnClickListener { showMainTab(PAGE_MESSAGES) }
         findViewById<View>(R.id.settingsContactsButton).setOnClickListener { showMainTab(PAGE_CONTACTS) }
         findViewById<View>(R.id.settingsDiscoverButton).setOnClickListener { showMainTab(PAGE_DISCOVER) }
-        findViewById<View>(R.id.settingsUnderstandScreenButton).setOnClickListener {
-            showMainTab(PAGE_AGENT)
-            startAgentScreenUnderstanding()
-        }
         findViewById<View>(R.id.settingsAgentMemoryButton).setOnClickListener { showAgentMemoryPage() }
         findViewById<View>(R.id.settingsAgentKnowledgeButton).setOnClickListener { showAgentKnowledgePage() }
         findViewById<View>(R.id.settingsAgentControlButton).setOnClickListener { showOnDeviceAgentFeaturePage() }
@@ -1338,7 +1334,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         findViewById<View>(R.id.importBackupButton).setOnClickListener { openBackupImportPicker() }
         findViewById<View>(R.id.languageSettingsButton).setOnClickListener { showLanguageSettingsPage() }
         findViewById<View>(R.id.protocolQualityButton).setOnClickListener { showProtocolQualityFeaturePage() }
-        findViewById<View>(R.id.signalLinkProtocolButton).setOnClickListener { showSignalLinkProtocolPage() }
         findViewById<View>(R.id.advancedOptionsButton).setOnClickListener { showAdvancedOptionsFeaturePage() }
         findViewById<View>(R.id.localModelSettingsButton).setOnClickListener { showLocalModelFeaturePage() }
         findViewById<View>(R.id.voiceAssistantSettingsButton).setOnClickListener { showVoiceAssistantSettingsPage() }
@@ -3443,7 +3438,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             R.id.myAgentsButton, R.id.myDevicesButton,
             R.id.languageSettingsButton,
             R.id.exportBackupButton, R.id.importBackupButton, R.id.protocolQualityButton,
-            R.id.signalLinkProtocolButton, R.id.advancedOptionsButton, R.id.localModelSettingsButton,
+            R.id.advancedOptionsButton, R.id.localModelSettingsButton,
             R.id.voiceAssistantSettingsButton, R.id.onDeviceAgentButton, R.id.destroyDataButton
         ).forEach { id ->
             findViewById<View>(id)?.let {
@@ -3456,6 +3451,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
             }
         }
+        normalizeSettingsRowVisuals()
     }
 
     private fun configureSettingsControlCenter() {
@@ -3487,25 +3483,99 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
         findViewById<View>(R.id.settingsPagesCard).visibility = View.VISIBLE
         val agentCard = findViewById<ViewGroup>(R.id.settingsAgentToolsCard)
-        findViewById<View>(R.id.settingsUnderstandScreenButton).visibility = View.VISIBLE
-        agentCard.getChildAt(1)?.visibility = View.VISIBLE
+        removeSettingsRow(agentCard, R.id.settingsUnderstandScreenButton)
 
         val protocolCard = findViewById<ViewGroup>(R.id.settingsProtocolCard)
-        for (index in 0 until protocolCard.childCount) protocolCard.getChildAt(index).visibility = View.VISIBLE
-        findViewById<TextView>(R.id.signalLinkProtocolButton).layoutParams =
-            findViewById<TextView>(R.id.signalLinkProtocolButton).layoutParams.apply { height = dp(62) }
+        removeSettingsRow(protocolCard, R.id.signalLinkProtocolButton)
 
         rebuildProfileStatusBadges()
         rebuildIdentitySecurityCard()
         rebuildGeneralCard()
         findViewById<TextView>(R.id.exportBackupButton).setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_settings_upload, 0, R.drawable.ic_arrow_right, 0)
         findViewById<TextView>(R.id.importBackupButton).setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_settings_download, 0, R.drawable.ic_arrow_right, 0)
+        findViewById<TextView>(R.id.languageSettingsButton).setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_settings_language, 0, R.drawable.ic_arrow_right, 0)
+        findViewById<TextView>(R.id.localModelSettingsButton).setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_settings_model, 0, R.drawable.ic_arrow_right, 0)
+        findViewById<TextView>(R.id.voiceAssistantSettingsButton).setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_settings_voice, 0, R.drawable.ic_arrow_right, 0)
+        findViewById<TextView>(R.id.onDeviceAgentButton).setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_settings_agent, 0, R.drawable.ic_arrow_right, 0)
+        findViewById<TextView>(R.id.advancedOptionsButton).setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_settings_diagnostics, 0, R.drawable.ic_arrow_right, 0)
         applySettingsCardSurfaces()
+        normalizeSettingsRowVisuals()
         meIdText.setOnClickListener {
             copyText(SignalASICrypto.localIdentitySha256(), getString(R.string.security_copied_phone_fingerprint))
         }
         refreshSettingsControlCenter()
     }
+
+    private fun removeSettingsRow(card: ViewGroup, rowId: Int) {
+        val row = findViewById<View>(rowId) ?: return
+        val index = card.indexOfChild(row)
+        if (index < 0) return
+        card.removeViewAt(index)
+        val dividerIndex = index.coerceAtMost(card.childCount - 1)
+        if (dividerIndex >= 0 && card.getChildAt(dividerIndex).layoutParams.height <= dp(1)) {
+            card.removeViewAt(dividerIndex)
+        }
+    }
+
+    private fun normalizeSettingsRowVisuals() {
+        val cards = listOf(
+            R.id.settingsAgentToolsCard, R.id.settingsLocalAgentCard,
+            R.id.settingsProtocolCard, R.id.settingsDataCard,
+            R.id.settingsIdentityCard, R.id.settingsGeneralCard,
+            R.id.settingsPagesCard
+        )
+        cards.forEach { normalizeSettingsRows(findViewById(it)) }
+        normalizeSettingsTextRow(findViewById(R.id.destroyDataButton))
+        listOf(R.id.meProfileArrow, R.id.aboutSignalASIArrow).forEach { id ->
+            findViewById<ImageView>(id).apply {
+                setImageDrawable(settingsDrawable(R.drawable.ic_arrow_right, "#C7C7CC", 16))
+                layoutParams = layoutParams.apply { width = dp(24) }
+                scaleType = ImageView.ScaleType.CENTER
+            }
+        }
+        findViewById<ViewGroup>(R.id.aboutSignalASIButton).apply {
+            layoutParams = layoutParams.apply { height = dp(62) }
+            val icon = getChildAt(0) as ImageView
+            icon.layoutParams = icon.layoutParams.apply { width = dp(24); height = dp(24) }
+            icon.background = null
+            icon.setPadding(0, 0, 0, 0)
+            icon.imageTintList = android.content.res.ColorStateList.valueOf(getColorCompat(R.color.text_primary))
+            val title = ((getChildAt(1) as LinearLayout).getChildAt(0) as TextView)
+            title.text = getString(R.string.settings_about_short)
+            title.textSize = 15f
+            title.setTextColor(getColorCompat(R.color.text_primary))
+            title.setTypeface(title.typeface, android.graphics.Typeface.NORMAL)
+        }
+    }
+
+    private fun normalizeSettingsRows(view: View) {
+        when (view) {
+            is TextView -> normalizeSettingsTextRow(view)
+            is ViewGroup -> for (index in 0 until view.childCount) normalizeSettingsRows(view.getChildAt(index))
+        }
+    }
+
+    private fun normalizeSettingsTextRow(row: TextView) {
+        val current = row.compoundDrawablesRelative
+        if (current.all { it == null }) return
+        val start = current[0]?.constantState?.newDrawable(resources)?.mutate()?.apply {
+            setTint(Color.parseColor("#202124"))
+            setBounds(0, 0, dp(24), dp(24))
+        }
+        val end = settingsDrawable(R.drawable.ic_arrow_right, "#C7C7CC", 16)
+        row.compoundDrawableTintList = null
+        row.setCompoundDrawablesRelative(start, null, end, null)
+        row.compoundDrawablePadding = dp(14)
+        row.textSize = 15f
+        row.setTextColor(getColorCompat(R.color.text_primary))
+        row.setTypeface(row.typeface, android.graphics.Typeface.NORMAL)
+    }
+
+    private fun settingsDrawable(resourceId: Int, color: String, sizeDp: Int) =
+        requireNotNull(getDrawable(resourceId)).mutate().apply {
+            setTint(Color.parseColor(color))
+            setBounds(0, 0, dp(sizeDp), dp(sizeDp))
+        }
 
     private fun sectionTitle(viewId: Int, textId: Int) {
         findViewById<TextView>(viewId).apply {
@@ -3636,6 +3706,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun settingsStatusRow(viewId: Int, titleId: Int, status: String) {
         findViewById<TextView>(viewId).apply {
             settingsText(getString(titleId), status)
+            setTypeface(typeface, android.graphics.Typeface.NORMAL)
         }
     }
 
@@ -3660,18 +3731,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             R.string.voice_settings_title,
             getString(if (voice.enabled) R.string.settings_status_voice_on else R.string.settings_status_voice_off)
         )
-        settingsStatusRow(
-            R.id.settingsUnderstandScreenButton,
-            R.string.agent_quick_understand,
-            getString(if (state.currentScreen.isAccessibilityEnabled) R.string.settings_status_screen_on else R.string.settings_status_screen_off)
-        )
         settingsStatusRow(R.id.settingsAgentMemoryButton, R.string.agent_quick_save_screen, getString(R.string.settings_status_memory_count, memoryCount))
         settingsStatusRow(R.id.settingsAgentKnowledgeButton, R.string.agent_quick_search_knowledge, getString(R.string.settings_status_knowledge_count, knowledgeCount))
         settingsStatusRow(R.id.settingsAgentControlButton, R.string.settings_device_control, getString(R.string.settings_device_control_subtitle))
         settingsStatusRow(R.id.settingsRecentTasksButton, R.string.agent_section_recent_tasks, getString(R.string.settings_status_recent_count, state.recentTasks.size))
         settingsStatusRow(R.id.settingsAgentSkillsButton, R.string.agent_skills_title, getString(R.string.settings_status_skills))
         settingsStatusRow(R.id.protocolQualityButton, R.string.settings_protocol_quality, getString(R.string.settings_protocol_quality_subtitle))
-        settingsStatusRow(R.id.signalLinkProtocolButton, R.string.settings_signal_link_title, getString(R.string.settings_signal_link_version))
         settingsStatusRow(R.id.advancedOptionsButton, R.string.settings_advanced_options, getString(R.string.settings_advanced_options_subtitle))
         settingsStatusRow(R.id.exportBackupButton, R.string.settings_backup_chat, getString(R.string.settings_backup_scope))
         settingsStatusRow(R.id.importBackupButton, R.string.settings_import_backup, getString(R.string.settings_import_scope))
@@ -3698,9 +3763,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         meIdText.setPadding(dp(16), 0, dp(16), 0)
         meIdText.settingsText(getString(R.string.settings_identity_fingerprint), "${fingerprint.take(6)}…${fingerprint.takeLast(5)}")
         findViewById<TextView>(R.id.destroyDataButton).apply {
-            settingsText(getString(R.string.settings_reset_signalasi), getString(R.string.settings_reset_scope))
-            setTextColor(Color.parseColor("#E53935"))
-            compoundDrawableTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#E53935"))
+            settingsText(getString(R.string.settings_reset_short), getString(R.string.settings_reset_scope))
+            setTextColor(getColorCompat(R.color.text_primary))
+            compoundDrawableTintList = android.content.res.ColorStateList.valueOf(getColorCompat(R.color.text_primary))
         }
         val aboutTextColumn = (findViewById<ViewGroup>(R.id.aboutSignalASIButton).getChildAt(1) as? LinearLayout)
         if (aboutTextColumn != null && aboutTextColumn.childCount == 1) {

@@ -345,8 +345,8 @@
     <string name="settings_language_selected">已选择</string>
     <string name="settings_language_use">使用</string>
     <string name="settings_data_backup">数据与备份</string>
-    <string name="settings_backup_chat">备份聊天记录</string>
-    <string name="settings_import_backup">从备份导入</string>
+    <string name="settings_backup_chat">备份</string>
+    <string name="settings_import_backup">导入</string>
     <string name="settings_protocol_quality">协议与质量</string>
     <string name="settings_signal_link_protocol">Signal Link Protocol        v1.0.3</string>
     <string name="settings_advanced_options">高级选项</string>
@@ -406,6 +406,8 @@
     <string name="settings_reset_signalasi">重置 SignalASI</string>
     <string name="settings_reset_scope">清除身份、联系人、聊天记录、密钥与缓存</string>
     <string name="settings_about_section">关于</string>
+    <string name="settings_about_short">关于</string>
+    <string name="settings_reset_short">重置</string>
     <string name="permission_mode_observe_only">仅观察</string>
     <string name="permission_mode_suggest_only">仅建议</string>
     <string name="permission_mode_ask_before_action">执行前询问</string>
