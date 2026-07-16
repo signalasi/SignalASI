@@ -80,10 +80,16 @@ async function main() {
   log("testing /api/agent/push authorization and encrypted MQTT payload");
   run(python, ["-c", String.raw`
 import json
+import os
+import tempfile
 from fastapi import HTTPException
+
+smoke_data_dir = tempfile.TemporaryDirectory(prefix="signalasi-agent-push-smoke-")
+os.environ["SIGNALASI_DATA_DIR"] = smoke_data_dir.name
 
 import mqtt_bridge
 from main import AgentPushReq, api_agent_push
+from pairing_state import record_pairing_success
 from push_auth import agent_push_token
 
 published = []
@@ -100,8 +106,14 @@ class FakeClient:
         return FakeInfo()
 
 mqtt_bridge.client = FakeClient()
-mqtt_bridge.is_paired = lambda: True
 mqtt_bridge.encrypt_signal_payload = lambda payload, remote_name="android": {"scheme": "signal", "debug_payload": payload}
+record_pairing_success(
+    fingerprint="a" * 64,
+    remote_name="signalasi:smoke-client",
+    client_route_id="c" * 22,
+    display_name="Smoke Client",
+    platform="test",
+)
 
 try:
     api_agent_push(AgentPushReq(contact_id="codex", content="bad"), x_signalasi_token="wrong")
@@ -117,7 +129,10 @@ data = api_agent_push(
 )
 assert data["ok"] is True and data["contact_id"] == "codex", data
 assert data["code"] == "agent_push_published" and data["params"]["contact_id"] == "codex", data
+assert data["params"]["client_count"] == 1, data
 assert published, "no MQTT publish captured"
+assert published[-1]["topic"].startswith("signalasichat/v1/"), published[-1]
+assert published[-1]["topic"].endswith("/" + "c" * 22 + "/down"), published[-1]
 wire = json.loads(published[-1]["payload"])
 envelope = wire["debug_payload"]
 assert envelope["protocol"] == "signalasi-link", envelope
