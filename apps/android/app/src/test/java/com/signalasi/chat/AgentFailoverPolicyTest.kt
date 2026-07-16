@@ -29,6 +29,38 @@ class AgentFailoverPolicyTest {
     }
 
     @Test
+    fun acceptedOnlyResourceIsAllowedToStartSlowly() {
+        assertTrue(
+            AgentFailoverPolicy.shouldKeepOnlyResourceAlive(
+                AgentConnectorTimeoutStage.NOT_RUNNING,
+                "accepted",
+                hasFallback = false
+            )
+        )
+        assertTrue(
+            AgentFailoverPolicy.shouldKeepOnlyResourceAlive(
+                AgentConnectorTimeoutStage.NOT_RUNNING,
+                "queued",
+                hasFallback = false
+            )
+        )
+        assertFalse(
+            AgentFailoverPolicy.shouldKeepOnlyResourceAlive(
+                AgentConnectorTimeoutStage.NOT_RUNNING,
+                "accepted",
+                hasFallback = true
+            )
+        )
+        assertFalse(
+            AgentFailoverPolicy.shouldKeepOnlyResourceAlive(
+                AgentConnectorTimeoutStage.NOT_ACCEPTED,
+                "",
+                hasFallback = false
+            )
+        )
+    }
+
+    @Test
     fun desktopProbeBackoffCapsAtOneHour() {
         assertEquals(60_000L, AgentFailoverPolicy.domainCooldownMs(1))
         assertEquals(5 * 60_000L, AgentFailoverPolicy.domainCooldownMs(2))

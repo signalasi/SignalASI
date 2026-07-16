@@ -114,6 +114,14 @@ object AgentFailoverPolicy {
         AgentConnectorTimeoutStage.READ_ONLY_STALE -> liveReadOnly && status == "running"
     }
 
+    fun shouldKeepOnlyResourceAlive(
+        stage: AgentConnectorTimeoutStage,
+        status: String,
+        hasFallback: Boolean
+    ): Boolean = !hasFallback &&
+        stage == AgentConnectorTimeoutStage.NOT_RUNNING &&
+        status in setOf("accepted", "queued", "starting")
+
     fun domainCooldownMs(consecutiveFailures: Int): Long = when (consecutiveFailures.coerceAtLeast(1)) {
         1 -> 60_000L
         2 -> 5 * 60_000L

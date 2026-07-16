@@ -121,6 +121,15 @@ class LinkPairingIntegrationTests(unittest.TestCase):
         flush_messages.assert_called_once_with(self.mqtt)
         publish_status.assert_called_once_with(self.mqtt, reason="mqtt_connected")
 
+    def test_delivery_ack_preserves_phone_source_message_id(self):
+        ack = mqtt_bridge.accepted_delivery_ack_payload(
+            {"source_message_id": "42"},
+            "signal-envelope-uuid",
+            [{"stage": "desktop_received"}],
+        )
+        self.assertEqual("42", ack["source_message_id"])
+        self.assertEqual("signal-envelope-uuid", ack["message_id"])
+
 
 class _ImmediateTimer:
     def __init__(self, interval, function, args=(), kwargs=None):

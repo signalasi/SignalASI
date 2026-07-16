@@ -13,6 +13,7 @@ import shutil
 import socket
 import subprocess
 import hashlib
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -25,6 +26,44 @@ from agent_config import cloud_model_config, command_for, custom_agent_config, c
 
 EXECUTION_LOG_PATH = Path(__file__).with_name("signalasi_agent_execution.jsonl")
 EXECUTION_LOG_MAX_BYTES = 512 * 1024
+AGENT_RUNTIME_FAILURE_TTL_SECONDS = 5 * 60
+
+_agent_runtime_lock = threading.RLock()
+_agent_runtime: dict[str, dict] = {}
+_agent_runtime_loaded = False
+
+
+def _agent_runtime_path() -> Path:
+    configured = os.environ.get("SIGNALASI_STATE_DIR", "").strip()
+    root = Path(configured) if configured else Path(os.environ.get("APPDATA") or Path.home()) / "SignalASI"
+    return root / "agent-runtime.json"
+
+
+def _ensure_agent_runtime_loaded_locked() -> None:
+    global _agent_runtime_loaded
+    if _agent_runtime_loaded:
+        return
+    _agent_runtime_loaded = True
+    path = _agent_runtime_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            for agent_id, state in payload.items():
+                if isinstance(agent_id, str) and isinstance(state, dict):
+                    _agent_runtime[agent_id] = dict(state)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
+
+def _persist_agent_runtime_locked() -> None:
+    path = _agent_runtime_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(_agent_runtime, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        pass
 
 PERMISSION_LABELS = {
     "local-cli": "local_process",
@@ -285,10 +324,10 @@ def list_agents() -> list[dict]:
     return [agent_status(spec) for spec in visible_agent_specs().values()]
 
 
-def connector_diagnostics() -> dict:
+def connector_diagnostics(quick: bool = False) -> dict:
     agents = []
     for spec in visible_agent_specs().values():
-        status = agent_status(spec)
+        status = agent_status(spec, quick=quick)
         guide = SETUP_GUIDES.get(spec.id, {})
         mobile_contact_id = guide.get("mobile_contact_id", spec.id)
         agents.append({
@@ -328,9 +367,17 @@ def connector_diagnostics() -> dict:
     }
 
 
-def agent_status(spec: AgentSpec) -> dict:
+def agent_status(spec: AgentSpec, quick: bool = False) -> dict:
     display_name = spec.name
-    if spec.id == "local-llm":
+    if quick:
+        ok, detail = _quick_agent_available(spec)
+        if spec.id == "local-llm":
+            display_name = local_model_config()["name"]
+        elif spec.id == "cloud-model":
+            display_name = cloud_model_config()["name"]
+        elif spec.id == "custom-agent":
+            display_name = custom_agent_config()["name"]
+    elif spec.id == "local-llm":
         display_name = local_model_config()["name"]
         ok, detail = _local_model_available()
     elif spec.id == "cloud-model":
@@ -347,17 +394,106 @@ def agent_status(spec: AgentSpec) -> dict:
     else:
         command = _command_for(spec)
         ok, detail = _command_available(command[0]) if command else (False, "No command")
-    detail_code = _agent_detail_code(spec, ok, detail)
+    runtime = _agent_runtime_snapshot(spec.id)
+    runtime_status = str(runtime.get("status") or "")
+    if ok and runtime_status == "unavailable":
+        unavailable_until = float(runtime.get("unavailable_until") or 0)
+        if unavailable_until <= time.time():
+            runtime_status = "degraded"
+    status = "ready" if ok else "needs_setup"
+    if ok and runtime_status in {"busy", "degraded", "unavailable"}:
+        status = runtime_status
+        detail = str(runtime.get("detail") or detail)
+    detail_code = _agent_detail_code(spec, status in {"ready", "busy", "degraded"}, detail)
     return {
         "id": spec.id,
         "name": display_name,
         "kind": spec.kind,
-        "status": "ready" if ok else "needs_setup",
+        "status": status,
         "detail": detail,
         "detail_code": detail_code,
         "detail_params": _agent_params(spec, detail=detail, display_name=display_name),
         "note": spec.note,
+        "runtime_status": runtime_status or "unknown",
+        "runtime_updated_at": int(float(runtime.get("updated_at") or 0) * 1000),
+        "active_tasks": int(runtime.get("active_tasks") or 0),
     }
+
+
+def _quick_agent_available(spec: AgentSpec) -> tuple[bool, str]:
+    if spec.id == "local-llm":
+        cfg = local_model_config()
+        if cfg["url"] and cfg["model"]:
+            return True, f"Configured {cfg['provider']}: {cfg['model']}"
+        executable = shutil.which("ollama")
+        return (True, "Ollama command detected") if executable else (False, "Configure a local model endpoint")
+    if spec.id == "cloud-model":
+        cfg = cloud_model_config()
+        ready = bool(cfg["url"] and cfg["api_key"] and cfg["model"])
+        return (True, f"Configured: {cfg['model']}") if ready else (False, "Set cloud endpoint, API key, and model")
+    command = _command_for(spec)
+    if not command:
+        return False, "No command"
+    executable = command[0]
+    if Path(executable).is_file() or shutil.which(executable):
+        return True, "Command detected"
+    return False, f"{executable} not found"
+
+
+def _agent_runtime_snapshot(agent_id: str) -> dict:
+    with _agent_runtime_lock:
+        _ensure_agent_runtime_loaded_locked()
+        return dict(_agent_runtime.get(agent_id) or {})
+
+
+def _agent_execution_started(agent_id: str) -> None:
+    with _agent_runtime_lock:
+        _ensure_agent_runtime_loaded_locked()
+        current = dict(_agent_runtime.get(agent_id) or {})
+        active = int(current.get("active_tasks") or 0) + 1
+        _agent_runtime[agent_id] = {
+            **current,
+            "status": "busy",
+            "active_tasks": active,
+            "updated_at": time.time(),
+            "detail": "Agent is executing a task",
+        }
+        _persist_agent_runtime_locked()
+
+
+def _agent_execution_finished(agent_id: str, ok: bool, detail: str = "") -> None:
+    with _agent_runtime_lock:
+        _ensure_agent_runtime_loaded_locked()
+        current = dict(_agent_runtime.get(agent_id) or {})
+        active = max(0, int(current.get("active_tasks") or 0) - 1)
+        now = time.time()
+        if active > 0:
+            status = "busy"
+        else:
+            status = "ready" if ok else "unavailable"
+        _agent_runtime[agent_id] = {
+            **current,
+            "status": status,
+            "active_tasks": active,
+            "updated_at": now,
+            "last_success_at": now if ok else float(current.get("last_success_at") or 0),
+            "last_failure_at": now if not ok else float(current.get("last_failure_at") or 0),
+            "unavailable_until": 0 if ok else now + AGENT_RUNTIME_FAILURE_TTL_SECONDS,
+            "detail": detail[:240],
+        }
+        _persist_agent_runtime_locked()
+
+
+def _agent_reply_failed(reply: str) -> bool:
+    value = str(reply or "").strip()
+    if not value.startswith("["):
+        return False
+    failure_terms = (
+        "not configured", "not found", "not connected", "timed out", "failed", "no response",
+        "\u672a\u914d\u7f6e", "\u672a\u68c0\u6d4b", "\u672a\u8fde\u63a5", "\u8d85\u65f6", "\u5931\u8d25", "\u65e0\u54cd\u5e94",
+    )
+    lowered = value.lower()
+    return any(term in lowered for term in failure_terms)
 
 
 def _command_for(spec: AgentSpec) -> list[str] | None:
@@ -519,20 +655,27 @@ def ask_agent_sync(contact_id: str, text: str, task_id: str = "") -> str:
     start = time.perf_counter()
     from response_policy import apply_response_policy, sanitize_assistant_response
     styled_text = apply_response_policy(text)
+    _agent_execution_started(contact_id)
     try:
         reply = sanitize_assistant_response(
             _ask_agent_sync_inner(contact_id, styled_text, spec, task_id=task_id)
         )
+        reply_ok = bool(reply and not _agent_reply_failed(reply))
+        if not reply_ok:
+            raise RuntimeError(reply or "Agent returned no response")
         _append_execution_log(
             spec=spec,
             contact_id=contact_id,
             prompt=text,
             reply=reply,
             duration_ms=int((time.perf_counter() - start) * 1000),
-            ok=bool(reply and not reply.startswith("[")),
+            ok=True,
         )
+        _agent_execution_finished(contact_id, True, "Agent is ready")
         return reply
     except Exception as exc:
+        if _agent_runtime_snapshot(contact_id).get("status") == "busy":
+            _agent_execution_finished(contact_id, False, str(exc))
         _append_execution_log(
             spec=spec,
             contact_id=contact_id,

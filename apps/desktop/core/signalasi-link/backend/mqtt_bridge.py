@@ -719,6 +719,18 @@ def build_delivery_ack_payload(payload: dict, stage: str, detail: object = "") -
     }
 
 
+def accepted_delivery_ack_payload(payload: dict, message_id: str, trace: list[dict]) -> dict:
+    return {
+        "type": "delivery_ack",
+        "message_id": message_id,
+        "source_message_id": str(payload.get("source_message_id") or message_id),
+        "delivery_status": "accepted",
+        "sender": "system",
+        "time": time.time(),
+        "delivery_trace": trace,
+    }
+
+
 def publish_delivery_ack(mqttc, ack: dict, reason_code=None):
     ack["broker_reason_code"] = str(reason_code or "")
     ack["delivery_trace"] = _delivery_trace(
@@ -851,6 +863,7 @@ def _agent_task_payload(task: dict, trace: list[dict]) -> dict:
         "output_files": task.get("output_files", []),
         "desktop_id": desktop_id(),
         "desktop_name": desktop_name(),
+        "connector_agents": mobile_connector_agents(),
         "sender": "system",
         "time": time.time(),
         "delivery_trace": _delivery_trace({"delivery_trace": trace}, _trace_event(stage, task.get("agent_id", ""))),
@@ -991,6 +1004,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             "agent_id": agent_id,
             "desktop_id": desktop_id(),
             "desktop_name": desktop_name(),
+            "connector_agents": mobile_connector_agents(str(wire_payload.get("_client_route_id") or "")),
             "source_message_id": source_message_id,
             "conversation_id": task.get("conversation_id", ""),
             "turn_id": task.get("turn_id", ""),
@@ -1171,14 +1185,11 @@ def on_message(mqttc, userdata, msg):
                 complete_message(client_route_id, message_id, "completed", {"status": "completed"})
                 return
             complete_message(client_route_id, message_id, "accepted", {"status": "accepted"})
-            _publish_phone_payload(mqttc, wire_payload, {
-                "type": "delivery_ack",
-                "source_message_id": message_id,
-                "delivery_status": "accepted",
-                "sender": "system",
-                "time": time.time(),
-                "delivery_trace": trace,
-            })
+            _publish_phone_payload(
+                mqttc,
+                wire_payload,
+                accepted_delivery_ack_payload(payload, message_id, trace),
+            )
 
         if _route_phone_tool_payload(
             mqttc,
@@ -1371,7 +1382,7 @@ def handle_pairing_claim(mqttc, payload: dict):
 
 
 def mobile_connector_agents(client_route_id: str = "") -> list[dict]:
-    diagnostics = connector_diagnostics()
+    diagnostics = connector_diagnostics(quick=True)
     agents = []
     did = desktop_id()
     dname = desktop_name()
@@ -1390,6 +1401,9 @@ def mobile_connector_agents(client_route_id: str = "") -> list[dict]:
             "desktop_name": dname,
             "desktop_fingerprint": fingerprint,
             "status": agent.get("status") or "needs_setup",
+            "runtime_status": agent.get("runtime_status") or "unknown",
+            "runtime_updated_at": int(agent.get("runtime_updated_at") or 0),
+            "active_tasks": int(agent.get("active_tasks") or 0),
             "detail": agent.get("detail") or "",
             "setup": agent.get("setup") or "",
             "kind": agent.get("kind") or "",

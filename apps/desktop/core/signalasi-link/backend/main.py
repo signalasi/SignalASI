@@ -250,8 +250,16 @@ class AgentTestReq(BaseModel):
 
 @app.post("/api/agents/{agent_id}/test")
 def api_test_agent(agent_id: str, req: AgentTestReq):
-    reply = ask_agent_sync(agent_id, req.prompt)
-    return {"agent_id": agent_id, "reply": reply}
+    try:
+        reply = ask_agent_sync(agent_id, req.prompt)
+        return {"agent_id": agent_id, "reply": reply}
+    finally:
+        try:
+            from mqtt_bridge import publish_connector_status
+
+            publish_connector_status(reason=f"agent_test_{agent_id}")
+        except Exception:
+            pass
 
 class MobileTestMessageReq(BaseModel):
     contact_id: str

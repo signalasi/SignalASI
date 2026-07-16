@@ -1439,17 +1439,20 @@ class MobileNativeAgent(
         if (pending.metadata["source_message_id"]?.toLongOrNull() != sourceMessageId) return null
         val status = pending.metadata["remote_task_status"].orEmpty()
         val liveReadOnly = pending.metadata["routing_requires_live_data"] == "true"
+        val fallbackIds = pending.metadata["remaining_fallback_ids"].orEmpty()
+            .split(',')
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .distinct()
+        if (AgentFailoverPolicy.shouldKeepOnlyResourceAlive(stage, status, fallbackIds.isNotEmpty())) {
+            return null
+        }
         val timedOut = AgentFailoverPolicy.shouldFailOver(stage, status, liveReadOnly)
         if (!timedOut) return null
         val targetId = pending.metadata["resource_id"].orEmpty()
         val failureDomain = pending.metadata["failure_domain"].orEmpty()
         if (stage == AgentConnectorTimeoutStage.READ_ONLY_STALE) {
-            val hasDifferentDomainFallback = pending.metadata["remaining_fallback_ids"].orEmpty()
-                .split(',')
-                .map(String::trim)
-                .filter(String::isNotBlank)
-                .distinct()
-                .any { connectorFailureDomain(it) != failureDomain }
+            val hasDifferentDomainFallback = fallbackIds.any { connectorFailureDomain(it) != failureDomain }
             if (!hasDifferentDomainFallback) return null
         }
         val elapsed = (System.currentTimeMillis() - (pending.metadata["resource_started_at"]?.toLongOrNull()
@@ -8309,10 +8312,7 @@ class AppStoreAgentConnectorRegistry(
                 val id = contact.optString("id").ifBlank { contact.optString("signalasi_id") }
                 if (id.isBlank()) continue
                 val selected = AppStore.selectedCloudModelContact(appContext, id) ?: contact
-                val ready = selected.optString("setup_status").ifBlank { "ready" } == "ready" &&
-                    selected.optString("cloud_model").isNotBlank() &&
-                    selected.optString("cloud_endpoint").isNotBlank() &&
-                    selected.optString("cloud_api_key").isNotBlank()
+                val ready = AgentConnectorAvailability.cloudModelReady(selected)
                 val endpoint = selected.optString("cloud_endpoint")
                 val localEndpoint = endpoint.contains("127.0.0.1") ||
                     endpoint.contains("localhost") ||
@@ -8425,9 +8425,12 @@ class AppStoreAgentConnectorRegistry(
 
     private fun contactReady(contactId: String): Boolean {
         if (AppStore.outgoingTopicForContact(appContext, contactId) == null) return false
+        val contact = AppStore.contactById(appContext, contactId) ?: return false
         return if (AppStore.usesPcConnectorTunnel(appContext, contactId)) {
             val desktopId = AppStore.desktopIdForContact(appContext, contactId)
-            desktopId.isNotBlank() && SignalASICrypto.hasDesktopSession(appContext, desktopId)
+            desktopId.isNotBlank() &&
+                SignalASICrypto.hasDesktopSession(appContext, desktopId) &&
+                AgentConnectorAvailability.desktopAgentReady(contact)
         } else {
             SignalASICrypto.hasPeerSession(appContext, contactId)
         }
@@ -8460,11 +8463,28 @@ class AppStoreAgentConnectorRegistry(
             val contact = contacts.optJSONObject(index) ?: continue
             if (contact.optBoolean("deleted", false)) continue
             if (contact.optString("delivery_mode") != "cloud_api") continue
-            if (contact.optString("setup_status").ifBlank { "ready" } != "ready") continue
-            if (contact.optString("cloud_model").isNotBlank()) return true
+            val selected = AppStore.selectedCloudModelContact(
+                appContext,
+                contact.optString("id").ifBlank { contact.optString("signalasi_id") }
+            ) ?: contact
+            if (AgentConnectorAvailability.cloudModelReady(selected)) return true
         }
         return false
     }
+}
+
+object AgentConnectorAvailability {
+    private val routableDesktopStates = setOf("ready", "busy")
+
+    fun desktopAgentReady(contact: JSONObject): Boolean =
+        contact.optString("setup_status").ifBlank { "unknown" }.lowercase(Locale.US) in routableDesktopStates
+
+    fun cloudModelReady(contact: JSONObject): Boolean =
+        contact.optString("setup_status").ifBlank { "ready" }.equals("ready", ignoreCase = true) &&
+            contact.optString("cloud_provider").isNotBlank() &&
+            contact.optString("cloud_model").isNotBlank() &&
+            contact.optString("cloud_endpoint").isNotBlank() &&
+            contact.optString("cloud_api_key").isNotBlank()
 }
 
 interface AgentSessionStore {

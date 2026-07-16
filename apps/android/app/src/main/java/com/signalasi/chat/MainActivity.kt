@@ -1769,7 +1769,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     ) {
         val metadata = runtime.pendingConnectorMetadata(sourceMessageId)
         if (metadata["resource_location"] != "desktop") return
-        scheduleConnectorTimeout(runtime, sourceMessageId, conversationId, turnId, 3_000L, AgentConnectorTimeoutStage.NOT_ACCEPTED)
+        scheduleConnectorTimeout(runtime, sourceMessageId, conversationId, turnId, 5_000L, AgentConnectorTimeoutStage.NOT_ACCEPTED)
         scheduleConnectorTimeout(runtime, sourceMessageId, conversationId, turnId, 8_000L, AgentConnectorTimeoutStage.NOT_RUNNING)
         if (metadata["routing_requires_live_data"] == "true") {
             scheduleConnectorTimeout(runtime, sourceMessageId, conversationId, turnId, 15_000L, AgentConnectorTimeoutStage.READ_ONLY_STALE)
