@@ -280,6 +280,7 @@ class MobileNativeAgent(
     ): String {
         val zh = currentGoal.any { it in '\u3400'..'\u9fff' }
         if (output.isEmpty()) return renderNativeToolFailure(message, zh)
+        if (toolId == AgentWebMediaNativeTools.WEATHER_FORECAST) return message.trim()
         renderAndroidSystemSummary(toolId, output, zh)?.let { return it }
         if (zh) return renderNativeToolResultChinese(toolId, message, output)
         fun bool(name: String) = output[name] as? Boolean ?: false
@@ -5301,6 +5302,15 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 AgentHardwareNativeTools.STORAGE_STATUS to JSONObject()
             lower.hasAny("network status", "phone network", "active network", "\u624b\u673a\u7f51\u7edc\u72b6\u6001", "\u5f53\u524d\u7f51\u7edc", "\u7f51\u7edc\u8fde\u63a5\u72b6\u6001") ->
                 AgentHardwareNativeTools.NETWORK_STATUS to JSONObject()
+            lower.hasAny("weather", "forecast", "\u5929\u6c14", "\u6c14\u6e29") -> {
+                val location = weatherLocationFromGoal(goal)
+                if (location.isBlank()) return null
+                AgentWebMediaNativeTools.WEATHER_FORECAST to JSONObject()
+                    .put("location", location)
+                    .put("language", if (goal.any { it.code in 0x3400..0x9fff }) "zh" else "en")
+                    .put("day_offset", weatherDayOffset(lower))
+                    .put("timeout_ms", 10_000)
+            }
             lower.hasAny("current location", "phone location", "where am i", "\u5f53\u524d\u4f4d\u7f6e", "\u624b\u673a\u4f4d\u7f6e", "\u6211\u5728\u54ea\u91cc", "\u83b7\u53d6\u4f4d\u7f6e") ->
                 AgentHardwareNativeTools.LOCATION_FOREGROUND_READ to JSONObject().put("timeout_ms", 10_000)
             lower.hasAny("list sensors", "device sensors", "sensor list", "\u5217\u51fa\u4f20\u611f\u5668", "\u624b\u673a\u4f20\u611f\u5668", "\u4f20\u611f\u5668\u5217\u8868") ->
@@ -5458,6 +5468,23 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         goal.hasAny("temperature", "\u6e29\u5ea6") -> "ambient_temperature"
         goal.hasAny("humidity", "\u6e7f\u5ea6") -> "relative_humidity"
         else -> "accelerometer"
+    }
+
+    private fun weatherDayOffset(goal: String): Int = when {
+        goal.contains("day after tomorrow") || goal.contains("\u540e\u5929") -> 2
+        goal.contains("tomorrow") || goal.contains("\u660e\u5929") -> 1
+        else -> 0
+    }
+
+    private fun weatherLocationFromGoal(goal: String): String {
+        Regex(
+            "\\b(?:weather|forecast)\\s+(?:in|for)\\s+([A-Za-z][A-Za-z .'-]{1,60}?)(?=\\s+(?:today|tomorrow|the day after tomorrow|now)\\b|[?.!,]|$)",
+            RegexOption.IGNORE_CASE
+        ).find(goal)?.groupValues?.getOrNull(1)?.trim()?.takeIf(String::isNotBlank)?.let { return it }
+        Regex(
+            "(?:\u4eca\u5929|\u4eca\u65e5|\u660e\u5929|\u540e\u5929)?\\s*([\u3400-\u9fff]{2,16}?)(?:\u4eca\u5929|\u4eca\u65e5|\u660e\u5929|\u540e\u5929)?(?:\u7684)?(?:\u5929\u6c14|\u6c14\u6e29)"
+        ).find(goal)?.groupValues?.getOrNull(1)?.trim()?.takeIf(String::isNotBlank)?.let { return it }
+        return ""
     }
 
     private fun informationQueryAction(request: AgentRequest): AgentAction? {

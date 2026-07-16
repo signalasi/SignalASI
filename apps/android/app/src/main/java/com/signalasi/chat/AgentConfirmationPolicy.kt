@@ -52,6 +52,9 @@ object AgentConfirmationPolicy {
         if (nativeToolId in CONFIRM_ONCE_NATIVE_TOOL_IDS) {
             return AgentConfirmationTier.CONFIRM_ONCE
         }
+        if (nativeToolId == AgentWebMediaNativeTools.WEATHER_FORECAST) {
+            return AgentConfirmationTier.DIRECT
+        }
         if (action.kind in ALWAYS_CONFIRM_KINDS || ALWAYS_CONFIRM_TERMS.any(value::contains)) {
             return AgentConfirmationTier.CONFIRM_ALWAYS
         }
@@ -130,6 +133,7 @@ object AgentConfirmationPolicy {
         AgentHardwareNativeTools.BLUETOOTH_STATUS,
         AgentHardwareNativeTools.NFC_STATUS,
         AgentHardwareNativeTools.FLASHLIGHT_SET,
+        AgentWebMediaNativeTools.WEATHER_FORECAST,
         AgentHardwareNativeTools.BLUETOOTH_PAIRING_HANDOFF,
         AgentAndroidSystemNativeTools.AUDIO_STATUS,
         AgentAndroidSystemNativeTools.AUDIO_VOLUME_SET,

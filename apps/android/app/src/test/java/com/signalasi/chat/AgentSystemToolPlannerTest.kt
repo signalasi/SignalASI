@@ -39,6 +39,7 @@ class AgentSystemToolPlannerTest {
             nativeDescriptor(AgentHardwareNativeTools.POWER_STATUS, "Read power status", AgentNativeToolRisk.LOW),
             nativeDescriptor(AgentHardwareNativeTools.STORAGE_STATUS, "Read storage status", AgentNativeToolRisk.LOW),
             nativeDescriptor(AgentHardwareNativeTools.NETWORK_STATUS, "Read network status", AgentNativeToolRisk.LOW),
+            nativeDescriptor(AgentWebMediaNativeTools.WEATHER_FORECAST, "Get current weather forecast", AgentNativeToolRisk.LOW),
             nativeDescriptor(AgentHardwareNativeTools.LOCATION_FOREGROUND_READ, "Read location", AgentNativeToolRisk.HIGH),
             nativeDescriptor(AgentHardwareNativeTools.SENSORS_LIST, "List sensors", AgentNativeToolRisk.LOW),
             nativeDescriptor(AgentHardwareNativeTools.SENSOR_SAMPLE, "Read sensor", AgentNativeToolRisk.MEDIUM),
@@ -71,6 +72,17 @@ class AgentSystemToolPlannerTest {
             AgentAndroidSystemNativeTools.AUDIO_VOLUME_SET,
             planner.deterministicLocalAction(request("\u628a\u97f3\u91cf\u8bbe\u7f6e\u4e3a50", screen, nativeTools))?.parameters?.get("tool_id")
         )
+        val weather = requireNotNull(
+            planner.deterministicLocalAction(request("What is the weather in Shanghai today?", screen, nativeTools))
+        )
+        assertEquals(AgentWebMediaNativeTools.WEATHER_FORECAST, weather.parameters["tool_id"])
+        assertEquals("Shanghai", JSONObject(weather.parameters.getValue("input_json")).getString("location"))
+        assertEquals(AgentConfirmationTier.DIRECT, AgentConfirmationPolicy.tier(weather))
+        val chineseWeather = requireNotNull(
+            planner.deterministicLocalAction(request("\u4eca\u5929\u4e0a\u6d77\u5929\u6c14\u600e\u4e48\u6837？", screen, nativeTools))
+        )
+        assertEquals("\u4e0a\u6d77", JSONObject(chineseWeather.parameters.getValue("input_json")).getString("location"))
+        assertEquals("zh", JSONObject(chineseWeather.parameters.getValue("input_json")).getString("language"))
         val englishVolume = requireNotNull(
             planner.deterministicLocalAction(request("Set media volume 30", screen, nativeTools))
         )

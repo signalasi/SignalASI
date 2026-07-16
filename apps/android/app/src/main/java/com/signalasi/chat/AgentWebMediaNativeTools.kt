@@ -28,6 +28,7 @@ import java.util.concurrent.TimeUnit
 import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONObject
 
 enum class AgentWebMethod { HEAD, GET }
 
@@ -802,6 +803,7 @@ data class AgentWebMediaServices(
 )
 
 object AgentWebMediaNativeTools {
+    const val WEATHER_FORECAST = "signalasi.weather.forecast"
     const val WEB_SEARCH = "web.search"
     const val WEB_OPEN = "web.open"
     const val BROWSER_RENDER = "browser.render"
@@ -841,6 +843,7 @@ object AgentWebMediaNativeTools {
     )
 
     val toolIds: Set<String> = linkedSetOf(
+        WEATHER_FORECAST,
         WEB_SEARCH,
         WEB_OPEN,
         BROWSER_RENDER,
@@ -880,6 +883,7 @@ object AgentWebMediaNativeTools {
     ): AgentNativeToolRegistry = AgentNativeToolRegistry(clock).registerAll(definitions(services))
 
     fun definitions(services: AgentWebMediaServices): List<AgentNativeToolDefinition> = listOf(
+        weatherForecastDefinition(services.web),
         webSearchDefinition(services.web),
         webOpenDefinition(services.web, WEB_OPEN, "Open and extract public web page"),
         webOpenDefinition(services.web, BROWSER_RENDER, "Render isolated public page content"),
@@ -893,6 +897,117 @@ object AgentWebMediaNativeTools {
         mediaMetadataDefinition(services.mediaInspector),
         mediaPlaybackDefinition(services.mediaPlayback),
         ffmpegUnavailableDefinition()
+    )
+
+    private fun weatherForecastDefinition(web: AgentBoundedWebService) = AgentNativeToolDefinition(
+        descriptor = webDescriptor(
+            id = WEATHER_FORECAST,
+            title = "Get current weather forecast",
+            description = "Resolves a public place and reads a current bounded forecast directly on the phone.",
+            inputSchema = objectSchema(
+                properties = mapOf(
+                    "location" to AgentNativeJsonSchema.string(minLength = 2, maxLength = 120),
+                    "language" to AgentNativeJsonSchema.string(enumValues = listOf("en", "zh")),
+                    "day_offset" to AgentNativeJsonSchema.integer(0, 2),
+                    "timeout_ms" to timeoutSchema()
+                ),
+                required = setOf("location")
+            ),
+            outputSchema = weatherForecastOutputSchema(),
+            consents = emptyList(),
+            availability = web.availability
+        ),
+        executor = AgentNativeToolExecutor { invocation ->
+            executeBounded {
+                val locationQuery = invocation.input.string("location")
+                val language = invocation.input.string("language", "en").lowercase(Locale.ROOT)
+                    .let { if (it == "zh") "zh" else "en" }
+                val dayOffset = invocation.input.long("day_offset", 0L).toInt().coerceIn(0, 2)
+                val timeout = invocation.input.timeout(invocation)
+                val encodedLocation = URLEncoder.encode(locationQuery, Charsets.UTF_8.name())
+                val geocodingUrl = "https://geocoding-api.open-meteo.com/v1/search" +
+                    "?name=$encodedLocation&count=1&language=$language&format=json"
+                val geocoding = web.fetch(
+                    geocodingUrl,
+                    128 * 1_024L,
+                    minOf(timeout, 5_000L),
+                    invocation.cancellationToken,
+                    invocation::checkpoint
+                )
+                val locationJson = JSONObject(geocoding.body.toString(Charsets.UTF_8))
+                    .optJSONArray("results")?.optJSONObject(0)
+                    ?: throw AgentWebMediaException(
+                        "weather_location_not_found",
+                        "No public weather location matched '$locationQuery'"
+                    )
+                val latitude = locationJson.getDouble("latitude")
+                val longitude = locationJson.getDouble("longitude")
+                val forecastUrl = "https://api.open-meteo.com/v1/forecast" +
+                    "?latitude=$latitude&longitude=$longitude" +
+                    "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m" +
+                    "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code" +
+                    "&timezone=auto&forecast_days=${dayOffset + 1}"
+                val forecastResource = web.fetch(
+                    forecastUrl,
+                    256 * 1_024L,
+                    invocation.remainingTimeMillis.coerceAtLeast(1L),
+                    invocation.cancellationToken,
+                    invocation::checkpoint
+                )
+                val forecast = JSONObject(forecastResource.body.toString(Charsets.UTF_8))
+                val current = forecast.optJSONObject("current") ?: JSONObject()
+                val daily = forecast.optJSONObject("daily")
+                    ?: throw AgentWebMediaException("weather_data_unavailable", "The weather service returned no daily forecast")
+                val low = daily.getJSONArray("temperature_2m_min").getDouble(dayOffset)
+                val high = daily.getJSONArray("temperature_2m_max").getDouble(dayOffset)
+                val precipitation = daily.optJSONArray("precipitation_probability_max")?.optDouble(dayOffset, 0.0) ?: 0.0
+                val code = daily.optJSONArray("weather_code")?.optInt(dayOffset, current.optInt("weather_code", -1))
+                    ?: current.optInt("weather_code", -1)
+                val forecastDate = daily.optJSONArray("time")?.optString(dayOffset).orEmpty()
+                val displayParts = linkedSetOf(locationJson.optString("name").ifBlank { locationQuery })
+                listOf("admin1", "country").forEach { key ->
+                    locationJson.optString(key).takeIf(String::isNotBlank)?.let(displayParts::add)
+                }
+                val displayName = displayParts.joinToString(", ")
+                val condition = weatherCondition(code, language)
+                val currentTemperature = current.optDouble("temperature_2m", 0.0)
+                val apparentTemperature = current.optDouble("apparent_temperature", 0.0)
+                val humidity = current.optDouble("relative_humidity_2m", 0.0)
+                val wind = current.optDouble("wind_speed_10m", 0.0)
+                val message = weatherMessage(
+                    language, displayName, dayOffset, low, high, precipitation,
+                    condition, currentTemperature, apparentTemperature, humidity, wind
+                )
+                AgentNativeToolExecutionResult.success(
+                    output = mapOf(
+                        "location" to displayName,
+                        "forecast_date" to forecastDate,
+                        "day_offset" to dayOffset,
+                        "temperature_min_c" to low,
+                        "temperature_max_c" to high,
+                        "temperature_current_c" to currentTemperature,
+                        "apparent_temperature_c" to apparentTemperature,
+                        "relative_humidity_percent" to humidity,
+                        "wind_speed_kmh" to wind,
+                        "precipitation_probability_percent" to precipitation,
+                        "weather_code" to code,
+                        "condition" to condition,
+                        "source_name" to "Open-Meteo",
+                        "source_url" to "https://open-meteo.com/",
+                        "retrieved_at_epoch_ms" to forecastResource.retrievedAtEpochMillis
+                    ),
+                    message = message,
+                    metadata = mapOf(
+                        "network_policy" to "public_https_pinned_dns_v1",
+                        "execution_location" to "android_phone",
+                        "provider" to "open-meteo"
+                    )
+                )
+            }
+        },
+        executorId = WEB_EXECUTOR_ID,
+        provenanceMetadata = webProvenance() + mapOf("provider" to "open-meteo", "execution_location" to "android_phone"),
+        availabilityProvider = AgentNativeToolAvailabilityProvider { web.availability }
     )
 
     private fun webSearchDefinition(web: AgentBoundedWebService) = AgentNativeToolDefinition(
@@ -1443,6 +1558,73 @@ object AgentWebMediaNativeTools {
         availabilityProvider = AgentNativeToolAvailabilityProvider { FFMPEG_UNAVAILABLE }
     )
 
+    private fun weatherCondition(code: Int, language: String): String {
+        val values = when (code) {
+            0 -> "Clear" to "\u6674"
+            1, 2 -> "Partly cloudy" to "\u591a\u4e91"
+            3 -> "Overcast" to "\u9634"
+            45, 48 -> "Foggy" to "\u6709\u96fe"
+            51, 53, 55, 56, 57 -> "Drizzle" to "\u6709\u6bdb\u6bdb\u96e8"
+            61, 63, 65, 66, 67 -> "Rain" to "\u6709\u96e8"
+            71, 73, 75, 77 -> "Snow" to "\u6709\u96ea"
+            80, 81, 82 -> "Rain showers" to "\u6709\u9635\u96e8"
+            85, 86 -> "Snow showers" to "\u6709\u9635\u96ea"
+            95, 96, 99 -> "Thunderstorms" to "\u6709\u96f7\u66b4"
+            else -> "Conditions unavailable" to "\u5929\u6c14\u72b6\u51b5\u672a\u77e5"
+        }
+        return if (language == "zh") values.second else values.first
+    }
+
+    private fun weatherMessage(
+        language: String,
+        location: String,
+        dayOffset: Int,
+        low: Double,
+        high: Double,
+        precipitation: Double,
+        condition: String,
+        current: Double,
+        apparent: Double,
+        humidity: Double,
+        wind: Double
+    ): String {
+        val day = if (language == "zh") {
+            listOf("\u4eca\u5929", "\u660e\u5929", "\u540e\u5929")[dayOffset]
+        } else {
+            listOf("today", "tomorrow", "the day after tomorrow")[dayOffset]
+        }
+        return if (language == "zh") {
+            buildString {
+                append(location).append(day).append("\uff1a")
+                    .append(String.format(Locale.US, "%.0f–%.0f °C", low, high))
+                    .append("\uff0c").append(condition)
+                    .append("\uff0c\u6700\u9ad8\u964d\u6c34\u6982\u7387 ").append(String.format(Locale.US, "%.0f%%", precipitation)).append("\u3002")
+                if (dayOffset == 0) {
+                    append(" \u5f53\u524d ").append(String.format(Locale.US, "%.0f °C", current))
+                        .append("\uff0c\u4f53\u611f ").append(String.format(Locale.US, "%.0f °C", apparent))
+                        .append("\uff0c\u6e7f\u5ea6 ").append(String.format(Locale.US, "%.0f%%", humidity))
+                        .append("\uff0c\u98ce\u901f ").append(String.format(Locale.US, "%.0f km/h", wind)).append("\u3002")
+                }
+                append("\n\n\u6570\u636e\u6765\u6e90\uff1aOpen-Meteo (https://open-meteo.com/)")
+            }
+        } else {
+            buildString {
+                append(location).append(' ').append(day).append(": ")
+                    .append(String.format(Locale.US, "%.0f–%.0f °C", low, high))
+                    .append(", ").append(condition.lowercase(Locale.US))
+                    .append(", with up to ").append(String.format(Locale.US, "%.0f%%", precipitation))
+                    .append(" precipitation probability.")
+                if (dayOffset == 0) {
+                    append(" Currently ").append(String.format(Locale.US, "%.0f °C", current))
+                        .append(", feels like ").append(String.format(Locale.US, "%.0f °C", apparent))
+                        .append(", humidity ").append(String.format(Locale.US, "%.0f%%", humidity))
+                        .append(", wind ").append(String.format(Locale.US, "%.0f km/h", wind)).append('.')
+                }
+                append("\n\nSource: Open-Meteo (https://open-meteo.com/)")
+            }
+        }
+    }
+
     private fun webDescriptor(
         id: String,
         title: String,
@@ -1539,6 +1721,32 @@ object AgentWebMediaNativeTools {
             "result_count" to AgentNativeJsonSchema.integer(0, 10)
         ),
         WEB_COMMON_REQUIRED + setOf("query", "results", "result_count")
+    )
+
+    private fun weatherForecastOutputSchema() = objectSchema(
+        properties = mapOf(
+            "location" to AgentNativeJsonSchema.string(maxLength = 240),
+            "forecast_date" to AgentNativeJsonSchema.string(maxLength = 32),
+            "day_offset" to AgentNativeJsonSchema.integer(0, 2),
+            "temperature_min_c" to AgentNativeJsonSchema.number(-120, 70),
+            "temperature_max_c" to AgentNativeJsonSchema.number(-120, 70),
+            "temperature_current_c" to AgentNativeJsonSchema.number(-120, 70),
+            "apparent_temperature_c" to AgentNativeJsonSchema.number(-150, 100),
+            "relative_humidity_percent" to AgentNativeJsonSchema.number(0, 100),
+            "wind_speed_kmh" to AgentNativeJsonSchema.number(0, 500),
+            "precipitation_probability_percent" to AgentNativeJsonSchema.number(0, 100),
+            "weather_code" to AgentNativeJsonSchema.integer(-1, 999),
+            "condition" to AgentNativeJsonSchema.string(maxLength = 120),
+            "source_name" to AgentNativeJsonSchema.string(maxLength = 80),
+            "source_url" to AgentNativeJsonSchema.string(maxLength = 4_096),
+            "retrieved_at_epoch_ms" to AgentNativeJsonSchema.integer(0)
+        ),
+        required = setOf(
+            "location", "forecast_date", "day_offset", "temperature_min_c", "temperature_max_c",
+            "temperature_current_c", "apparent_temperature_c", "relative_humidity_percent",
+            "wind_speed_kmh", "precipitation_probability_percent", "weather_code", "condition",
+            "source_name", "source_url", "retrieved_at_epoch_ms"
+        )
     )
 
     private fun webOpenOutputSchema() = objectSchema(

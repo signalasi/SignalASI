@@ -33,6 +33,7 @@ class AgentWebMediaNativeToolsTest {
         assertEquals("tool_unavailable", result.error?.code)
         assertTrue(result.error?.message.orEmpty().contains("FFmpeg"))
         setOf(
+            AgentWebMediaNativeTools.WEATHER_FORECAST,
             AgentWebMediaNativeTools.WEB_SEARCH,
             AgentWebMediaNativeTools.WEB_OPEN,
             AgentWebMediaNativeTools.BROWSER_RENDER,
@@ -40,6 +41,36 @@ class AgentWebMediaNativeToolsTest {
         ).forEach { id ->
             assertTrue(definitions.single { it.descriptor.id == id }.descriptor.requiredConsents.isEmpty())
         }
+    }
+
+    @Test
+    fun weatherForecastRunsEntirelyThroughPhoneWebTransport() {
+        val geocoding = """{"results":[{"name":"Shanghai","admin1":"Shanghai","country":"China","latitude":31.22,"longitude":121.46}]}""".toByteArray()
+        val forecast = """{"current":{"temperature_2m":33,"apparent_temperature":39,"relative_humidity_2m":62,"weather_code":3,"wind_speed_10m":9},"daily":{"time":["2026-07-16"],"temperature_2m_max":[38],"temperature_2m_min":[29],"precipitation_probability_max":[20],"weather_code":[3]}}""".toByteArray()
+        val transport = FakeTransport(
+            AgentWebTransportResponse(200, mapOf("Content-Type" to listOf("application/json")), geocoding),
+            AgentWebTransportResponse(200, mapOf("Content-Type" to listOf("application/json")), forecast)
+        )
+        val registry = registry(
+            transport,
+            FakeResolver(
+                "geocoding-api.open-meteo.com" to listOf(publicAddress(93, 184, 216, 34)),
+                "api.open-meteo.com" to listOf(publicAddress(142, 250, 72, 14))
+            )
+        )
+
+        val result = registry.invoke(
+            AgentWebMediaNativeTools.WEATHER_FORECAST,
+            mapOf("location" to "Shanghai", "language" to "en", "day_offset" to 0, "timeout_ms" to 10_000),
+            AgentNativeToolInvocationContext(grantedPermissions = setOf(AgentWebMediaNativeTools.INTERNET_PERMISSION))
+        )
+
+        assertTrue(result.toJson(), result.isSuccess)
+        assertEquals("Shanghai, China", result.output["location"])
+        assertEquals(29.0, result.output["temperature_min_c"])
+        assertTrue(result.message.contains("29\u201338 \u00b0C"))
+        assertEquals("android_phone", result.metadata["execution_location"])
+        assertEquals(2, transport.requests.size)
     }
 
     @Test

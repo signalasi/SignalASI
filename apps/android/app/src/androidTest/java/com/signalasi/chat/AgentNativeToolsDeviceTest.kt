@@ -59,7 +59,7 @@ class AgentNativeToolsDeviceTest {
     @Test
     fun testAllRegisteredPhoneToolsOnDevice() {
         val descriptors = registry.descriptors()
-        assertEquals("The native tool inventory changed; update the device matrix", 97, descriptors.size)
+        assertEquals("The native tool inventory changed; update the device matrix", 98, descriptors.size)
 
         runWorkspaceLifecycle()
         descriptors
@@ -95,6 +95,7 @@ class AgentNativeToolsDeviceTest {
             AgentAndroidSystemNativeTools.VPN_STATUS,
             AgentAndroidSystemNativeTools.DEVICE_POLICY_STATUS,
             AgentWebMediaNativeTools.WEB_SEARCH,
+            AgentWebMediaNativeTools.WEATHER_FORECAST,
             AgentWebMediaNativeTools.WEB_OPEN,
             AgentWebMediaNativeTools.BROWSER_RENDER,
             AgentWebMediaNativeTools.CONTENT_EXTRACT,
@@ -336,6 +337,7 @@ class AgentNativeToolsDeviceTest {
             AgentWebMediaNativeTools.WEB_OPEN,
             AgentWebMediaNativeTools.BROWSER_RENDER -> mapOf("url" to "https://example.com/", "timeout_ms" to 5_000, "max_bytes" to 16_384)
             AgentWebMediaNativeTools.WEB_SEARCH -> mapOf("query" to "SignalASI", "max_results" to 3, "timeout_ms" to 10_000)
+            AgentWebMediaNativeTools.WEATHER_FORECAST -> mapOf("location" to "Shanghai", "language" to "en", "day_offset" to 0, "timeout_ms" to 10_000)
             AgentWebMediaNativeTools.CONTENT_EXTRACT -> mapOf("content" to "<h1>SignalASI</h1><p>Device test</p>")
             AgentWebMediaNativeTools.HTTP_REQUEST -> mapOf("url" to "https://example.com/", "method" to "GET", "timeout_ms" to 5_000, "max_bytes" to 16_384)
             AgentWebMediaNativeTools.WEB_DOWNLOAD -> mapOf("url" to "https://example.com/", "destination_content_uri" to "content://invalid/device-test")
