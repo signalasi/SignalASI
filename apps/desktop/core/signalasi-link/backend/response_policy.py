@@ -7,6 +7,8 @@ import re
 
 POLICY_MARKER = "SignalASI response policy:"
 CURRENT_REQUEST_MARKER = "\nCurrent user request:\n"
+ATTACHED_INPUT_MARKER = "\n\nAttached input:\n"
+RICH_OUTPUT_MARKER = "\n\nSignalASI can render optional rich output."
 CODEX_STYLE_RESPONSE_POLICY = """
 SignalASI response policy:
 - Respond in the user's language; default to Simplified Chinese for Chinese users.
@@ -20,19 +22,54 @@ SignalASI response policy:
 """.strip()
 
 
+def _current_request(prompt: str) -> str:
+    value = str(prompt or "").strip()
+    if CURRENT_REQUEST_MARKER in value:
+        value = value.rsplit(CURRENT_REQUEST_MARKER, 1)[1].strip()
+    for marker in (ATTACHED_INPUT_MARKER, RICH_OUTPUT_MARKER):
+        if marker in value:
+            value = value.split(marker, 1)[0].strip()
+    return value
+
+
+def response_language(prompt: str) -> str:
+    """Infer the response language from this turn instead of prior history."""
+    request = _current_request(prompt)
+    lower = request.lower()
+    if re.search(r"\b(?:reply|respond|answer|write)\s+in\s+(?:english|en)\b", lower):
+        return "English"
+    if re.search(r"\b(?:reply|respond|answer|write)\s+in\s+(?:chinese|simplified chinese|zh-cn)\b", lower):
+        return "Simplified Chinese"
+    if any(term in request for term in ("\u7528\u82f1\u6587", "\u82f1\u6587\u56de\u590d", "\u56de\u7b54\u82f1\u6587")):
+        return "English"
+    if any(term in request for term in ("\u7528\u4e2d\u6587", "\u4e2d\u6587\u56de\u590d", "\u7b80\u4f53\u4e2d\u6587", "\u7b80\u4f53\u56de\u590d")):
+        return "Simplified Chinese"
+    han_count = len(re.findall(r"[\u3400-\u9fff]", request))
+    latin_count = len(re.findall(r"[A-Za-z]", request))
+    if han_count >= 2:
+        return "Simplified Chinese"
+    if latin_count >= 2:
+        return "English"
+    return "Simplified Chinese"
+
+
+def _turn_language_policy(prompt: str) -> str:
+    language = response_language(prompt)
+    return f"Turn language: {language}. Respond in {language} unless the user explicitly requests another language."
+
+
 def apply_response_policy(prompt: str) -> str:
     value = str(prompt or "").strip()
     if not value or POLICY_MARKER in value:
         return value
-    return f"{CODEX_STYLE_RESPONSE_POLICY}\n\n{value}"
+    return f"{CODEX_STYLE_RESPONSE_POLICY}\n- {_turn_language_policy(value)}\n\n{value}"
 
 
 def compact_codex_turn_prompt(prompt: str) -> str:
     """Send only the new request when Codex already owns the conversation thread."""
     value = str(prompt or "").strip()
-    if CURRENT_REQUEST_MARKER in value:
-        return value.rsplit(CURRENT_REQUEST_MARKER, 1)[1].strip()
-    return value
+    request = value.rsplit(CURRENT_REQUEST_MARKER, 1)[1].strip() if CURRENT_REQUEST_MARKER in value else value
+    return f"SignalASI turn policy: {_turn_language_policy(request)}\n\n{request}"
 
 
 def sanitize_assistant_response(response: str, hidden_input_paths: list[str] | None = None) -> str:
