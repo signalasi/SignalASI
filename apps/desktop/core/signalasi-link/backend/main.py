@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from models import init_db, get_session, Contact, Message, ContactType, MessageType, SenderType
-from agent_gateway import ask_agent_sync, connector_diagnostics, connector_self_test, list_agents, recent_agent_execution_log
+from agent_gateway import ask_agent_sync, connector_diagnostics, connector_self_test, list_agents, recent_agent_execution_log, reset_inactive_agent_runtime
 from agent_config import load_config, save_config
 from api_response import api_error
 from agent_task_manager import agent_task_manager
@@ -77,41 +77,46 @@ def signalasi_pairing_payload(include_agents: bool = False) -> dict:
 async def lifespan(app: FastAPI):
     file_server_process = None
     init_db()
-    # Start the local Signal Protocol sidecar.
-    try:
-        import signalasi_client
-        signalasi_client.start_signal_sidecar()
-        log.info("Signal sidecar started (:%s)", signalasi_client.SIDECAR_PORT)
-    except Exception as e:
-        log.warning(f"Signal sidecar start failed: {e}")
-    # Start the MQTT bridge in a background thread.
-    try:
-        from mqtt_bridge import start_background
-        start_background()
-        log.info("MQTT bridge started")
-    except Exception as e:
-        log.warning(f"MQTT start failed: {e}")
-    # Start the file service subprocess.
-    try:
-        import subprocess, sys
-        file_server_script = Path(__file__).parent / "file_server.py"
-        file_server_process = subprocess.Popen(
-            [sys.executable, str(file_server_script)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        log.info("File service started (:18765)")
-    except Exception as e:
-        log.warning(f"File service start failed: {e}")
+    external_services_enabled = os.environ.get("SIGNALASI_DISABLE_EXTERNAL_SERVICES") != "1"
+    if external_services_enabled:
+        # Start the local Signal Protocol sidecar.
+        try:
+            import signalasi_client
+            signalasi_client.start_signal_sidecar()
+            log.info("Signal sidecar started (:%s)", signalasi_client.SIDECAR_PORT)
+        except Exception as e:
+            log.warning(f"Signal sidecar start failed: {e}")
+        # Start the MQTT bridge in a background thread.
+        try:
+            from mqtt_bridge import start_background
+            start_background()
+            log.info("MQTT bridge started")
+        except Exception as e:
+            log.warning(f"MQTT start failed: {e}")
+        # Start the file service subprocess.
+        try:
+            import subprocess, sys
+            file_server_script = Path(__file__).parent / "file_server.py"
+            file_server_process = subprocess.Popen(
+                [sys.executable, str(file_server_script)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            log.info("File service started (:18765)")
+        except Exception as e:
+            log.warning(f"File service start failed: {e}")
+    else:
+        log.info("External services disabled for isolated backend run")
     log.info("SignalASI Link backend started")
     try:
         yield
     finally:
-        try:
-            from mqtt_bridge import stop
-            stop()
-        except Exception as exc:
-            log.warning("MQTT shutdown failed: %s", exc)
+        if external_services_enabled:
+            try:
+                from mqtt_bridge import stop
+                stop()
+            except Exception as exc:
+                log.warning("MQTT shutdown failed: %s", exc)
         if file_server_process is not None and file_server_process.poll() is None:
             if os.name == "nt":
                 subprocess.run(
@@ -126,11 +131,12 @@ async def lifespan(app: FastAPI):
                     file_server_process.wait(timeout=5)
                 except Exception:
                     file_server_process.kill()
-        try:
-            from signalasi_client import stop_signal_sidecar
-            stop_signal_sidecar()
-        except Exception as exc:
-            log.warning("Signal sidecar shutdown failed: %s", exc)
+        if external_services_enabled:
+            try:
+                from signalasi_client import stop_signal_sidecar
+                stop_signal_sidecar()
+            except Exception as exc:
+                log.warning("Signal sidecar shutdown failed: %s", exc)
 
 app = FastAPI(title="SignalASI Link", lifespan=lifespan)
 app.add_middleware(
@@ -231,6 +237,7 @@ class AgentConfigReq(BaseModel):
 @app.post("/api/agents/config")
 def api_save_agent_config(req: AgentConfigReq):
     saved = save_config(req.dict())
+    reset_inactive_agent_runtime()
     try:
         from mqtt_bridge import publish_connector_status
 
@@ -251,8 +258,19 @@ class AgentTestReq(BaseModel):
 @app.post("/api/agents/{agent_id}/test")
 def api_test_agent(agent_id: str, req: AgentTestReq):
     try:
-        reply = ask_agent_sync(agent_id, req.prompt)
-        return {"agent_id": agent_id, "reply": reply}
+        try:
+            reply = ask_agent_sync(agent_id, req.prompt)
+            return {"agent_id": agent_id, "reply": reply}
+        except Exception as exc:
+            log.exception("Agent test failed agent_id=%s", agent_id)
+            raise HTTPException(
+                status_code=502,
+                detail=api_error(
+                    "agent_test_failed",
+                    str(exc)[:240],
+                    params={"agent_id": agent_id},
+                ),
+            ) from exc
     finally:
         try:
             from mqtt_bridge import publish_connector_status

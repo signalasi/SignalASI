@@ -348,7 +348,7 @@ for (const requiredText of [
   "data-setup-action",
   "Connector status matrix",
   "Agent permissions and execution log",
-  "signalasi_agent_execution.jsonl",
+  "agent-execution.jsonl",
   "/api/agents/execution-log",
   "prompt_sha256",
   "local_process",

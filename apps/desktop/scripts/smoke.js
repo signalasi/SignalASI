@@ -8,7 +8,8 @@ const { withSignalasiLock } = require("./smoke-lock");
 const root = path.resolve(__dirname, "..");
 const workspaceRoot = path.resolve(root, "..");
 const backendDir = path.join(root, "core", "signalasi-link", "backend");
-const backendOrigin = "http://127.0.0.1:8765";
+let backendPort = 8765;
+let backendOrigin = `http://127.0.0.1:${backendPort}`;
 const agentConfigPath = path.join(backendDir, "signalasi_agents.json");
 const fakeModelPort = 18993;
 const fakeModelOrigin = `http://127.0.0.1:${fakeModelPort}`;
@@ -53,14 +54,14 @@ function assertStructuredAgentDiagnostics(diagnostics) {
   }
 }
 
-function stopBackendPort() {
+function stopBackendPort(port = backendPort) {
   if (process.platform !== "win32") return;
   execFileSync(
     "powershell",
     [
       "-NoProfile",
       "-Command",
-      "$pids=(Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue).OwningProcess | Sort-Object -Unique; foreach($p in $pids){Stop-Process -Id $p -Force -ErrorAction SilentlyContinue}"
+      `$pids=(Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue).OwningProcess | Sort-Object -Unique; foreach($p in $pids){Stop-Process -Id $p -Force -ErrorAction SilentlyContinue}`
     ],
     { stdio: "ignore", windowsHide: true }
   );
@@ -119,28 +120,62 @@ async function waitForBackend() {
   fail("Backend did not respond on :8765");
 }
 
-function startBackendIfNeeded() {
+function startBackendIfNeeded(stateDir = "") {
   return new Promise(async (resolve) => {
-    try {
-      const diagnostics = await fetchJson("/api/agents/diagnostics");
-      if (backendHasCapabilities(diagnostics) && backendIsCurrentSource(diagnostics)) {
-        resolve(undefined);
-        return;
+    if (!stateDir) {
+      try {
+        const diagnostics = await fetchJson("/api/agents/diagnostics");
+        if (backendHasCapabilities(diagnostics) && backendIsCurrentSource(diagnostics)) {
+          resolve(undefined);
+          return;
+        }
+        log(`stale backend detected or foreign backend on :${backendPort}; restarting current source backend`);
+        stopBackendPort();
+        await new Promise((ready) => setTimeout(ready, 1000));
+      } catch {
+        // Start below.
       }
-      log("stale backend detected or foreign backend on :8765; restarting current source backend");
-      stopBackendPort();
-      await new Promise((ready) => setTimeout(ready, 1000));
-    } catch {
-      // Start below.
     }
     const python = findPython();
-    const child = spawn(python, ["-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8765"], {
+    const child = spawn(python, ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", String(backendPort)], {
       cwd: backendDir,
       windowsHide: true,
-      stdio: "ignore"
+      stdio: "ignore",
+      env: stateDir ? {
+        ...process.env,
+        SIGNALASI_STATE_DIR: stateDir,
+        SIGNALASI_DISABLE_EXTERNAL_SERVICES: process.env.SIGNALASI_SMOKE_MOBILE === "1" ? "0" : "1",
+      } : process.env,
     });
     resolve(child);
   });
+}
+
+function findFreeBackendPort() {
+  return new Promise((resolve, reject) => {
+    const probe = http.createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      probe.close(error => error ? reject(error) : resolve(port));
+    });
+  });
+}
+
+async function stopChild(child) {
+  if (!child || child.exitCode !== null) return;
+  const exited = new Promise(resolve => child.once("exit", resolve));
+  if (process.platform === "win32") {
+    try {
+      execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    } catch {
+      child.kill();
+    }
+  } else {
+    child.kill();
+  }
+  await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 3_000))]);
 }
 
 function startFakeModelServer() {
@@ -189,7 +224,10 @@ async function smoke() {
   run(python, ["-m", "py_compile", "agent_gateway.py", "agent_task_manager.py", "main.py", "mqtt_bridge.py", "agent_config.py"], { cwd: backendDir });
 
   log("starting or reusing backend");
-  const startedBackend = await startBackendIfNeeded();
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalasi-smoke-"));
+  backendPort = await findFreeBackendPort();
+  backendOrigin = `http://127.0.0.1:${backendPort}`;
+  const startedBackend = await startBackendIfNeeded(path.join(tmpDir, "state"));
   try {
     const diagnostics = await waitForBackend();
     if (diagnostics.pairing_route !== "/signalasi/verify") fail("Unexpected pairing route");
@@ -271,9 +309,8 @@ async function smoke() {
 
     log("smoke test OK");
   } finally {
-    if (startedBackend) {
-      startedBackend.kill();
-    }
+    await stopChild(startedBackend);
+    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 

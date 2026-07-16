@@ -1,5 +1,8 @@
 """SignalASI Link data models."""
 from datetime import datetime, timezone
+from pathlib import Path
+import os
+import shutil
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Enum as SAEnum
 from sqlalchemy.orm import declarative_base, sessionmaker
 import enum
@@ -41,8 +44,20 @@ class Message(Base):
     type = Column(SAEnum(MessageType), default=MessageType.TEXT)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-DB_PATH = "signalasi.db"
-engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
+def _database_path() -> Path:
+    configured = os.environ.get("SIGNALASI_DATABASE_PATH", "").strip()
+    state_directory = os.environ.get("SIGNALASI_STATE_DIR", "").strip()
+    root = Path(state_directory) if state_directory else Path(os.environ.get("APPDATA") or Path.home()) / "SignalASI"
+    target = Path(configured) if configured else root / "signalasi.db"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    legacy = Path(__file__).with_name("signalasi.db")
+    if not target.exists() and legacy.exists() and legacy.resolve() != target.resolve():
+        shutil.copy2(legacy, target)
+    return target
+
+
+DB_PATH = _database_path()
+engine = create_engine(f"sqlite:///{DB_PATH.as_posix()}", echo=False)
 SessionLocal = sessionmaker(bind=engine)
 
 def init_db():

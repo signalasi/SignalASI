@@ -24,7 +24,6 @@ from pathlib import Path
 
 from agent_config import cloud_model_config, command_for, custom_agent_config, custom_agent_configs, local_model_config
 
-EXECUTION_LOG_PATH = Path(__file__).with_name("signalasi_agent_execution.jsonl")
 EXECUTION_LOG_MAX_BYTES = 512 * 1024
 AGENT_RUNTIME_FAILURE_TTL_SECONDS = 5 * 60
 
@@ -34,9 +33,16 @@ _agent_runtime_loaded = False
 
 
 def _agent_runtime_path() -> Path:
+    return _state_root() / "agent-runtime.json"
+
+
+def _execution_log_path() -> Path:
+    return _state_root() / "agent-execution.jsonl"
+
+
+def _state_root() -> Path:
     configured = os.environ.get("SIGNALASI_STATE_DIR", "").strip()
-    root = Path(configured) if configured else Path(os.environ.get("APPDATA") or Path.home()) / "SignalASI"
-    return root / "agent-runtime.json"
+    return Path(configured) if configured else Path(os.environ.get("APPDATA") or Path.home()) / "SignalASI"
 
 
 def _ensure_agent_runtime_loaded_locked() -> None:
@@ -64,6 +70,20 @@ def _persist_agent_runtime_locked() -> None:
         temporary.replace(path)
     except OSError:
         pass
+
+
+def reset_inactive_agent_runtime() -> None:
+    """Discard stale health quarantine after connector configuration changes."""
+    with _agent_runtime_lock:
+        _ensure_agent_runtime_loaded_locked()
+        inactive_ids = [
+            agent_id
+            for agent_id, state in _agent_runtime.items()
+            if int(state.get("active_tasks") or 0) == 0
+        ]
+        for agent_id in inactive_ids:
+            _agent_runtime.pop(agent_id, None)
+        _persist_agent_runtime_locked()
 
 PERMISSION_LABELS = {
     "local-cli": "local_process",
@@ -422,11 +442,7 @@ def agent_status(spec: AgentSpec, quick: bool = False) -> dict:
 
 def _quick_agent_available(spec: AgentSpec) -> tuple[bool, str]:
     if spec.id == "local-llm":
-        cfg = local_model_config()
-        if cfg["url"] and cfg["model"]:
-            return True, f"Configured {cfg['provider']}: {cfg['model']}"
-        executable = shutil.which("ollama")
-        return (True, "Ollama command detected") if executable else (False, "Configure a local model endpoint")
+        return _local_model_available()
     if spec.id == "cloud-model":
         cfg = cloud_model_config()
         ready = bool(cfg["url"] and cfg["api_key"] and cfg["model"])
@@ -569,10 +585,13 @@ def _command_available(command: str) -> tuple[bool, str]:
 
 
 def _ollama_available() -> tuple[bool, str]:
-    ok, detail = _command_available("ollama")
-    if ok:
-        return True, detail
-    return _ollama_api_available("http://127.0.0.1:11434/api/tags", fallback=detail)
+    api_ok, api_detail = _ollama_api_available("http://127.0.0.1:11434/api/tags")
+    if api_ok:
+        return True, api_detail
+    command_ok, command_detail = _command_available("ollama")
+    if command_ok:
+        return False, f"Ollama is installed but its API is not reachable: {api_detail}"
+    return False, command_detail or api_detail
 
 
 def _ollama_api_available(tags_url: str, fallback: str = "Ollama API not detected") -> tuple[bool, str]:
@@ -713,6 +732,7 @@ def _append_execution_log(
     ok: bool,
     error: str = "",
 ) -> None:
+    execution_log_path = _execution_log_path()
     prompt_bytes = prompt.encode("utf-8", errors="replace")
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -728,12 +748,13 @@ def _append_execution_log(
         "error": error,
     }
     try:
-        if EXECUTION_LOG_PATH.exists() and EXECUTION_LOG_PATH.stat().st_size > EXECUTION_LOG_MAX_BYTES:
-            backup = EXECUTION_LOG_PATH.with_suffix(".jsonl.1")
+        execution_log_path.parent.mkdir(parents=True, exist_ok=True)
+        if execution_log_path.exists() and execution_log_path.stat().st_size > EXECUTION_LOG_MAX_BYTES:
+            backup = execution_log_path.with_suffix(".jsonl.1")
             if backup.exists():
                 backup.unlink()
-            EXECUTION_LOG_PATH.replace(backup)
-        with EXECUTION_LOG_PATH.open("a", encoding="utf-8") as handle:
+            execution_log_path.replace(backup)
+        with execution_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
     except Exception:
         pass
@@ -741,10 +762,11 @@ def _append_execution_log(
 
 def recent_agent_execution_log(limit: int = 50) -> dict:
     limit = max(1, min(int(limit or 50), 200))
-    if not EXECUTION_LOG_PATH.exists():
-        return {"path": str(EXECUTION_LOG_PATH), "entries": []}
+    execution_log_path = _execution_log_path()
+    if not execution_log_path.exists():
+        return {"path": str(execution_log_path), "entries": []}
     try:
-        lines = EXECUTION_LOG_PATH.read_text(encoding="utf-8-sig").splitlines()[-limit:]
+        lines = execution_log_path.read_text(encoding="utf-8-sig").splitlines()[-limit:]
         entries = []
         for line in lines:
             try:
@@ -752,9 +774,9 @@ def recent_agent_execution_log(limit: int = 50) -> dict:
             except Exception:
                 continue
         entries.reverse()
-        return {"path": str(EXECUTION_LOG_PATH), "entries": entries}
+        return {"path": str(execution_log_path), "entries": entries}
     except Exception as exc:
-        return {"path": str(EXECUTION_LOG_PATH), "entries": [], "error": str(exc)[:200]}
+        return {"path": str(execution_log_path), "entries": [], "error": str(exc)[:200]}
 
 
 def ask_cli_agent(spec: AgentSpec, text: str, task_id: str = "") -> str:

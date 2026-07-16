@@ -2,13 +2,23 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 
-CONFIG_PATH = Path(__file__).with_name("signalasi_agents.json")
+LEGACY_CONFIG_PATH = Path(__file__).with_name("signalasi_agents.json")
+
+
+def _config_path() -> Path:
+    configured = os.environ.get("SIGNALASI_CONFIG_PATH", "").strip()
+    if configured:
+        return Path(configured)
+    state_directory = os.environ.get("SIGNALASI_STATE_DIR", "").strip()
+    root = Path(state_directory) if state_directory else Path(os.environ.get("APPDATA") or Path.home()) / "SignalASI"
+    return root / "agents.json"
 MASK = "********"
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -40,11 +50,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 def load_config(mask_secrets: bool = False) -> dict[str, Any]:
     config = deepcopy(DEFAULT_CONFIG)
-    if CONFIG_PATH.exists():
+    config_path = _config_path()
+    source_path = config_path if config_path.exists() else LEGACY_CONFIG_PATH
+    if source_path.exists():
         try:
-            with CONFIG_PATH.open("r", encoding="utf-8-sig") as handle:
+            with source_path.open("r", encoding="utf-8-sig") as handle:
                 saved = json.load(handle)
             _merge(config, saved)
+            if source_path == LEGACY_CONFIG_PATH and source_path != config_path:
+                _write_config(config_path, config)
         except Exception:
             pass
     if mask_secrets:
@@ -66,9 +80,16 @@ def save_config(incoming: dict[str, Any]) -> dict[str, Any]:
             sanitized[section]["api_key"] = current.get(section, {}).get("api_key", "")
 
     _merge(updated, sanitized)
-    with CONFIG_PATH.open("w", encoding="utf-8") as handle:
-        json.dump(updated, handle, ensure_ascii=False, indent=2)
+    _write_config(_config_path(), updated)
     return load_config(mask_secrets=True)
+
+
+def _write_config(config_path: Path, config: dict[str, Any]) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = config_path.with_suffix(f"{config_path.suffix}.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(config, handle, ensure_ascii=False, indent=2)
+    temporary.replace(config_path)
 
 
 def command_for(agent_id: str) -> str:

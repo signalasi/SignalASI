@@ -57,10 +57,33 @@ class AgentRuntimeStatusTest(unittest.TestCase):
         self.assertEqual("ready", status["status"])
         deep_probe.assert_not_called()
 
+    @patch.object(agent_gateway, "_local_model_available", return_value=(False, "Local model API is offline"))
+    def test_quick_local_model_status_requires_a_reachable_runtime(self, _available):
+        status = agent_gateway.agent_status(agent_gateway.BASE_AGENTS["local-llm"], quick=True)
+        self.assertEqual("needs_setup", status["status"])
+        self.assertIn("offline", status["detail"])
+
+    @patch.object(agent_gateway, "_command_available", return_value=(True, "ollama version test"))
+    @patch.object(agent_gateway, "_ollama_api_available", return_value=(False, "API offline"))
+    def test_installed_ollama_without_api_is_not_routable(self, _api, _command):
+        ready, detail = agent_gateway._ollama_available()
+        self.assertFalse(ready)
+        self.assertIn("not reachable", detail)
+
     def test_known_connector_error_replies_are_failures(self):
         self.assertTrue(agent_gateway._agent_reply_failed("[Local LLM] not connected"))
         self.assertTrue(agent_gateway._agent_reply_failed("[Claude Code] \u672a\u68c0\u6d4b\u5230\u547d\u4ee4"))
         self.assertFalse(agent_gateway._agent_reply_failed("A concise normal reply."))
+
+    def test_config_change_clears_inactive_quarantine_but_preserves_running_tasks(self):
+        agent_gateway._agent_execution_started("codex")
+        agent_gateway._agent_execution_started("claude")
+        agent_gateway._agent_execution_finished("claude", False, "old command failed")
+
+        agent_gateway.reset_inactive_agent_runtime()
+
+        self.assertIn("codex", agent_gateway._agent_runtime)
+        self.assertNotIn("claude", agent_gateway._agent_runtime)
 
 
 if __name__ == "__main__":

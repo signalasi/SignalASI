@@ -303,7 +303,9 @@ class MobileNativeAgent(
         )
         val renderedOutput = AgentNativeJsonCodec.stringify(result.output).take(8_000)
         val nativeMessage = result.message.ifBlank { result.error?.message.orEmpty() }
-        val userMessage = renderNativeToolResult(toolId, nativeMessage, result.output)
+        val responseLanguage = action.parameters["response_language"].orEmpty()
+        val zh = responseLanguage == "zh" || (responseLanguage.isBlank() && currentGoal.any { it in '\u3400'..'\u9fff' })
+        val userMessage = renderNativeToolResult(toolId, nativeMessage, result.output, zh)
             .ifBlank { renderedOutput }
         return AgentActionResult(
             actionId = action.id,
@@ -330,9 +332,9 @@ class MobileNativeAgent(
     private fun renderNativeToolResult(
         toolId: String,
         message: String,
-        output: AgentNativeJsonObject
+        output: AgentNativeJsonObject,
+        zh: Boolean
     ): String {
-        val zh = currentGoal.any { it in '\u3400'..'\u9fff' }
         if (output.isEmpty()) return renderNativeToolFailure(message, zh)
         if (toolId == AgentWebMediaNativeTools.WEB_SEARCH) return renderPhoneWebSearchResult(output, zh)
         renderAndroidSystemSummary(toolId, output, zh)?.let { return it }
@@ -5514,6 +5516,21 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         val lower = goal.lowercase(Locale.US)
         val now = System.currentTimeMillis()
         val phoneWebSearchQuery = phoneWebSearchQuery(goal, lower)
+        val batteryReadIntent = lower.hasAny(
+            "battery status", "phone battery", "current battery level", "how much battery",
+            "\u624b\u673a\u7535\u91cf", "\u624b\u673a\u7535\u6c60", "\u7535\u6c60\u7535\u91cf", "\u7535\u91cf\u591a\u5c11",
+            "\u67e5\u770b\u7535\u91cf", "\u67e5\u8be2\u7535\u91cf", "\u67e5\u7535\u91cf"
+        ) || (
+            lower.hasAny("battery", "\u7535\u91cf", "\u7535\u6c60") &&
+                lower.hasAny(
+                    "read", "check", "show", "current", "how much", "status",
+                    "\u8bfb\u53d6", "\u67e5\u770b", "\u67e5\u8be2", "\u5f53\u524d", "\u591a\u5c11"
+                ) &&
+                !lower.hasAny(
+                    "battery saver", "power saving", "battery threshold", "battery settings",
+                    "\u7701\u7535", "\u9608\u503c", "\u7535\u6c60\u8bbe\u7f6e"
+                )
+            )
         val selected: Pair<String, JSONObject> = when {
             lower.hasAny(
                 "turn on flashlight", "turn on the flashlight", "switch on flashlight", "switch on the flashlight",
@@ -5525,7 +5542,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 "close flashlight", "flashlight off", "turn off torch", "turn off the torch", "switch off torch", "torch off",
                 "\u5173\u95ed\u624b\u7535\u7b52", "\u5173\u6389\u624b\u7535\u7b52", "\u5173\u95ed\u95ea\u5149\u706f", "\u5173\u6389\u95ea\u5149\u706f"
             ) -> AgentHardwareNativeTools.FLASHLIGHT_SET to JSONObject().put("enabled", false)
-            lower.hasAny("battery status", "phone battery", "\u624b\u673a\u7535\u91cf", "\u624b\u673a\u7535\u6c60", "\u7535\u6c60\u7535\u91cf", "\u7535\u91cf\u591a\u5c11", "\u67e5\u770b\u7535\u91cf", "\u67e5\u8be2\u7535\u91cf", "\u67e5\u7535\u91cf") ->
+            batteryReadIntent ->
                 AgentHardwareNativeTools.BATTERY_STATUS to JSONObject()
             lower.hasAny("power status", "battery saver status", "power saving status", "\u7535\u6e90\u72b6\u6001", "\u7701\u7535\u6a21\u5f0f\u72b6\u6001", "\u67e5\u770b\u7701\u7535\u6a21\u5f0f") ->
                 AgentHardwareNativeTools.POWER_STATUS to JSONObject()
@@ -5669,6 +5686,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 "tool_id" to descriptor.id,
                 "tool_version" to descriptor.version,
                 "native_tool_risk" to descriptor.risk.wireValue,
+                "response_language" to if (request.goal.any { it in '\u3400'..'\u9fff' }) "zh" else "en",
                 "input_json" to input.toString()
             )
         )

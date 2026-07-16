@@ -147,9 +147,32 @@ class AgentSystemToolPlannerTest {
         assertEquals(AgentHardwareNativeTools.FLASHLIGHT_SET, englishFlashlightOff?.parameters?.get("tool_id"))
         assertFalse(JSONObject(englishFlashlightOff?.parameters?.get("input_json").orEmpty()).getBoolean("enabled"))
 
+        val chineseBattery = planner.deterministicLocalAction(request("\u67e5\u770b\u624b\u673a\u7535\u91cf", screen, nativeTools))
         assertEquals(
             AgentHardwareNativeTools.BATTERY_STATUS,
-            planner.deterministicLocalAction(request("\u67e5\u770b\u624b\u673a\u7535\u91cf", screen, nativeTools))?.parameters?.get("tool_id")
+            chineseBattery?.parameters?.get("tool_id")
+        )
+        assertEquals("zh", chineseBattery?.parameters?.get("response_language"))
+        listOf(
+            "\u8bfb\u53d6\u8fd9\u53f0\u624b\u673a\u7684\u5f53\u524d\u7535\u91cf\uff0c\u7b80\u77ed\u56de\u7b54\u3002",
+            "\u8fd9\u53f0\u624b\u673a\u8fd8\u6709\u591a\u5c11\u7535\u91cf\uff1f",
+            "Read the current battery level on this phone."
+        ).forEach { goal ->
+            assertEquals(
+                goal,
+                AgentHardwareNativeTools.BATTERY_STATUS,
+                planner.deterministicLocalAction(request(goal, screen, nativeTools))?.parameters?.get("tool_id")
+            )
+        }
+        assertEquals(
+            "en",
+            planner.deterministicLocalAction(
+                request("Read the current battery level on this phone.", screen, nativeTools)
+            )?.parameters?.get("response_language")
+        )
+        assertEquals(
+            AgentHardwareNativeTools.POWER_STATUS,
+            planner.deterministicLocalAction(request("Check battery saver status", screen, nativeTools))?.parameters?.get("tool_id")
         )
         assertEquals(
             AgentAndroidSystemNativeTools.AUDIO_VOLUME_SET,

@@ -1,6 +1,6 @@
 {
   "name": "signalasi-desktop",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "description": "SignalASI Desktop Connector for pairing local agents with the mobile app.",
   "license": "Apache-2.0",
   "main": "src/main.js",
@@ -20,6 +20,9 @@
     "smoke:android-cloud-models": "node scripts/smoke-android-cloud-models.js",
     "smoke:android-background": "node scripts/smoke-android-background-message.js",
     "smoke:android-agent-replies": "node scripts/smoke-android-agent-replies.js",
+    "smoke:android-agent-live": "node scripts/smoke-android-native-agent-live.js",
+    "smoke:android-control-center": "node scripts/smoke-android-control-center-live.js",
+    "smoke:android-control-center-interactions": "node scripts/smoke-android-control-center-interactions.js",
     "smoke:android-reset": "node scripts/smoke-android-reset.js",
     "smoke:android-backup": "node scripts/smoke-android-backup-roundtrip.js",
     "smoke:android-voice-reply": "node scripts/smoke-android-voice-reply.js",

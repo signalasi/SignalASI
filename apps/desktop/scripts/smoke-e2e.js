@@ -8,9 +8,11 @@ const { withSignalasiLock } = require("./smoke-lock");
 const root = path.resolve(__dirname, "..");
 const workspaceRoot = path.resolve(root, "..");
 const backendDir = path.join(root, "core", "signalasi-link", "backend");
-const backendOrigin = "http://127.0.0.1:8765";
+let backendPort = 8765;
+let backendOrigin = `http://127.0.0.1:${backendPort}`;
 const agentConfigPath = path.join(backendDir, "signalasi_agents.json");
 const requiredBackendCapabilities = ["model_display_names", "local_model_endpoint_probe", "mobile_cloud_models", "mcp_stdio_wrapper", "multiple_custom_agents", "agent_execution_log", "api_response_codes", "agent_diagnostics_codes"];
+let backendStateDir = "";
 
 function log(message) {
   console.log(`[e2e] ${message}`);
@@ -38,14 +40,14 @@ function backendIsCurrentSource(diagnostics) {
   return typeof actual === "string" && path.resolve(actual).toLowerCase() === path.resolve(backendDir).toLowerCase();
 }
 
-function stopBackendPort() {
+function stopBackendPort(port = backendPort) {
   if (process.platform !== "win32") return;
   execFileSync(
     "powershell",
     [
       "-NoProfile",
       "-Command",
-      "$pids=(Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue).OwningProcess | Sort-Object -Unique; foreach($p in $pids){Stop-Process -Id $p -Force -ErrorAction SilentlyContinue}"
+      `$pids=(Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue).OwningProcess | Sort-Object -Unique; foreach($p in $pids){Stop-Process -Id $p -Force -ErrorAction SilentlyContinue}`
     ],
     { stdio: "ignore", windowsHide: true }
   );
@@ -67,7 +69,8 @@ async function fetchJson(pathname, options = {}) {
     ...options
   });
   if (!response.ok) {
-    throw new Error(`${pathname} returned HTTP ${response.status}`);
+    const detail = await response.text();
+    throw new Error(`${pathname} returned HTTP ${response.status}: ${detail.slice(0, 500)}`);
   }
   return response.json();
 }
@@ -78,7 +81,8 @@ function runBackendJson(code) {
       cwd: backendDir,
       encoding: "utf8",
       windowsHide: true,
-      maxBuffer: 1024 * 1024
+      maxBuffer: 1024 * 1024,
+      env: backendStateDir ? { ...process.env, SIGNALASI_STATE_DIR: backendStateDir } : process.env,
     }, (error, stdout) => {
       if (error) {
         reject(error);
@@ -134,26 +138,63 @@ async function waitForBackend() {
   fail("Backend did not respond on :8765");
 }
 
-async function startBackendIfNeeded() {
-  try {
-    const diagnostics = await fetchJson("/api/agents/diagnostics");
-    if (backendHasCapabilities(diagnostics) && backendIsCurrentSource(diagnostics)) {
-      return undefined;
+async function startBackendIfNeeded(stateDir = "") {
+  if (!stateDir) {
+    try {
+      const diagnostics = await fetchJson("/api/agents/diagnostics");
+      if (backendHasCapabilities(diagnostics) && backendIsCurrentSource(diagnostics)) {
+        return undefined;
+      }
+      log(`stale backend detected or foreign backend on :${backendPort}; restarting current source backend`);
+      stopBackendPort();
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    } catch {
+      // Start below.
     }
-    log("stale backend detected or foreign backend on :8765; restarting current source backend");
+  } else {
     stopBackendPort();
     await new Promise((resolve) => setTimeout(resolve, 1000));
-  } catch {
-    // Start below.
   }
   const python = findPython();
-  const child = spawn(python, ["-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8765"], {
+  const child = spawn(python, ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", String(backendPort)], {
     cwd: backendDir,
     windowsHide: true,
-    stdio: "ignore"
+    stdio: process.env.SIGNALASI_E2E_DEBUG === "1" ? "inherit" : "ignore",
+    env: stateDir ? {
+      ...process.env,
+      SIGNALASI_STATE_DIR: stateDir,
+      SIGNALASI_DISABLE_EXTERNAL_SERVICES: process.env.SIGNALASI_E2E_MOBILE === "1" ? "0" : "1",
+    } : process.env,
   });
   await waitForBackend();
   return child;
+}
+
+function findFreeBackendPort() {
+  return new Promise((resolve, reject) => {
+    const probe = http.createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      probe.close(error => error ? reject(error) : resolve(port));
+    });
+  });
+}
+
+async function stopChild(child) {
+  if (!child || child.exitCode !== null) return;
+  const exited = new Promise(resolve => child.once("exit", resolve));
+  if (process.platform === "win32") {
+    try {
+      execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    } catch {
+      child.kill();
+    }
+  } else {
+    child.kill();
+  }
+  await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 3_000))]);
 }
 
 function createFakeClaude(tmpDir) {
@@ -272,8 +313,11 @@ async function main() {
   run(findPython(), ["-m", "py_compile", "agent_gateway.py", "agent_config.py", "main.py", "custom_agent_stdio.py", "mcp_agent_wrapper.py"], { cwd: backendDir });
 
   log("starting or reusing backend");
-  const startedBackend = await startBackendIfNeeded();
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalasi-e2e-"));
+  backendStateDir = path.join(tmpDir, "state");
+  backendPort = await findFreeBackendPort();
+  backendOrigin = `http://127.0.0.1:${backendPort}`;
+  const startedBackend = await startBackendIfNeeded(backendStateDir);
   const { server, port } = await startFakeModelServer();
   let oldConfig;
   const configSnapshot = readConfigSnapshot();
@@ -314,7 +358,8 @@ async function main() {
     const diagnostics = await fetchJson("/api/agents/diagnostics");
     for (const id of ["claude", "local-llm", "custom-agent", "research-agent"]) {
       if (!diagnostics.ready.includes(id)) {
-        fail(`${id} should be ready under simulated configuration`);
+        const status = diagnostics.agents.find(agent => agent.id === id);
+        fail(`${id} should be ready under simulated configuration: ${JSON.stringify(status)}`);
       }
     }
     const customAgentStatus = diagnostics.agents.find((agent) => agent.id === "custom-agent");
@@ -383,9 +428,15 @@ async function main() {
         ]
       })
     });
+    const brokenConfig = await fetchJson("/api/agents/config");
+    if (brokenConfig.local_model?.name !== "E2E Broken Local Model" ||
+        brokenConfig.local_model?.url !== "http://127.0.0.1:9/local/v1/chat/completions") {
+      fail(`Broken local model configuration was not persisted: ${JSON.stringify(brokenConfig.local_model)}`);
+    }
     const brokenDiagnostics = await fetchJson("/api/agents/diagnostics");
     if (brokenDiagnostics.ready.includes("local-llm")) {
-      fail("Local model should not be ready when configured endpoint is unreachable");
+      const status = brokenDiagnostics.agents.find(agent => agent.id === "local-llm");
+      fail(`Local model should not be ready when configured endpoint is unreachable: ${JSON.stringify(status)}`);
     }
     await fetchJson("/api/agents/config", {
       method: "POST",
@@ -499,7 +550,9 @@ async function main() {
     }
     const loggedIds = new Set(executionLog.entries.map((entry) => entry.contact_id));
     for (const id of ["claude", "local-llm", "custom-agent", "research-agent"]) {
-      if (!loggedIds.has(id)) fail(`Execution log missing contact: ${id}`);
+      if (!loggedIds.has(id)) {
+        fail(`Execution log missing contact: ${id}; present=${JSON.stringify([...loggedIds])}; path=${executionLog.path}`);
+      }
     }
     const serializedLog = JSON.stringify(executionLog);
     for (const leaked of [
@@ -543,9 +596,10 @@ async function main() {
         restoreConfigSnapshot(configSnapshot);
       }
     }
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    await stopChild(startedBackend);
+    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     assertNoE2eConfigLeak();
-    if (startedBackend) startedBackend.kill();
+    backendStateDir = "";
   }
 }
 
