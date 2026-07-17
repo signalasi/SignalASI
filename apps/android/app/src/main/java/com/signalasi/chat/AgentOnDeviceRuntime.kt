@@ -1,6 +1,7 @@
 package com.signalasi.chat
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Base64
@@ -80,8 +81,8 @@ fun interface AgentRuntimePackSignatureVerifier {
     fun verify(manifest: AgentRuntimePackManifest): Boolean
 }
 
-class AndroidAppSigningRuntimePackVerifier(context: Context) : AgentRuntimePackSignatureVerifier {
-    private val verifier = AndroidAppSigningPayloadVerifier(context)
+class AndroidTrustedRuntimePackVerifier(context: Context) : AgentRuntimePackSignatureVerifier {
+    private val verifier = AndroidRuntimePayloadVerifier(context)
 
     override fun verify(manifest: AgentRuntimePackManifest): Boolean = verifier.verify(
         manifest.signatureKeyId,
@@ -90,13 +91,13 @@ class AndroidAppSigningRuntimePackVerifier(context: Context) : AgentRuntimePackS
     )
 }
 
-class AndroidAppSigningPayloadVerifier(context: Context) {
+class AndroidRuntimePayloadVerifier(context: Context) {
     private val appContext = context.applicationContext
 
     fun verify(signatureKeyId: String, signature: String, payload: ByteArray): Boolean {
         val signatureBytes = runCatching { Base64.decode(signature, Base64.DEFAULT) }.getOrNull()
             ?: return false
-        return signingCertificates().any { certificateBytes ->
+        return trustedCertificates().any { certificateBytes ->
             runCatching {
                 val certificate = CertificateFactory.getInstance("X.509")
                     .generateCertificate(certificateBytes.inputStream())
@@ -119,6 +120,33 @@ class AndroidAppSigningPayloadVerifier(context: Context) {
         }
     }
 
+    private fun trustedCertificates(): List<ByteArray> {
+        val embedded = runCatching {
+            val root = JSONObject(
+                appContext.resources.openRawResource(R.raw.signalasi_runtime_trust_anchors)
+                    .bufferedReader(Charsets.UTF_8)
+                    .use { it.readText() }
+            )
+            require(root.optInt("format_version") == 1)
+            val values = root.optJSONArray("certificates") ?: JSONArray()
+            buildList {
+                for (index in 0 until minOf(values.length(), MAX_TRUST_ANCHORS)) {
+                    val encoded = values.optString(index)
+                    if (encoded.isBlank()) continue
+                    val decoded = Base64.decode(encoded, Base64.DEFAULT)
+                    require(decoded.size in 1..MAX_CERTIFICATE_BYTES)
+                    add(decoded)
+                }
+            }
+        }.getOrDefault(emptyList())
+        val debugSigningCertificates = if (
+            appContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        ) signingCertificates() else emptyList()
+        return (embedded + debugSigningCertificates).distinctBy { certificate ->
+            MessageDigest.getInstance("SHA-256").digest(certificate).joinToString("") { "%02x".format(it) }
+        }
+    }
+
     @Suppress("DEPRECATION")
     private fun signingCertificates(): List<ByteArray> {
         val info = appContext.packageManager.getPackageInfo(
@@ -136,6 +164,11 @@ class AndroidAppSigningPayloadVerifier(context: Context) {
         }
         return signatures.map { it.toByteArray() }
     }
+
+    companion object {
+        private const val MAX_TRUST_ANCHORS = 8
+        private const val MAX_CERTIFICATE_BYTES = 32 * 1024
+    }
 }
 
 data class AgentRuntimePackStatus(
@@ -152,12 +185,25 @@ data class AgentOnDeviceRuntimeStatus(
     val architecture: String,
     val enginePath: String,
     val avfAdvertised: Boolean,
-    val packs: List<AgentRuntimePackStatus>
+    val packs: List<AgentRuntimePackStatus>,
+    val lifecyclePhase: AgentRuntimeLifecyclePhase = AgentRuntimeLifecyclePhase.STOPPED,
+    val lifecycleReason: String = "",
+    val lifecycleFailures: Int = 0,
+    val lifecycleNextAttemptAtMillis: Long = 0L
 ) {
     fun languageReady(language: AgentRuntimeLanguage): Boolean = backendReady && packs.any {
         it.id == language.requiredPack && it.state == AgentRuntimePackState.READY
     }
 }
+
+internal data class AgentRuntimeBootstrapFiles(
+    val engineFile: File,
+    val baseImageFile: File,
+    val socketFile: File,
+    val packsDirectory: File,
+    val workspacesDirectory: File,
+    val architecture: String
+)
 
 data class AgentRuntimeExecutionRequest(
     val language: AgentRuntimeLanguage,
@@ -211,7 +257,7 @@ object AgentOnDeviceRuntimeBridgeRegistry {
 class AgentOnDeviceRuntimeManager(
     context: Context,
     private val bridge: AgentOnDeviceRuntimeBridge? = null,
-    private val signatureVerifier: AgentRuntimePackSignatureVerifier = AndroidAppSigningRuntimePackVerifier(context)
+    private val signatureVerifier: AgentRuntimePackSignatureVerifier = AndroidTrustedRuntimePackVerifier(context)
 ) {
     private val appContext = context.applicationContext
     private val runtimeRoot = File(appContext.filesDir, RUNTIME_DIRECTORY)
@@ -237,9 +283,18 @@ class AgentOnDeviceRuntimeManager(
                 AgentRuntimeBridgeHealth(false, reason = error.message ?: "Guest bridge health check failed")
             }
         }
+        val lifecycle = if (bridgeHealth?.ready == true) {
+            AgentRuntimeLifecycleSnapshot(
+                phase = AgentRuntimeLifecyclePhase.READY,
+                reason = "Guest runtime health handshake completed"
+            )
+        } else {
+            AgentOnDeviceRuntimeLifecycle.inspectAfterBridgeProbe(appContext, bridgeHealth)
+        }
         val reason = when {
-            backend == AgentOnDeviceRuntimeBackend.QEMU_TCG && activeBridge == null ->
+            backend == AgentOnDeviceRuntimeBackend.QEMU_TCG && activeBridge == null -> lifecycle.reason.ifBlank {
                 "Runtime engine and base pack are present, but the guest bridge is not connected"
+            }
             backend == AgentOnDeviceRuntimeBackend.QEMU_TCG && bridgeHealth?.ready != true ->
                 bridgeHealth?.reason.orEmpty().ifBlank { "The guest bridge is not healthy" }
             backend == AgentOnDeviceRuntimeBackend.QEMU_TCG -> "On-device Linux runtime is ready"
@@ -254,7 +309,11 @@ class AgentOnDeviceRuntimeManager(
             architecture = Build.SUPPORTED_ABIS.firstOrNull().orEmpty(),
             enginePath = engine.absolutePath,
             avfAdvertised = avf,
-            packs = REQUIRED_PACKS.map(::packStatus)
+            packs = REQUIRED_PACKS.map(::packStatus),
+            lifecyclePhase = lifecycle.phase,
+            lifecycleReason = lifecycle.reason,
+            lifecycleFailures = lifecycle.consecutiveFailures,
+            lifecycleNextAttemptAtMillis = lifecycle.nextAttemptAtMillis
         )
     }
 
@@ -322,6 +381,35 @@ class AgentOnDeviceRuntimeManager(
     private fun qemuEngineFile(): File = File(appContext.applicationInfo.nativeLibraryDir, QEMU_ENGINE_FILE)
 
     internal fun packsDirectory(): File = packsRoot
+
+    internal fun runtimeSocketFile(): File = File(appContext.filesDir, "$RUNTIME_DIRECTORY/guest.sock")
+
+    internal fun runtimeBootstrapFiles(): AgentRuntimeBootstrapFiles {
+        val engine = qemuEngineFile()
+        check(engine.isFile) { "Install the SignalASI QEMU engine" }
+        val base = inspectPackDirectory(
+            directory = File(packsRoot, "linux-base"),
+            expectedId = "linux-base",
+            checkDependencies = true
+        )
+        check(base.state == AgentRuntimePackState.READY && base.manifest != null) {
+            base.reason.ifBlank { "Install the linux-base runtime pack" }
+        }
+        val image = safeChild(File(packsRoot, "linux-base"), base.manifest.imageFile)
+        check(image?.isFile == true) { "The linux-base runtime image is unavailable" }
+        val runtimeRoot = File(appContext.filesDir, RUNTIME_DIRECTORY)
+        val workspaces = File(runtimeRoot, "workspaces")
+        check(runtimeRoot.mkdirs() || runtimeRoot.isDirectory) { "Runtime storage is unavailable" }
+        check(workspaces.mkdirs() || workspaces.isDirectory) { "Runtime workspace storage is unavailable" }
+        return AgentRuntimeBootstrapFiles(
+            engineFile = engine,
+            baseImageFile = image,
+            socketFile = runtimeSocketFile(),
+            packsDirectory = packsRoot,
+            workspacesDirectory = workspaces,
+            architecture = Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
+        )
+    }
 
     internal fun inspectPackDirectory(
         directory: File,
@@ -673,6 +761,12 @@ object AgentOnDeviceRuntimeTools {
         "backend" to status.backend.wireValue,
         "backend_ready" to status.backendReady,
         "reason" to status.reason,
+        "lifecycle" to mapOf(
+            "phase" to status.lifecyclePhase.wireValue,
+            "reason" to status.lifecycleReason,
+            "consecutive_failures" to status.lifecycleFailures,
+            "next_attempt_at_millis" to status.lifecycleNextAttemptAtMillis
+        ),
         "architecture" to status.architecture,
         "avf_advertised" to status.avfAdvertised,
         "packs" to status.packs.map(::packOutput),

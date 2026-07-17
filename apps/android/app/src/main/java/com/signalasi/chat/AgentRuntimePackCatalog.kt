@@ -73,8 +73,8 @@ fun interface AgentRuntimeCatalogSignatureVerifier {
     fun verify(catalog: AgentRuntimePackCatalog): Boolean
 }
 
-class AndroidAppSigningRuntimeCatalogVerifier(context: Context) : AgentRuntimeCatalogSignatureVerifier {
-    private val verifier = AndroidAppSigningPayloadVerifier(context)
+class AndroidTrustedRuntimeCatalogVerifier(context: Context) : AgentRuntimeCatalogSignatureVerifier {
+    private val verifier = AndroidRuntimePayloadVerifier(context)
 
     override fun verify(catalog: AgentRuntimePackCatalog): Boolean = verifier.verify(
         catalog.signatureKeyId,
@@ -597,7 +597,7 @@ class AgentRuntimePackCatalogStore(context: Context) {
 
 class AgentRuntimePackCatalogManager(
     context: Context,
-    private val verifier: AgentRuntimeCatalogSignatureVerifier = AndroidAppSigningRuntimeCatalogVerifier(context),
+    private val verifier: AgentRuntimeCatalogSignatureVerifier = AndroidTrustedRuntimeCatalogVerifier(context),
     private val store: AgentRuntimePackCatalogStore = AgentRuntimePackCatalogStore(context),
     private val web: AgentBoundedWebService = AgentBoundedWebService(
         transport = AgentPinnedOkHttpWebTransport(),

@@ -34,6 +34,10 @@
     "audit:release": "node tools/dev/release-audit.js",
     "audit:release:strict": "node tools/dev/release-audit.js --strict",
     "test:release:local": "node tools/dev/run-release-local-gates.js",
-    "test:release:device": "node tools/dev/run-release-device-gates.js"
+    "test:release:device": "node tools/dev/run-release-device-gates.js",
+    "test:runtime-tools": "node --test tools/runtime/runtime-signing.test.mjs tools/runtime/runtime-build.integration.test.mjs",
+    "runtime:build-pack": "node tools/runtime/build-runtime-pack.mjs",
+    "runtime:build-catalog": "node tools/runtime/build-runtime-catalog.mjs",
+    "runtime:print-trust-anchor": "node tools/runtime/print-runtime-trust-anchor.mjs"
   }
 }

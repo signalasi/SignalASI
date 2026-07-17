@@ -36,7 +36,7 @@ data class AgentRuntimePackInstallProgress(
 class AgentRuntimePackInstaller(
     context: Context,
     private val signatureVerifier: AgentRuntimePackSignatureVerifier =
-        AndroidAppSigningRuntimePackVerifier(context)
+        AndroidTrustedRuntimePackVerifier(context)
 ) {
     private val appContext = context.applicationContext
     private val manager = AgentOnDeviceRuntimeManager(appContext, signatureVerifier = signatureVerifier)
@@ -156,6 +156,7 @@ class AgentRuntimePackInstaller(
         check(dependent == null) { "${dependent?.id} depends on $packId" }
         val directory = File(packsRoot, packId)
         if (!directory.exists()) return false
+        AgentOnDeviceRuntimeLifecycle.stop(appContext)
         val quarantine = File(packsRoot, ".remove-$packId-${UUID.randomUUID()}")
         check(directory.renameTo(quarantine)) { "Runtime pack could not be removed" }
         manager.clearIntegrityCache(packId)

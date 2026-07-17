@@ -488,4 +488,10 @@ object AgentOnDeviceRuntimeSupervisor {
         registeredBridge = candidate
         return candidate
     }
+
+    @Synchronized
+    fun reset() {
+        registeredBridge?.let(AgentOnDeviceRuntimeBridgeRegistry::unregister)
+        registeredBridge = null
+    }
 }

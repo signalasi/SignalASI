@@ -567,6 +567,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             handleDebugSendIntent(intent)
             handleDebugIncomingIntent(intent)
         }, 1200)
+        scheduleRuntimeLifecycleStartup()
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -4365,6 +4366,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 renderCurrentControlCenterDestination()
             }
             "runtime.catalog_refresh" -> refreshRuntimePackCatalog()
+            "runtime.lifecycle" -> showRuntimeLifecycleDialog()
             "runtime.import" -> openRuntimePackPicker()
             "phone.catalog" -> openExistingControlCenterPage { showNativeToolCatalogPage() }
             "apps.adapters" -> openExistingControlCenterPage { showAgentAppAdaptersPage() }
@@ -5020,6 +5022,31 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         getString(R.string.cc_runtime_section_management),
                         listOf(
                             ControlCenterRowSpec(
+                                actionId = if (status.lifecyclePhase in setOf(
+                                        AgentRuntimeLifecyclePhase.STARTING,
+                                        AgentRuntimeLifecyclePhase.STOPPING
+                                    )) "" else "runtime.lifecycle",
+                                title = getString(R.string.cc_runtime_lifecycle_title),
+                                subtitle = status.lifecycleReason.ifBlank {
+                                    getString(R.string.cc_runtime_lifecycle_subtitle)
+                                },
+                                iconRes = R.drawable.ic_protocol_link,
+                                status = runtimeLifecycleLabel(status.lifecyclePhase),
+                                tone = when (status.lifecyclePhase) {
+                                    AgentRuntimeLifecyclePhase.READY -> ControlCenterTone.GREEN
+                                    AgentRuntimeLifecyclePhase.STARTING -> ControlCenterTone.BLUE
+                                    AgentRuntimeLifecyclePhase.BLOCKED,
+                                    AgentRuntimeLifecyclePhase.DEGRADED,
+                                    AgentRuntimeLifecyclePhase.BACKING_OFF -> ControlCenterTone.AMBER
+                                    AgentRuntimeLifecyclePhase.STOPPED,
+                                    AgentRuntimeLifecyclePhase.STOPPING -> ControlCenterTone.NEUTRAL
+                                },
+                                showChevron = status.lifecyclePhase !in setOf(
+                                    AgentRuntimeLifecyclePhase.STARTING,
+                                    AgentRuntimeLifecyclePhase.STOPPING
+                                )
+                            ),
+                            ControlCenterRowSpec(
                                 actionId = if (runtimeCatalogRefreshInProgress) "" else "runtime.catalog_refresh",
                                 title = getString(R.string.cc_runtime_catalog_refresh_title),
                                 subtitle = if (catalog == null) {
@@ -5100,6 +5127,99 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             AgentRuntimeReceiptStatus.TIMED_OUT -> R.string.cc_runtime_receipt_timed_out
         }
     )
+
+    private fun runtimeLifecycleLabel(phase: AgentRuntimeLifecyclePhase): String = getString(
+        when (phase) {
+            AgentRuntimeLifecyclePhase.BLOCKED -> R.string.cc_runtime_lifecycle_blocked
+            AgentRuntimeLifecyclePhase.STOPPED -> R.string.cc_runtime_lifecycle_stopped
+            AgentRuntimeLifecyclePhase.STARTING -> R.string.cc_runtime_lifecycle_starting
+            AgentRuntimeLifecyclePhase.READY -> R.string.cc_runtime_lifecycle_ready
+            AgentRuntimeLifecyclePhase.DEGRADED -> R.string.cc_runtime_lifecycle_degraded
+            AgentRuntimeLifecyclePhase.BACKING_OFF -> R.string.cc_runtime_lifecycle_backing_off
+            AgentRuntimeLifecyclePhase.STOPPING -> R.string.cc_runtime_lifecycle_stopping
+        }
+    )
+
+    private fun showRuntimeLifecycleDialog() {
+        val snapshot = AgentOnDeviceRuntimeLifecycle.inspect(this)
+        val nextAttempt = snapshot.nextAttemptAtMillis.takeIf { it > 0L }?.let(::listTime)
+            ?: getString(R.string.cc_runtime_lifecycle_not_scheduled)
+        val builder = AlertDialog.Builder(this)
+            .setTitle(R.string.cc_runtime_lifecycle_title)
+            .setMessage(
+                getString(
+                    R.string.cc_runtime_lifecycle_details,
+                    runtimeLifecycleLabel(snapshot.phase),
+                    snapshot.reason.ifBlank { getString(R.string.status_unknown) },
+                    snapshot.controllerId.ifBlank { getString(R.string.cc_runtime_lifecycle_no_controller) },
+                    snapshot.consecutiveFailures,
+                    nextAttempt
+                )
+            )
+            .setNegativeButton(R.string.common_cancel, null)
+        when (snapshot.phase) {
+            AgentRuntimeLifecyclePhase.READY,
+            AgentRuntimeLifecyclePhase.DEGRADED -> {
+                builder.setPositiveButton(R.string.cc_runtime_lifecycle_restart) { _, _ ->
+                    runRuntimeLifecycleOperation(restart = true, stop = false)
+                }
+                builder.setNeutralButton(R.string.cc_runtime_lifecycle_stop) { _, _ ->
+                    runRuntimeLifecycleOperation(restart = false, stop = true)
+                }
+            }
+            AgentRuntimeLifecyclePhase.STOPPED,
+            AgentRuntimeLifecyclePhase.BACKING_OFF -> builder.setPositiveButton(
+                R.string.cc_runtime_lifecycle_start
+            ) { _, _ -> runRuntimeLifecycleOperation(restart = false, stop = false) }
+            AgentRuntimeLifecyclePhase.BLOCKED,
+            AgentRuntimeLifecyclePhase.STARTING,
+            AgentRuntimeLifecyclePhase.STOPPING -> Unit
+        }
+        builder.show()
+    }
+
+    private fun runRuntimeLifecycleOperation(restart: Boolean, stop: Boolean) {
+        Toast.makeText(this, R.string.cc_runtime_lifecycle_working, Toast.LENGTH_SHORT).show()
+        thread(name = "signalasi-runtime-lifecycle") {
+            val outcome = runCatching {
+                when {
+                    stop -> AgentOnDeviceRuntimeLifecycle.stop(this)
+                    restart -> AgentOnDeviceRuntimeLifecycle.restart(this)
+                    else -> AgentOnDeviceRuntimeLifecycle.start(this, force = true)
+                }
+            }
+            runOnUiThread {
+                Toast.makeText(
+                    this,
+                    outcome.fold(
+                        onSuccess = { result ->
+                            getString(
+                                R.string.cc_runtime_lifecycle_result,
+                                runtimeLifecycleLabel(result.phase),
+                                result.reason
+                            )
+                        },
+                        onFailure = { error ->
+                            getString(
+                                R.string.cc_runtime_lifecycle_failed,
+                                error.message ?: getString(R.string.status_unknown)
+                            )
+                        }
+                    ),
+                    Toast.LENGTH_LONG
+                ).show()
+                if (controlCenterDestination?.route == ControlCenterRoute.ON_DEVICE_RUNTIME) {
+                    renderControlCenterRuntimePage()
+                }
+            }
+        }
+    }
+
+    private fun scheduleRuntimeLifecycleStartup() {
+        thread(name = "signalasi-runtime-autostart") {
+            runCatching { AgentOnDeviceRuntimeLifecycle.ensureRunning(this) }
+        }
+    }
 
     private fun showRuntimeReceiptDialog(requestId: String) {
         val receipt = AgentRuntimeExecutionReceiptStore(this).find(requestId) ?: return
@@ -5272,6 +5392,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 if (progressDialog.isShowing) progressDialog.dismiss()
                 val message = outcome.fold(
                     onSuccess = {
+                        scheduleRuntimeLifecycleStartup()
                         getString(R.string.cc_runtime_install_success, runtimePackTitle(entry.packId), entry.version)
                     },
                     onFailure = { error ->
@@ -5324,6 +5445,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             runOnUiThread {
                 outcome.fold(
                     onSuccess = { result ->
+                        scheduleRuntimeLifecycleStartup()
                         val message = if (result.state == AgentRuntimePackState.READY) {
                             getString(R.string.cc_runtime_install_success, runtimePackTitle(result.packId), result.version)
                         } else {
@@ -5379,7 +5501,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         Toast.makeText(
                             this,
                             outcome.fold(
-                                onSuccess = { getString(R.string.cc_runtime_uninstall_success, runtimePackTitle(packId)) },
+                                onSuccess = {
+                                    if (packId != "linux-base") scheduleRuntimeLifecycleStartup()
+                                    getString(R.string.cc_runtime_uninstall_success, runtimePackTitle(packId))
+                                },
                                 onFailure = { getString(R.string.cc_runtime_uninstall_failed, it.message ?: getString(R.string.status_unknown)) }
                             ),
                             Toast.LENGTH_LONG

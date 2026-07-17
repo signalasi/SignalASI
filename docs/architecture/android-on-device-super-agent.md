@@ -152,6 +152,16 @@ request id, monotonic sequence, timestamp, and HMAC-SHA256 authentication; overs
 tampered, and incompatible frames fail closed. Execution supports progress, cancellation,
 timeouts, bounded results, explicit network-domain allowlists, and health probes.
 
+A persistent lifecycle supervisor separates pack presence from process health. It records blocked,
+stopped, starting, ready, degraded, backing-off, and stopping states in encrypted app storage;
+starts only through a registered native engine controller; waits for the authenticated guest
+health handshake; and applies bounded exponential restart backoff after failures. A user stop
+invalidates an in-flight startup immediately, while restart safely serializes behind the previous
+attempt. Main UI and foreground-service startup both request recovery, and runtime-pack removal
+stops the guest before changing mounted data. The Control Center exposes the real phase, failure
+count, next retry, controller identity, and start, stop, or restart controls when those actions are
+available.
+
 Each request receives an app-private workspace and an encrypted execution receipt containing the
 source digest, runtime-pack versions, resource limits, network scope, terminal state, output
 digests, exit code, and verified artifact hashes. Only explicitly requested relative artifacts
@@ -188,9 +198,10 @@ untrusted signatures, unsupported protocol versions, and invalid hashes. Activat
 same-volume staging directory and rollback backup; dependencies prevent unsafe removal.
 
 Compatible packs are discovered through a bounded, signed release catalog rather than arbitrary
-URLs entered by the planner. Catalog and pack signatures are verified against the installed app's
-signing identity, catalog generations cannot roll back or reuse a timestamp with different
-content, and an expired catalog is never offered for installation. Downloads require public
+URLs entered by the planner. Catalog and pack signatures are verified against dedicated public
+trust anchors embedded in the APK; debuggable builds may also use the current APK signing identity.
+Catalog generations cannot roll back or reuse a timestamp with different content, and an expired
+catalog is never offered for installation. Downloads require public
 HTTPS endpoints, pin each DNS resolution for the connection, revalidate every redirect, reject
 private and special-use destinations, and verify the catalog-declared byte count and SHA-256.
 Interrupted downloads retain an app-private partial file and resume with `Range` and `If-Range`;
@@ -242,7 +253,7 @@ access to the user's shared storage.
 | --- | --- |
 | Encrypted memory metadata, ranking, conflict handling, and no-migration storage | Host complete |
 | Evidence-based learning, repeated-failure lessons, and reviewed Skill proposals/upgrades | Host complete |
-| Runtime capability, signed-pack catalog/download/install policy, guest protocol, workspace, cancellation, and receipt contracts | Host complete |
+| Runtime capability, signed-pack catalog/download/install policy, lifecycle supervision, guest protocol, workspace, cancellation, and receipt contracts | Host complete |
 | Control Center pages for memory, learning proposals, runtime packs, and execution receipts | Host complete |
 | Mixed-script OCR and local PDF/DOCX/XLSX/PPTX/image/source ingestion | Host complete |
 | Signed QEMU engine and compatible `linux-base` guest image | Not shipped |

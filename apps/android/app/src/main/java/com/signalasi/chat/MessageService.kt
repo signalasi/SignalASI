@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Base64
 import org.json.JSONObject
+import kotlin.concurrent.thread
 
 class MessageService : Service(), SignalASIMqttClient.Listener {
     companion object {
@@ -32,6 +33,9 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         startForeground(NOTIFICATION_ID, serviceNotification())
         SignalASIMqttClient.addListener(this)
         SignalASIMqttClient.connect(this)
+        thread(name = "signalasi-runtime-service-autostart") {
+            runCatching { AgentOnDeviceRuntimeLifecycle.ensureRunning(this@MessageService) }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
