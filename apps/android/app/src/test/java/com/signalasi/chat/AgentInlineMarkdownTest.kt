@@ -21,4 +21,13 @@ class AgentInlineMarkdownTest {
             segments.first { it.text == "Shanghai Weather" }.url
         )
     }
+
+    @Test
+    fun parsesItalicAndStrikeWithoutAffectingBold() {
+        val segments = AgentInlineMarkdown.parse("Use *care* and remove ~~noise~~ while **keeping this**.")
+
+        assertEquals(AgentInlineStyle.ITALIC, segments.first { it.text == "care" }.style)
+        assertEquals(AgentInlineStyle.STRIKE, segments.first { it.text == "noise" }.style)
+        assertEquals(AgentInlineStyle.BOLD, segments.first { it.text == "keeping this" }.style)
+    }
 }

@@ -28,6 +28,10 @@ Rich output is carried inside the encrypted application payload. The transport n
   "uri": "Optional artifact or media URI",
   "mime_type": "Optional MIME type",
   "language": "Optional code or content language",
+  "metadata": {
+    "style": "Optional bounded renderer hint",
+    "size": "Optional human-readable artifact size"
+  },
   "provenance": {
     "resource_id": "codex",
     "tool_call_id": "call-id",
@@ -62,9 +66,21 @@ Rich output is carried inside the encrypted application payload. The transport n
 }
 ```
 
+## Document and Data Blocks
+
+The version 1 document flow supports these non-executable structural blocks:
+
+- `heading`, `text`, `quote`, `list`, and `divider` for prose.
+- `code`, `diff`, and `json` for source and structured text.
+- `key_value`, `table`, `metric`, `progress`, `chart`, and `timeline` for data.
+- `notice` for bounded information, success, warning, or error callouts.
+- `gallery` for multiple image rows. Each row is `[uri, title, mime_type]`.
+
+`list` rows are `[marker, text]`. Markers may be `bullet`, `checked`, `unchecked`, or an ordered number. `key_value` rows are `[key, value]`. `timeline` rows are `[time, title, detail]`. A renderer may initially collapse large blocks, but it must preserve the complete bounded document.
+
 ## Media and Artifact Blocks
 
-`image`, `video`, `audio`, `file`, `link`, and `citation` blocks use `uri`. Clients must allow only supported URI schemes, never autoplay remote media, never execute downloaded content, and require an explicit user action before leaving the app.
+`image`, `gallery`, `video`, `audio`, `file`, `link`, and `citation` blocks use `uri`. Clients must allow only supported URI schemes, never autoplay remote media, never execute downloaded content, and require an explicit user action before leaving the app. Unknown MIME types render as inert artifact cards with a compatible-app fallback instead of being interpreted as text or executable content.
 
 ## Interactive Blocks
 

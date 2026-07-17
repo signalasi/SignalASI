@@ -1,6 +1,6 @@
 package com.signalasi.chat
 
-enum class AgentInlineStyle { NORMAL, BOLD, CODE, LINK }
+enum class AgentInlineStyle { NORMAL, BOLD, ITALIC, STRIKE, CODE, LINK }
 
 data class AgentInlineSegment(
     val text: String,
@@ -12,8 +12,10 @@ data class AgentInlineSegment(
 object AgentInlineMarkdown {
     private val tokens = listOf(
         AgentInlineStyle.BOLD to Regex("\\*\\*([^*\\n]+)\\*\\*"),
+        AgentInlineStyle.STRIKE to Regex("~~([^~\\n]+)~~"),
         AgentInlineStyle.LINK to Regex("\\[([^]\\n]+)]\\((https?://[^)\\s]+)\\)"),
-        AgentInlineStyle.CODE to Regex("`([^`\\n]+)`")
+        AgentInlineStyle.CODE to Regex("`([^`\\n]+)`"),
+        AgentInlineStyle.ITALIC to Regex("(?<!\\*)\\*([^*\\n]+)\\*(?!\\*)")
     )
 
     fun parse(value: String): List<AgentInlineSegment> {

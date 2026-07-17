@@ -135,6 +135,20 @@ def acknowledge_outbound(client_route_id: str, message_id: str) -> None:
             db.close()
 
 
+def outbound_status(client_route_id: str, message_id: str) -> str | None:
+    """Return the durable delivery state without making the message replayable."""
+    with _lock:
+        db = _connect()
+        try:
+            row = db.execute(
+                "SELECT status FROM outbound_messages WHERE client_route_id=? AND message_id=?",
+                (client_route_id, message_id),
+            ).fetchone()
+        finally:
+            db.close()
+    return str(row[0]) if row else None
+
+
 def pending_outbound(max_attempts: int = 8) -> list[dict]:
     with _lock:
         db = _connect()

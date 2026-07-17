@@ -103,10 +103,13 @@ class PairingRegistryTests(unittest.TestCase):
         message_id = str(uuid.uuid4())
         link_delivery.queue_outbound(route_id, message_id, "topic/down", '{"ciphertext":true}')
         self.assertEqual(1, len(link_delivery.pending_outbound()))
+        self.assertEqual("queued", link_delivery.outbound_status(route_id, message_id))
         link_delivery.mark_outbound_published(route_id, message_id)
-        self.assertEqual(1, len(link_delivery.pending_outbound()))
+        self.assertEqual([], link_delivery.pending_outbound())
+        self.assertEqual("published", link_delivery.outbound_status(route_id, message_id))
         link_delivery.acknowledge_outbound(route_id, message_id)
         self.assertEqual([], link_delivery.pending_outbound())
+        self.assertIsNone(link_delivery.outbound_status(route_id, message_id))
 
 
 if __name__ == "__main__":

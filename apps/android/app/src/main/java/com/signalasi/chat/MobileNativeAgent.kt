@@ -7701,6 +7701,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         private const val RICH_RESPONSE_CONTRACT =
             "SignalASI can render optional rich output. When a visual, table, media preview, animation, or public web page " +
                 "would answer better than plain text, append one fenced signalasi-rich JSON document. " +
+                "Use list, key_value, table, chart, timeline, notice, code, diff, json, image, gallery, video, audio, file, link, citation, html, or webpage blocks as appropriate. " +
                 "For an animation use a block with type html, self-contained HTML/CSS/JavaScript in text, " +
                 "and fallback_text. Do not use network requests, external assets, forms, or device APIs in html blocks. " +
                 "To show an actual public page inline, use a block with type webpage and an HTTPS uri."

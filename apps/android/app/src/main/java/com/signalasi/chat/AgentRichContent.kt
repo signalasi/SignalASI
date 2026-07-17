@@ -2,15 +2,21 @@ package com.signalasi.chat
 
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 import java.util.UUID
 
 enum class AgentRichBlockType {
     TEXT,
     HEADING,
     QUOTE,
+    LIST,
+    DIVIDER,
     CODE,
+    JSON,
+    KEY_VALUE,
     TABLE,
     IMAGE,
+    GALLERY,
     VIDEO,
     AUDIO,
     FILE,
@@ -22,6 +28,8 @@ enum class AgentRichBlockType {
     TOOL,
     DIFF,
     CHART,
+    TIMELINE,
+    NOTICE,
     HTML,
     WEBPAGE,
     ACTIONS,
@@ -61,7 +69,8 @@ data class AgentRichBlock(
     val maximum: Int = 100,
     val fallbackText: String = "",
     val actions: List<AgentRichAction> = emptyList(),
-    val fields: List<AgentRichField> = emptyList()
+    val fields: List<AgentRichField> = emptyList(),
+    val metadata: Map<String, String> = emptyMap()
 )
 
 object AgentRichContentCodec {
@@ -95,7 +104,8 @@ object AgentRichContentCodec {
                     .getOrDefault(AgentRichBlockType.UNKNOWN)
                 val uri = item.optString("uri").trim().take(4_096)
                 val mimeType = item.optString("mime_type").trim().take(160)
-                val type = normalizedMediaType(declaredType, uri, mimeType)
+                val language = item.optString("language").trim().take(80)
+                val type = AgentRichFormatRegistry.normalizedType(declaredType, uri, mimeType, language)
                 val columns = jsonStrings(item.optJSONArray("columns"), MAX_TABLE_COLUMNS)
                 val rows = buildList {
                     val sourceRows = item.optJSONArray("rows") ?: JSONArray()
@@ -107,17 +117,18 @@ object AgentRichContentCodec {
                     id = item.optString("id").trim().take(120).ifBlank { UUID.randomUUID().toString() },
                     type = type,
                     title = item.optString("title").trim().take(500),
-                    text = item.optString("text").trim().take(MAX_BLOCK_TEXT),
+                    text = normalizeBlockText(item.optString("text").take(MAX_BLOCK_TEXT), type),
                     uri = uri,
                     mimeType = mimeType,
-                    language = item.optString("language").trim().take(80),
+                    language = language,
                     columns = columns,
                     rows = rows,
                     value = item.optInt("value", 0),
                     maximum = item.optInt("maximum", 100).coerceAtLeast(1),
                     fallbackText = item.optString("fallback_text").trim().take(MAX_BLOCK_TEXT),
                     actions = decodeActions(item.optJSONArray("actions")),
-                    fields = decodeFields(item.optJSONArray("fields"))
+                    fields = decodeFields(item.optJSONArray("fields")),
+                    metadata = decodeMetadata(item.optJSONObject("metadata"))
                 )
                 if (block.hasRenderableContent()) add(block)
             }
@@ -156,6 +167,9 @@ object AgentRichContentCodec {
                         .put("value", field.value.take(4_000))
                         .put("required", field.required)
                         .put("options", JSONArray(field.options.take(50)))
+                }))
+                .put("metadata", JSONObject(block.metadata.entries.take(MAX_METADATA_ITEMS).associate {
+                    it.key.take(80) to it.value.take(MAX_METADATA_VALUE)
                 })))
         }
         while (array.length() > 0) {
@@ -169,6 +183,9 @@ object AgentRichContentCodec {
     fun fromText(text: String): List<AgentRichBlock> {
         val clean = text.trim()
         if (clean.isBlank()) return emptyList()
+        prettyJson(clean)?.let { formatted ->
+            return listOf(AgentRichBlock(newId(), AgentRichBlockType.JSON, text = formatted, language = "json"))
+        }
         val blocks = mutableListOf<AgentRichBlock>()
         val lines = clean.lines()
         var index = 0
@@ -202,6 +219,29 @@ object AgentRichContentCodec {
                 } else {
                     blocks += AgentRichBlock(newId(), AgentRichBlockType.CODE, text = codeText, language = language)
                 }
+            } else if (parseListItem(line) != null) {
+                flushParagraph()
+                val rows = mutableListOf<List<String>>()
+                var ordered = false
+                var checklist = false
+                while (index < lines.size) {
+                    val item = parseListItem(lines[index]) ?: break
+                    rows += listOf(item.marker, item.text)
+                    ordered = ordered || item.ordered
+                    checklist = checklist || item.checklist
+                    index++
+                }
+                blocks += AgentRichBlock(
+                    newId(),
+                    AgentRichBlockType.LIST,
+                    rows = rows,
+                    metadata = mapOf("style" to when {
+                        checklist -> "checklist"
+                        ordered -> "ordered"
+                        else -> "bullet"
+                    })
+                )
+                continue
             } else if (isTableHeader(lines, index)) {
                 flushParagraph()
                 val columns = tableCells(lines[index])
@@ -216,11 +256,21 @@ object AgentRichContentCodec {
                 flushParagraph()
                 blocks += AgentRichBlock(
                     newId(), AgentRichBlockType.HEADING,
-                    text = line.replaceFirst(Regex("^#{1,6}\\s+"), "")
+                    text = line.replaceFirst(Regex("^#{1,6}\\s+"), ""),
+                    metadata = mapOf("level" to line.takeWhile { it == '#' }.length.toString())
                 )
             } else if (line.trimStart().startsWith("> ")) {
                 flushParagraph()
-                blocks += AgentRichBlock(newId(), AgentRichBlockType.QUOTE, text = line.trimStart().removePrefix("> "))
+                val quote = mutableListOf<String>()
+                while (index < lines.size && lines[index].trimStart().startsWith(">")) {
+                    quote += lines[index].trimStart().removePrefix(">").removePrefix(" ")
+                    index++
+                }
+                blocks += AgentRichBlock(newId(), AgentRichBlockType.QUOTE, text = quote.joinToString("\n"))
+                continue
+            } else if (line.trim().matches(Regex("^([-*_])\\1{2,}$"))) {
+                flushParagraph()
+                blocks += AgentRichBlock(newId(), AgentRichBlockType.DIVIDER)
             } else if (line.isBlank()) {
                 flushParagraph()
             } else {
@@ -241,7 +291,25 @@ object AgentRichContentCodec {
     private fun AgentRichBlock.hasRenderableContent(): Boolean =
         text.isNotBlank() || title.isNotBlank() || uri.isNotBlank() || columns.isNotEmpty() ||
             rows.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty() ||
-            type in setOf(AgentRichBlockType.PROGRESS, AgentRichBlockType.STATUS)
+            type in setOf(AgentRichBlockType.PROGRESS, AgentRichBlockType.STATUS, AgentRichBlockType.DIVIDER)
+
+    private fun normalizeBlockText(value: String, type: AgentRichBlockType): String =
+        if (type in setOf(AgentRichBlockType.CODE, AgentRichBlockType.DIFF, AgentRichBlockType.JSON, AgentRichBlockType.HTML)) {
+            value.trim('\r', '\n')
+        } else {
+            value.trim()
+        }
+
+    private fun decodeMetadata(value: JSONObject?): Map<String, String> {
+        if (value == null) return emptyMap()
+        return buildMap {
+            val keys = value.keys()
+            while (keys.hasNext() && size < MAX_METADATA_ITEMS) {
+                val key = keys.next().take(80)
+                put(key, value.optString(key).take(MAX_METADATA_VALUE))
+            }
+        }
+    }
 
     private fun decodeActions(array: JSONArray?): List<AgentRichAction> {
         if (array == null) return emptyList()
@@ -301,6 +369,43 @@ object AgentRichContentCodec {
     private fun tableCells(line: String): List<String> =
         line.trim().trim('|').split('|').map { it.trim().take(2_000) }.take(MAX_TABLE_COLUMNS)
 
+    private data class ParsedListItem(
+        val marker: String,
+        val text: String,
+        val ordered: Boolean,
+        val checklist: Boolean
+    )
+
+    private fun parseListItem(line: String): ParsedListItem? {
+        val match = Regex("^\\s*(?:(\\d+)[.)]|([-+*]))\\s+(.+)$").matchEntire(line) ?: return null
+        val rawText = match.groupValues[3].trim()
+        val check = Regex("^\\[([ xX])]\\s*(.*)$").matchEntire(rawText)
+        return ParsedListItem(
+            marker = when {
+                check != null && check.groupValues[1].isBlank() -> "unchecked"
+                check != null -> "checked"
+                match.groupValues[1].isNotBlank() -> match.groupValues[1]
+                else -> "bullet"
+            },
+            text = check?.groupValues?.get(2)?.trim().orEmpty().ifBlank { rawText },
+            ordered = match.groupValues[1].isNotBlank(),
+            checklist = check != null
+        )
+    }
+
+    private fun prettyJson(value: String): String? {
+        if (!(value.startsWith('{') && value.endsWith('}')) && !(value.startsWith('[') && value.endsWith(']'))) {
+            return null
+        }
+        return runCatching {
+            when (val parsed = JSONTokener(value).nextValue()) {
+                is JSONObject -> parsed.toString(2)
+                is JSONArray -> parsed.toString(2)
+                else -> null
+            }
+        }.getOrNull()
+    }
+
     private fun markdownWebPage(text: String): AgentRichBlock? {
         val matches = Regex("""\[([^]]+)]\((https://[^)\s]+)\)""", RegexOption.IGNORE_CASE)
             .findAll(text)
@@ -319,18 +424,8 @@ object AgentRichContentCodec {
         )
     }
 
-    private fun normalizedMediaType(
-        declaredType: AgentRichBlockType,
-        uri: String,
-        mimeType: String
-    ): AgentRichBlockType {
-        if (declaredType != AgentRichBlockType.WEBPAGE) return declaredType
-        if (mimeType.startsWith("image/", ignoreCase = true)) return AgentRichBlockType.IMAGE
-        val path = runCatching { java.net.URI(uri).path.orEmpty() }.getOrDefault(uri).lowercase()
-        return if (IMAGE_EXTENSIONS.any(path::endsWith)) AgentRichBlockType.IMAGE else declaredType
-    }
-
-    private val IMAGE_EXTENSIONS = setOf(".gif", ".png", ".jpg", ".jpeg", ".webp", ".avif")
-
     private fun newId(): String = UUID.randomUUID().toString()
+
+    private const val MAX_METADATA_ITEMS = 32
+    private const val MAX_METADATA_VALUE = 2_000
 }

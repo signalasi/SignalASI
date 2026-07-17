@@ -52,6 +52,28 @@ class RichOutputTests(unittest.TestCase):
         self.assertEqual(document["blocks"][0]["type"], "image")
         self.assertEqual(fallback, "https://cdn.example.com/character.gif")
 
+    def test_preserves_structured_document_blocks_and_metadata(self):
+        fallback, document = build_rich_output(
+            '''```signalasi-rich
+{"blocks":[
+  {"type":"list","rows":[["checked","Build"],["unchecked","Verify"]],"metadata":{"style":"checklist"}},
+  {"type":"chart","columns":["Run","ms"],"rows":[["1","120"]]},
+  {"type":"notice","title":"Ready","text":"Result available","metadata":{"style":"success"}}
+]}
+```'''
+        )
+        self.assertEqual(["list", "chart", "notice"], [item["type"] for item in document["blocks"]])
+        self.assertEqual("checklist", document["blocks"][0]["metadata"]["style"])
+        self.assertEqual([["1", "120"]], document["blocks"][1]["rows"])
+
+    def test_artifact_includes_human_readable_metadata(self):
+        _, document = build_rich_output(
+            "Created output.",
+            [{"name": "report.pdf", "relative_path": "outputs/report.pdf", "size": 2048}],
+            "task-2",
+        )
+        self.assertEqual("2.0 KB", document["blocks"][0]["metadata"]["size"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,9 +15,11 @@ MAX_TEXT = 32_000
 MAX_ROWS = 500
 MAX_COLUMNS = 24
 ALLOWED_TYPES = {
-    "text", "heading", "quote", "code", "table", "image", "video", "audio",
+    "text", "heading", "quote", "list", "divider", "code", "json", "key_value",
+    "table", "image", "gallery", "video", "audio",
     "file", "link", "citation", "status", "progress", "metric", "actions",
-    "approval", "form", "tool", "diff", "chart", "html", "webpage",
+    "approval", "form", "tool", "diff", "chart", "timeline", "notice", "html",
+    "webpage", "unknown",
 }
 RICH_FENCE = re.compile(r"```signalasi-rich\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 
@@ -78,13 +80,20 @@ def _normalize_block(raw: dict) -> dict:
     if block_type == "webpage" and _is_image_uri(block.get("uri", ""), block.get("mime_type", "")):
         block["type"] = "image"
         block_type = "image"
-    if block_type == "table":
+    if block_type in {"table", "chart"}:
         block["columns"] = [str(value)[:2000] for value in list(raw.get("columns") or [])[:MAX_COLUMNS]]
+    if block_type in {"table", "chart", "key_value", "list", "timeline", "gallery"}:
         block["rows"] = [
             [str(value)[:2000] for value in list(row or [])[:MAX_COLUMNS]]
             for row in list(raw.get("rows") or [])[:MAX_ROWS]
             if isinstance(row, (list, tuple))
         ]
+    metadata = raw.get("metadata")
+    if isinstance(metadata, dict):
+        block["metadata"] = {
+            str(key)[:80]: str(value)[:2000]
+            for key, value in list(metadata.items())[:32]
+        }
     if block_type == "progress":
         block["value"] = _bounded_int(raw.get("value"), -1, 1_000_000, 0)
         block["maximum"] = _bounded_int(raw.get("maximum"), 1, 1_000_000, 100)
@@ -140,6 +149,10 @@ def _artifact_block(raw: dict, task_id: str) -> dict:
         "uri": f"signalasi-artifact://{safe_task}/{safe_path}",
         "mime_type": mime_type,
         "fallback_text": relative,
+        "metadata": {
+            "size": _human_size(int(raw.get("size") or 0)),
+            "category": str(raw.get("category") or "output")[:80],
+        },
     }
 
 
@@ -164,3 +177,12 @@ def _is_image_uri(uri: str, mime_type: str) -> bool:
         return True
     path = urlparse(str(uri or "")).path.lower()
     return path.endswith((".gif", ".png", ".jpg", ".jpeg", ".webp", ".avif"))
+
+
+def _human_size(size: int) -> str:
+    value = max(0, int(size or 0))
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return "0 B"

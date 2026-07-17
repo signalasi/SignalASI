@@ -1,5 +1,6 @@
 package com.signalasi.chat
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -78,5 +79,61 @@ class AgentRichContentTest {
 
         assertTrue(block.type == AgentRichBlockType.IMAGE)
         assertTrue(AgentRichContentCodec.fallbackText(encoded).endsWith("character.gif"))
+    }
+
+    @Test
+    fun parsesListsChecklistsQuotesAndDividersAsDocumentBlocks() {
+        val blocks = AgentRichContentCodec.fromText(
+            """
+            ## Release checklist
+
+            - [x] Build
+            - [ ] Verify
+
+            > Keep the rollout reversible.
+            > Record the result.
+
+            ---
+
+            1. Stage
+            2. Ship
+            """.trimIndent()
+        )
+
+        assertEquals("2", blocks.first { it.type == AgentRichBlockType.HEADING }.metadata["level"])
+        assertEquals("checklist", blocks.first { it.type == AgentRichBlockType.LIST }.metadata["style"])
+        assertTrue(blocks.first { it.type == AgentRichBlockType.QUOTE }.text.contains("Record the result"))
+        assertTrue(blocks.any { it.type == AgentRichBlockType.DIVIDER })
+        assertTrue(blocks.any { it.type == AgentRichBlockType.LIST && it.metadata["style"] == "ordered" })
+    }
+
+    @Test
+    fun recognizesAndFormatsStandaloneJson() {
+        val block = AgentRichContentCodec.fromText("{\"ready\":true,\"count\":2}").single()
+
+        assertEquals(AgentRichBlockType.JSON, block.type)
+        assertEquals("json", block.language)
+        assertTrue(block.text.contains("\n"))
+    }
+
+    @Test
+    fun preservesExtensibleMetadataAcrossCodecRoundTrip() {
+        val encoded = AgentRichContentCodec.encode(listOf(AgentRichBlock(
+            id = "notice",
+            type = AgentRichBlockType.NOTICE,
+            title = "Ready",
+            text = "The result is available.",
+            metadata = mapOf("style" to "success", "source" to "phone")
+        )))
+
+        val block = AgentRichContentCodec.decode(encoded).single()
+        assertEquals("success", block.metadata["style"])
+        assertEquals("phone", block.metadata["source"])
+    }
+
+    @Test
+    fun malformedOrFutureDocumentsFailClosed() {
+        assertTrue(AgentRichContentCodec.decode("not-json").isEmpty())
+        assertTrue(AgentRichContentCodec.decode("{\"version\":99,\"blocks\":[]}").isEmpty())
     }
 }

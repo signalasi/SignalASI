@@ -19,7 +19,9 @@ class LinkDeliveryTest(unittest.TestCase):
                 link_delivery.mark_outbound_published("client", "message")
 
                 self.assertEqual([], link_delivery.pending_outbound())
+                self.assertEqual("published", link_delivery.outbound_status("client", "message"))
                 link_delivery.acknowledge_outbound("client", "message")
+                self.assertIsNone(link_delivery.outbound_status("client", "message"))
 
 
 if __name__ == "__main__":
