@@ -118,9 +118,15 @@ object AgentFailoverPolicy {
         stage: AgentConnectorTimeoutStage,
         status: String,
         hasFallback: Boolean
-    ): Boolean = !hasFallback &&
-        stage == AgentConnectorTimeoutStage.NOT_RUNNING &&
-        status in setOf("accepted", "queued", "starting")
+    ): Boolean {
+        if (hasFallback) return false
+        return when (stage) {
+            AgentConnectorTimeoutStage.NOT_ACCEPTED -> status.isBlank()
+            AgentConnectorTimeoutStage.NOT_RUNNING ->
+                status.isBlank() || status in setOf("accepted", "queued", "starting")
+            AgentConnectorTimeoutStage.READ_ONLY_STALE -> false
+        }
+    }
 
     fun domainCooldownMs(consecutiveFailures: Int): Long = when (consecutiveFailures.coerceAtLeast(1)) {
         1 -> 60_000L
@@ -128,6 +134,28 @@ object AgentFailoverPolicy {
         3 -> 15 * 60_000L
         else -> 60 * 60_000L
     }
+}
+
+data class AgentConnectorTimeoutSchedule(
+    val acceptedMs: Long,
+    val runningMs: Long,
+    val liveStaleMs: Long
+)
+
+object AgentConnectorTimingPolicy {
+    private val interactive = AgentConnectorTimeoutSchedule(
+        acceptedMs = 5_000L,
+        runningMs = 8_000L,
+        liveStaleMs = 15_000L
+    )
+    private val attachment = AgentConnectorTimeoutSchedule(
+        acceptedMs = 15_000L,
+        runningMs = 30_000L,
+        liveStaleMs = 45_000L
+    )
+
+    fun deadlines(hasAttachments: Boolean): AgentConnectorTimeoutSchedule =
+        if (hasAttachments) attachment else interactive
 }
 
 object AgentTaskRequirementAnalyzer {

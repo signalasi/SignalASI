@@ -51,13 +51,25 @@ class AgentFailoverPolicyTest {
                 hasFallback = true
             )
         )
-        assertFalse(
+        assertTrue(
             AgentFailoverPolicy.shouldKeepOnlyResourceAlive(
                 AgentConnectorTimeoutStage.NOT_ACCEPTED,
                 "",
                 hasFallback = false
             )
         )
+    }
+
+    @Test
+    fun attachmentTransportGetsRoomForEncryptionAndBrokerDelivery() {
+        val regular = AgentConnectorTimingPolicy.deadlines(hasAttachments = false)
+        val attachment = AgentConnectorTimingPolicy.deadlines(hasAttachments = true)
+
+        assertEquals(5_000L, regular.acceptedMs)
+        assertEquals(8_000L, regular.runningMs)
+        assertEquals(15_000L, attachment.acceptedMs)
+        assertEquals(30_000L, attachment.runningMs)
+        assertTrue(attachment.liveStaleMs > regular.liveStaleMs)
     }
 
     @Test

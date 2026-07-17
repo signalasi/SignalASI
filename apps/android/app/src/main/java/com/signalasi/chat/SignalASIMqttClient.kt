@@ -1,8 +1,6 @@
 package com.signalasi.chat
 
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
@@ -231,16 +229,32 @@ object SignalASIMqttClient {
         AgentTurnAttachmentRegistry.get(turnId).forEach { attachment ->
             val item = attachment.descriptor()
             item.remove("uri")
-            val bytes = when {
-                attachment.isImage -> compressedImageBytes(context, attachment, remaining)
-                attachment.sizeBytes in 1..remaining.toLong() -> readBoundedBytes(context, attachment, remaining)
-                else -> null
-            }
-            if (bytes != null && bytes.isNotEmpty() && bytes.size <= remaining) {
-                item.put("data_b64", Base64.encodeToString(bytes, Base64.NO_WRAP))
-                remaining -= bytes.size
+            if (attachment.isImage) {
+                val encoded = AgentImagePipeline.encodeForTransport(context, attachment, remaining)
+                if (encoded != null && encoded.bytes.isNotEmpty() && encoded.bytes.size <= remaining) {
+                    val transportName = encoded.transportName(attachment.displayName)
+                    if (transportName != attachment.displayName) {
+                        item.put("original_name", attachment.displayName)
+                        item.put("name", transportName)
+                    }
+                    item.put("mime_type", encoded.mimeType)
+                    item.put("transport_size", encoded.bytes.size)
+                    item.put("transport_lossless", encoded.lossless)
+                    item.put("data_b64", Base64.encodeToString(encoded.bytes, Base64.NO_WRAP))
+                    remaining -= encoded.bytes.size
+                } else {
+                    item.put("inline_status", "metadata_only")
+                }
             } else {
-                item.put("inline_status", "metadata_only")
+                val bytes = if (attachment.sizeBytes in 1..remaining.toLong()) {
+                    readBoundedBytes(context, attachment, remaining)
+                } else null
+                if (bytes != null && bytes.isNotEmpty() && bytes.size <= remaining) {
+                    item.put("data_b64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                    remaining -= bytes.size
+                } else {
+                    item.put("inline_status", "metadata_only")
+                }
             }
             result.put(item)
         }
@@ -262,34 +276,6 @@ object SignalASIMqttClient {
                 output.write(buffer, 0, read)
             }
             output.toByteArray()
-        }
-    }.getOrNull()
-
-    private fun compressedImageBytes(
-        context: Context,
-        attachment: AgentInputAttachment,
-        limit: Int
-    ): ByteArray? = runCatching {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        context.contentResolver.openInputStream(attachment.uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-        var sample = 1
-        while (bounds.outWidth / sample > 1280 || bounds.outHeight / sample > 1280) sample *= 2
-        val bitmap = context.contentResolver.openInputStream(attachment.uri)?.use {
-            BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
-        } ?: return@runCatching null
-        try {
-            var quality = 86
-            var bytes: ByteArray
-            do {
-                bytes = ByteArrayOutputStream().use { output ->
-                    bitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)
-                    output.toByteArray()
-                }
-                quality -= 10
-            } while (bytes.size > limit && quality >= 36)
-            bytes.takeIf { it.size <= limit }
-        } finally {
-            bitmap.recycle()
         }
     }.getOrNull()
 

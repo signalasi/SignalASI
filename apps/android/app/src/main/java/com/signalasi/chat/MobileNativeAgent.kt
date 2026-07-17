@@ -1261,7 +1261,8 @@ class MobileNativeAgent(
     ): AgentUiState? {
         if (sourceMessageId <= 0L || (success && content.isBlank())) return null
         val pendingResult = lastActionResult ?: return null
-        if (phase != AgentPhase.WAITING_RESPONSE) return null
+        val recoveringTimeout = success && isRecoverableConnectorTimeout(pendingResult, sourceMessageId)
+        if (phase != AgentPhase.WAITING_RESPONSE && !recoveringTimeout) return null
         if (pendingResult.metadata["source_message_id"]?.toLongOrNull() != sourceMessageId) return null
         val expectedContactId = pendingResult.metadata["contact_id"].orEmpty()
         if (expectedContactId.isNotBlank() && contactId.isNotBlank() && expectedContactId != contactId) return null
@@ -1289,15 +1290,20 @@ class MobileNativeAgent(
         if (!success) {
             continueWithConnectorFallback(plan, pendingResult)?.let { return it }
         }
+        val completedMetadata = pendingResult.metadata - setOf(
+            "timeout_stage",
+            "timeout_elapsed_ms"
+        ) + mapOf(
+            "awaiting_response" to "false",
+            "response_received_at" to System.currentTimeMillis().toString(),
+            "rich_output" to AgentRichContentCodec.normalize(richOutputJson),
+            "recovered_after_timeout" to recoveringTimeout.toString()
+        )
         val completedResult = AgentActionResult(
             actionId = actionId,
             success = success,
             message = response,
-            metadata = pendingResult.metadata + mapOf(
-                "awaiting_response" to "false",
-                "response_received_at" to System.currentTimeMillis().toString(),
-                "rich_output" to AgentRichContentCodec.normalize(richOutputJson)
-            )
+            metadata = completedMetadata
         )
         val responseStatus = if (success) AgentActionStatus.COMPLETED else AgentActionStatus.FAILED
         val responsePlan = plan.markAction(actionId, responseStatus, completedResult)
@@ -1408,12 +1414,23 @@ class MobileNativeAgent(
     }
 
     fun canAcceptConnectorResponse(sourceMessageId: Long, contactId: String): Boolean {
-        if (sourceMessageId <= 0L || phase != AgentPhase.WAITING_RESPONSE) return false
+        if (sourceMessageId <= 0L) return false
         val pendingResult = lastActionResult ?: return false
+        if (phase != AgentPhase.WAITING_RESPONSE &&
+            !isRecoverableConnectorTimeout(pendingResult, sourceMessageId)
+        ) return false
         if (pendingResult.metadata["source_message_id"]?.toLongOrNull() != sourceMessageId) return false
         val expectedContactId = pendingResult.metadata["contact_id"].orEmpty()
         return expectedContactId.isBlank() || contactId.isBlank() || expectedContactId == contactId
     }
+
+    private fun isRecoverableConnectorTimeout(
+        result: AgentActionResult,
+        sourceMessageId: Long
+    ): Boolean = phase == AgentPhase.FAILED &&
+        result.success.not() &&
+        result.metadata["source_message_id"]?.toLongOrNull() == sourceMessageId &&
+        result.metadata["timeout_stage"].orEmpty().isNotBlank()
 
     fun recordConnectorTaskStatus(
         sourceMessageId: Long,
@@ -1475,15 +1492,18 @@ class MobileNativeAgent(
             .map(String::trim)
             .filter(String::isNotBlank)
             .distinct()
-        if (AgentFailoverPolicy.shouldKeepOnlyResourceAlive(stage, status, fallbackIds.isNotEmpty())) {
+        val failureDomain = pending.metadata["failure_domain"].orEmpty()
+        val viableFallbackIds = fallbackIds.filter { fallbackId ->
+            failureDomain.isBlank() || connectorFailureDomain(fallbackId) != failureDomain
+        }
+        if (AgentFailoverPolicy.shouldKeepOnlyResourceAlive(stage, status, viableFallbackIds.isNotEmpty())) {
             return null
         }
         val timedOut = AgentFailoverPolicy.shouldFailOver(stage, status, liveReadOnly)
         if (!timedOut) return null
         val targetId = pending.metadata["resource_id"].orEmpty()
-        val failureDomain = pending.metadata["failure_domain"].orEmpty()
         if (stage == AgentConnectorTimeoutStage.READ_ONLY_STALE) {
-            val hasDifferentDomainFallback = fallbackIds.any { connectorFailureDomain(it) != failureDomain }
+            val hasDifferentDomainFallback = viableFallbackIds.isNotEmpty()
             if (!hasDifferentDomainFallback) return null
         }
         val elapsed = (System.currentTimeMillis() - (pending.metadata["resource_started_at"]?.toLongOrNull()
@@ -7448,6 +7468,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 "failure_domain" to AppStore.desktopIdForContact(context, contactId).ifBlank { "peer:$contactId" },
                 "resource_location" to if (AppStore.usesPcConnectorTunnel(context, contactId)) "desktop" else "peer",
                 "resource_started_at" to System.currentTimeMillis().toString(),
+                "has_attachments" to action.id.startsWith("attachment-").toString(),
                 "routing_requires_live_data" to action.parameters["routing_requires_live_data"].orEmpty(),
                 "remaining_fallback_ids" to action.parameters["routing_fallback_ids"].orEmpty()
             )

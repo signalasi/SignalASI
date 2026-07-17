@@ -1910,10 +1910,20 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     ) {
         val metadata = runtime.pendingConnectorMetadata(sourceMessageId)
         if (metadata["resource_location"] != "desktop") return
-        scheduleConnectorTimeout(runtime, sourceMessageId, conversationId, turnId, 5_000L, AgentConnectorTimeoutStage.NOT_ACCEPTED)
-        scheduleConnectorTimeout(runtime, sourceMessageId, conversationId, turnId, 8_000L, AgentConnectorTimeoutStage.NOT_RUNNING)
+        val deadlines = AgentConnectorTimingPolicy.deadlines(metadata["has_attachments"] == "true")
+        scheduleConnectorTimeout(
+            runtime, sourceMessageId, conversationId, turnId,
+            deadlines.acceptedMs, AgentConnectorTimeoutStage.NOT_ACCEPTED
+        )
+        scheduleConnectorTimeout(
+            runtime, sourceMessageId, conversationId, turnId,
+            deadlines.runningMs, AgentConnectorTimeoutStage.NOT_RUNNING
+        )
         if (metadata["routing_requires_live_data"] == "true") {
-            scheduleConnectorTimeout(runtime, sourceMessageId, conversationId, turnId, 15_000L, AgentConnectorTimeoutStage.READ_ONLY_STALE)
+            scheduleConnectorTimeout(
+                runtime, sourceMessageId, conversationId, turnId,
+                deadlines.liveStaleMs, AgentConnectorTimeoutStage.READ_ONLY_STALE
+            )
         }
     }
 
@@ -1941,10 +1951,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
                 val replacementSourceId = state.lastActionResult?.metadata
                     ?.get("source_message_id")?.toLongOrNull()
+                    ?.takeIf { it != sourceMessageId }
                 runOnUiThread {
-                    supersededConnectorSourceIds.add(sourceMessageId)
-                    activeAgentTasks.remove(sourceMessageId)
-                    if (replacementSourceId != null && replacementSourceId != sourceMessageId) {
+                    if (replacementSourceId != null) {
+                        supersededConnectorSourceIds.add(sourceMessageId)
+                        activeAgentTasks.remove(sourceMessageId)
                         activeAgentTasks[replacementSourceId] = runtime
                         scheduleConnectorTimeouts(runtime, replacementSourceId, conversationId, turnId)
                     }
@@ -5985,7 +5996,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val uri = Uri.parse(block.uri)
         if (block.type == AgentRichBlockType.IMAGE) {
             return ImageView(this).apply {
-                setImageURI(uri)
                 scaleType = ImageView.ScaleType.CENTER_CROP
                 contentDescription = block.title
                 background = GradientDrawable().apply {
@@ -5993,15 +6003,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     setColor(Color.parseColor("#F4F6F8"))
                 }
                 clipToOutline = true
-                setOnClickListener {
-                    runCatching {
-                        startActivity(Intent(Intent.ACTION_VIEW).apply {
-                            setDataAndType(uri, block.mimeType.ifBlank { "image/*" })
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        })
-                    }
-                }
-                layoutParams = LinearLayout.LayoutParams(dp(184), dp(138))
+                setOnClickListener { showAgentImagePreview(uri, block.title) }
+                loadAgentImageThumbnail(this, uri, dp(224), dp(168))
+                layoutParams = LinearLayout.LayoutParams(dp(112), dp(84))
             }
         }
         return LinearLayout(this).apply {
@@ -6038,6 +6042,97 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         setDataAndType(uri, block.mimeType.ifBlank { "application/octet-stream" })
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     })
+                }
+            }
+        }
+    }
+
+    private fun loadAgentImageThumbnail(image: ImageView, uri: Uri, width: Int, height: Int) {
+        val requestKey = uri.toString()
+        image.tag = requestKey
+        thread(name = "signalasi-image-thumbnail") {
+            val bitmap = AgentImagePipeline.loadPreview(applicationContext, uri, width, height)
+            runOnUiThread {
+                if (!isDestroyed && image.tag == requestKey && bitmap != null) {
+                    image.setImageBitmap(bitmap)
+                } else {
+                    bitmap?.recycle()
+                }
+            }
+        }
+    }
+
+    private fun showAgentImagePreview(uri: Uri, title: String) {
+        val dialog = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        val viewport = SignalASIPinchZoomViewport(this)
+        val image = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            contentDescription = title
+        }
+        viewport.attach(image)
+        root.addView(viewport, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        if (title.isNotBlank()) {
+            root.addView(TextView(this).apply {
+                text = title
+                textSize = 13f
+                setTextColor(Color.WHITE)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                setPadding(dp(16), dp(8), dp(16), dp(8))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(8).toFloat()
+                    setColor(Color.argb(150, 0, 0, 0))
+                }
+            }, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            ).apply {
+                leftMargin = dp(24)
+                rightMargin = dp(24)
+                bottomMargin = dp(24)
+            })
+        }
+        root.addView(ImageButton(this).apply {
+            setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
+            imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+            contentDescription = getString(R.string.agent_image_preview_close)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.argb(165, 30, 30, 30))
+            }
+            setOnClickListener { dialog.dismiss() }
+        }, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP or Gravity.END).apply {
+            topMargin = dp(20)
+            rightMargin = dp(16)
+        })
+        dialog.setContentView(root)
+        var previewBitmap: Bitmap? = null
+        dialog.setOnDismissListener {
+            image.setImageDrawable(null)
+            previewBitmap?.recycle()
+            previewBitmap = null
+        }
+        dialog.show()
+        val metrics = resources.displayMetrics
+        thread(name = "signalasi-image-preview") {
+            val bitmap = AgentImagePipeline.loadPreview(
+                applicationContext,
+                uri,
+                metrics.widthPixels * 2,
+                metrics.heightPixels * 2
+            )
+            runOnUiThread {
+                if (dialog.isShowing && bitmap != null) {
+                    previewBitmap = bitmap
+                    image.setImageBitmap(bitmap)
+                } else {
+                    bitmap?.recycle()
                 }
             }
         }
@@ -14302,7 +14397,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             container.addView(ImageView(this).apply {
                 scaleType = ImageView.ScaleType.CENTER_CROP
                 contentDescription = attachment.displayName
-                setImageURI(attachment.uri)
+                loadAgentImageThumbnail(this, attachment.uri, dp(140), dp(132))
             }, FrameLayout.LayoutParams(dp(70), dp(66)))
         } else {
             container.addView(LinearLayout(this).apply {
