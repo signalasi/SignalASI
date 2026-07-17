@@ -1,0 +1,191 @@
+# Android On-device Super Agent
+
+## Purpose
+
+SignalASI for Android is an agent operating system, not a thin chat client. It must be able to
+observe the phone, reason about a goal, select local or connected capabilities, execute work,
+verify results, preserve useful context, and improve under user control.
+
+The design combines the strongest product patterns from coding agents and persistent personal
+agents:
+
+- durable tasks, plans, tool receipts, artifacts, validation, steering, and resumability;
+- scoped instructions, hooks, reusable skills, subagents, and explicit tool permissions;
+- encrypted long-term memory, session search, user preferences, scheduled work, and learning;
+- a persistent gateway, capability discovery, health-aware routing, and reviewed extensions.
+
+These are product patterns. SignalASI keeps its own Android-native contracts and does not copy a
+vendor's private protocol or runtime.
+
+## Agent loop
+
+Every request enters one task state machine:
+
+1. Build a context envelope from the active conversation, attachments, relevant memories,
+   knowledge evidence, current screen, device state, and available capability health.
+2. Classify intent, privacy, freshness, latency, cost, and risk.
+3. Create or update a typed plan. Each step declares inputs, expected evidence, timeout,
+   cancellation behavior, fallback policy, and rollback support.
+4. Route each step to the phone, an on-device runtime, an MCP server, a paired agent, a local
+   model, or an enabled cloud provider.
+5. Stream concise progress events while retaining detailed diagnostics in the audit log.
+6. Verify postconditions and either complete, retry, replan, roll back, or request one precise
+   clarification.
+7. Store the task receipt and artifacts. Send eligible evidence to the learning pipeline.
+
+The router favors phone-native tools for phone state and actions. It considers capability fit,
+health, expected latency, privacy, cost, context capacity, and quality. A failed Desktop does not
+cause blind retries across every Desktop agent; an enabled phone API or local path is preferred
+when it can satisfy the same step.
+
+## Agent gateway and run control plane
+
+External agents remain independently upgradeable and connect through adapters. SignalASI owns the
+stable control model around them:
+
+- an encrypted Agent Registry records stable agent, installation, provider, and device identities;
+- capabilities, tools, permission scopes, trust, cost, latency, concurrency, health, and failure
+  domain drive routing instead of display names;
+- protocol ranges and feature sets are negotiated when a connection is established;
+- `RESPOND` asks an agent to act, `OBSERVE` adds context without triggering work, and `IGNORE`
+  suppresses delivery;
+- conversation, message, task, run, step, event, tool call, device, and agent identifiers are
+  distinct;
+- monotonic run events are encrypted, idempotent by event id, replayable, and reducible to a
+  recoverable state;
+- heartbeats expose online, idle, busy, degraded, updating, permission-required, and unreachable
+  states without frequent MQTT polling;
+- structured handoffs carry the target agent, reason, artifacts, checkpoint, and return path.
+
+Adapters expose connect, status, capabilities, start, steer, cancel, event streaming, and run
+recovery. Codex, Claude Code, OpenClaw, cloud providers, paired Desktop agents, Android in-process
+agents, and local models implement the same contract while retaining their native execution
+engines.
+
+## Memory system
+
+Memory is encrypted at rest and separated from transcripts.
+
+| Layer | Purpose | Retention |
+| --- | --- | --- |
+| Working | Current plan, observations, and tool results | Task lifetime |
+| Episodic | What happened, result, artifacts, and feedback | User-controlled |
+| Semantic | Stable facts about people, projects, and devices | Until changed or deleted |
+| Preference | Stable response and workflow preferences | Until changed or deleted |
+| Procedural | Successful reusable methods | Skill proposal or Skill |
+| Safety | Trust, consent, denial, and revocation decisions | Policy-controlled |
+
+Each durable memory records scope, source, confidence, evidence count, last confirmation, last
+access, expiration, version lineage, and conflict state. Duplicate evidence strengthens an item;
+contradictory evidence creates a visible conflict instead of silently overwriting it. Private mode
+never produces long-term memory or learning evidence.
+
+## Automatic learning
+
+Learning is evidence-driven and reversible:
+
+1. Record successful and failed task runs using redacted structured receipts.
+2. Extract only stable preferences, corrections, reusable procedures, and failure lessons.
+3. Reject secrets, authentication material, one-time codes, private-mode data, and incidental
+   attachment contents.
+4. Merge repeated evidence by normalized task family.
+5. Save low-risk explicit preferences as memory when memory capture is enabled.
+6. Create a Skill proposal after repeated successful runs; do not silently activate generated
+   code or high-impact behavior.
+7. Run manifest validation and regression cases before installation.
+8. Preserve version history, provenance, disable, rollback, export, and deletion.
+
+## Skill Workshop
+
+A Skill is a declarative workflow with typed parameters, native/MCP tool requirements, examples,
+negative examples, permissions, tests, rendering hints, and provenance. Explicit user requests may
+save a reviewed Skill immediately. Automatic learning creates a disabled proposal that shows:
+
+- the generalized task family and evidence runs;
+- proposed parameters and steps;
+- required tools, permissions, network access, and risk;
+- redactions and regression tests;
+- approve, edit, reject, or defer actions.
+
+Task-specific paths, URLs, identifiers, names, and secrets must become parameters or redacted
+values. A Skill cannot contain executable payloads outside declared runtime and tool contracts.
+
+## Android execution runtime
+
+The app targets modern Android, where executing downloaded binaries from writable app storage is
+not a dependable production design. SignalASI therefore uses a runtime broker with explicit
+backends:
+
+- **QEMU TCG**: universal no-root fallback. The QEMU engine is shipped as an Android native
+  component; signed disk and toolchain packs are data interpreted by that engine.
+- **Android Virtualization Framework**: optional acceleration for eligible OEM, managed, or
+  preinstalled builds. It is not assumed to be available to a normal Play-installed app.
+- **Native Android tools**: preferred for phone actions, OCR, media metadata, storage, sensors,
+  network, camera, and system intents.
+
+PROot and Termux are not production dependencies.
+
+The Linux guest is persistent and controlled by a small guest agent. SignalASI does not boot a VM
+for each command. Host and guest communicate through a bounded request protocol with per-task
+workspaces, cancellation, heartbeats, output limits, artifact hashes, and execution receipts.
+
+## Runtime packs
+
+The base APK remains small. Runtime components are signed, versioned, and independently removable:
+
+- `linux-base`: minimal AArch64 userspace and guest agent;
+- `python-uv`: Python and uv-managed isolated environments;
+- `node-js`: Node.js, npm-compatible package execution, JavaScript, and TypeScript;
+- `go`, `rust`, `cpp`, and `java`: language toolchains and caches;
+- `ffmpeg`: audio, video, and image processing;
+- `ocr-extended`: optional models and document-layout components.
+
+Every pack manifest declares platform, architecture, version, compressed and installed size,
+SHA-256, signature key, dependencies, licenses, exposed capabilities, and minimum host/guest
+versions. Installation is atomic and verified before activation. Network is off by default for a
+task and package downloads require an explicit policy decision.
+
+The installable `.sarpack` format is a ZIP archive with `manifest.json` at its root and one signed
+runtime image addressed by `image_file`. The signature covers format, pack id, semantic version,
+architecture, image path and digest, sorted capabilities and dependencies, declared archive and
+installed limits, minimum Android host version, guest API version, license, and signing key id.
+Import rejects path traversal, unknown pack ids, incompatible architectures, excessive expansion,
+untrusted signatures, unsupported protocol versions, and invalid hashes. Activation uses a
+same-volume staging directory and rollback backup; dependencies prevent unsafe removal.
+
+Large image hashes are cached only after a full successful verification and are keyed by image
+size, modification time, and expected digest. Installation and update always force a complete
+verification. The app never treats the runtime as ready until the native engine, `linux-base`, and
+the guest bridge are all active.
+
+## Runtime safety
+
+- Separate workspace per task and no direct access to arbitrary app-private data.
+- Content URIs are copied into a bounded task workspace only when granted.
+- CPU, memory, disk, process, wall-clock, stdout, stderr, and artifact quotas.
+- Network disabled by default; domain and duration scope when enabled.
+- No Android permission inheritance inside Linux.
+- High-impact Android actions remain Android-native and use the global confirmation policy.
+- Complete provenance for toolchain, package lock, command, outputs, and artifacts.
+- Immediate stop, cleanup, quarantine, and rollback controls.
+
+## OCR and media
+
+OCR is Android-native first and supports Latin, Chinese, Japanese, Korean, and Devanagari script
+selection, image orientation, bounded decoding, reading-order sorting, duplicate-line removal, and
+structured boxes. A later document pipeline adds layout, tables, handwriting, equations, and
+offline visual-model review as optional packs.
+
+FFmpeg is exposed through the runtime broker with argument validation, bounded inputs and outputs,
+progress events, cancellation, and artifact previews. Media conversion never grants a shell direct
+access to the user's shared storage.
+
+## Delivery stages
+
+1. Strengthen memory metadata, ranking, conflict handling, and encrypted database storage.
+2. Add automatic learning evidence and reviewed Skill proposals.
+3. Add runtime capability, pack, policy, and receipt contracts to the Android tool catalog.
+4. Ship and validate the QEMU/guest-agent base runtime as a separately licensed component.
+5. Add Python/uv, Node, Go, Rust, C/C++, Java, and FFmpeg packs.
+6. Expand multilingual OCR and document understanding.
+7. Add Control Center pages for memory, learning proposals, runtime packs, resource use, and audit.

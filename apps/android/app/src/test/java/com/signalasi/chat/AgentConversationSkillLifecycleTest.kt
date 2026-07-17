@@ -149,5 +149,44 @@ class AgentConversationSkillLifecycleTest {
         assertEquals(installed.id, restored.id)
     }
 
+    @Test
+    fun repeatedRunsCompileOnlyTheLatestRepresentativeWorkflow() {
+        val descriptor = AgentNativeToolDescriptor(
+            id = "test.echo",
+            version = "1.0.0",
+            title = "Echo",
+            description = "Echoes a bounded value.",
+            location = AgentNativeToolLocation.APPLICATION,
+            inputSchema = AgentNativeJsonSchema.any(),
+            outputSchema = AgentNativeJsonSchema.any(),
+            risk = AgentNativeToolRisk.LOW
+        )
+        val runtime = AgentSkillRuntime(availableNativeToolIds = setOf(descriptor.id))
+        val first = completedRun("run-1", "Do the first item", "first")
+        val latest = completedRun("run-2", "Do the second item", "second")
+
+        val manifest = AgentConversationSkillCompiler(runtime) { listOf(descriptor) }
+            .compile(listOf(first, latest))
+
+        assertEquals(1, manifest.steps.size)
+        assertEquals("second", manifest.steps.single().input["value"])
+    }
+
+    private fun completedRun(id: String, request: String, value: String) = AgentRecordedRun(
+        runId = id,
+        conversationId = "conversation",
+        taskThreadId = "thread",
+        originalRequest = request,
+        toolCalls = listOf(
+            AgentToolCallRecord(
+                id = "call-$id",
+                toolName = "test.echo",
+                status = AgentToolCallStatus.SUCCEEDED,
+                argumentsJson = "{\"value\":\"$value\"}"
+            )
+        ),
+        status = AgentRecordedRunStatus.COMPLETED
+    )
+
     private fun matcher(runtime: AgentSkillRuntime) = AgentSkillMatcher(runtime)
 }

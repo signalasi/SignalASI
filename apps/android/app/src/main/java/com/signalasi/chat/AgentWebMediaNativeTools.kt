@@ -8,11 +8,18 @@ import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.exifinterface.media.ExifInterface
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
+import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
+import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
+import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.io.ByteArrayOutputStream
+import java.io.ByteArrayInputStream
 import java.net.IDN
 import java.net.Inet4Address
 import java.net.Inet6Address
@@ -603,11 +610,21 @@ enum class AgentOcrSourceKind(val wireValue: String) {
     CAPTURED("captured")
 }
 
+enum class AgentOcrScript(val wireValue: String, val languageTag: String) {
+    AUTO("auto", "und"),
+    LATIN("latin", "Latn"),
+    CHINESE("chinese", "zh"),
+    JAPANESE("japanese", "ja"),
+    KOREAN("korean", "ko"),
+    DEVANAGARI("devanagari", "Deva")
+}
+
 data class AgentOcrRequest(
     val contentUri: String,
     val sourceKind: AgentOcrSourceKind,
     val maxSourceBytes: Long,
-    val timeoutMillis: Long
+    val timeoutMillis: Long,
+    val scriptHint: AgentOcrScript = AgentOcrScript.AUTO
 )
 
 data class AgentOcrLine(
@@ -638,7 +655,7 @@ class AgentAndroidMlKitContentOcr(
     constructor(context: Context) : this(context.applicationContext.contentResolver)
 
     override val availability = AgentNativeToolAvailability.AVAILABLE
-    override val implementationId = "mlkit.chinese_text_recognition"
+    override val implementationId = "mlkit.multiscript_text_recognition"
 
     override fun recognize(request: AgentOcrRequest): AgentOcrResult {
         val uri = parseAndroidContentUri(request.contentUri)
@@ -648,39 +665,128 @@ class AgentAndroidMlKitContentOcr(
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
             throw AgentWebMediaException("unsupported_ocr_content", "Selected content is not a decodable image")
         }
-        if (bounds.outWidth.toLong() * bounds.outHeight.toLong() > MAX_OCR_PIXELS) {
-            throw AgentWebMediaException("ocr_image_too_large", "OCR image exceeds the decoded pixel limit")
+        val decodeOptions = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight)
         }
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOptions)
             ?: throw AgentWebMediaException("unsupported_ocr_content", "Selected content is not a decodable image")
-        val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+        val rotation = exifRotation(bytes)
+        val initialScripts = if (request.scriptHint == AgentOcrScript.AUTO) {
+            listOf(AgentOcrScript.CHINESE, AgentOcrScript.LATIN)
+        } else listOf(request.scriptHint)
+        val recognizers = linkedMapOf<AgentOcrScript, TextRecognizer>()
         try {
-            val text = Tasks.await(
-                recognizer.process(InputImage.fromBitmap(bitmap, 0)),
-                request.timeoutMillis,
-                TimeUnit.MILLISECONDS
-            )
-            val lines = text.textBlocks.flatMap { it.lines }.map { line ->
-                val box = line.boundingBox
-                AgentOcrLine(
-                    text = line.text,
-                    left = box?.left ?: 0,
-                    top = box?.top ?: 0,
-                    right = box?.right ?: 0,
-                    bottom = box?.bottom ?: 0
-                )
+            val startedAt = System.currentTimeMillis()
+            val candidates = initialScripts.mapNotNull { script ->
+                val recognizer = recognizers.getOrPut(script) { recognizer(script) }
+                val remaining = (request.timeoutMillis - (System.currentTimeMillis() - startedAt)).coerceAtLeast(1L)
+                try {
+                    script to Tasks.await(
+                        recognizer.process(InputImage.fromBitmap(bitmap, rotation)),
+                        remaining,
+                        TimeUnit.MILLISECONDS
+                    )
+                } catch (_: TimeoutException) {
+                    throw AgentNativeToolTimeoutException()
+                } catch (_: Exception) {
+                    null
+                }
+            }.toMutableList()
+            if (request.scriptHint == AgentOcrScript.AUTO) {
+                val detected = detectExtendedScript(candidates.joinToString("\n") { it.second.text })
+                if (detected != null && detected !in initialScripts) {
+                    val recognizer = recognizers.getOrPut(detected) { recognizer(detected) }
+                    val remaining = (request.timeoutMillis - (System.currentTimeMillis() - startedAt)).coerceAtLeast(1L)
+                    try {
+                        candidates += detected to Tasks.await(
+                            recognizer.process(InputImage.fromBitmap(bitmap, rotation)),
+                            remaining,
+                            TimeUnit.MILLISECONDS
+                        )
+                    } catch (_: TimeoutException) {
+                        throw AgentNativeToolTimeoutException()
+                    } catch (_: Exception) {
+                        Unit
+                    }
+                }
             }
-            return AgentOcrResult(text.text, lines, bitmap.width, bitmap.height)
-        } catch (_: TimeoutException) {
-            throw AgentNativeToolTimeoutException()
+            val selected = candidates.maxByOrNull { (_, text) -> recognitionScore(text.text) }
+                ?: throw AgentWebMediaException("ocr_empty_result", "OCR did not produce a result")
+            val lines = selected.second.textBlocks
+                .flatMap { it.lines }
+                .map { line ->
+                    val box = line.boundingBox
+                    AgentOcrLine(
+                        text = line.text.trim(),
+                        left = box?.left ?: 0,
+                        top = box?.top ?: 0,
+                        right = box?.right ?: 0,
+                        bottom = box?.bottom ?: 0
+                    )
+                }
+                .filter { it.text.isNotBlank() }
+                .distinctBy { line -> "${line.text.lowercase(Locale.ROOT)}:${line.left / BOX_BUCKET}:${line.top / BOX_BUCKET}" }
+                .sortedWith(compareBy<AgentOcrLine> { it.top }.thenBy { it.left })
+            val outputWidth = if (rotation == 90 || rotation == 270) bitmap.height else bitmap.width
+            val outputHeight = if (rotation == 90 || rotation == 270) bitmap.width else bitmap.height
+            return AgentOcrResult(
+                text = lines.joinToString("\n") { it.text }.ifBlank { selected.second.text.trim() },
+                lines = lines,
+                width = outputWidth,
+                height = outputHeight,
+                languageTags = listOf(selected.first.languageTag)
+            )
         } finally {
             bitmap.recycle()
-            recognizer.close()
+            recognizers.values.forEach(TextRecognizer::close)
         }
     }
 
+    private fun detectExtendedScript(value: String): AgentOcrScript? = when {
+        value.any { it.code in 0x3040..0x30FF } -> AgentOcrScript.JAPANESE
+        value.any { it.code in 0xAC00..0xD7AF || it.code in 0x1100..0x11FF } -> AgentOcrScript.KOREAN
+        value.any { it.code in 0x0900..0x097F } -> AgentOcrScript.DEVANAGARI
+        else -> null
+    }
+
+    private fun recognizer(script: AgentOcrScript): TextRecognizer = TextRecognition.getClient(
+        when (script) {
+            AgentOcrScript.AUTO, AgentOcrScript.LATIN -> TextRecognizerOptions.DEFAULT_OPTIONS
+            AgentOcrScript.CHINESE -> ChineseTextRecognizerOptions.Builder().build()
+            AgentOcrScript.JAPANESE -> JapaneseTextRecognizerOptions.Builder().build()
+            AgentOcrScript.KOREAN -> KoreanTextRecognizerOptions.Builder().build()
+            AgentOcrScript.DEVANAGARI -> DevanagariTextRecognizerOptions.Builder().build()
+        }
+    )
+
+    private fun sampleSize(width: Int, height: Int): Int {
+        var sample = 1
+        while ((width / sample).toLong() * (height / sample).toLong() > TARGET_OCR_PIXELS) sample *= 2
+        return sample
+    }
+
+    private fun exifRotation(bytes: ByteArray): Int = runCatching {
+        when (ExifInterface(ByteArrayInputStream(bytes)).getAttributeInt(
+            ExifInterface.TAG_ORIENTATION,
+            ExifInterface.ORIENTATION_NORMAL
+        )) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270
+            else -> 0
+        }
+    }.getOrDefault(0)
+
+    private fun recognitionScore(value: String): Double {
+        if (value.isBlank()) return 0.0
+        val meaningful = value.count { it.isLetterOrDigit() }
+        val replacementPenalty = value.count { it == '\uFFFD' } * 4
+        return meaningful.toDouble() - replacementPenalty
+    }
+
     companion object {
-        private const val MAX_OCR_PIXELS = 20_000_000L
+        private const val TARGET_OCR_PIXELS = 12_000_000L
+        private const val BOX_BUCKET = 12
     }
 }
 
@@ -1277,6 +1383,7 @@ object AgentWebMediaNativeTools {
                 properties = mapOf(
                     "content_uri" to contentUriSchema(),
                     "source_kind" to AgentNativeJsonSchema.string(enumValues = AgentOcrSourceKind.entries.map { it.wireValue }),
+                    "script_hint" to AgentNativeJsonSchema.string(enumValues = AgentOcrScript.entries.map { it.wireValue }),
                     "max_source_bytes" to AgentNativeJsonSchema.integer(1, MAX_OCR_SOURCE_BYTES),
                     "timeout_ms" to timeoutSchema()
                 ),
@@ -1302,7 +1409,10 @@ object AgentWebMediaNativeTools {
                         contentUri,
                         sourceKind,
                         invocation.input.long("max_source_bytes", MAX_OCR_SOURCE_BYTES),
-                        invocation.input.timeout(invocation)
+                        invocation.input.timeout(invocation),
+                        AgentOcrScript.entries.firstOrNull {
+                            it.wireValue == invocation.input.string("script_hint", AgentOcrScript.AUTO.wireValue)
+                        } ?: AgentOcrScript.AUTO
                     )
                 ).bounded()
                 invocation.checkpoint()

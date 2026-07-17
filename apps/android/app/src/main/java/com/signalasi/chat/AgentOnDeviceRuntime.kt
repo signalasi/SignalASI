@@ -1,0 +1,608 @@
+package com.signalasi.chat
+
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import android.util.Base64
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.security.MessageDigest
+import java.security.Signature
+import java.security.cert.CertificateFactory
+import java.util.Locale
+
+enum class AgentOnDeviceRuntimeBackend(val wireValue: String) {
+    QEMU_TCG("qemu_tcg"),
+    ANDROID_VIRTUALIZATION_FRAMEWORK("android_virtualization_framework"),
+    NONE("none")
+}
+
+enum class AgentRuntimePackState(val wireValue: String) {
+    READY("ready"),
+    NOT_INSTALLED("not_installed"),
+    INVALID("invalid"),
+    INCOMPATIBLE("incompatible")
+}
+
+enum class AgentRuntimeLanguage(val wireValue: String, val requiredPack: String) {
+    SHELL("shell", "linux-base"),
+    PYTHON("python", "python-uv"),
+    UV("uv", "python-uv"),
+    JAVASCRIPT("javascript", "node-js"),
+    TYPESCRIPT("typescript", "node-js"),
+    GO("go", "go"),
+    RUST("rust", "rust"),
+    C("c", "cpp"),
+    CPP("cpp", "cpp"),
+    JAVA("java", "java"),
+    FFMPEG("ffmpeg", "ffmpeg")
+}
+
+data class AgentRuntimePackManifest(
+    val id: String,
+    val version: String,
+    val architecture: String,
+    val imageFile: String,
+    val imageSha256: String,
+    val capabilities: List<String>,
+    val dependencies: List<String>,
+    val installedSizeBytes: Long,
+    val license: String,
+    val signatureKeyId: String,
+    val signature: String,
+    val formatVersion: Int = 1,
+    val archiveSizeBytes: Long = 0L,
+    val minimumHostVersionCode: Long = 1L,
+    val guestApiVersion: Int = 1
+) {
+    fun signingPayload(): ByteArray = buildString {
+        append(formatVersion).append('\n')
+        append(id).append('\n')
+        append(version).append('\n')
+        append(architecture).append('\n')
+        append(imageFile).append('\n')
+        append(imageSha256.lowercase(Locale.ROOT)).append('\n')
+        append(capabilities.sorted().joinToString(",")).append('\n')
+        append(dependencies.sorted().joinToString(",")).append('\n')
+        append(installedSizeBytes).append('\n')
+        append(archiveSizeBytes).append('\n')
+        append(minimumHostVersionCode).append('\n')
+        append(guestApiVersion).append('\n')
+        append(license).append('\n')
+        append(signatureKeyId.lowercase(Locale.ROOT))
+    }.toByteArray(Charsets.UTF_8)
+}
+
+fun interface AgentRuntimePackSignatureVerifier {
+    fun verify(manifest: AgentRuntimePackManifest): Boolean
+}
+
+class AndroidAppSigningRuntimePackVerifier(context: Context) : AgentRuntimePackSignatureVerifier {
+    private val appContext = context.applicationContext
+
+    override fun verify(manifest: AgentRuntimePackManifest): Boolean {
+        val signatureBytes = runCatching { Base64.decode(manifest.signature, Base64.DEFAULT) }.getOrNull()
+            ?: return false
+        return signingCertificates().any { certificateBytes ->
+            runCatching {
+                val certificate = CertificateFactory.getInstance("X.509")
+                    .generateCertificate(certificateBytes.inputStream())
+                val keyId = MessageDigest.getInstance("SHA-256")
+                    .digest(certificate.encoded)
+                    .joinToString("") { "%02x".format(it) }
+                if (!keyId.equals(manifest.signatureKeyId, ignoreCase = true)) return@runCatching false
+                val algorithm = when (certificate.publicKey.algorithm.uppercase(Locale.ROOT)) {
+                    "RSA" -> "SHA256withRSA"
+                    "EC", "ECDSA" -> "SHA256withECDSA"
+                    "ED25519", "EDDSA" -> "Ed25519"
+                    else -> return@runCatching false
+                }
+                Signature.getInstance(algorithm).run {
+                    initVerify(certificate.publicKey)
+                    update(manifest.signingPayload())
+                    verify(signatureBytes)
+                }
+            }.getOrDefault(false)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun signingCertificates(): List<ByteArray> {
+        val info = appContext.packageManager.getPackageInfo(
+            appContext.packageName,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                PackageManager.GET_SIGNING_CERTIFICATES
+            } else {
+                PackageManager.GET_SIGNATURES
+            }
+        )
+        val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.signingInfo?.apkContentsSigners.orEmpty()
+        } else {
+            info.signatures.orEmpty()
+        }
+        return signatures.map { it.toByteArray() }
+    }
+}
+
+data class AgentRuntimePackStatus(
+    val id: String,
+    val state: AgentRuntimePackState,
+    val reason: String = "",
+    val manifest: AgentRuntimePackManifest? = null
+)
+
+data class AgentOnDeviceRuntimeStatus(
+    val backend: AgentOnDeviceRuntimeBackend,
+    val backendReady: Boolean,
+    val reason: String,
+    val architecture: String,
+    val enginePath: String,
+    val avfAdvertised: Boolean,
+    val packs: List<AgentRuntimePackStatus>
+) {
+    fun languageReady(language: AgentRuntimeLanguage): Boolean = backendReady && packs.any {
+        it.id == language.requiredPack && it.state == AgentRuntimePackState.READY
+    }
+}
+
+data class AgentRuntimeExecutionRequest(
+    val language: AgentRuntimeLanguage,
+    val source: String,
+    val arguments: List<String>,
+    val timeoutMillis: Long,
+    val networkEnabled: Boolean,
+    val artifactPaths: List<String>,
+    val workspaceId: String
+)
+
+data class AgentRuntimeExecutionResponse(
+    val exitCode: Int,
+    val stdout: String,
+    val stderr: String,
+    val durationMillis: Long,
+    val artifacts: List<Map<String, Any?>> = emptyList()
+)
+
+fun interface AgentOnDeviceRuntimeBridge {
+    fun execute(request: AgentRuntimeExecutionRequest): AgentRuntimeExecutionResponse
+}
+
+object AgentOnDeviceRuntimeBridgeRegistry {
+    @Volatile
+    private var active: AgentOnDeviceRuntimeBridge? = null
+
+    fun register(bridge: AgentOnDeviceRuntimeBridge) {
+        active = bridge
+    }
+
+    fun unregister(bridge: AgentOnDeviceRuntimeBridge) {
+        if (active === bridge) active = null
+    }
+
+    fun current(): AgentOnDeviceRuntimeBridge? = active
+}
+
+class AgentOnDeviceRuntimeManager(
+    context: Context,
+    private val bridge: AgentOnDeviceRuntimeBridge? = null,
+    private val signatureVerifier: AgentRuntimePackSignatureVerifier = AndroidAppSigningRuntimePackVerifier(context)
+) {
+    private val appContext = context.applicationContext
+    private val runtimeRoot = File(appContext.filesDir, RUNTIME_DIRECTORY)
+    private val packsRoot = File(runtimeRoot, PACKS_DIRECTORY)
+    private val integrityCache = appContext.getSharedPreferences(INTEGRITY_CACHE, Context.MODE_PRIVATE)
+
+    fun status(): AgentOnDeviceRuntimeStatus {
+        val engine = qemuEngineFile()
+        val avf = appContext.packageManager.hasSystemFeature(AVF_FEATURE)
+        val base = packStatus("linux-base")
+        val engineReady = engine.isFile && engine.canExecute()
+        val baseReady = base.state == AgentRuntimePackState.READY
+        val backend = when {
+            engineReady && baseReady -> AgentOnDeviceRuntimeBackend.QEMU_TCG
+            else -> AgentOnDeviceRuntimeBackend.NONE
+        }
+        val activeBridge = bridge ?: AgentOnDeviceRuntimeBridgeRegistry.current()
+        val reason = when {
+            backend == AgentOnDeviceRuntimeBackend.QEMU_TCG && activeBridge == null ->
+                "Runtime engine and base pack are present, but the guest bridge is not connected"
+            backend == AgentOnDeviceRuntimeBackend.QEMU_TCG -> "On-device Linux runtime is ready"
+            !engineReady -> "Install the SignalASI QEMU engine"
+            !baseReady -> "Install the linux-base runtime pack"
+            else -> "On-device Linux runtime requires setup"
+        }
+        return AgentOnDeviceRuntimeStatus(
+            backend = backend,
+            backendReady = backend != AgentOnDeviceRuntimeBackend.NONE && activeBridge != null,
+            reason = reason,
+            architecture = Build.SUPPORTED_ABIS.firstOrNull().orEmpty(),
+            enginePath = engine.absolutePath,
+            avfAdvertised = avf,
+            packs = REQUIRED_PACKS.map(::packStatus)
+        )
+    }
+
+    fun execute(request: AgentRuntimeExecutionRequest): AgentRuntimeExecutionResponse {
+        require(request.source.toByteArray().size <= MAX_SOURCE_BYTES) { "Runtime source exceeds the limit" }
+        require(request.arguments.size <= MAX_ARGUMENTS) { "Runtime argument count exceeds the limit" }
+        require(request.arguments.all { it.toByteArray().size <= MAX_ARGUMENT_BYTES }) {
+            "A runtime argument exceeds the limit"
+        }
+        require(request.timeoutMillis in MIN_TIMEOUT_MILLIS..MAX_TIMEOUT_MILLIS) {
+            "Runtime timeout is outside the allowed range"
+        }
+        require(request.artifactPaths.size <= MAX_ARTIFACTS) { "Too many runtime artifact paths" }
+        val current = status()
+        check(current.languageReady(request.language)) {
+            "${request.language.wireValue} requires the ${request.language.requiredPack} pack"
+        }
+        val activeBridge = bridge ?: AgentOnDeviceRuntimeBridgeRegistry.current()
+            ?: error("The on-device guest bridge is not connected")
+        return activeBridge.execute(request).bounded()
+    }
+
+    private fun qemuEngineFile(): File = File(appContext.applicationInfo.nativeLibraryDir, QEMU_ENGINE_FILE)
+
+    internal fun packsDirectory(): File = packsRoot
+
+    internal fun inspectPackDirectory(
+        directory: File,
+        expectedId: String? = null,
+        checkDependencies: Boolean = true,
+        forceIntegrityCheck: Boolean = false
+    ): AgentRuntimePackStatus {
+        val manifestFile = File(directory, MANIFEST_FILE)
+        val fallbackId = expectedId ?: directory.name
+        if (!manifestFile.isFile) return AgentRuntimePackStatus(fallbackId, AgentRuntimePackState.NOT_INSTALLED)
+        val manifest = runCatching { decodeManifest(manifestFile.readText()) }.getOrNull()
+            ?: return AgentRuntimePackStatus(fallbackId, AgentRuntimePackState.INVALID, "Invalid runtime pack manifest")
+        if (expectedId != null && manifest.id != expectedId) {
+            return AgentRuntimePackStatus(expectedId, AgentRuntimePackState.INVALID, "Runtime pack id does not match its directory", manifest)
+        }
+        if (manifest.id !in REQUIRED_PACKS || !PACK_ID_PATTERN.matches(manifest.id)) {
+            return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INCOMPATIBLE, "Runtime pack id is not supported", manifest)
+        }
+        if (manifest.architecture !in supportedArchitectures()) {
+            return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INCOMPATIBLE, "Runtime pack architecture is incompatible", manifest)
+        }
+        if (!VERSION_PATTERN.matches(manifest.version) || !SHA256_PATTERN.matches(manifest.imageSha256)) {
+            return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INVALID, "Runtime pack metadata is invalid", manifest)
+        }
+        if (manifest.formatVersion != SUPPORTED_PACK_FORMAT_VERSION ||
+            manifest.minimumHostVersionCode > installedHostVersionCode() ||
+            manifest.guestApiVersion != SUPPORTED_GUEST_API_VERSION
+        ) {
+            return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INCOMPATIBLE, "Runtime pack protocol is incompatible", manifest)
+        }
+        if (manifest.archiveSizeBytes <= 0L || manifest.license.isBlank() ||
+            manifest.capabilities.any(String::isBlank) ||
+            manifest.dependencies.any { it !in REQUIRED_PACKS || it == manifest.id }
+        ) {
+            return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INVALID, "Runtime pack metadata is incomplete", manifest)
+        }
+        if (manifest.signature.isBlank() || manifest.signatureKeyId.isBlank()) {
+            return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INVALID, "Runtime pack signature is missing", manifest)
+        }
+        if (!signatureVerifier.verify(manifest)) {
+            return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INVALID, "Runtime pack signature is not trusted", manifest)
+        }
+        val image = safeChild(directory, manifest.imageFile)
+            ?: return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INVALID, "Runtime pack image path is unsafe", manifest)
+        if (!image.isFile) return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INVALID, "Runtime pack image is missing", manifest)
+        if (manifest.installedSizeBytes <= 0L || image.length() > manifest.installedSizeBytes + INSTALL_SIZE_TOLERANCE_BYTES) {
+            return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INVALID, "Runtime pack installed size is invalid", manifest)
+        }
+        val actualHash = sha256(image, manifest.imageSha256, forceIntegrityCheck)
+        if (!actualHash.equals(manifest.imageSha256, ignoreCase = true)) {
+            return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INVALID, "Runtime pack image integrity check failed", manifest)
+        }
+        if (checkDependencies) {
+            val missingDependency = manifest.dependencies.firstOrNull { dependency ->
+                dependency != manifest.id && packStatusWithoutDependencies(dependency).state != AgentRuntimePackState.READY
+            }
+            if (missingDependency != null) {
+                return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INCOMPATIBLE, "Missing dependency: $missingDependency", manifest)
+            }
+        }
+        return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.READY, manifest = manifest)
+    }
+
+    internal fun clearIntegrityCache(packId: String) {
+        val prefix = "$packId|"
+        integrityCache.edit().also { editor ->
+            integrityCache.all.keys.filter { it.startsWith(prefix) }.forEach(editor::remove)
+        }.apply()
+    }
+
+    private fun packStatus(id: String): AgentRuntimePackStatus = inspectPackDirectory(
+        directory = File(packsRoot, id),
+        expectedId = id
+    )
+
+    private fun packStatusWithoutDependencies(id: String): AgentRuntimePackStatus {
+        val directory = File(packsRoot, id)
+        return inspectPackDirectory(directory, expectedId = id, checkDependencies = false)
+    }
+
+    internal fun decodeManifest(raw: String): AgentRuntimePackManifest {
+        require(raw.toByteArray().size <= MAX_MANIFEST_BYTES) { "Runtime manifest is too large" }
+        val json = JSONObject(raw)
+        return AgentRuntimePackManifest(
+            id = json.getString("id").take(MAX_ID_CHARS),
+            version = json.getString("version"),
+            architecture = json.getString("architecture").lowercase(Locale.ROOT),
+            imageFile = json.getString("image_file"),
+            imageSha256 = json.getString("image_sha256").lowercase(Locale.ROOT),
+            capabilities = json.optJSONArray("capabilities").strings(MAX_CAPABILITIES),
+            dependencies = json.optJSONArray("dependencies").strings(MAX_DEPENDENCIES),
+            installedSizeBytes = json.optLong("installed_size_bytes", 0L).coerceAtLeast(0L),
+            license = json.optString("license"),
+            signatureKeyId = json.optString("signature_key_id"),
+            signature = json.optString("signature"),
+            formatVersion = json.optInt("format_version", 0),
+            archiveSizeBytes = json.optLong("archive_size_bytes", 0L).coerceAtLeast(0L),
+            minimumHostVersionCode = json.optLong("minimum_host_version_code", 1L).coerceAtLeast(1L),
+            guestApiVersion = json.optInt("guest_api_version", 0)
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun installedHostVersionCode(): Long = appContext.packageManager
+        .getPackageInfo(appContext.packageName, 0)
+        .let { info -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else info.versionCode.toLong() }
+
+    private fun safeChild(root: File, relative: String): File? {
+        if (relative.isBlank() || File(relative).isAbsolute) return null
+        val canonicalRoot = root.canonicalFile
+        val candidate = File(canonicalRoot, relative).canonicalFile
+        return candidate.takeIf { it.path.startsWith(canonicalRoot.path + File.separator) }
+    }
+
+    internal fun supportedArchitectures(): Set<String> = Build.SUPPORTED_ABIS.flatMapTo(linkedSetOf()) { abi ->
+        when (abi.lowercase(Locale.ROOT)) {
+            "arm64-v8a" -> listOf("arm64-v8a", "aarch64")
+            "x86_64" -> listOf("x86_64", "amd64")
+            else -> listOf(abi.lowercase(Locale.ROOT))
+        }
+    }
+
+    private fun sha256(file: File, expectedHash: String, force: Boolean = false): String {
+        val cacheKey = "${file.parentFile?.name.orEmpty()}|${file.canonicalPath}"
+        val cacheStamp = "${file.length()}:${file.lastModified()}:${expectedHash.lowercase(Locale.ROOT)}"
+        if (!force) {
+            integrityCache.getString(cacheKey, null)?.let { cached ->
+                val separator = cached.indexOf('|')
+                if (separator > 0 && cached.substring(0, separator) == cacheStamp) {
+                    return cached.substring(separator + 1)
+                }
+            }
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().buffered().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }.also { actual ->
+            integrityCache.edit().putString(cacheKey, "$cacheStamp|$actual").apply()
+        }
+    }
+
+    private fun AgentRuntimeExecutionResponse.bounded(): AgentRuntimeExecutionResponse = copy(
+        stdout = stdout.take(MAX_OUTPUT_CHARS),
+        stderr = stderr.take(MAX_OUTPUT_CHARS),
+        artifacts = artifacts.take(MAX_ARTIFACTS)
+    )
+
+    private fun JSONArray?.strings(limit: Int): List<String> = buildList {
+        val source = this@strings ?: return@buildList
+        for (index in 0 until minOf(source.length(), limit)) {
+            source.optString(index).takeIf(String::isNotBlank)?.let(::add)
+        }
+    }
+
+    companion object {
+        val REQUIRED_PACKS = listOf("linux-base", "python-uv", "node-js", "go", "rust", "cpp", "java", "ffmpeg")
+        private const val RUNTIME_DIRECTORY = "agent-runtime"
+        private const val PACKS_DIRECTORY = "packs"
+        private const val MANIFEST_FILE = "manifest.json"
+        private const val QEMU_ENGINE_FILE = "libsignalasi_qemu.so"
+        private const val AVF_FEATURE = "android.software.virtualization_framework"
+        private const val INTEGRITY_CACHE = "signalasi_runtime_integrity_cache_v1"
+        private const val MAX_MANIFEST_BYTES = 64 * 1024
+        private const val MAX_SOURCE_BYTES = 256 * 1024
+        private const val MAX_ARGUMENTS = 256
+        private const val MAX_ARGUMENT_BYTES = 8 * 1024
+        private const val MAX_ARTIFACTS = 32
+        private const val MAX_OUTPUT_CHARS = 512 * 1024
+        private const val MAX_ID_CHARS = 80
+        private const val MAX_CAPABILITIES = 128
+        private const val MAX_DEPENDENCIES = 32
+        private const val INSTALL_SIZE_TOLERANCE_BYTES = 16L * 1024L * 1024L
+        private const val SUPPORTED_PACK_FORMAT_VERSION = 1
+        private const val SUPPORTED_GUEST_API_VERSION = 1
+        private const val MIN_TIMEOUT_MILLIS = 100L
+        private const val MAX_TIMEOUT_MILLIS = 30 * 60_000L
+        private val VERSION_PATTERN = Regex("[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?")
+        private val SHA256_PATTERN = Regex("[0-9a-f]{64}")
+        private val PACK_ID_PATTERN = Regex("[a-z0-9][a-z0-9._-]{0,79}")
+    }
+}
+
+object AgentOnDeviceRuntimeTools {
+    const val STATUS = "signalasi.runtime.status"
+    const val LIST_PACKS = "signalasi.runtime.packs.list"
+    const val EXECUTE = "signalasi.runtime.execute"
+
+    val toolIds = setOf(STATUS, LIST_PACKS, EXECUTE)
+
+    fun definitions(context: Context): List<AgentNativeToolDefinition> {
+        val manager = AgentOnDeviceRuntimeManager(context.applicationContext)
+        return listOf(
+            AgentNativeToolDefinition(
+                descriptor = descriptor(
+                    id = STATUS,
+                    title = "Inspect on-device runtime",
+                    description = "Reports Android-local Linux backend, language, toolchain, and media-pack readiness.",
+                    input = AgentNativeJsonSchema.objectSchema(additionalProperties = false),
+                    risk = AgentNativeToolRisk.LOW,
+                    availability = AgentNativeToolAvailability.AVAILABLE
+                ),
+                executor = AgentNativeToolExecutor {
+                    val status = manager.status()
+                    AgentNativeToolExecutionResult.success(runtimeStatusOutput(status), "On-device runtime inspected")
+                },
+                executorId = "signalasi.android_runtime_broker"
+            ),
+            AgentNativeToolDefinition(
+                descriptor = descriptor(
+                    id = LIST_PACKS,
+                    title = "List on-device runtime packs",
+                    description = "Lists Android-local Linux, language, FFmpeg, and toolchain pack state.",
+                    input = AgentNativeJsonSchema.objectSchema(additionalProperties = false),
+                    risk = AgentNativeToolRisk.LOW,
+                    availability = AgentNativeToolAvailability.AVAILABLE
+                ),
+                executor = AgentNativeToolExecutor {
+                    val status = manager.status()
+                    AgentNativeToolExecutionResult.success(
+                        mapOf("packs" to status.packs.map(::packOutput)),
+                        "On-device runtime packs listed"
+                    )
+                },
+                executorId = "signalasi.android_runtime_broker"
+            ),
+            AgentNativeToolDefinition(
+                descriptor = descriptor(
+                    id = EXECUTE,
+                    title = "Execute in the on-device Linux sandbox",
+                    description = "Runs bounded shell, language, build, or FFmpeg work in the Android-local Linux runtime.",
+                    input = executionInputSchema(),
+                    risk = AgentNativeToolRisk.MEDIUM,
+                    timeoutMillis = 30 * 60_000L,
+                    availability = executionAvailability(manager)
+                ),
+                executor = AgentNativeToolExecutor { invocation ->
+                    val language = AgentRuntimeLanguage.entries.firstOrNull {
+                        it.wireValue == invocation.input["language"]?.toString()
+                    } ?: return@AgentNativeToolExecutor AgentNativeToolExecutionResult.failure(
+                        "invalid_runtime_language", "Runtime language is invalid"
+                    )
+                    val request = AgentRuntimeExecutionRequest(
+                        language = language,
+                        source = invocation.input["source"]?.toString().orEmpty(),
+                        arguments = invocation.input.stringList("arguments"),
+                        timeoutMillis = (invocation.input["timeout_ms"] as? Number)?.toLong() ?: 60_000L,
+                        networkEnabled = invocation.input["network_enabled"] as? Boolean ?: false,
+                        artifactPaths = invocation.input.stringList("artifact_paths"),
+                        workspaceId = invocation.context.turnId
+                            .ifBlank { invocation.context.conversationId }
+                            .ifBlank { invocation.context.invocationId }
+                    )
+                    runCatching { manager.execute(request) }.fold(
+                        onSuccess = { response -> AgentNativeToolExecutionResult.success(
+                            output = mapOf(
+                                "exit_code" to response.exitCode,
+                                "stdout" to response.stdout,
+                                "stderr" to response.stderr,
+                                "duration_ms" to response.durationMillis,
+                                "artifacts" to response.artifacts
+                            ),
+                            message = if (response.exitCode == 0) "On-device runtime completed" else "On-device runtime exited with ${response.exitCode}"
+                        ) },
+                        onFailure = { error -> AgentNativeToolExecutionResult.failure(
+                            "on_device_runtime_failed", error.message ?: "On-device runtime failed", retryable = false
+                        ) }
+                    )
+                },
+                executorId = "signalasi.android_runtime_broker",
+                provenanceMetadata = mapOf(
+                    "platform" to "android",
+                    "sandbox" to "linux_guest",
+                    "network_default" to "disabled"
+                ),
+                availabilityProvider = AgentNativeToolAvailabilityProvider { executionAvailability(manager) }
+            )
+        )
+    }
+
+    private fun descriptor(
+        id: String,
+        title: String,
+        description: String,
+        input: AgentNativeJsonSchema,
+        risk: AgentNativeToolRisk,
+        timeoutMillis: Long = 30_000L,
+        availability: AgentNativeToolAvailability
+    ) = AgentNativeToolDescriptor(
+        id = id,
+        version = "1.0.0",
+        title = title,
+        description = description,
+        location = AgentNativeToolLocation.APPLICATION,
+        inputSchema = input,
+        outputSchema = AgentNativeJsonSchema.any(),
+        risk = risk,
+        capabilities = setOf("runtime.android_local", "runtime.linux", "runtime.sandboxed"),
+        timeoutMillis = timeoutMillis,
+        idempotency = AgentNativeToolIdempotency.NON_IDEMPOTENT,
+        availability = availability
+    )
+
+    private fun executionInputSchema() = AgentNativeJsonSchema.objectSchema(
+        properties = mapOf(
+            "language" to AgentNativeJsonSchema.string(enumValues = AgentRuntimeLanguage.entries.map { it.wireValue }),
+            "source" to AgentNativeJsonSchema.string(maxLength = 256 * 1024),
+            "arguments" to AgentNativeJsonSchema.array(AgentNativeJsonSchema.string(maxLength = 8 * 1024), maxItems = 256),
+            "timeout_ms" to AgentNativeJsonSchema.integer(100, 30 * 60_000L),
+            "network_enabled" to AgentNativeJsonSchema.boolean(),
+            "artifact_paths" to AgentNativeJsonSchema.array(AgentNativeJsonSchema.string(maxLength = 1_024), maxItems = 32)
+        ),
+        required = setOf("language", "source"),
+        additionalProperties = false
+    )
+
+    private fun executionAvailability(manager: AgentOnDeviceRuntimeManager): AgentNativeToolAvailability {
+        val status = manager.status()
+        return if (status.backendReady) AgentNativeToolAvailability.AVAILABLE else AgentNativeToolAvailability(
+            AgentNativeToolAvailabilityStatus.REQUIRES_SETUP,
+            status.reason,
+            System.currentTimeMillis()
+        )
+    }
+
+    private fun runtimeStatusOutput(status: AgentOnDeviceRuntimeStatus): Map<String, Any?> = mapOf(
+        "backend" to status.backend.wireValue,
+        "backend_ready" to status.backendReady,
+        "reason" to status.reason,
+        "architecture" to status.architecture,
+        "avf_advertised" to status.avfAdvertised,
+        "packs" to status.packs.map(::packOutput),
+        "languages" to AgentRuntimeLanguage.entries.map { language ->
+            mapOf(
+                "id" to language.wireValue,
+                "required_pack" to language.requiredPack,
+                "ready" to status.languageReady(language)
+            )
+        }
+    )
+
+    private fun packOutput(pack: AgentRuntimePackStatus): Map<String, Any?> = mapOf(
+        "id" to pack.id,
+        "state" to pack.state.wireValue,
+        "reason" to pack.reason,
+        "version" to pack.manifest?.version.orEmpty(),
+        "architecture" to pack.manifest?.architecture.orEmpty(),
+        "capabilities" to pack.manifest?.capabilities.orEmpty(),
+        "installed_size_bytes" to (pack.manifest?.installedSizeBytes ?: 0L),
+        "license" to pack.manifest?.license.orEmpty()
+    )
+
+    private fun Map<String, Any?>.stringList(key: String): List<String> =
+        (this[key] as? Iterable<*>)?.mapNotNull { it?.toString() }.orEmpty()
+}

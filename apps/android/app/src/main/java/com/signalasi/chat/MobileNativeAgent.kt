@@ -118,7 +118,7 @@ class MobileNativeAgent(
     ),
     private val observationController: AgentContinuousObservationController = AgentContinuousObservationController(),
     private val recoveryController: AgentActionRecoveryController = AgentActionRecoveryController(),
-    private val memoryStore: AgentMemoryStore = SharedPreferencesAgentMemoryStore(context),
+    private val memoryStore: AgentMemoryStore = EncryptedAgentMemoryStore(context),
     private val knowledgeStore: AgentKnowledgeStore = SharedPreferencesAgentKnowledgeStore(context),
     private val taskStore: AgentTaskStore = SharedPreferencesAgentTaskStore(context),
     private val workflowStore: AgentWorkflowStore = SharedPreferencesAgentWorkflowStore(context),
@@ -211,6 +211,8 @@ class MobileNativeAgent(
         restoreSession(sessionStore.load())
         return snapshot()
     }
+
+    fun agentRegistrySnapshot(): List<AgentRegistration> = connectorRegistry.registrations()
 
     fun startNewConversation(conversationId: String): AgentUiState {
         PhoneExecutionAuthority.requestCancellation(sessionId)
@@ -7907,8 +7909,12 @@ class InMemoryAgentMemoryStore : AgentMemoryStore {
     }
 }
 
-class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
-    private val prefs = AgentEncryptedPreferences(context, PREFS)
+class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
+    private val database = AgentEncryptedDatabase(
+        context,
+        DATABASE,
+        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
+    )
 
     @Synchronized
     override fun remember(item: AgentMemoryItem): AgentMemoryWriteResult {
@@ -7929,7 +7935,19 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
                 existing.value.equals(nextItem.value, ignoreCase = true)
         }
         if (sameValue != null) {
-            return AgentMemoryWriteResult(sameValue, duplicate = true)
+            val merged = sameValue.copy(
+                confidence = maxOf(sameValue.confidence, nextItem.confidence),
+                evidenceCount = (sameValue.evidenceCount + nextItem.evidenceCount).coerceAtMost(MAX_EVIDENCE_COUNT),
+                lastConfirmedAtMillis = maxOf(
+                    sameValue.lastConfirmedAtMillis,
+                    nextItem.lastConfirmedAtMillis,
+                    System.currentTimeMillis()
+                ),
+                expiresAtMillis = maxOf(sameValue.expiresAtMillis, nextItem.expiresAtMillis)
+            )
+            items[items.indexOfFirst { it.id == sameValue.id }] = merged
+            saveItems(trimHistory(items))
+            return AgentMemoryWriteResult(merged, duplicate = true)
         }
         if (normalizedKey.isBlank()) {
             items.add(nextItem)
@@ -7981,22 +7999,31 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
     override fun recall(query: String): List<AgentMemoryItem> {
         val cleanQuery = query.trim()
         if (cleanQuery.isBlank()) return emptyList()
-        return loadItems()
-            .filter { it.status == AgentMemoryStatus.ACTIVE }
+        val now = System.currentTimeMillis()
+        val items = loadItems()
+        val recalled = items
+            .filter { it.status == AgentMemoryStatus.ACTIVE && !it.isExpired(now) }
             .map { item -> item to score(item, cleanQuery) }
             .filter { (_, score) -> score > 0 }
             .sortedWith(
-                compareByDescending<Pair<AgentMemoryItem, Int>> { it.second }
+                compareByDescending<Pair<AgentMemoryItem, Double>> { it.second }
                     .thenByDescending { it.first.important }
                     .thenByDescending { it.first.timestampMillis }
             )
             .map { it.first }
             .take(MAX_RECALL_ITEMS)
+        if (recalled.isNotEmpty()) {
+            val recalledIds = recalled.mapTo(hashSetOf()) { it.id }
+            saveItems(items.map { item ->
+                if (item.id in recalledIds) item.copy(lastAccessedAtMillis = now) else item
+            })
+        }
+        return recalled
     }
 
     @Synchronized
     override fun recent(limit: Int): List<AgentMemoryItem> = loadItems()
-        .filter { it.status == AgentMemoryStatus.ACTIVE }
+        .filter { it.status == AgentMemoryStatus.ACTIVE && !it.isExpired(System.currentTimeMillis()) }
         .sortedWith(compareByDescending<AgentMemoryItem> { it.important }.thenByDescending { it.timestampMillis })
         .take(limit.coerceAtLeast(0))
 
@@ -8150,23 +8177,29 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
         return resolved
     }
 
-    private fun score(item: AgentMemoryItem, query: String): Int {
+    private fun score(item: AgentMemoryItem, query: String): Double {
         val value = item.value.lowercase()
         val cleanQuery = query.lowercase()
-        var score = 0
-        if (value == cleanQuery) score += 12
-        if (value.contains(cleanQuery) || cleanQuery.contains(value)) score += 8
-        cleanQuery
-            .split(Regex("\\s+"))
+        var lexicalScore = 0.0
+        if (value == cleanQuery) lexicalScore += 12.0
+        if (value.contains(cleanQuery) || cleanQuery.contains(value)) lexicalScore += 8.0
+        queryTokens(cleanQuery).forEach { token -> if (value.contains(token)) lexicalScore += 1.0 }
+        val ageDays = ((System.currentTimeMillis() - item.timestampMillis).coerceAtLeast(0L) / DAY_MILLIS.toDouble())
+        val recency = 1.0 / (1.0 + ageDays / 30.0)
+        val evidence = kotlin.math.ln(1.0 + item.evidenceCount.coerceAtLeast(1))
+        return lexicalScore * (0.5 + item.confidence.coerceIn(0.0, 1.0)) +
+            recency + evidence + if (item.important) 2.0 else 0.0
+    }
+
+    private fun queryTokens(value: String): Set<String> {
+        val wordTokens = value.split(Regex("[^\\p{L}\\p{N}]+"))
             .filter { it.length >= MIN_TOKEN_LENGTH }
-            .forEach { token ->
-                if (value.contains(token)) score += 1
-            }
-        return score
+        val cjkBigrams = value.filter { it.code in 0x3400..0x9FFF }.windowed(2)
+        return (wordTokens + cjkBigrams).toSet()
     }
 
     private fun loadItems(): List<AgentMemoryItem> {
-        val raw = prefs.readString(KEY_ITEMS, "[]")
+        val raw = database.readString(KEY_ITEMS, "[]")
         return runCatching {
             val array = JSONArray(raw)
             buildList {
@@ -8180,7 +8213,7 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
     private fun saveItems(items: List<AgentMemoryItem>) {
         val array = JSONArray()
         items.forEach { array.put(encodeMemoryItem(it)) }
-        prefs.writeString(KEY_ITEMS, array.toString())
+        database.writeString(KEY_ITEMS, array.toString())
     }
 
     private fun encodeMemoryItem(item: AgentMemoryItem): JSONObject = JSONObject()
@@ -8195,6 +8228,14 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
         .put("important", item.important)
         .put("status", item.status.name)
         .put("conflict_group_id", item.conflictGroupId)
+        .put("scope", item.scope.name)
+        .put("scope_id", item.scopeId)
+        .put("confidence", item.confidence)
+        .put("evidence_count", item.evidenceCount)
+        .put("auto_learned", item.autoLearned)
+        .put("last_confirmed_at_millis", item.lastConfirmedAtMillis)
+        .put("last_accessed_at_millis", item.lastAccessedAtMillis)
+        .put("expires_at_millis", item.expiresAtMillis)
 
     private fun decodeMemoryItem(json: JSONObject): AgentMemoryItem? {
         val value = json.optString("value").trim()
@@ -8210,7 +8251,15 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
             supersedesId = json.optString("supersedes_id"),
             important = json.optBoolean("important", false),
             status = enumOrDefault(json.optString("status"), AgentMemoryStatus.ACTIVE),
-            conflictGroupId = json.optString("conflict_group_id")
+            conflictGroupId = json.optString("conflict_group_id"),
+            scope = enumOrDefault(json.optString("scope"), AgentMemoryScope.GLOBAL),
+            scopeId = json.optString("scope_id"),
+            confidence = json.optDouble("confidence", 0.65).coerceIn(0.0, 1.0),
+            evidenceCount = json.optInt("evidence_count", 1).coerceIn(1, MAX_EVIDENCE_COUNT),
+            autoLearned = json.optBoolean("auto_learned", false),
+            lastConfirmedAtMillis = json.optLong("last_confirmed_at_millis", 0L).coerceAtLeast(0L),
+            lastAccessedAtMillis = json.optLong("last_accessed_at_millis", 0L).coerceAtLeast(0L),
+            expiresAtMillis = json.optLong("expires_at_millis", 0L).coerceAtLeast(0L)
         )
     }
 
@@ -8258,18 +8307,71 @@ class SharedPreferencesAgentMemoryStore(context: Context) : AgentMemoryStore {
     }
 
     companion object {
-        private const val PREFS = "signalasi_agent_memory"
+        private const val DATABASE = "signalasi_agent_memory_v2"
+        private const val UNUSED_LEGACY_PREFERENCES = "signalasi_agent_memory_v2_no_legacy"
         private const val KEY_ITEMS = "items"
-        private const val MAX_ITEMS = 200
+        private const val MAX_ITEMS = 1_000
         private const val MAX_RECALL_ITEMS = 8
+        private const val MAX_EVIDENCE_COUNT = 10_000
         private const val MIN_TOKEN_LENGTH = 3
         private const val MAX_KEY_PREFIX_LENGTH = 64
         private const val MAX_KEY_LENGTH = 80
+        private const val DAY_MILLIS = 86_400_000L
     }
 }
 
 interface AgentConnectorRegistry {
     fun availableTargets(): List<AgentCallableTarget>
+
+    fun registrations(): List<AgentRegistration> = availableTargets().map { target ->
+        val location = when {
+            target.id == "local-llm" -> AgentResourceLocation.PHONE
+            target.kind == AgentConnectorKind.MODEL -> AgentResourceLocation.CLOUD
+            target.kind == AgentConnectorKind.AGENT -> AgentResourceLocation.TRUSTED_DESKTOP
+            target.kind == AgentConnectorKind.DEVICE -> AgentResourceLocation.PRIVATE_NETWORK
+            else -> AgentResourceLocation.CLOUD
+        }
+        AgentRegistration(
+            agentId = target.id,
+            installationId = target.failureDomain.ifBlank { "installation:${target.id}" },
+            deviceId = target.failureDomain.ifBlank { "device:${target.id}" },
+            providerId = target.id.substringBefore(':'),
+            displayName = target.title,
+            kind = target.kind,
+            location = location,
+            status = when (target.status) {
+                AgentConnectorStatus.AVAILABLE -> AgentEndpointStatus.ONLINE
+                AgentConnectorStatus.DISCONNECTED -> AgentEndpointStatus.OFFLINE
+                AgentConnectorStatus.NEEDS_SETUP -> AgentEndpointStatus.PERMISSION_REQUIRED
+            },
+            capabilities = target.capabilities.toSet(),
+            protocol = AgentProtocolRange(
+                preferred = "1.0",
+                minimum = "1.0",
+                maximum = "1.0",
+                features = setOf("run.cancel", "run.events", "message.respond", "message.observe")
+            ),
+            connectionKind = when (location) {
+                AgentResourceLocation.PHONE -> AgentConnectionKind.IN_PROCESS
+                AgentResourceLocation.TRUSTED_DESKTOP -> AgentConnectionKind.SIGNALASI_LINK
+                AgentResourceLocation.PRIVATE_NETWORK -> AgentConnectionKind.HTTP
+                AgentResourceLocation.CLOUD -> AgentConnectionKind.HTTP
+            },
+            cost = if (location == AgentResourceLocation.CLOUD) AgentResourceCost.MEDIUM else AgentResourceCost.FREE,
+            latency = when (location) {
+                AgentResourceLocation.PHONE -> AgentResourceLatency.INSTANT
+                AgentResourceLocation.TRUSTED_DESKTOP, AgentResourceLocation.PRIVATE_NETWORK -> AgentResourceLatency.FAST
+                AgentResourceLocation.CLOUD -> AgentResourceLatency.NORMAL
+            },
+            trust = when (location) {
+                AgentResourceLocation.PHONE -> AgentResourceTrust.PHONE_SYSTEM
+                AgentResourceLocation.TRUSTED_DESKTOP -> AgentResourceTrust.VERIFIED_PAIRED
+                AgentResourceLocation.PRIVATE_NETWORK -> AgentResourceTrust.PRIVATE_CONFIGURED
+                AgentResourceLocation.CLOUD -> AgentResourceTrust.CLOUD_CONFIGURED
+            },
+            failureDomain = target.failureDomain
+        )
+    }
 }
 
 class StaticAgentConnectorRegistry : AgentConnectorRegistry {
@@ -9715,8 +9817,19 @@ data class AgentMemoryItem(
     val supersedesId: String = "",
     val important: Boolean = false,
     val status: AgentMemoryStatus = AgentMemoryStatus.ACTIVE,
-    val conflictGroupId: String = ""
-)
+    val conflictGroupId: String = "",
+    val scope: AgentMemoryScope = AgentMemoryScope.GLOBAL,
+    val scopeId: String = "",
+    val confidence: Double = 0.65,
+    val evidenceCount: Int = 1,
+    val autoLearned: Boolean = false,
+    val lastConfirmedAtMillis: Long = 0L,
+    val lastAccessedAtMillis: Long = 0L,
+    val expiresAtMillis: Long = 0L
+) {
+    fun isExpired(nowMillis: Long = System.currentTimeMillis()): Boolean =
+        expiresAtMillis > 0L && expiresAtMillis <= nowMillis
+}
 
 data class AgentMemoryWriteResult(
     val item: AgentMemoryItem?,
@@ -9826,6 +9939,15 @@ enum class AgentMemoryKind {
     WORKFLOW,
     KNOWLEDGE,
     SAFETY
+}
+
+enum class AgentMemoryScope {
+    GLOBAL,
+    CONVERSATION,
+    APPLICATION,
+    CONTACT,
+    WORKSPACE,
+    DEVICE
 }
 
 enum class AgentMemoryStatus {

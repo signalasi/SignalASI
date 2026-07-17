@@ -91,7 +91,8 @@ class AgentRunRecorder(context: Context) {
         finalOutputJson: String,
         renderSpecJson: String,
         artifacts: List<AgentArtifactReference>,
-        success: Boolean = true
+        success: Boolean = true,
+        finalStatus: AgentRecordedRunStatus? = null
     ): AgentRecordedRun? = update(runId) { current ->
         current.copy(
             normalizedIntent = normalizeIntent(current.originalRequest),
@@ -102,7 +103,7 @@ class AgentRunRecorder(context: Context) {
             finalOutputJson = sanitizeSecrets(safeJson(finalOutputJson, "{}", MAX_RESULT_CHARS)),
             renderSpecJson = sanitizeSecrets(safeJson(renderSpecJson, "{}", MAX_RENDER_CHARS)),
             artifacts = artifacts.take(MAX_ARTIFACTS),
-            status = if (success) AgentRecordedRunStatus.COMPLETED else AgentRecordedRunStatus.FAILED,
+            status = finalStatus ?: if (success) AgentRecordedRunStatus.COMPLETED else AgentRecordedRunStatus.FAILED,
             completedAtMillis = System.currentTimeMillis()
         )
     }
@@ -120,8 +121,20 @@ class AgentRunRecorder(context: Context) {
         context(conversationId)?.activeRunId?.let { id -> allRuns().firstOrNull { it.runId == id } }
 
     @Synchronized
+    fun run(runId: String): AgentRecordedRun? = allRuns().firstOrNull { it.runId == runId }
+
+    @Synchronized
     fun runsForThread(taskThreadId: String): List<AgentRecordedRun> =
         allRuns().filter { it.taskThreadId == taskThreadId }.sortedBy { it.revisionNumber }
+
+    @Synchronized
+    fun recentCompletedRuns(limit: Int = 100): List<AgentRecordedRun> = allRuns()
+        .asSequence()
+        .filter { it.status == AgentRecordedRunStatus.COMPLETED }
+        .sortedByDescending { it.completedAtMillis }
+        .take(limit.coerceIn(1, MAX_RUNS))
+        .toList()
+        .asReversed()
 
     @Synchronized
     fun context(conversationId: String): AgentTaskThreadContext? = contexts()
@@ -309,34 +322,46 @@ data class AgentSkillMatch(
 )
 
 object AgentSkillRequestTransformer {
-    private val singleCharacterArgument = Regex("([\u3400-\u9fff])\u5b57")
-
     fun transform(savedRequest: String, currentRequest: String): String {
         if (!sameTaskFamily(savedRequest, currentRequest)) return currentRequest.trim()
-        val requested = extractCharacter(currentRequest) ?: return currentRequest.trim()
-        val savedMatch = singleCharacterArgument.find(savedRequest) ?: return currentRequest.trim()
-        val characterGroup = savedMatch.groups[1] ?: return currentRequest.trim()
-        return savedRequest.replaceRange(characterGroup.range, requested.toString())
+        return replaceSingleAlignedArgument(savedRequest, currentRequest) ?: currentRequest.trim()
     }
 
-    fun sameTaskFamily(left: String, right: String): Boolean {
-        val leftTail = taskTail(left)
-        val rightTail = taskTail(right)
-        if (leftTail.length < MIN_TASK_TAIL_LENGTH || rightTail.length < MIN_TASK_TAIL_LENGTH) return false
-        return leftTail.contains(rightTail) || rightTail.contains(leftTail)
+    fun sameTaskFamily(left: String, right: String): Boolean =
+        AgentLearningAnalyzer.sameTaskFamily(left, right)
+
+    private fun replaceSingleAlignedArgument(saved: String, current: String): String? {
+        val savedTokens = semanticTokens(saved)
+        val currentTokens = semanticTokens(current)
+        for (savedIndex in savedTokens.indices) {
+            for (currentIndex in currentTokens.indices) {
+                if (savedTokens[savedIndex].text == currentTokens[currentIndex].text) continue
+                val leftAnchored = savedIndex > 0 && currentIndex > 0 &&
+                    savedTokens[savedIndex - 1].text.equals(currentTokens[currentIndex - 1].text, true)
+                val rightMatches = (1..MAX_RIGHT_ANCHORS).count { offset ->
+                    savedTokens.getOrNull(savedIndex + offset)?.text
+                        ?.equals(currentTokens.getOrNull(currentIndex + offset)?.text, true) == true
+                }
+                if (!leftAnchored || rightMatches < MIN_RIGHT_ANCHORS) continue
+                val savedToken = savedTokens[savedIndex]
+                val replacement = currentTokens[currentIndex].text
+                return saved.replaceRange(savedToken.start, savedToken.endExclusive, replacement)
+            }
+        }
+        return null
     }
 
-    fun extractCharacter(value: String): Char? = singleCharacterArgument.find(value)
-        ?.groups?.get(1)?.value?.singleOrNull()
-
-    private fun taskTail(value: String): String {
-        val match = singleCharacterArgument.find(value) ?: return ""
-        return value.substring(match.range.last + 1)
-            .lowercase(Locale.ROOT)
-            .filter { it.isLetterOrDigit() }
+    private fun semanticTokens(value: String): List<SemanticToken> {
+        val pattern = Regex("[A-Za-z0-9_]+|[\\u3400-\\u9FFF]|[^\\s]")
+        return pattern.findAll(value).map { match ->
+            SemanticToken(match.value, match.range.first, match.range.last + 1)
+        }.toList()
     }
 
-    private const val MIN_TASK_TAIL_LENGTH = 2
+    private data class SemanticToken(val text: String, val start: Int, val endExclusive: Int)
+
+    private const val MIN_RIGHT_ANCHORS = 2
+    private const val MAX_RIGHT_ANCHORS = 3
 }
 
 class AgentSkillMatcher(private val runtime: AgentSkillRuntime) {
@@ -383,8 +408,7 @@ class AgentSkillMatcher(private val runtime: AgentSkillRuntime) {
             ?: 0
     }
 
-    private fun normalize(value: String): String = value.lowercase(Locale.US)
-        .replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim()
+    private fun normalize(value: String): String = AgentLearningAnalyzer.taskFamily(value)
 
     private fun similarity(left: String, right: String): Double {
         if (AgentSkillRequestTransformer.sameTaskFamily(left, right)) return 0.97
@@ -424,7 +448,7 @@ class AgentConversationSkillCompiler(
         val successful = runs.filter { it.status == AgentRecordedRunStatus.COMPLETED }
         require(successful.isNotEmpty()) { "A completed Agent run is required before saving a Skill" }
         val latest = successful.last()
-        val calls = successful.flatMap { it.toolCalls }
+        val calls = latest.toolCalls
             .filter { it.status == AgentToolCallStatus.SUCCEEDED }
         val descriptors = availableTools().associateBy { it.id }
         val reusableCalls = calls.filter { it.toolName in descriptors }
@@ -434,7 +458,7 @@ class AgentConversationSkillCompiler(
         } else {
             reusableCalls.map { it.toolName }.distinct()
         }
-        val id = "skill_${sha256(successful.first().normalizedIntent.ifBlank { successful.first().originalRequest }).take(16)}"
+        val id = "skill_${sha256(AgentLearningAnalyzer.taskFamily(successful.first().originalRequest)).take(16)}"
         val version = nextVersion(id)
         val title = titleHint.trim().ifBlank { deriveTitle(successful.first().originalRequest) }
         val steps = if (usesAgentOrchestration) {
@@ -472,13 +496,13 @@ class AgentConversationSkillCompiler(
             author = "User Generated",
             source = "conversation",
             autoInvoke = true,
-            triggerExamples = successful.map { it.originalRequest }.distinct().take(12),
+            triggerExamples = successful.map { generalizeSkillText(it.originalRequest) }.distinct().take(12),
             negativeExamples = emptyList(),
             renderSpec = renderSpec,
             tests = listOf(
                 AgentSkillTestCase(
                     id = "regression_1",
-                    input = mapOf("request" to successful.first().originalRequest),
+                    input = mapOf("request" to generalizeSkillText(successful.first().originalRequest)),
                     expectedToolIds = toolIds.toSet()
                 )
             )
@@ -502,8 +526,7 @@ class AgentConversationSkillCompiler(
     fun install(runs: List<AgentRecordedRun>, titleHint: String = ""): AgentSkillInstallation =
         runtime.install(compile(runs, titleHint))
 
-    private fun deriveTitle(request: String): String = request.trim().replace(Regex("\\s+"), " ").take(32)
-        .ifBlank { "Learned Skill" }
+    private fun deriveTitle(request: String): String = AgentLearningAnalyzer.safeTitle(request)
 
     private fun buildInstructions(runs: List<AgentRecordedRun>): String = buildString {
         append("Complete requests in this task family by following the saved declarative tool workflow. ")
@@ -514,7 +537,7 @@ class AgentConversationSkillCompiler(
             .distinct()
         if (examples.isNotEmpty()) {
             append("Learned successful request sequence: ")
-            append(examples.joinToString(" -> ").take(8_000))
+            append(examples.joinToString(" -> ") { generalizeSkillText(it) }.take(8_000))
             append(". Preserve the successful interaction and output behavior while substituting the current request. ")
         }
         val feedback = runs.flatMap { it.userFeedback }.distinct()
@@ -535,6 +558,14 @@ class AgentConversationSkillCompiler(
         else -> value
     }
 }
+
+private fun generalizeSkillText(value: String): String = sanitizeSecrets(value)
+    .replace(Regex("(?i)\\bhttps?://[^\\s]+"), "[URL]")
+    .replace(Regex("(?i)(?:[a-z]:\\\\|\\\\\\\\)[^\\r\\n]+"), "[PATH]")
+    .replace(Regex("(?<![A-Za-z0-9])/(?:[^\\s/]+/)*[^\\s/]+"), "[PATH]")
+    .replace(Regex("(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b"), "[EMAIL]")
+    .replace(Regex("(?i)\\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\b"), "[ID]")
+    .take(8_000)
 
 class AgentSkillVersionManager(private val runtime: AgentSkillRuntime) {
     fun upgrade(base: AgentSkillInstallation, improvedRuns: List<AgentRecordedRun>): AgentSkillInstallation {

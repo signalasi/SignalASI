@@ -128,6 +128,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_AGENT_IMAGES = 2015
         private const val REQUEST_CONTROL_CENTER_PERMISSION = 2016
         private const val REQUEST_IMPORT_MCP_PACKAGE = 2017
+        private const val REQUEST_IMPORT_RUNTIME_PACK = 2018
         private const val EXTRA_REOPEN_CONTROL_CENTER_CHILD = "signalasi_reopen_control_center_child"
         private const val CONTROL_CENTER_CHILD_TEXT_SIZE = "text_size"
         private const val CAPABILITY_KIND_MCP = "mcp"
@@ -289,6 +290,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentRunRecorder: AgentRunRecorder
     private lateinit var agentSkillRuntime: AgentSkillRuntime
     private lateinit var agentSkillMatcher: AgentSkillMatcher
+    private lateinit var agentLearningEngine: AgentLearningEngine
+    private lateinit var agentRunEventStore: AgentRunEventStore
+    private lateinit var encryptedAgentRegistry: EncryptedAgentRegistry
     private lateinit var agentMcpRegistry: AgentMcpRegistry
     private lateinit var agentMcpPackageRepository: AgentMcpPackageRepository
     private val agentRunIdsByTurn = ConcurrentHashMap<String, String>()
@@ -415,12 +419,23 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         mobileNativeAgent = MobileNativeAgent(this)
         agentTranscriptStore = AgentTranscriptStore(this)
         agentRunRecorder = AgentRunRecorder(this)
+        agentRunEventStore = AgentRunEventStore(this)
+        encryptedAgentRegistry = EncryptedAgentRegistry(this)
+        mobileNativeAgent.agentRegistrySnapshot().forEach(encryptedAgentRegistry::upsert)
         agentSkillRuntime = AgentSkillRuntime(
             store = EncryptedAgentSkillStore(this),
             availableNativeToolIds = mobileNativeAgent.nativeToolCatalog().map { it.id } + AGENT_ORCHESTRATION_TOOL_ID
         )
         AgentBuiltInSkills.installAvailable(agentSkillRuntime)
         agentSkillMatcher = AgentSkillMatcher(agentSkillRuntime)
+        agentLearningEngine = AgentLearningEngine(
+            context = this,
+            memoryStore = EncryptedAgentMemoryStore(this),
+            skillRuntime = agentSkillRuntime,
+            skillCompiler = AgentConversationSkillCompiler(agentSkillRuntime) {
+                mobileNativeAgent.nativeToolCatalog()
+            }
+        )
         agentMcpRegistry = AgentMcpRegistry(EncryptedAgentMcpStore(this))
         agentMcpPackageRepository = AgentMcpPackageRepository(this)
         agentTranscriptStore.removeExactText("Create a safe local task plan")
@@ -1263,6 +1278,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             importAgentMcpPackageFromUri(data?.data ?: return)
             return
         }
+        if (requestCode == REQUEST_IMPORT_RUNTIME_PACK && resultCode == RESULT_OK) {
+            importRuntimePackFromUri(data?.data ?: return)
+            return
+        }
         if (requestCode == REQUEST_EXPORT_SKILL) {
             if (resultCode == RESULT_OK && data?.data != null) {
                 exportAgentSkillToUri(data.data!!)
@@ -1773,6 +1792,24 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             request = goal,
             activeSkillId = if (deterministicAction == null) skillMatch?.installation?.id.orEmpty() else ""
         )
+        val selectedAgentId = (forcedAction ?: deterministicAction)
+            ?.parameters?.get("connector_id")
+            .orEmpty()
+            .ifBlank { "signalasi-mobile" }
+        appendRunControlEvent(
+            run = run,
+            messageId = turnId,
+            taskId = turnId,
+            agentId = selectedAgentId,
+            type = AgentRunControlEventType.RUN_CREATED
+        )
+        appendRunControlEvent(
+            run = run,
+            messageId = turnId,
+            taskId = turnId,
+            agentId = selectedAgentId,
+            type = AgentRunControlEventType.RUN_STARTED
+        )
         Log.d(
             "SignalASIAgent",
             "run_recorded turn=${turnId.take(8)} elapsed_ms=${SystemClock.elapsedRealtime() - routingStartedAt}"
@@ -2151,6 +2188,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun recordDirectAgentRun(turnId: String, action: AgentAction, result: AgentActionResult) {
         val runId = agentRunIdsByTurn.remove(turnId) ?: return
+        val run = agentRunRecorder.run(runId) ?: return
         val toolName = action.parameters["tool_id"].orEmpty().ifBlank { "android.${action.kind.name.lowercase()}" }
         val call = AgentToolCallRecord(
             id = action.id,
@@ -2162,6 +2200,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             startedAtMillis = System.currentTimeMillis(),
             completedAtMillis = System.currentTimeMillis()
         )
+        appendRunControlEvent(
+            run = run,
+            messageId = turnId,
+            taskId = turnId,
+            agentId = "signalasi-mobile",
+            type = AgentRunControlEventType.TOOL_COMPLETED,
+            payload = mapOf("tool_id" to toolName, "success" to result.success),
+            stepId = action.id,
+            toolCallId = call.id
+        )
         agentRunRecorder.complete(
             runId = runId,
             planJson = JSONArray().put(JSONObject().put("action", action.id).put("kind", action.kind.name)).toString(),
@@ -2171,11 +2219,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             renderSpecJson = "{}",
             artifacts = emptyList(),
             success = result.success
-        )
+        )?.let(::observeCompletedAgentRun)
     }
 
     private fun recordSkillAgentRun(turnId: String, result: AgentSkillExecutionResult) {
         val runId = agentRunIdsByTurn.remove(turnId) ?: return
+        val run = agentRunRecorder.run(runId) ?: return
         val toolIds = agentSkillRuntime.get(result.skillId, result.version)?.manifest?.steps.orEmpty().map { it.toolId }
         val calls = result.toolResults.mapIndexed { index, toolResult ->
             AgentToolCallRecord(
@@ -2186,15 +2235,28 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 errorMessage = if (toolResult.isSuccess) "" else toolResult.message
             )
         }
+        calls.forEachIndexed { index, call ->
+            appendRunControlEvent(
+                run = run,
+                messageId = turnId,
+                taskId = turnId,
+                agentId = "signalasi-mobile",
+                type = AgentRunControlEventType.TOOL_COMPLETED,
+                payload = mapOf("tool_id" to call.toolName, "success" to (call.status == AgentToolCallStatus.SUCCEEDED)),
+                stepId = "skill-step-${index + 1}",
+                toolCallId = call.id
+            )
+        }
         agentRunRecorder.complete(
             runId, "[]", calls, "[]",
             JSONObject().put("text", result.message).toString(), "{}", emptyList(), result.success
-        )
+        )?.let(::observeCompletedAgentRun)
     }
 
     private fun recordAgentRunFromState(turnId: String, state: AgentUiState) {
         if (state.phase !in setOf(AgentPhase.COMPLETED, AgentPhase.FAILED, AgentPhase.CANCELLED, AgentPhase.BLOCKED)) return
         val runId = agentRunIdsByTurn.remove(turnId) ?: return
+        val run = agentRunRecorder.run(runId) ?: return
         val result = state.lastActionResult
         val nativeActions = (state.plan?.actionHistory.orEmpty() + state.plan?.actions.orEmpty())
             .distinctBy { it.id }
@@ -2213,6 +2275,35 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 errorMessage = if (succeeded) "" else action.result
             )
         }
+        val routeTarget = state.plan?.route?.targetId.orEmpty()
+            .ifBlank { state.plan?.selectedAgentOrModel.orEmpty() }
+        if (routeTarget.isNotBlank() && routeTarget != "signalasi-mobile") {
+            appendRunControlEvent(
+                run = run,
+                messageId = turnId,
+                taskId = turnId,
+                agentId = routeTarget,
+                type = AgentRunControlEventType.HANDOFF,
+                payload = mapOf(
+                    "from_agent_id" to "signalasi-mobile",
+                    "to_agent_id" to routeTarget,
+                    "reason" to state.plan?.routeRationale.orEmpty(),
+                    "return_to_agent_id" to "signalasi-mobile"
+                )
+            )
+        }
+        calls.forEachIndexed { index, call ->
+            appendRunControlEvent(
+                run = run,
+                messageId = turnId,
+                taskId = turnId,
+                agentId = routeTarget.ifBlank { "signalasi-mobile" },
+                type = AgentRunControlEventType.TOOL_COMPLETED,
+                payload = mapOf("tool_id" to call.toolName, "success" to (call.status == AgentToolCallStatus.SUCCEEDED)),
+                stepId = nativeActions.getOrNull(index)?.id.orEmpty(),
+                toolCallId = call.id
+            )
+        }
         val planJson = JSONArray().apply {
             state.plan?.actions.orEmpty().forEach { item ->
                 put(JSONObject().put("id", item.id).put("kind", item.kind.name).put("target", item.target))
@@ -2226,7 +2317,63 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             finalOutputJson = JSONObject().put("text", result?.message.orEmpty()).toString(),
             renderSpecJson = "{}",
             artifacts = emptyList(),
-            success = state.phase == AgentPhase.COMPLETED
+            success = state.phase == AgentPhase.COMPLETED,
+            finalStatus = when (state.phase) {
+                AgentPhase.COMPLETED -> AgentRecordedRunStatus.COMPLETED
+                AgentPhase.CANCELLED -> AgentRecordedRunStatus.CANCELLED
+                else -> AgentRecordedRunStatus.FAILED
+            }
+        )?.let(::observeCompletedAgentRun)
+    }
+
+    private fun observeCompletedAgentRun(run: AgentRecordedRun) {
+        val existing = agentRunEventStore.events(run.runId).lastOrNull()
+        appendRunControlEvent(
+            run = run,
+            messageId = existing?.messageId.orEmpty().ifBlank { run.runId },
+            taskId = existing?.taskId.orEmpty().ifBlank { run.taskThreadId },
+            agentId = existing?.agentId.orEmpty().ifBlank { "signalasi-mobile" },
+            type = when (run.status) {
+                AgentRecordedRunStatus.COMPLETED -> AgentRunControlEventType.RUN_COMPLETED
+                AgentRecordedRunStatus.CANCELLED -> AgentRunControlEventType.RUN_CANCELLED
+                AgentRecordedRunStatus.RUNNING, AgentRecordedRunStatus.FAILED -> AgentRunControlEventType.RUN_FAILED
+            }
+        )
+        if (run.status != AgentRecordedRunStatus.COMPLETED) return
+        val privateMode = agentTranscriptStore.context(run.conversationId).privateMode
+        agentLearningEngine.observeCompletedRun(
+            run = run,
+            recentRuns = agentRunRecorder.recentCompletedRuns(),
+            privateMode = privateMode,
+            memoryCaptureEnabled = mobileNativeAgent.safetySettings().memoryCapture
+        )
+    }
+
+    private fun appendRunControlEvent(
+        run: AgentRecordedRun,
+        messageId: String,
+        taskId: String,
+        agentId: String,
+        type: AgentRunControlEventType,
+        payload: AgentNativeJsonObject = emptyMap(),
+        stepId: String = "",
+        toolCallId: String = ""
+    ) {
+        val profile = AppStore.profile(this)
+        agentRunEventStore.appendNext(
+            AgentRunControlEvent(
+                conversationId = run.conversationId,
+                messageId = messageId,
+                taskId = taskId,
+                runId = run.runId,
+                stepId = stepId,
+                toolCallId = toolCallId,
+                agentId = agentId,
+                deviceId = profile.optString("device_id").ifBlank { profile.optString("signalasi_id") },
+                type = type,
+                sequence = 0L,
+                payload = payload
+            )
         )
     }
 
@@ -3848,6 +3995,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val secure = SignalASIMqttClient.isConnected() && SignalASIMqttClient.isSecureReady()
         val homeAssistant = HomeAssistantSettingsStore.load(this)
         val homeAssistantReady = homeAssistant.configured
+        val onDeviceRuntime = AgentOnDeviceRuntimeManager(this).status()
 
         controlCenterRenderer.render(
             content,
@@ -3882,6 +4030,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             ccRouteRow(ControlCenterRoute.AGENT_CORE, R.string.cc_agent_core_title, R.string.cc_agent_core_subtitle, R.drawable.ic_agent_node, getString(if (safety.executionPaused) R.string.on_device_agent_status_paused else R.string.cc_status_online), if (safety.executionPaused) ControlCenterTone.AMBER else ControlCenterTone.GREEN),
                             ccRouteRow(ControlCenterRoute.RESOURCE_ROUTING, R.string.cc_resource_routing_title, R.string.cc_resource_routing_subtitle, R.drawable.ic_settings_model, getString(if (availableResources > 0) R.string.cc_status_available else R.string.status_needs_setup), if (availableResources > 0) ControlCenterTone.BLUE else ControlCenterTone.AMBER),
                             ccRouteRow(ControlCenterRoute.MEMORY, getString(R.string.cc_memory_title), getString(R.string.cc_memory_subtitle, memoryCount), R.drawable.ic_agent_memory, getString(if (safety.memoryCapture) R.string.status_enabled else R.string.common_off), if (safety.memoryCapture) ControlCenterTone.GREEN else ControlCenterTone.NEUTRAL),
+                            ccRouteRow(ControlCenterRoute.LEARNING, R.string.cc_learning_title, R.string.cc_learning_subtitle, R.drawable.ic_agent_skill, agentLearningEngine.proposals(AgentLearningProposalStatus.PENDING).size.toString(), ControlCenterTone.VIOLET),
                             ccRouteRow(ControlCenterRoute.KNOWLEDGE, getString(R.string.cc_knowledge_title), getString(R.string.cc_knowledge_subtitle, knowledgeCount), R.drawable.ic_agent_knowledge, knowledgeCount.toString(), ControlCenterTone.AMBER)
                         )
                     ),
@@ -3889,6 +4038,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         getString(R.string.cc_section_execution_devices),
                         listOf(
                             ccRouteRow(ControlCenterRoute.PHONE_CAPABILITIES, getString(R.string.cc_phone_title), getString(R.string.cc_phone_subtitle, availableTools, toolsNeedingAttention), R.drawable.ic_agent_control, "$availableTools/${tools.size}", if (availableTools > 0) ControlCenterTone.GREEN else ControlCenterTone.AMBER),
+                            ccRouteRow(ControlCenterRoute.ON_DEVICE_RUNTIME, R.string.cc_runtime_title, R.string.cc_runtime_subtitle, R.drawable.ic_settings_diagnostics, getString(if (onDeviceRuntime.backendReady) R.string.cc_status_ready else R.string.status_needs_setup), if (onDeviceRuntime.backendReady) ControlCenterTone.GREEN else ControlCenterTone.AMBER),
                             ccRouteRow(ControlCenterRoute.APP_TOOLS, R.string.cc_apps_title, R.string.cc_apps_subtitle, R.drawable.ic_tab_discover, "", ControlCenterTone.BLUE),
                             ccRouteRow(
                                 ControlCenterRoute.SMART_SPACES,
@@ -4046,6 +4196,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 mobileNativeAgent.updateMemoryCapture(next)
                 renderCurrentControlCenterDestination()
             }
+            "learning.toggle_capture" -> {
+                val next = !mobileNativeAgent.safetySettings().memoryCapture
+                mobileNativeAgent.updateMemoryCapture(next)
+                renderCurrentControlCenterDestination()
+            }
+            "runtime.import" -> openRuntimePackPicker()
             "phone.catalog" -> openExistingControlCenterPage { showNativeToolCatalogPage() }
             "apps.adapters" -> openExistingControlCenterPage { showAgentAppAdaptersPage() }
             "spaces.configure" -> openExistingControlCenterPage { showDeviceFeaturePage() }
@@ -4133,6 +4289,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         openExistingControlCenterPage { showAgentMemoryPage(kinds) }
                     }
                 }
+                actionId.startsWith("learning.proposal:") -> {
+                    showLearningProposalDialog(actionId.substringAfter("learning.proposal:"))
+                }
+                actionId.startsWith("runtime.pack:") -> {
+                    showRuntimePackDialog(actionId.substringAfter("runtime.pack:"))
+                }
                 actionId.startsWith("routing.target:") -> showControlCenterTarget(actionId.substringAfter("routing.target:"))
                 actionId.startsWith("tool.detail:") -> showNativeToolDetailPage(actionId.substringAfter("tool.detail:"))
                 actionId.startsWith("node.desktop:") -> showControlCenterDesktop(actionId.substringAfter("node.desktop:"))
@@ -4163,6 +4325,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 ControlCenterRoute.EXECUTION_POLICY -> renderControlCenterExecutionPolicyPage()
                 ControlCenterRoute.RESOURCE_ROUTING -> renderControlCenterRoutingPage()
                 ControlCenterRoute.MEMORY -> renderControlCenterMemoryPage()
+                ControlCenterRoute.LEARNING -> renderControlCenterLearningPage()
                 ControlCenterRoute.KNOWLEDGE -> showAgentKnowledgePage()
                 ControlCenterRoute.MCP -> showCapabilityLibraryPage(
                     if (destination.payload == CAPABILITY_KIND_SKILL) AgentCapabilityCatalogKind.SKILL
@@ -4170,6 +4333,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 )
                 ControlCenterRoute.TASKS -> showAgentRecentTasksPage()
                 ControlCenterRoute.PHONE_CAPABILITIES -> renderControlCenterPhoneCapabilitiesPage()
+                ControlCenterRoute.ON_DEVICE_RUNTIME -> renderControlCenterRuntimePage()
                 ControlCenterRoute.APP_TOOLS -> renderControlCenterAppToolsPage()
                 ControlCenterRoute.SMART_SPACES -> renderControlCenterSmartSpacesPage()
                 ControlCenterRoute.NODES -> renderControlCenterNodesPage()
@@ -4441,6 +4605,288 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 )
             )
         )
+    }
+
+    private fun renderControlCenterLearningPage() {
+        val pending = agentLearningEngine.proposals(AgentLearningProposalStatus.PENDING)
+        val approved = agentLearningEngine.proposals(AgentLearningProposalStatus.APPROVED)
+        val rejected = agentLearningEngine.proposals(AgentLearningProposalStatus.REJECTED)
+        val captureEnabled = mobileNativeAgent.safetySettings().memoryCapture
+        val proposalRows = pending.map { proposal ->
+            ControlCenterRowSpec(
+                actionId = "learning.proposal:${proposal.id}",
+                title = proposal.title,
+                subtitle = getString(R.string.cc_learning_evidence_subtitle, proposal.evidenceRunIds.size),
+                iconRes = R.drawable.ic_agent_skill,
+                status = getString(R.string.cc_learning_review),
+                tone = ControlCenterTone.VIOLET
+            )
+        }.ifEmpty {
+            listOf(
+                ControlCenterRowSpec(
+                    actionId = "",
+                    title = getString(R.string.cc_learning_no_proposals_title),
+                    subtitle = getString(R.string.cc_learning_no_proposals_subtitle),
+                    iconRes = R.drawable.ic_agent_skill,
+                    status = getString(R.string.cc_status_ready),
+                    tone = ControlCenterTone.GREEN,
+                    showChevron = false
+                )
+            )
+        }
+        showControlCenterFeature(
+            getString(R.string.cc_learning_title),
+            ControlCenterPageSpec(
+                banner = ControlCenterBannerSpec(
+                    title = getString(R.string.cc_learning_banner_title),
+                    subtitle = getString(R.string.cc_learning_banner_subtitle),
+                    iconRes = R.drawable.ic_agent_skill,
+                    tone = if (pending.isEmpty()) ControlCenterTone.GREEN else ControlCenterTone.VIOLET
+                ),
+                hero = ControlCenterHeroSpec(
+                    title = getString(R.string.cc_learning_overview_title),
+                    subtitle = getString(R.string.cc_learning_overview_subtitle),
+                    iconRes = R.drawable.ic_agent_skill,
+                    metrics = listOf(
+                        ControlCenterMetricSpec(pending.size.toString(), getString(R.string.cc_learning_metric_pending)),
+                        ControlCenterMetricSpec(approved.size.toString(), getString(R.string.cc_learning_metric_approved)),
+                        ControlCenterMetricSpec(rejected.size.toString(), getString(R.string.cc_learning_metric_rejected))
+                    )
+                ),
+                sections = listOf(
+                    ControlCenterSectionSpec(getString(R.string.cc_learning_section_proposals), proposalRows),
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_learning_section_policy),
+                        listOf(
+                            ControlCenterRowSpec(
+                                actionId = "learning.toggle_capture",
+                                title = getString(R.string.cc_learning_memory_title),
+                                subtitle = getString(R.string.cc_learning_memory_subtitle),
+                                iconRes = R.drawable.ic_agent_memory,
+                                switchValue = captureEnabled,
+                                showChevron = false
+                            ),
+                            ControlCenterRowSpec(
+                                actionId = "",
+                                title = getString(R.string.cc_learning_review_policy_title),
+                                subtitle = getString(R.string.cc_learning_review_policy_subtitle),
+                                iconRes = R.drawable.ic_security_shield,
+                                status = getString(R.string.cc_learning_review),
+                                tone = ControlCenterTone.BLUE,
+                                showChevron = false
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    }
+
+    private fun showLearningProposalDialog(proposalId: String) {
+        val proposal = agentLearningEngine.proposals().firstOrNull { it.id == proposalId } ?: return
+        AlertDialog.Builder(this)
+            .setTitle(proposal.title)
+            .setMessage(
+                getString(
+                    R.string.cc_learning_dialog_message,
+                    proposal.summary,
+                    proposal.evidenceRunIds.size
+                )
+            )
+            .setPositiveButton(R.string.cc_learning_approve) { _, _ ->
+                val installed = agentLearningEngine.approve(proposal.id)
+                Toast.makeText(
+                    this,
+                    getString(if (installed != null) R.string.cc_learning_approved else R.string.cc_learning_action_failed),
+                    Toast.LENGTH_SHORT
+                ).show()
+                renderControlCenterLearningPage()
+            }
+            .setNegativeButton(R.string.cc_learning_reject) { _, _ ->
+                agentLearningEngine.reject(proposal.id)
+                renderControlCenterLearningPage()
+            }
+            .setNeutralButton(R.string.common_cancel, null)
+            .show()
+    }
+
+    private fun renderControlCenterRuntimePage() {
+        val status = AgentOnDeviceRuntimeManager(this).status()
+        val readyPacks = status.packs.count { it.state == AgentRuntimePackState.READY }
+        val packRows = status.packs.map { pack ->
+            val stateText = getString(
+                when (pack.state) {
+                    AgentRuntimePackState.READY -> R.string.cc_status_ready
+                    AgentRuntimePackState.NOT_INSTALLED -> R.string.cc_status_not_installed
+                    AgentRuntimePackState.INVALID, AgentRuntimePackState.INCOMPATIBLE -> R.string.cc_status_degraded
+                }
+            )
+            ControlCenterRowSpec(
+                actionId = if (pack.state == AgentRuntimePackState.READY) "runtime.pack:${pack.id}" else "runtime.import",
+                title = runtimePackTitle(pack.id),
+                subtitle = pack.reason.ifBlank {
+                    pack.manifest?.capabilities?.joinToString().orEmpty().ifBlank {
+                        getString(R.string.cc_runtime_pack_subtitle)
+                    }
+                },
+                iconRes = if (pack.id == "ffmpeg") R.drawable.ic_tab_discover else R.drawable.ic_settings_diagnostics,
+                status = stateText,
+                tone = if (pack.state == AgentRuntimePackState.READY) ControlCenterTone.GREEN else ControlCenterTone.AMBER,
+                showChevron = true
+            )
+        }
+        showControlCenterFeature(
+            getString(R.string.cc_runtime_title),
+            ControlCenterPageSpec(
+                banner = ControlCenterBannerSpec(
+                    title = getString(if (status.backendReady) R.string.cc_runtime_ready_title else R.string.cc_runtime_setup_title),
+                    subtitle = status.reason,
+                    iconRes = R.drawable.ic_settings_diagnostics,
+                    tone = if (status.backendReady) ControlCenterTone.GREEN else ControlCenterTone.AMBER
+                ),
+                hero = ControlCenterHeroSpec(
+                    title = getString(R.string.cc_runtime_overview_title),
+                    subtitle = getString(R.string.cc_runtime_overview_subtitle),
+                    iconRes = R.drawable.ic_settings_diagnostics,
+                    badges = listOf(
+                        ControlCenterBadgeSpec(status.architecture.ifBlank { "unknown" }, ControlCenterTone.BLUE),
+                        ControlCenterBadgeSpec(status.backend.wireValue, if (status.backendReady) ControlCenterTone.GREEN else ControlCenterTone.NEUTRAL)
+                    ),
+                    metrics = listOf(
+                        ControlCenterMetricSpec(readyPacks.toString(), getString(R.string.cc_runtime_metric_ready)),
+                        ControlCenterMetricSpec(status.packs.size.toString(), getString(R.string.cc_runtime_metric_total)),
+                        ControlCenterMetricSpec(AgentRuntimeLanguage.entries.count(status::languageReady).toString(), getString(R.string.cc_runtime_metric_languages))
+                    )
+                ),
+                sections = listOf(
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_runtime_section_management),
+                        listOf(
+                            ControlCenterRowSpec(
+                                actionId = "runtime.import",
+                                title = getString(R.string.cc_runtime_import_title),
+                                subtitle = getString(R.string.cc_runtime_import_subtitle),
+                                iconRes = R.drawable.ic_import,
+                                status = "",
+                                tone = ControlCenterTone.BLUE
+                            )
+                        )
+                    ),
+                    ControlCenterSectionSpec(getString(R.string.cc_runtime_section_packs), packRows),
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_runtime_section_security),
+                        listOf(
+                            ControlCenterRowSpec("", getString(R.string.cc_runtime_isolation_title), getString(R.string.cc_runtime_isolation_subtitle), R.drawable.ic_security_shield, getString(R.string.cc_status_ready), ControlCenterTone.GREEN, showChevron = false),
+                            ControlCenterRowSpec("", getString(R.string.cc_runtime_network_title), getString(R.string.cc_runtime_network_subtitle), R.drawable.ic_protocol_link, getString(R.string.common_off), ControlCenterTone.NEUTRAL, showChevron = false)
+                        )
+                    )
+                )
+            )
+        )
+    }
+
+    private fun runtimePackTitle(id: String): String = when (id) {
+        "linux-base" -> getString(R.string.cc_runtime_pack_linux)
+        "python-uv" -> getString(R.string.cc_runtime_pack_python)
+        "node-js" -> getString(R.string.cc_runtime_pack_node)
+        "go" -> "Go"
+        "rust" -> "Rust"
+        "cpp" -> "C / C++"
+        "java" -> "Java"
+        "ffmpeg" -> "FFmpeg"
+        else -> id
+    }
+
+    private fun openRuntimePackPicker() {
+        startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = AgentRuntimePackInstaller.PACKAGE_MIME_TYPE
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf(AgentRuntimePackInstaller.PACKAGE_MIME_TYPE, "application/zip", "application/octet-stream")
+            )
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }, REQUEST_IMPORT_RUNTIME_PACK)
+    }
+
+    private fun importRuntimePackFromUri(uri: Uri) {
+        runCatching {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        Toast.makeText(this, getString(R.string.cc_runtime_installing), Toast.LENGTH_SHORT).show()
+        thread(name = "signalasi-runtime-pack-install") {
+            val outcome = runCatching { AgentRuntimePackInstaller(this).install(uri) }
+            runOnUiThread {
+                outcome.fold(
+                    onSuccess = { result ->
+                        val message = if (result.state == AgentRuntimePackState.READY) {
+                            getString(R.string.cc_runtime_install_success, runtimePackTitle(result.packId), result.version)
+                        } else {
+                            getString(
+                                R.string.cc_runtime_install_incomplete,
+                                runtimePackTitle(result.packId),
+                                result.reason.ifBlank { getString(R.string.status_needs_setup) }
+                            )
+                        }
+                        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                    },
+                    onFailure = { error ->
+                        Toast.makeText(
+                            this,
+                            getString(R.string.cc_runtime_install_failed, error.message ?: getString(R.string.status_unknown)),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                )
+                if (controlCenterDestination?.route == ControlCenterRoute.ON_DEVICE_RUNTIME) {
+                    renderControlCenterRuntimePage()
+                }
+            }
+        }
+    }
+
+    private fun showRuntimePackDialog(packId: String) {
+        val pack = AgentOnDeviceRuntimeManager(this).status().packs.firstOrNull { it.id == packId } ?: return
+        val manifest = pack.manifest
+        val message = getString(
+            R.string.cc_runtime_pack_details_message,
+            manifest?.version.orEmpty().ifBlank { getString(R.string.status_unknown) },
+            manifest?.architecture.orEmpty().ifBlank { getString(R.string.status_unknown) },
+            formatBytes(manifest?.installedSizeBytes ?: 0L),
+            manifest?.license.orEmpty().ifBlank { getString(R.string.status_unknown) }
+        )
+        AlertDialog.Builder(this)
+            .setTitle(runtimePackTitle(packId))
+            .setMessage(message)
+            .setPositiveButton(R.string.cc_runtime_uninstall) { _, _ -> confirmRuntimePackUninstall(packId) }
+            .setNegativeButton(R.string.common_cancel, null)
+            .show()
+    }
+
+    private fun confirmRuntimePackUninstall(packId: String) {
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.cc_runtime_uninstall_title, runtimePackTitle(packId)))
+            .setMessage(R.string.cc_runtime_uninstall_message)
+            .setPositiveButton(R.string.cc_runtime_uninstall) { _, _ ->
+                thread(name = "signalasi-runtime-pack-uninstall") {
+                    val outcome = runCatching { AgentRuntimePackInstaller(this).uninstall(packId) }
+                    runOnUiThread {
+                        Toast.makeText(
+                            this,
+                            outcome.fold(
+                                onSuccess = { getString(R.string.cc_runtime_uninstall_success, runtimePackTitle(packId)) },
+                                onFailure = { getString(R.string.cc_runtime_uninstall_failed, it.message ?: getString(R.string.status_unknown)) }
+                            ),
+                            Toast.LENGTH_LONG
+                        ).show()
+                        if (controlCenterDestination?.route == ControlCenterRoute.ON_DEVICE_RUNTIME) {
+                            renderControlCenterRuntimePage()
+                        }
+                    }
+                }
+            }
+            .setNegativeButton(R.string.common_cancel, null)
+            .show()
     }
 
     private fun showPermissionModeSettingsPage() {
@@ -5654,6 +6100,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         turnId: String = "",
         syncTranscript: Boolean = true
     ) {
+        if (turnId.isNotBlank()) recordRunControlProgress(state, turnId)
         if (conversationId != agentTranscriptStore.activeConversation().id) {
             if (syncTranscript) syncAgentTranscript(state, conversationId, turnId)
             return
@@ -5689,6 +6136,52 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentSubmitButton.isEnabled = true
         agentSubmitButton.alpha = 1f
         latestAgentScreenContext = state.currentScreen
+    }
+
+    private fun recordRunControlProgress(state: AgentUiState, turnId: String) {
+        val runId = agentRunIdsByTurn[turnId] ?: return
+        val run = agentRunRecorder.run(runId) ?: return
+        val action = state.pendingAction
+        val eventType = when (state.phase) {
+            AgentPhase.OBSERVING -> AgentRunControlEventType.STEP_STARTED
+            AgentPhase.PLANNING -> AgentRunControlEventType.PLANNING
+            AgentPhase.WAITING_CONFIRMATION -> AgentRunControlEventType.WAITING_FOR_USER
+            AgentPhase.EXECUTING -> if (action != null) {
+                AgentRunControlEventType.TOOL_STARTED
+            } else {
+                AgentRunControlEventType.STEP_STARTED
+            }
+            AgentPhase.VERIFYING -> AgentRunControlEventType.TOOL_PROGRESS
+            AgentPhase.WAITING_RESPONSE -> AgentRunControlEventType.WAITING_FOR_DEVICE
+            AgentPhase.PAUSED -> AgentRunControlEventType.PAUSED
+            AgentPhase.CANCELLED,
+            AgentPhase.BLOCKED,
+            AgentPhase.FAILED,
+            AgentPhase.COMPLETED -> return
+        }
+        val stepId = action?.id.orEmpty().ifBlank { state.steps.firstOrNull { it.status == AgentStepStatus.CURRENT }?.kind?.name.orEmpty() }
+        val toolCallId = action?.takeIf {
+            it.kind == AgentActionKind.CALL_NATIVE_TOOL || it.kind == AgentActionKind.CALL_CONNECTOR
+        }?.id.orEmpty()
+        val latest = agentRunEventStore.events(runId).lastOrNull()
+        if (latest?.type == eventType && latest.stepId == stepId && latest.toolCallId == toolCallId) return
+        val agentId = state.plan?.route?.targetId.orEmpty()
+            .ifBlank { state.plan?.selectedAgentOrModel.orEmpty() }
+            .ifBlank { "signalasi-mobile" }
+        appendRunControlEvent(
+            run = run,
+            messageId = turnId,
+            taskId = turnId,
+            agentId = agentId,
+            type = eventType,
+            payload = mapOf(
+                "phase" to state.phase.name.lowercase(Locale.ROOT),
+                "action_kind" to action?.kind?.name.orEmpty().lowercase(Locale.ROOT),
+                "delivery_mode" to state.plan?.route?.deliveryMode.orEmpty()
+            ),
+            stepId = stepId,
+            toolCallId = toolCallId
+        )
     }
 
     private fun renderAgentOutput(state: AgentUiState, conversationId: String, turnId: String) {
