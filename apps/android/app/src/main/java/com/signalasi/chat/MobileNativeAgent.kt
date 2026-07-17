@@ -6715,9 +6715,9 @@ class DefaultAgentSafetyPolicy(
         }
         val deniedPermissions = (deniedSystemPermissions + deniedCapabilities).distinct()
         val blocksScreenAction = mode == PermissionMode.OBSERVE_ONLY &&
-            plan.actions.any { it.kind != AgentActionKind.READ_SCREEN && it.kind != AgentActionKind.DRAFT_PLAN }
+            plan.actions.any { it.kind != AgentActionKind.READ_SCREEN }
         val blocksExecution = mode == PermissionMode.SUGGEST_ONLY &&
-            plan.actions.any { it.kind != AgentActionKind.DRAFT_PLAN }
+            plan.actions.any { it.kind != AgentActionKind.READ_SCREEN && it.kind != AgentActionKind.DRAFT_PLAN }
         val blocksHighRisk = highRiskGuardEnabled() && highestRisk == AgentRisk.BLOCKED
         val blockedActionReason = plan.actions
             .firstOrNull { it.risk == AgentRisk.BLOCKED }
@@ -6736,16 +6736,20 @@ class DefaultAgentSafetyPolicy(
                     confirmationConsentStore?.isRemembered(AgentConfirmationPolicy.consentKey(action)) != true
             }
         }
-        Log.d(
-            "SignalASISafety",
-            "review mode=${mode.name} actions=${pendingActions.joinToString(",") { action ->
-                "${action.kind.name}:${AgentConfirmationPolicy.tier(action).name}"
-            }} tier_confirmation=$requiresTierConfirmation blocked=$blocked"
-        )
+        runCatching {
+            Log.d(
+                "SignalASISafety",
+                "review mode=${mode.name} actions=${pendingActions.joinToString(",") { action ->
+                    "${action.kind.name}:${AgentConfirmationPolicy.tier(action).name}"
+                }} tier_confirmation=$requiresTierConfirmation blocked=$blocked"
+            )
+        }
         val requiresConfirmation = when (mode) {
             PermissionMode.OBSERVE_ONLY,
-            PermissionMode.SUGGEST_ONLY -> true
-            PermissionMode.ASK_BEFORE_ACTION,
+            PermissionMode.SUGGEST_ONLY -> false
+            PermissionMode.ASK_BEFORE_ACTION -> pendingActions.any {
+                it.kind != AgentActionKind.READ_SCREEN && it.kind != AgentActionKind.DRAFT_PLAN
+            }
             PermissionMode.AUTO_LOW_RISK -> requiresTierConfirmation
         }
         val warnings = buildList {

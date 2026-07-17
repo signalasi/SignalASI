@@ -133,6 +133,17 @@ const androidStringsZh = fs.readFileSync(path.join(workspaceRoot, "android", "ap
 const androidStringsEn = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "res", "values", "strings.xml"), "utf8");
 const androidSourceRoot = path.join(workspaceRoot, "android", "app", "src", "main");
 
+for (const resource of ["colors.xml", "styles.xml"]) {
+  const localizedResource = path.join(androidSourceRoot, "res", "values-zh-rCN", resource);
+  if (fs.existsSync(localizedResource)) {
+    throw new Error(`${resource} must not be localized; locale-specific copies override Android night resources`);
+  }
+}
+
+if (!smokeAndroidReset.includes("SIGNALASI_ALLOW_DESTRUCTIVE_RESET")) {
+  throw new Error("Android destructive reset smoke must require an explicit disposable-device opt-in");
+}
+
 if (!main.includes("/signalasi/verify")) {
   throw new Error("Electron desktop must use /signalasi/verify");
 }

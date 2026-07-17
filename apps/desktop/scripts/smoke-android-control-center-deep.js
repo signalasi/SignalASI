@@ -10,6 +10,9 @@ const adb = createAdb(root, message => process.stderr.write(`${message}\n`));
 const reportPath = path.join(root, "build", "reports", "android-control-center-deep.json");
 const debugPreferencesPath = "shared_prefs/signalasi_debug.xml";
 const homeAssistantPreferencesPath = "shared_prefs/signalasi_home_assistant.xml";
+const displayPreferencesPath = "shared_prefs/signalasi_display.xml";
+const safetyPreferencesPath = "shared_prefs/signalasi_agent_safety.xml";
+const plannerPreferencesPath = "shared_prefs/signalasi_agent_model_planner.xml";
 
 const labels = {
   back: ["\u2039"],
@@ -195,7 +198,7 @@ async function expectNear(labelCandidates, expectedCandidates, name) {
   const nearby = nodes.filter(node => {
     if (!node.bounds || !(node.text || "").trim()) return false;
     const nodeY = (node.bounds[1] + node.bounds[3]) / 2;
-    return Math.abs(nodeY - centerY) <= 42;
+    return Math.abs(nodeY - centerY) <= 90;
   }).map(node => node.text.trim().toLowerCase());
   const expected = expectedCandidates.map(value => value.toLowerCase());
   if (!nearby.some(value => expected.some(candidate => value === candidate || value.includes(candidate)))) {
@@ -251,6 +254,105 @@ function permissionGranted(permission) {
   return new RegExp(`${escaped}: granted=true`).test(output);
 }
 
+function intentResolvable(action, data = "", mimeType = "", category = "") {
+  const args = ["shell", "cmd", "package", "resolve-activity", "--brief", "-a", action];
+  if (data) args.push("-d", data);
+  if (mimeType) args.push("-t", mimeType);
+  if (category) args.push("-c", category);
+  try {
+    return /[\w.]+\/[\w.$]+/.test(adb(args));
+  } catch (_) {
+    return false;
+  }
+}
+
+function packageInstalled(packageId) {
+  try {
+    return adb(["shell", "pm", "path", packageId]).includes("package:");
+  } catch (_) {
+    return false;
+  }
+}
+
+function nodeHeight(xml, candidates) {
+  const node = findNode(xml, candidates);
+  if (!node?.bounds) throw new Error(`Could not measure: ${candidates.join(" / ")}`);
+  return node.bounds[3] - node.bounds[1];
+}
+
+function captureScreenshot(name) {
+  const remote = `/sdcard/${name}.png`;
+  const local = path.join(root, "build", "reports", `${name}.png`);
+  fs.mkdirSync(path.dirname(local), { recursive: true });
+  adb(["shell", "screencap", "-p", remote]);
+  adb(["pull", remote, local]);
+  return local;
+}
+
+async function waitForTextScaleSelection(candidates, name) {
+  for (let attempt = 0; attempt < 18; attempt += 1) {
+    try {
+      await expectNear(candidates, ["Selected", "\u5df2\u9009\u62e9"], `${name}-${attempt}`);
+      return;
+    } catch (_) {
+      await sleep(250);
+    }
+  }
+  throw new Error(`Text scale UI did not settle: ${candidates.join(" / ")}`);
+}
+
+async function selectTextScale(candidates, value, name) {
+  const expected = `<string name="text_scale">${value}</string>`;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (readAppFile(displayPreferencesPath).includes(expected)) {
+      await waitForTextScaleSelection(candidates, `${name}-settled`);
+      return;
+    }
+    await tapText(candidates, `${name}-${attempt}`, true);
+    for (let poll = 0; poll < 10; poll += 1) {
+      await sleep(200);
+      if (readAppFile(displayPreferencesPath).includes(expected)) {
+        await waitForTextScaleSelection(candidates, `${name}-settled`);
+        return;
+      }
+    }
+  }
+  throw new Error(`Text scale did not persist: ${value}`);
+}
+
+function restartApp() {
+  adb(["shell", "am", "force-stop", packageName]);
+  adb(["shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"]);
+}
+
+function currentNightMode() {
+  const output = adb(["shell", "cmd", "uimode", "night"]);
+  return output.match(/Night mode:\s*([\w_]+)/i)?.[1] || "no";
+}
+
+function colorLuminance(argb) {
+  const value = Number(argb) >>> 0;
+  const red = (value >>> 16) & 0xff;
+  const green = (value >>> 8) & 0xff;
+  const blue = value & 0xff;
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+async function debugThemeSnapshot(mode) {
+  adb(["shell", "cmd", "uimode", "night", mode]);
+  await sleep(1_200);
+  adb(["shell", "am", "force-stop", packageName]);
+  adb(["shell", "am", "start", "-W", "-n", activityName]);
+  await sleep(1_800);
+  const token = `THEME_${mode}_${Date.now()}`;
+  adb(["shell", "am", "force-stop", packageName]);
+  adb([
+    "shell", "am", "start", "-W", "-n", activityName,
+    "--es", "signalasi_debug_control_center_theme", token,
+  ]);
+  return waitForDebugResult("control_center_theme_result", token);
+}
+
 async function expectSystemPackage(name) {
   await sleep(500);
   const pkg = currentPackage();
@@ -281,6 +383,35 @@ async function main() {
   adb(["shell", "wm", "dismiss-keyguard"]);
 
   const cases = [
+    ["all-control-center-routes-render", "Navigation", async () => {
+      const routes = [
+        ["profile", labels.profile],
+        ["system_status", labels.system],
+        ["agent_core", labels.agent],
+        ["execution_policy", labels.execution],
+        ["resource_routing", labels.routing],
+        ["memory", labels.memory],
+        ["knowledge", labels.knowledge],
+        ["skills", labels.skills],
+        ["tasks", ["Task Center", "\u4efb\u52a1\u4e2d\u5fc3"]],
+        ["phone_capabilities", labels.phone],
+        ["app_tools", labels.appTools],
+        ["smart_spaces", labels.spaces],
+        ["nodes", ["Agents, Models & Nodes", "Agent\u3001\u6a21\u578b\u4e0e\u8282\u70b9"]],
+        ["security", labels.security],
+        ["permissions_audit", labels.permissions],
+        ["voice", labels.voice],
+        ["data_backup", labels.data],
+        ["general", labels.general],
+        ["app_services", labels.services],
+        ["advanced", labels.advanced],
+        ["reset", labels.reset],
+      ];
+      for (const [route, expected] of routes) {
+        await openPage(route);
+        await expectText(expected, `route-${route}`);
+      }
+    }],
     ["encrypted-settings-and-device-store-roundtrip", "Persistence", async () => {
       const token = `CC_${Date.now()}`;
       adb(["shell", "am", "force-stop", packageName]);
@@ -336,20 +467,114 @@ async function main() {
     ["system-status-drilldown", "Status", async () => {
       await openPage("system_status");
       await tapText(["Agent runtime", "Agent \u8fd0\u884c\u65f6"], "status-runtime", true);
+      await sleep(500);
       await expectText(labels.agent, "status-agent");
       adb(["shell", "input", "keyevent", "KEYCODE_BACK"]);
       await expectText(labels.system, "status-back");
       await tapText(["Resource router", "\u8d44\u6e90\u8def\u7531\u5668"], "status-router", true);
       await expectText(labels.routing, "status-routing");
     }],
-    ["agent-core-and-policy-navigation", "Agent", async () => {
+    ["home-and-profile-reflect-live-agent-settings", "Status", async () => {
+      const original = readAppFile(safetyPreferencesPath);
+      try {
+        await openPage("agent_core");
+        const agentXml = await dumpUi("live-agent-before");
+        const wasPaused = Boolean(findNode(agentXml, ["Paused", "\u5df2\u6682\u505c"]));
+        await tapText(["Pause All Execution", "\u6682\u505c\u6240\u6709\u6267\u884c"], "live-agent-toggle", true);
+        const nowPaused = !wasPaused;
+        await openPage("home");
+        await expectNear(
+          ["Agent Core", "Agent \u5185\u6838"],
+          nowPaused ? ["Paused", "\u5df2\u6682\u505c"] : ["Online", "\u5728\u7ebf"],
+          "live-agent-home"
+        );
+        await openPage("profile");
+        await expectText(nowPaused ? ["Paused", "\u5df2\u6682\u505c"] : ["Agent enabled", "Agent \u5df2\u542f\u7528"], "live-agent-profile");
+
+        await openPage("memory");
+        const memoryXml = await dumpUi("live-memory-before");
+        const wasCaptureOn = Boolean(findNode(memoryXml, ["Automatic memory on", "\u81ea\u52a8\u8bb0\u5fc6\u5df2\u5f00\u542f"]));
+        await tapText(["Remember useful context", "\u8bb0\u4f4f\u6709\u7528\u7684\u4e0a\u4e0b\u6587"], "live-memory-toggle", true);
+        const captureOn = !wasCaptureOn;
+        await expectText(
+          captureOn ? ["Automatic memory on", "\u81ea\u52a8\u8bb0\u5fc6\u5df2\u5f00\u542f"] : ["Automatic memory off", "\u81ea\u52a8\u8bb0\u5fc6\u5df2\u5173\u95ed"],
+          "live-memory-page"
+        );
+        await openPage("home");
+        await expectNear(
+          ["Memory & Personalization", "\u8bb0\u5fc6\u4e0e\u4e2a\u6027\u5316"],
+          captureOn ? ["Enabled", "\u5df2\u5f00\u542f"] : ["Off", "\u5173\u95ed"],
+          "live-memory-home"
+        );
+      } finally {
+        adb(["shell", "am", "force-stop", packageName]);
+        restoreAppFile(safetyPreferencesPath, original);
+        restartApp();
+        await sleep(500);
+      }
+    }],
+    ["agent-core-policy-and-planner-navigation", "Agent", async () => {
       await openPage("agent_core");
       await tapText(["Smart Automatic", "\u667a\u80fd\u81ea\u52a8"], "agent-policy", true);
       await expectText(labels.execution, "agent-policy-open");
-      await tapText(["Direct execution", "\u76f4\u63a5\u6267\u884c"], "policy-direct", true);
-      await expectText(["On-device Agent", "\u624b\u673a\u7aef Agent"], "policy-advanced");
+      await tapText(["Permission mode", "\u6267\u884c\u6a21\u5f0f"], "policy-permission-mode", true, true);
+      await expectText(["Observe Only", "\u4ec5\u89c2\u5bdf"], "policy-permission-options");
       adb(["shell", "input", "keyevent", "KEYCODE_BACK"]);
       await expectText(labels.execution, "policy-back");
+      adb(["shell", "input", "keyevent", "KEYCODE_BACK"]);
+      await expectText(labels.agent, "agent-policy-parent");
+      await tapText(["Planning & Replanning", "\u89c4\u5212\u4e0e\u91cd\u89c4\u5212"], "agent-planner", true);
+      await expectText(["Planning & Coordination", "\u89c4\u5212\u4e0e\u534f\u540c"], "agent-planner-open");
+    }],
+    ["permission-mode-persists-and-changes-runtime-policy", "Agent", async () => {
+      const original = readAppFile(safetyPreferencesPath);
+      try {
+        await openPage("agent_core");
+        await tapText(["Smart Automatic", "\u667a\u80fd\u81ea\u52a8"], "permission-policy", true);
+        await tapText(["Permission mode", "\u6267\u884c\u6a21\u5f0f"], "permission-mode", true, true);
+        await tapText(["Observe Only", "\u4ec5\u89c2\u5bdf"], "permission-observe", true);
+        await expectNear(
+          ["Observe Only", "\u4ec5\u89c2\u5bdf"],
+          ["Selected", "\u5df2\u9009\u62e9"],
+          "permission-observe-selected"
+        );
+        await tapText(["Ask Before Action", "\u6267\u884c\u524d\u8be2\u95ee"], "permission-ask", true);
+        await expectNear(
+          ["Ask Before Action", "\u6267\u884c\u524d\u8be2\u95ee"],
+          ["Selected", "\u5df2\u9009\u62e9"],
+          "permission-ask-selected"
+        );
+        const changed = readAppFile(safetyPreferencesPath);
+        if (!changed || changed === original) {
+          throw new Error("Permission mode did not persist to the encrypted safety store");
+        }
+      } finally {
+        adb(["shell", "am", "force-stop", packageName]);
+        restoreAppFile(safetyPreferencesPath, original);
+        restartApp();
+        await sleep(500);
+      }
+    }],
+    ["planner-settings-persist-and-remain-on-page", "Agent", async () => {
+      const original = readAppFile(plannerPreferencesPath);
+      try {
+        await openPage("agent_core");
+        await tapText(["Planning & Replanning", "\u89c4\u5212\u4e0e\u91cd\u89c4\u5212"], "planner-open", true);
+        await expectText(["Planning & Coordination", "\u89c4\u5212\u4e0e\u534f\u540c"], "planner-ready");
+        await tapText(["Model-driven Planning", "\u6a21\u578b\u9a71\u52a8\u89c4\u5212"], "planner-toggle", true);
+        await expectText(["Planning & Coordination", "\u89c4\u5212\u4e0e\u534f\u540c"], "planner-after-toggle");
+        await tapText(["Maximum Tool Calls", "\u6700\u5927\u5de5\u5177\u8c03\u7528"], "planner-tools", true);
+        await expectText(["Planning & Coordination", "\u89c4\u5212\u4e0e\u534f\u540c"], "planner-after-budget");
+        const changed = readAppFile(plannerPreferencesPath);
+        if (!changed || changed === original) {
+          throw new Error("Planner settings did not persist to the encrypted planner store");
+        }
+      } finally {
+        adb(["shell", "am", "force-stop", packageName]);
+        restoreAppFile(plannerPreferencesPath, original);
+        restartApp();
+        await sleep(500);
+      }
     }],
     ["cloud-provider-model-config-back-stack", "Routing", async () => {
       await openPage("resource_routing");
@@ -410,6 +635,33 @@ async function main() {
       await openPage("app_tools");
       await tapText(["Manage App Adapters", "\u7ba1\u7406\u5e94\u7528\u9002\u914d\u5668"], "app-adapters", true);
       await expectText(["App Adapters", "\u5e94\u7528\u9002\u914d\u5668"], "app-adapters-open");
+      const adapterExpectations = [
+        {
+          labels: ["SMS", "\u77ed\u4fe1"],
+          available: intentResolvable("android.intent.action.SENDTO", "smsto:"),
+        },
+        {
+          labels: ["Phone", "\u7535\u8bdd"],
+          available: intentResolvable("android.intent.action.DIAL", "tel:"),
+        },
+        {
+          labels: ["Browser", "\u6d4f\u89c8\u5668"],
+          available: intentResolvable("android.intent.action.VIEW", "https://signalasi.org"),
+        },
+        {
+          labels: ["Files", "\u6587\u4ef6"],
+          available: intentResolvable("android.intent.action.OPEN_DOCUMENT", "", "*/*", "android.intent.category.OPENABLE") ||
+            packageInstalled("com.google.android.documentsui") ||
+            packageInstalled("com.android.documentsui"),
+        },
+      ];
+      for (const adapter of adapterExpectations) {
+        await expectNear(
+          adapter.labels,
+          adapter.available ? ["Allowed", "\u5df2\u5141\u8bb8"] : ["Needs setup", "\u5f85\u914d\u7f6e"],
+          `app-adapter-${adapter.labels[0].toLowerCase()}`
+        );
+      }
       adb(["shell", "input", "keyevent", "KEYCODE_BACK"]);
       await expectText(labels.appTools, "app-adapters-back");
       await tapText(["Universal App Executor", "\u901a\u7528\u5e94\u7528\u6267\u884c\u5668"], "app-accessibility", true);
@@ -506,11 +758,73 @@ async function main() {
       await tapText(["Appearance", "\u5916\u89c2"], "general-appearance", true);
       await expectSystemPackage("Display settings");
       await openPage("general");
-      await tapText(["About SignalASI", "\u5173\u4e8e SignalASI"], "general-about", true);
+      await tapText(["About", "\u5173\u4e8e"], "general-about", true, true);
       await expectText(["About SignalASI", "\u5173\u4e8e SignalASI"], "about-page");
       await tapText(["Security and privacy", "\u5b89\u5168\u4e0e\u9690\u79c1"], "about-security", true);
       await expectText(["Security Center", "\u5b89\u5168\u4e2d\u5fc3"], "about-security-open");
       await headerBack(["About SignalASI", "\u5173\u4e8e SignalASI"], "about-security");
+    }],
+    ["app-text-size-changes-pixels-and-persists", "General", async () => {
+      const original = readAppFile(displayPreferencesPath);
+      const preview = ["SignalASI can understand and act", "SignalASI \u80fd\u7406\u89e3\u5e76\u6267\u884c"];
+      try {
+        await openPage("general");
+        await tapText(["Text Size", "\u6587\u5b57\u5927\u5c0f"], "text-size-open", true);
+        await selectTextScale(["Standard", "\u6807\u51c6"], "standard", "text-size-standard");
+        const standardXml = await expectText(preview, "text-size-standard-preview");
+        captureScreenshot("control-center-text-standard");
+        const standardHeight = nodeHeight(standardXml, preview);
+        await selectTextScale(["Large", "\u5927"], "large", "text-size-large");
+        const largeXml = await expectText(preview, "text-size-large-preview");
+        captureScreenshot("control-center-text-large");
+        const largeHeight = nodeHeight(largeXml, preview);
+        if (largeHeight <= standardHeight) {
+          throw new Error(`Large text did not increase rendered pixels: ${standardHeight}px -> ${largeHeight}px`);
+        }
+        const persisted = readAppFile(displayPreferencesPath);
+        if (!persisted.includes('<string name="text_scale">large</string>')) {
+          throw new Error("Large text scale was not persisted");
+        }
+        restartApp();
+        await sleep(650);
+        await openPage("general");
+        await tapText(["Text Size", "\u6587\u5b57\u5927\u5c0f"], "text-size-reopen", true);
+        await expectNear(["Large", "\u5927"], ["Selected", "\u5df2\u9009\u62e9"], "text-size-persisted");
+      } finally {
+        adb(["shell", "am", "force-stop", packageName]);
+        restoreAppFile(displayPreferencesPath, original);
+        restartApp();
+        await sleep(500);
+      }
+    }],
+    ["android-night-mode-selects-real-app-palette", "General", async () => {
+      const originalMode = currentNightMode();
+      try {
+        const dark = await debugThemeSnapshot("yes");
+        const light = await debugThemeSnapshot("no");
+        if (!dark.night || light.night) {
+          throw new Error(`App uiMode did not follow Android: dark=${JSON.stringify(dark)} light=${JSON.stringify(light)}`);
+        }
+        const darkLuminance = colorLuminance(dark.page_bg);
+        const lightLuminance = colorLuminance(light.page_bg);
+        if (darkLuminance >= 80 || lightLuminance <= 180 || lightLuminance - darkLuminance < 100) {
+          throw new Error(`App palette did not switch visibly: dark=${darkLuminance.toFixed(1)} light=${lightLuminance.toFixed(1)}`);
+        }
+      } finally {
+        adb(["shell", "cmd", "uimode", "night", originalMode]);
+        await sleep(1_200);
+        restartApp();
+        await sleep(500);
+      }
+    }],
+    ["routing-policy-exposes-all-intent-modes", "Routing", async () => {
+      await openPage("resource_routing");
+      await tapText(["Route by Task Type", "\u6309\u4efb\u52a1\u7c7b\u578b\u8def\u7531"], "routing-policy", true);
+      await expectText(["Balanced", "\u5747\u8861"], "routing-balanced");
+      await scrollToText(["Fast", "\u5feb\u901f"], "routing-fast");
+      await scrollToText(["Economy", "\u7701\u8d39\u7528"], "routing-economy");
+      await scrollToText(["Highest quality", "\u6700\u9ad8\u8d28\u91cf"], "routing-quality");
+      await scrollToText(["Private", "\u9690\u79c1"], "routing-private");
     }],
     ["app-services-navigation", "Services", async () => {
       await openPage("app_services");

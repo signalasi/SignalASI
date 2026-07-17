@@ -910,16 +910,38 @@ object AppStore {
         HomeAssistantSettingsStore.clear(context)
         CustomDeviceConnectorStore(context).clear()
         AgentModelPlannerSettingsStore(context).clear()
+        EncryptedAgentSkillStore(context).clear()
         VoiceAssistantSettings.clear(context)
         SignalASILinkProtocol.clear(context)
         SignalASILinkDeliveryStore.clear(context)
+        AgentEncryptedDatabase(context, "signalasi_agent_runs").clear()
+        AgentEncryptedDatabase(context, EncryptedAgentWorkspaceStore.DATABASE_NAME).clear()
+        context.databaseList().forEach { database -> runCatching { context.deleteDatabase(database) } }
+        clearAllSharedPreferences(context)
         runCatching { AgentStorageCipher.deleteMasterKey() }
         SignalASICrypto.resetLocalIdentity(context)
-        context.cacheDir.deleteRecursively()
-        context.filesDir.resolve("backups").deleteRecursively()
-        context.filesDir.resolve("tmp").deleteRecursively()
+        context.cacheDir.listFiles().orEmpty().forEach { it.deleteRecursively() }
+        context.externalCacheDirs.filterNotNull().forEach { directory ->
+            directory.listFiles().orEmpty().forEach { it.deleteRecursively() }
+        }
+        context.filesDir.listFiles().orEmpty().forEach { it.deleteRecursively() }
+        context.noBackupFilesDir.listFiles().orEmpty().forEach { it.deleteRecursively() }
+        context.getExternalFilesDirs(null).filterNotNull().forEach { directory ->
+            directory.listFiles().orEmpty().forEach { it.deleteRecursively() }
+        }
         resetToFreshInstall(context)
         ensureInitialized(context)
+    }
+
+    private fun clearAllSharedPreferences(context: Context) {
+        val directory = File(context.applicationInfo.dataDir, "shared_prefs")
+        directory.listFiles()
+            .orEmpty()
+            .filter { it.extension == "xml" }
+            .map { it.nameWithoutExtension }
+            .forEach { name ->
+                context.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit()
+            }
     }
 
     private fun resetToFreshInstall(context: Context) {

@@ -18,8 +18,11 @@ data class HomeAssistantSettings(
     val accessToken: String = "",
     val defaultEntityId: String = ""
 ) {
+    val credentialsConfigured: Boolean
+        get() = baseUrl.isNotBlank() && accessToken.isNotBlank()
+
     val configured: Boolean
-        get() = enabled && baseUrl.isNotBlank() && accessToken.isNotBlank()
+        get() = enabled && credentialsConfigured
 }
 
 object HomeAssistantSettingsStore {

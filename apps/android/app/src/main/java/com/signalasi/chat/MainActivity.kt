@@ -3,6 +3,7 @@
 import android.app.Activity
 import android.app.DownloadManager
 import android.app.Dialog
+import android.app.NotificationManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ContentValues
@@ -19,6 +20,8 @@ import android.graphics.Paint
 import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.GradientDrawable
 import android.media.MediaRecorder
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -122,6 +125,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_AGENT_ATTACHMENTS = 2014
         private const val REQUEST_AGENT_IMAGES = 2015
         private const val REQUEST_CONTROL_CENTER_PERMISSION = 2016
+        private const val EXTRA_REOPEN_CONTROL_CENTER_CHILD = "signalasi_reopen_control_center_child"
+        private const val CONTROL_CENTER_CHILD_TEXT_SIZE = "text_size"
         private const val MAX_AGENT_ATTACHMENTS = 10
         private const val MAX_AGENT_ATTACHMENT_BYTES = 20L * 1024L * 1024L
         private const val UI_PREFS = "signalasi_ui_preferences"
@@ -391,15 +396,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     override fun attachBaseContext(newBase: Context) {
         val localized = AppLanguage.wrap(newBase)
-        val config = Configuration(localized.resources.configuration).apply {
-            fontScale = 1.0f
-        }
-        super.attachBaseContext(localized.createConfigurationContext(config))
+        super.attachBaseContext(localized)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        AppDisplaySettings.applyToResources(this)
         super.onCreate(savedInstanceState)
-        AppLanguage.applyToResources(this)
         configureSystemBars()
         setContentView(R.layout.activity_main)
         AppStore.ensureInitialized(this)
@@ -418,7 +420,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         androidTts = TextToSpeech(this) { status ->
             androidTtsReady = status == TextToSpeech.SUCCESS
             if (androidTtsReady) {
-                androidTts?.language = Locale.SIMPLIFIED_CHINESE
+                configureAndroidTtsLanguage()
                 androidTts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) = Unit
                     override fun onDone(utteranceId: String?) {
@@ -429,6 +431,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         runOnUiThread { onVoiceSpeechFinished() }
                     }
                 })
+            }
+            if (::featurePage.isInitialized &&
+                featurePage.visibility == View.VISIBLE &&
+                controlCenterDestination?.route == ControlCenterRoute.VOICE
+            ) {
+                runOnUiThread { renderCurrentControlCenterDestination() }
             }
         }
 
@@ -521,6 +529,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         refreshMePage()
         startMessageService()
         showMainTab(PAGE_AGENT)
+        reopenRequestedControlCenterChild(intent)
         requestAgentNotificationPermissionIfNeeded()
 
         SignalASIMqttClient.addListener(this)
@@ -568,8 +577,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         window.statusBarColor = getColorCompat(R.color.bar_bg)
         window.navigationBarColor = getColorCompat(R.color.bar_bg)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            var flags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val isNight = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+                Configuration.UI_MODE_NIGHT_YES
+            var flags = if (isNight) 0 else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+            if (!isNight && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 flags = flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
             }
             window.decorView.systemUiVisibility = flags
@@ -595,6 +606,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     override fun onResume() {
         super.onResume()
+        if (AppDisplaySettings.synchronizeNightMode(this)) {
+            recreate()
+            return
+        }
         AppForegroundTracker.onActivityResumed()
         AgentConnectorResponseBus.addListener(agentConnectorResponseListener)
         ScreenPerceptionState.addVisualListener(agentVisualScreenListener)
@@ -607,6 +622,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             reloadedAgentState
         }
         if (activeMainTab == PAGE_AGENT) renderAgentState(restoredAgentState)
+        if (featurePage.visibility == View.VISIBLE && controlCenterDestination != null) {
+            renderCurrentControlCenterDestination()
+        }
         consumePendingAgentConnectorResponses()
         reloadChatHistoryIfChanged()
     }
@@ -3371,7 +3389,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             return
         }
         val utteranceId = "signalasi_voice_${System.currentTimeMillis()}"
-        androidTts?.language = Locale.SIMPLIFIED_CHINESE
+        configureAndroidTtsLanguage()
         androidTts?.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), utteranceId)
         handler.postDelayed({
             if (voiceAssistantSpeaking) {
@@ -3379,6 +3397,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 after()
             }
         }, 20_000L)
+    }
+
+    private fun configureAndroidTtsLanguage() {
+        val languageTag = VoiceAssistantSettings.get(this).asrLanguage.ifBlank { "zh-CN" }
+        androidTts?.language = Locale.forLanguageTag(languageTag)
     }
 
     private fun onVoiceSpeechFinished() {
@@ -3720,8 +3743,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val memoryCount = mobileNativeAgent.memorySnapshot().activeCount
         val knowledgeCount = mobileNativeAgent.knowledgeSourceGroups().size
         val recentTasks = state.recentTasks.size
+        val safety = mobileNativeAgent.safetySettings()
+        val planner = mobileNativeAgent.modelPlannerSettings()
+        val privacyProtected = !planner.shareScreenText && !planner.shareAgentOutputsWithPlanner
         val secure = SignalASIMqttClient.isConnected() && SignalASIMqttClient.isSecureReady()
         val homeAssistant = HomeAssistantSettingsStore.load(this)
+        val homeAssistantReady = homeAssistant.configured
 
         controlCenterRenderer.render(
             content,
@@ -3733,9 +3760,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     preserveIconColor = true,
                     actionId = routeAction(ControlCenterRoute.PROFILE),
                     badges = listOf(
-                        ControlCenterBadgeSpec(getString(R.string.cc_core_ready), ControlCenterTone.GREEN),
+                        ControlCenterBadgeSpec(
+                            getString(if (safety.executionPaused) R.string.on_device_agent_status_paused else R.string.cc_core_ready),
+                            if (safety.executionPaused) ControlCenterTone.AMBER else ControlCenterTone.GREEN
+                        ),
                         ControlCenterBadgeSpec(getString(R.string.cc_trusted_devices_badge, trustedDeviceCount), ControlCenterTone.BLUE),
-                        ControlCenterBadgeSpec(getString(R.string.cc_privacy_badge), ControlCenterTone.NEUTRAL)
+                        ControlCenterBadgeSpec(
+                            getString(if (privacyProtected) R.string.cc_privacy_badge else R.string.cc_status_review),
+                            if (privacyProtected) ControlCenterTone.NEUTRAL else ControlCenterTone.AMBER
+                        )
                     ),
                     metrics = listOf(
                         ControlCenterMetricSpec(availableResources.toString(), getString(R.string.cc_metric_resources)),
@@ -3747,18 +3780,31 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     ControlCenterSectionSpec(
                         getString(R.string.cc_section_intelligent_core),
                         listOf(
-                            ccRouteRow(ControlCenterRoute.AGENT_CORE, R.string.cc_agent_core_title, R.string.cc_agent_core_subtitle, R.drawable.ic_agent_node, getString(R.string.cc_status_online), ControlCenterTone.GREEN),
-                            ccRouteRow(ControlCenterRoute.RESOURCE_ROUTING, R.string.cc_resource_routing_title, R.string.cc_resource_routing_subtitle, R.drawable.ic_settings_model, getString(R.string.cc_status_available), ControlCenterTone.BLUE),
-                            ccRouteRow(ControlCenterRoute.MEMORY, getString(R.string.cc_memory_title), getString(R.string.cc_memory_subtitle, memoryCount), R.drawable.ic_agent_memory, getString(R.string.status_enabled), ControlCenterTone.GREEN),
+                            ccRouteRow(ControlCenterRoute.AGENT_CORE, R.string.cc_agent_core_title, R.string.cc_agent_core_subtitle, R.drawable.ic_agent_node, getString(if (safety.executionPaused) R.string.on_device_agent_status_paused else R.string.cc_status_online), if (safety.executionPaused) ControlCenterTone.AMBER else ControlCenterTone.GREEN),
+                            ccRouteRow(ControlCenterRoute.RESOURCE_ROUTING, R.string.cc_resource_routing_title, R.string.cc_resource_routing_subtitle, R.drawable.ic_settings_model, getString(if (availableResources > 0) R.string.cc_status_available else R.string.status_needs_setup), if (availableResources > 0) ControlCenterTone.BLUE else ControlCenterTone.AMBER),
+                            ccRouteRow(ControlCenterRoute.MEMORY, getString(R.string.cc_memory_title), getString(R.string.cc_memory_subtitle, memoryCount), R.drawable.ic_agent_memory, getString(if (safety.memoryCapture) R.string.status_enabled else R.string.common_off), if (safety.memoryCapture) ControlCenterTone.GREEN else ControlCenterTone.NEUTRAL),
                             ccRouteRow(ControlCenterRoute.KNOWLEDGE, getString(R.string.cc_knowledge_title), getString(R.string.cc_knowledge_subtitle, knowledgeCount), R.drawable.ic_agent_knowledge, knowledgeCount.toString(), ControlCenterTone.AMBER)
                         )
                     ),
                     ControlCenterSectionSpec(
                         getString(R.string.cc_section_execution_devices),
                         listOf(
-                            ccRouteRow(ControlCenterRoute.PHONE_CAPABILITIES, getString(R.string.cc_phone_title), getString(R.string.cc_phone_subtitle, availableTools, toolsNeedingAttention), R.drawable.ic_agent_control, getString(R.string.cc_status_available), ControlCenterTone.GREEN),
+                            ccRouteRow(ControlCenterRoute.PHONE_CAPABILITIES, getString(R.string.cc_phone_title), getString(R.string.cc_phone_subtitle, availableTools, toolsNeedingAttention), R.drawable.ic_agent_control, "$availableTools/${tools.size}", if (availableTools > 0) ControlCenterTone.GREEN else ControlCenterTone.AMBER),
                             ccRouteRow(ControlCenterRoute.APP_TOOLS, R.string.cc_apps_title, R.string.cc_apps_subtitle, R.drawable.ic_tab_discover, "", ControlCenterTone.BLUE),
-                            ccRouteRow(ControlCenterRoute.SMART_SPACES, R.string.cc_spaces_title, R.string.cc_spaces_subtitle, R.drawable.ic_device_node, getString(if (homeAssistant.configured) R.string.cc_status_online else R.string.cc_status_not_configured), if (homeAssistant.configured) ControlCenterTone.GREEN else ControlCenterTone.AMBER),
+                            ccRouteRow(
+                                ControlCenterRoute.SMART_SPACES,
+                                R.string.cc_spaces_title,
+                                R.string.cc_spaces_subtitle,
+                                R.drawable.ic_device_node,
+                                getString(
+                                    when {
+                                        !homeAssistant.credentialsConfigured -> R.string.cc_status_not_configured
+                                        homeAssistantReady -> R.string.status_enabled
+                                        else -> R.string.common_off
+                                    }
+                                ),
+                                if (homeAssistantReady) ControlCenterTone.GREEN else ControlCenterTone.AMBER
+                            ),
                             ccRouteRow(ControlCenterRoute.TASKS, R.string.cc_tasks_title, R.string.cc_tasks_subtitle, R.drawable.ic_agent_history, recentTasks.toString(), if (state.runningTaskCount > 0) ControlCenterTone.AMBER else ControlCenterTone.NEUTRAL),
                             ccRouteRow(ControlCenterRoute.SKILLS, R.string.agent_skills_title, R.string.settings_status_skills, R.drawable.ic_agent_skill, agentSkillRuntime.list(enabledOnly = true).size.toString(), ControlCenterTone.VIOLET)
                         )
@@ -3840,31 +3886,69 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "profile.copy_fingerprint" -> copyText(SignalASICrypto.localIdentitySha256(), getString(R.string.security_copied_phone_fingerprint))
             "profile.recovery" -> openControlCenterDestination(ControlCenterDestination(ControlCenterRoute.DATA_BACKUP))
             "agent.execution_policy" -> openControlCenterDestination(ControlCenterDestination(ControlCenterRoute.EXECUTION_POLICY))
+            "agent.permission_mode" -> openExistingControlCenterPage { showPermissionModeSettingsPage() }
             "agent.toggle_pause" -> {
                 val next = !mobileNativeAgent.safetySettings().executionPaused
                 mobileNativeAgent.updateExecutionPaused(next)
                 renderCurrentControlCenterDestination()
             }
-            "agent.advanced" -> openExistingControlCenterPage { showOnDeviceAgentFeaturePage() }
+            "agent.planner" -> openExistingControlCenterPage { showAgentPlannerSettingsPage() }
+            "agent.planner.toggle_enabled" -> {
+                mobileNativeAgent.updateModelPlannerEnabled(!mobileNativeAgent.modelPlannerSettings().enabled)
+                showAgentPlannerSettingsPage()
+            }
+            "agent.planner.toggle_screen_text" -> {
+                mobileNativeAgent.updateModelPlannerScreenText(!mobileNativeAgent.modelPlannerSettings().shareScreenText)
+                showAgentPlannerSettingsPage()
+            }
+            "agent.planner.model_source" -> showAgentModelPlannerSourceDialog { showAgentPlannerSettingsPage() }
+            "agent.planner.toggle_replanning" -> {
+                mobileNativeAgent.updateModelPlannerDynamicReplanning(!mobileNativeAgent.modelPlannerSettings().dynamicReplanning)
+                showAgentPlannerSettingsPage()
+            }
+            "agent.planner.max_replans" -> {
+                val current = mobileNativeAgent.modelPlannerSettings().maxReplans
+                mobileNativeAgent.updateModelPlannerMaxReplans(if (current < 3) 3 else if (current < 5) 5 else 1)
+                showAgentPlannerSettingsPage()
+            }
+            "agent.planner.toggle_multi_agent" -> {
+                mobileNativeAgent.updateMultiAgentCoordination(!mobileNativeAgent.modelPlannerSettings().multiAgentCoordination)
+                showAgentPlannerSettingsPage()
+            }
+            "agent.planner.toggle_share_outputs" -> {
+                mobileNativeAgent.updateShareAgentOutputsWithPlanner(!mobileNativeAgent.modelPlannerSettings().shareAgentOutputsWithPlanner)
+                showAgentPlannerSettingsPage()
+            }
+            "agent.planner.max_hops" -> {
+                val current = mobileNativeAgent.modelPlannerSettings().maxAgentHops
+                mobileNativeAgent.updateMaxAgentHops(if (current < 4) 4 else if (current < 8) 8 else 2)
+                showAgentPlannerSettingsPage()
+            }
+            "agent.planner.max_tools" -> {
+                val current = mobileNativeAgent.modelPlannerSettings().maxToolCalls
+                mobileNativeAgent.updateMaxToolCalls(if (current < 16) 16 else if (current < 32) 32 else 8)
+                showAgentPlannerSettingsPage()
+            }
+            "agent.planner.max_actions" -> {
+                val current = mobileNativeAgent.modelPlannerSettings().maxActions
+                mobileNativeAgent.updateModelPlannerMaxActions(if (current < 8) 8 else if (current < 12) 12 else 4)
+                showAgentPlannerSettingsPage()
+            }
             "memory.manage" -> openExistingControlCenterPage { showAgentMemoryPage() }
             "memory.toggle_capture" -> {
                 val next = !mobileNativeAgent.safetySettings().memoryCapture
                 mobileNativeAgent.updateMemoryCapture(next)
                 renderCurrentControlCenterDestination()
             }
-            "routing.cloud" -> openExistingControlCenterPage { showCloudProviderPage() }
-            "routing.agents" -> openExistingControlCenterPage { showAgentFeaturePage() }
             "phone.catalog" -> openExistingControlCenterPage { showNativeToolCatalogPage() }
             "apps.adapters" -> openExistingControlCenterPage { showAgentAppAdaptersPage() }
             "spaces.configure" -> openExistingControlCenterPage { showDeviceFeaturePage() }
             "spaces.entities" -> showHomeAssistantCollectionPage("entities")
             "spaces.automations" -> showHomeAssistantCollectionPage("automations")
-            "nodes.manage" -> openExistingControlCenterPage { showAgentFeaturePage() }
             "nodes.scan" -> {
                 scanMode = "security"
                 startSecurityScan()
             }
-            "routing.target" -> Unit
             "permissions.accessibility" -> startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             "permissions.notifications" -> startActivity(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"))
             "permissions.microphone" -> requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_CONTROL_CENTER_PERMISSION)
@@ -3889,7 +3973,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "general.notifications" -> startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
                 putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
             })
-            "general.display" -> startActivity(Intent(Settings.ACTION_DISPLAY_SETTINGS))
+            "general.appearance" -> startActivity(Intent(Settings.ACTION_DISPLAY_SETTINGS))
+            "general.text_size" -> openExistingControlCenterPage { showTextSizeSettingsPage() }
             "general.about" -> openExistingControlCenterPage { showAboutSignalASIPage() }
             "general.advanced" -> openControlCenterDestination(ControlCenterDestination(ControlCenterRoute.ADVANCED))
             "apps.messages" -> exitControlCenterToTab(PAGE_MESSAGES)
@@ -3903,9 +3988,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             "routing.add_cloud" -> openExistingControlCenterPage { showCloudProviderPage() }
             "routing.manage" -> openExistingControlCenterPage { showAgentFeaturePage() }
-            "routing.rules" -> openControlCenterDestination(ControlCenterDestination(ControlCenterRoute.EXECUTION_POLICY))
-            "apps.background" -> startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+            "routing.policy" -> openExistingControlCenterPage { showRoutingPolicyPage() }
+            "apps.background" -> startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.parse("package:$packageName")
             })
             "advanced.protocol" -> openExistingControlCenterPage { showSignalLinkProtocolPage() }
             "advanced.audit" -> openExistingControlCenterPage { showAgentAuditOperationsPage() }
@@ -3916,6 +4001,20 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "advanced.cache" -> clearRebuildableCache()
             "reset.begin" -> showResetConfirmationDialog()
             else -> when {
+                actionId.startsWith("agent.permission_mode:") -> {
+                    val mode = runCatching {
+                        PermissionMode.valueOf(actionId.substringAfter(':').uppercase(Locale.ROOT))
+                    }.getOrNull() ?: return
+                    mobileNativeAgent.updatePermissionMode(mode)
+                    showPermissionModeSettingsPage()
+                }
+                actionId.startsWith("general.text_scale:") -> {
+                    AppDisplaySettings.setTextScale(
+                        this,
+                        AppDisplaySettings.TextScaleMode.fromWireValue(actionId.substringAfter(':'))
+                    )
+                    recreateIntoControlCenterChild(CONTROL_CENTER_CHILD_TEXT_SIZE)
+                }
                 actionId.startsWith("memory.group:") -> {
                     val kinds = when (actionId.substringAfter("memory.group:")) {
                         "identity" -> setOf(AgentMemoryKind.IDENTITY, AgentMemoryKind.PREFERENCE)
@@ -4018,6 +4117,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val nickname = profile.optString("name", getString(R.string.settings_profile_me))
         val signalasiId = SignalASICrypto.localSignalasiId()
         val fingerprint = SignalASICrypto.localIdentitySha256().filter(Char::isLetterOrDigit)
+        val safety = mobileNativeAgent.safetySettings()
         showControlCenterFeature(
             getString(R.string.cc_profile_title),
             ControlCenterPageSpec(
@@ -4027,7 +4127,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     iconRes = R.drawable.signalasi_mark_large,
                     preserveIconColor = true,
                     badges = listOf(
-                        ControlCenterBadgeSpec(getString(R.string.settings_badge_agent_enabled), ControlCenterTone.GREEN),
+                        ControlCenterBadgeSpec(
+                            getString(if (safety.executionPaused) R.string.on_device_agent_status_paused else R.string.settings_badge_agent_enabled),
+                            if (safety.executionPaused) ControlCenterTone.AMBER else ControlCenterTone.GREEN
+                        ),
                         ControlCenterBadgeSpec(getString(R.string.cc_identity_verified), ControlCenterTone.BLUE)
                     )
                 ),
@@ -4037,13 +4140,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         listOf(
                             ControlCenterRowSpec("profile.nickname", getString(R.string.cc_nickname_title), getString(R.string.cc_nickname_subtitle), R.drawable.ic_avatar_profile, nickname),
                             ControlCenterRowSpec("profile.copy_id", getString(R.string.settings_signalasi_id), signalasiId, R.drawable.ic_protocol_link, getString(R.string.common_copy), ControlCenterTone.BLUE, showChevron = false),
-                            ControlCenterRowSpec("profile.copy_fingerprint", getString(R.string.settings_identity_fingerprint), compactFingerprint(fingerprint), R.drawable.ic_settings_fingerprint, getString(R.string.cc_identity_verified), ControlCenterTone.GREEN)
+                            ControlCenterRowSpec("profile.copy_fingerprint", getString(R.string.settings_identity_fingerprint), compactFingerprint(fingerprint), R.drawable.ic_settings_fingerprint, getString(R.string.cc_identity_verified), ControlCenterTone.GREEN, showChevron = false)
                         )
                     ),
                     ControlCenterSectionSpec(
                         getString(R.string.common_status),
                         listOf(
-                            ControlCenterRowSpec(routeAction(ControlCenterRoute.AGENT_CORE), getString(R.string.cc_agent_identity_title), getString(R.string.cc_agent_identity_subtitle), R.drawable.ic_agent_node, getString(R.string.status_enabled), ControlCenterTone.VIOLET),
+                            ControlCenterRowSpec(routeAction(ControlCenterRoute.AGENT_CORE), getString(R.string.cc_agent_identity_title), getString(R.string.cc_agent_identity_subtitle), R.drawable.ic_agent_node, getString(if (safety.executionPaused) R.string.on_device_agent_status_paused else R.string.status_enabled), if (safety.executionPaused) ControlCenterTone.AMBER else ControlCenterTone.VIOLET),
                             ControlCenterRowSpec("", getString(R.string.cc_device_info_title), "${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}", R.drawable.ic_device_node, showChevron = false)
                         )
                     ),
@@ -4058,11 +4161,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun renderControlCenterSystemStatusPage() {
         val state = mobileNativeAgent.snapshot()
+        val safety = mobileNativeAgent.safetySettings()
         val tools = mobileNativeAgent.nativeToolCatalog()
         val availableResources = state.callableTargets.count { it.status == AgentConnectorStatus.AVAILABLE }
         val linkReady = SignalASIMqttClient.isConnected() && SignalASIMqttClient.isSecureReady()
         val knowledgeCount = mobileNativeAgent.knowledgeSourceGroups().size
-        val needsAttention = !linkReady || state.callableTargets.any { it.status == AgentConnectorStatus.NEEDS_SETUP }
+        val needsAttention = safety.executionPaused || !linkReady ||
+            state.callableTargets.any { it.status == AgentConnectorStatus.NEEDS_SETUP }
         showControlCenterFeature(
             getString(R.string.cc_system_status_title),
             ControlCenterPageSpec(
@@ -4086,10 +4191,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     ControlCenterSectionSpec(
                         getString(R.string.cc_section_core_services),
                         listOf(
-                            ControlCenterRowSpec(routeAction(ControlCenterRoute.AGENT_CORE), getString(R.string.cc_service_runtime), getString(R.string.cc_service_runtime_subtitle), R.drawable.ic_agent_node, getString(R.string.cc_status_online), ControlCenterTone.GREEN),
+                            ControlCenterRowSpec(routeAction(ControlCenterRoute.AGENT_CORE), getString(R.string.cc_service_runtime), getString(if (safety.executionPaused) R.string.cc_agent_paused_subtitle else R.string.cc_service_runtime_subtitle), R.drawable.ic_agent_node, getString(if (safety.executionPaused) R.string.on_device_agent_status_paused else R.string.cc_status_online), if (safety.executionPaused) ControlCenterTone.AMBER else ControlCenterTone.GREEN),
                             ControlCenterRowSpec(routeAction(ControlCenterRoute.NODES), getString(R.string.cc_service_link), getString(if (linkReady) R.string.cc_service_link_connected else R.string.cc_service_link_offline), R.drawable.ic_protocol_link, getString(if (linkReady) R.string.cc_status_online else R.string.cc_status_degraded), if (linkReady) ControlCenterTone.GREEN else ControlCenterTone.AMBER),
                             ControlCenterRowSpec(routeAction(ControlCenterRoute.RESOURCE_ROUTING), getString(R.string.cc_service_router), getString(R.string.cc_service_router_subtitle, availableResources, state.callableTargets.size), R.drawable.ic_settings_model, getString(if (availableResources > 0) R.string.cc_status_ready else R.string.cc_status_degraded), if (availableResources > 0) ControlCenterTone.BLUE else ControlCenterTone.AMBER),
-                            ControlCenterRowSpec(routeAction(ControlCenterRoute.KNOWLEDGE), getString(R.string.cc_service_knowledge), getString(R.string.cc_service_knowledge_subtitle, knowledgeCount), R.drawable.ic_agent_knowledge, getString(R.string.cc_status_ready), ControlCenterTone.AMBER)
+                            ControlCenterRowSpec(routeAction(ControlCenterRoute.KNOWLEDGE), getString(R.string.cc_service_knowledge), getString(R.string.cc_service_knowledge_subtitle, knowledgeCount), R.drawable.ic_agent_knowledge, getString(if (knowledgeCount > 0) R.string.cc_status_ready else R.string.status_needs_setup), if (knowledgeCount > 0) ControlCenterTone.BLUE else ControlCenterTone.NEUTRAL)
                         )
                     )
                 )
@@ -4117,8 +4222,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     ControlCenterSectionSpec(
                         getString(R.string.cc_section_core_capabilities),
                         listOf(
-                            ControlCenterRowSpec("agent.advanced", getString(R.string.cc_planning_title), getString(R.string.cc_planning_subtitle, planner.maxReplans), R.drawable.ic_agent_control, getString(if (planner.dynamicReplanning) R.string.status_enabled else R.string.common_off), ControlCenterTone.BLUE),
-                            ControlCenterRowSpec("agent.advanced", getString(R.string.cc_multitask_title), getString(R.string.cc_multitask_subtitle), R.drawable.ic_agent_history, getString(if (planner.multiAgentCoordination) R.string.status_enabled else R.string.common_off), ControlCenterTone.GREEN),
+                            ControlCenterRowSpec("agent.planner", getString(R.string.cc_planning_title), getString(R.string.cc_planning_subtitle, planner.maxReplans), R.drawable.ic_agent_control, getString(if (planner.dynamicReplanning) R.string.status_enabled else R.string.common_off), ControlCenterTone.BLUE),
+                            ControlCenterRowSpec("agent.planner", getString(R.string.cc_multitask_title), getString(R.string.cc_multitask_subtitle), R.drawable.ic_agent_history, getString(if (planner.multiAgentCoordination) R.string.status_enabled else R.string.common_off), ControlCenterTone.GREEN),
                             ControlCenterRowSpec(routeAction(ControlCenterRoute.RESOURCE_ROUTING), getString(R.string.cc_failure_recovery_title), getString(R.string.cc_failure_recovery_subtitle), R.drawable.ic_reset_data, getString(R.string.cc_status_ready), ControlCenterTone.AMBER),
                             ControlCenterRowSpec(routeAction(ControlCenterRoute.RESOURCE_ROUTING), getString(R.string.cc_resource_routing_title), getString(R.string.cc_resource_routing_subtitle), R.drawable.ic_settings_model, "", ControlCenterTone.VIOLET)
                         )
@@ -4127,7 +4232,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         getString(R.string.cc_section_runtime_protection),
                         listOf(
                             ControlCenterRowSpec("agent.toggle_pause", getString(R.string.cc_pause_all_title), getString(R.string.cc_pause_all_subtitle), R.drawable.ic_agent_history, switchValue = safety.executionPaused, showChevron = false),
-                            ControlCenterRowSpec("agent.advanced", getString(R.string.cc_advanced_agent_settings), getString(R.string.cc_advanced_agent_settings_subtitle), R.drawable.ic_settings_diagnostics, "", ControlCenterTone.NEUTRAL)
+                            ControlCenterRowSpec("agent.planner", getString(R.string.cc_advanced_agent_settings), getString(R.string.cc_advanced_agent_settings_subtitle), R.drawable.ic_settings_diagnostics, "", ControlCenterTone.NEUTRAL)
                         )
                     )
                 )
@@ -4229,31 +4334,132 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         )
     }
 
-    private fun renderControlCenterExecutionPolicyPage() {
-        val planner = mobileNativeAgent.modelPlannerSettings()
+    private fun showPermissionModeSettingsPage() {
+        val selected = mobileNativeAgent.safetySettings().permissionMode
         showControlCenterFeature(
-            getString(R.string.cc_execution_policy_title),
+            getString(R.string.on_device_agent_permission_mode),
             ControlCenterPageSpec(
+                banner = ControlCenterBannerSpec(
+                    getString(R.string.cc_permission_mode_banner_title),
+                    getString(R.string.cc_permission_mode_banner_subtitle),
+                    R.drawable.ic_security_shield,
+                    ControlCenterTone.BLUE
+                ),
                 sections = listOf(
                     ControlCenterSectionSpec(
-                        getString(R.string.cc_section_confirmation_rules),
+                        getString(R.string.cc_permission_mode_section),
+                        PermissionMode.entries.map { mode ->
+                            val isSelected = mode == selected
+                            ControlCenterRowSpec(
+                                actionId = if (isSelected) "" else "agent.permission_mode:${mode.name}",
+                                title = permissionModeLabel(mode),
+                                subtitle = permissionModeDescription(mode),
+                                iconRes = R.drawable.ic_security_shield,
+                                status = if (isSelected) getString(R.string.settings_language_selected) else "",
+                                tone = if (isSelected) ControlCenterTone.GREEN else ControlCenterTone.NEUTRAL,
+                                showChevron = false
+                            )
+                        }
+                    )
+                )
+            )
+        )
+    }
+
+    private fun permissionModeDescription(mode: PermissionMode): String = getString(
+        when (mode) {
+            PermissionMode.OBSERVE_ONLY -> R.string.cc_permission_observe_subtitle
+            PermissionMode.SUGGEST_ONLY -> R.string.cc_permission_suggest_subtitle
+            PermissionMode.ASK_BEFORE_ACTION -> R.string.cc_permission_ask_subtitle
+            PermissionMode.AUTO_LOW_RISK -> R.string.cc_permission_auto_subtitle
+        }
+    )
+
+    private fun showAgentPlannerSettingsPage() {
+        val settings = mobileNativeAgent.modelPlannerSettings()
+        val sources = configuredAgentPlannerSources()
+        val plannerReady = !settings.enabled || sources.isNotEmpty()
+        showControlCenterFeature(
+            getString(R.string.cc_planner_settings_title),
+            ControlCenterPageSpec(
+                banner = ControlCenterBannerSpec(
+                    getString(if (settings.enabled) R.string.on_device_agent_model_planner else R.string.cc_planner_local_title),
+                    getString(
+                        when {
+                            !settings.enabled -> R.string.cc_planner_local_subtitle
+                            plannerReady -> R.string.cc_planner_ready_subtitle
+                            else -> R.string.cc_planner_needs_model_subtitle
+                        }
+                    ),
+                    R.drawable.ic_agent_control,
+                    if (plannerReady) ControlCenterTone.BLUE else ControlCenterTone.AMBER
+                ),
+                sections = listOf(
+                    ControlCenterSectionSpec(
+                        getString(R.string.on_device_agent_section_intelligence),
                         listOf(
-                            ControlCenterRowSpec("agent.advanced", getString(R.string.cc_direct_execution_title), getString(R.string.cc_direct_execution_subtitle), R.drawable.ic_send_plane, getString(R.string.cc_status_direct), ControlCenterTone.GREEN),
-                            ControlCenterRowSpec("agent.advanced", getString(R.string.cc_first_confirm_title), getString(R.string.cc_first_confirm_subtitle), R.drawable.ic_info_outline, getString(R.string.cc_status_ask), ControlCenterTone.AMBER),
-                            ControlCenterRowSpec("agent.advanced", getString(R.string.cc_always_confirm_title), getString(R.string.cc_always_confirm_subtitle), R.drawable.ic_security_shield, getString(R.string.common_confirm), ControlCenterTone.RED)
+                            ControlCenterRowSpec("agent.planner.toggle_enabled", getString(R.string.on_device_agent_model_planner), getString(R.string.on_device_agent_model_planner_subtitle), R.drawable.ic_agent_node, switchValue = settings.enabled, showChevron = false),
+                            ControlCenterRowSpec(if (sources.isEmpty()) "routing.add_cloud" else "agent.planner.model_source", getString(R.string.on_device_agent_model_source), getString(R.string.on_device_agent_model_source_subtitle), R.drawable.ic_protocol_link, if (sources.isEmpty()) getString(R.string.status_needs_setup) else agentModelPlannerSourceLabel(settings.cloudContactId), if (plannerReady) ControlCenterTone.BLUE else ControlCenterTone.AMBER),
+                            ControlCenterRowSpec("agent.planner.toggle_replanning", getString(R.string.on_device_agent_dynamic_replanning), getString(R.string.on_device_agent_dynamic_replanning_subtitle), R.drawable.ic_agent_control, switchValue = settings.dynamicReplanning, showChevron = false),
+                            ControlCenterRowSpec("agent.planner.max_replans", getString(R.string.on_device_agent_max_replans), getString(R.string.on_device_agent_max_replans_subtitle), R.drawable.ic_reset_data, settings.maxReplans.toString(), ControlCenterTone.BLUE),
+                            ControlCenterRowSpec("agent.planner.toggle_multi_agent", getString(R.string.on_device_agent_multi_agent_coordination), getString(R.string.on_device_agent_multi_agent_coordination_subtitle), R.drawable.ic_protocol_link, switchValue = settings.multiAgentCoordination, showChevron = false)
                         )
                     ),
                     ControlCenterSectionSpec(
                         getString(R.string.cc_section_task_control),
                         listOf(
-                            ControlCenterRowSpec("agent.advanced", getString(R.string.cc_max_concurrency_title), getString(R.string.cc_max_concurrency_subtitle), R.drawable.ic_agent_history, "3", ControlCenterTone.BLUE),
-                            ControlCenterRowSpec("agent.advanced", getString(R.string.cc_tool_budget_title), getString(R.string.cc_tool_budget_subtitle), R.drawable.ic_agent_control, planner.maxToolCalls.toString(), ControlCenterTone.VIOLET),
-                            ControlCenterRowSpec("general.notifications", getString(R.string.cc_long_task_notifications_title), getString(R.string.cc_long_task_notifications_subtitle), R.drawable.ic_settings_notification, getString(R.string.status_enabled), ControlCenterTone.GREEN)
+                            ControlCenterRowSpec("agent.planner.max_actions", getString(R.string.on_device_agent_model_max_actions), getString(R.string.on_device_agent_model_max_actions_subtitle), R.drawable.ic_agent_history, settings.maxActions.toString(), ControlCenterTone.BLUE),
+                            ControlCenterRowSpec("agent.planner.max_tools", getString(R.string.on_device_agent_max_tool_calls), getString(R.string.on_device_agent_max_tool_calls_subtitle), R.drawable.ic_agent_control, settings.maxToolCalls.toString(), ControlCenterTone.VIOLET),
+                            ControlCenterRowSpec("agent.planner.max_hops", getString(R.string.on_device_agent_max_agent_hops), getString(R.string.on_device_agent_max_agent_hops_subtitle), R.drawable.ic_protocol_link, settings.maxAgentHops.toString(), ControlCenterTone.AMBER)
                         )
                     ),
                     ControlCenterSectionSpec(
                         getString(R.string.cc_section_privacy_boundary),
-                        listOf(ControlCenterRowSpec("agent.advanced", getString(R.string.cc_sensitive_local_title), getString(R.string.cc_sensitive_local_subtitle), R.drawable.ic_security_shield, getString(R.string.status_enabled), ControlCenterTone.GREEN))
+                        listOf(
+                            ControlCenterRowSpec("agent.planner.toggle_screen_text", getString(R.string.on_device_agent_model_screen_text), getString(R.string.on_device_agent_model_screen_text_subtitle), R.drawable.ic_scan, switchValue = settings.shareScreenText, showChevron = false),
+                            ControlCenterRowSpec("agent.planner.toggle_share_outputs", getString(R.string.on_device_agent_share_agent_outputs), getString(R.string.on_device_agent_share_agent_outputs_subtitle), R.drawable.ic_security_shield, switchValue = settings.shareAgentOutputsWithPlanner, showChevron = false)
+                        )
+                    )
+                )
+            )
+        )
+    }
+
+    private fun renderControlCenterExecutionPolicyPage() {
+        val safety = mobileNativeAgent.safetySettings()
+        val planner = mobileNativeAgent.modelPlannerSettings()
+        val privacyProtected = !planner.shareScreenText && !planner.shareAgentOutputsWithPlanner
+        val notificationsEnabled = appNotificationsEnabled()
+        showControlCenterFeature(
+            getString(R.string.cc_execution_policy_title),
+            ControlCenterPageSpec(
+                sections = listOf(
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_permission_mode_section),
+                        listOf(
+                            ControlCenterRowSpec("agent.permission_mode", getString(R.string.on_device_agent_permission_mode), getString(R.string.on_device_agent_permission_mode_subtitle), R.drawable.ic_security_shield, permissionModeLabel(safety.permissionMode), ControlCenterTone.BLUE),
+                            ControlCenterRowSpec("security.toggle_guard", getString(R.string.on_device_agent_high_risk_guard), getString(R.string.on_device_agent_high_risk_guard_subtitle), R.drawable.ic_security_shield, switchValue = safety.highRiskGuard, showChevron = false)
+                        )
+                    ),
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_section_confirmation_rules),
+                        listOf(
+                            ControlCenterRowSpec("", getString(R.string.cc_direct_execution_title), getString(R.string.cc_direct_execution_subtitle), R.drawable.ic_send_plane, getString(R.string.cc_status_direct), ControlCenterTone.GREEN, showChevron = false),
+                            ControlCenterRowSpec("", getString(R.string.cc_first_confirm_title), getString(R.string.cc_first_confirm_subtitle), R.drawable.ic_info_outline, getString(R.string.cc_status_ask), ControlCenterTone.AMBER, showChevron = false),
+                            ControlCenterRowSpec("", getString(R.string.cc_always_confirm_title), getString(R.string.cc_always_confirm_subtitle), R.drawable.ic_security_shield, getString(R.string.common_confirm), ControlCenterTone.RED, showChevron = false)
+                        )
+                    ),
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_section_task_control),
+                        listOf(
+                            ControlCenterRowSpec("", getString(R.string.cc_max_concurrency_title), getString(R.string.cc_max_concurrency_subtitle), R.drawable.ic_agent_history, "3 + 1", ControlCenterTone.BLUE, showChevron = false),
+                            ControlCenterRowSpec("agent.planner", getString(R.string.cc_tool_budget_title), getString(R.string.cc_tool_budget_subtitle), R.drawable.ic_agent_control, planner.maxToolCalls.toString(), ControlCenterTone.VIOLET),
+                            ControlCenterRowSpec("general.notifications", getString(R.string.cc_long_task_notifications_title), getString(R.string.cc_long_task_notifications_subtitle), R.drawable.ic_settings_notification, getString(if (notificationsEnabled) R.string.status_enabled else R.string.status_needs_setup), if (notificationsEnabled) ControlCenterTone.GREEN else ControlCenterTone.AMBER)
+                        )
+                    ),
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_section_privacy_boundary),
+                        listOf(ControlCenterRowSpec("agent.planner", getString(R.string.cc_sensitive_local_title), getString(R.string.cc_sensitive_local_subtitle), R.drawable.ic_security_shield, getString(if (privacyProtected) R.string.status_enabled else R.string.cc_status_review), if (privacyProtected) ControlCenterTone.GREEN else ControlCenterTone.AMBER))
                     )
                 )
             )
@@ -4291,7 +4497,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 sections = listOf(
                     ControlCenterSectionSpec(
                         getString(R.string.cc_section_current_strategy),
-                        listOf(ControlCenterRowSpec("routing.rules", getString(R.string.cc_balanced_strategy_title), getString(R.string.cc_balanced_strategy_subtitle), R.drawable.ic_agent_control, getString(R.string.common_select), ControlCenterTone.BLUE))
+                        listOf(ControlCenterRowSpec("routing.policy", getString(R.string.cc_balanced_strategy_title), getString(R.string.cc_balanced_strategy_subtitle), R.drawable.ic_agent_control, getString(R.string.cc_status_automatic), ControlCenterTone.BLUE))
                     ),
                     ControlCenterSectionSpec(
                         getString(R.string.cc_section_available_resources),
@@ -4302,7 +4508,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     ControlCenterSectionSpec(
                         getString(R.string.cc_section_rules),
                         listOf(
-                            ControlCenterRowSpec("routing.rules", getString(R.string.cc_route_by_task_title), getString(R.string.cc_route_by_task_subtitle), R.drawable.ic_protocol_link, "", ControlCenterTone.NEUTRAL),
+                            ControlCenterRowSpec("routing.policy", getString(R.string.cc_route_by_task_title), getString(R.string.cc_route_by_task_subtitle), R.drawable.ic_protocol_link, getString(R.string.common_view), ControlCenterTone.NEUTRAL),
                             ControlCenterRowSpec("routing.add_cloud", getString(R.string.cc_add_cloud_provider_title), getString(R.string.cc_add_cloud_provider_subtitle), R.drawable.ic_avatar_cloud_model, "+", ControlCenterTone.VIOLET),
                             ControlCenterRowSpec("routing.manage", getString(R.string.cc_nodes_title), getString(R.string.cc_nodes_subtitle), R.drawable.ic_agent_node, "", ControlCenterTone.BLUE)
                         )
@@ -4311,6 +4517,42 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             )
         )
     }
+
+    private fun showRoutingPolicyPage() {
+        showControlCenterFeature(
+            getString(R.string.cc_route_by_task_title),
+            ControlCenterPageSpec(
+                banner = ControlCenterBannerSpec(
+                    getString(R.string.cc_routing_policy_banner_title),
+                    getString(R.string.cc_routing_policy_banner_subtitle),
+                    R.drawable.ic_agent_control,
+                    ControlCenterTone.BLUE
+                ),
+                sections = listOf(
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_section_current_strategy),
+                        listOf(
+                            routingPolicyInfoRow(R.string.cc_routing_balanced_title, R.string.cc_routing_balanced_subtitle, ControlCenterTone.BLUE),
+                            routingPolicyInfoRow(R.string.cc_routing_fast_title, R.string.cc_routing_fast_subtitle, ControlCenterTone.GREEN),
+                            routingPolicyInfoRow(R.string.cc_routing_economy_title, R.string.cc_routing_economy_subtitle, ControlCenterTone.AMBER),
+                            routingPolicyInfoRow(R.string.cc_routing_quality_title, R.string.cc_routing_quality_subtitle, ControlCenterTone.VIOLET),
+                            routingPolicyInfoRow(R.string.cc_routing_private_title, R.string.cc_routing_private_subtitle, ControlCenterTone.NEUTRAL)
+                        )
+                    )
+                )
+            )
+        )
+    }
+
+    private fun routingPolicyInfoRow(title: Int, subtitle: Int, tone: ControlCenterTone) =
+        ControlCenterRowSpec(
+            actionId = "",
+            title = getString(title),
+            subtitle = getString(subtitle),
+            iconRes = R.drawable.ic_protocol_link,
+            tone = tone,
+            showChevron = false
+        )
 
     private fun controlCenterTargetSubtitle(target: AgentCallableTarget): String {
         val capabilities = target.capabilities.take(3).joinToString(" · ") {
@@ -4449,7 +4691,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun renderControlCenterAppToolsPage() {
-        val adapterCount = 5
+        val adapterReadiness = agentAdapterReadiness()
+        val adapterCount = adapterReadiness.count { it.value }
         val accessibility = mobileNativeAgent.snapshot().currentScreen.isAccessibilityEnabled
         showControlCenterFeature(
             getString(R.string.cc_app_tools_title),
@@ -4483,33 +4726,55 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun renderControlCenterSmartSpacesPage() {
         val homeAssistant = HomeAssistantSettingsStore.load(this)
+        val homeAssistantReady = homeAssistant.configured
         val customDevices = CustomDeviceConnectorStore(this).list()
         showControlCenterFeature(
             getString(R.string.cc_smart_spaces_title),
             ControlCenterPageSpec(
                 hero = ControlCenterHeroSpec(
                     title = getString(R.string.cc_home_assistant_title),
-                    subtitle = getString(if (homeAssistant.configured) R.string.cc_home_assistant_connected else R.string.cc_home_assistant_not_configured),
+                    subtitle = getString(
+                        when {
+                            !homeAssistant.credentialsConfigured -> R.string.cc_home_assistant_not_configured
+                            homeAssistantReady -> R.string.cc_home_assistant_connected
+                            else -> R.string.cc_home_assistant_disabled
+                        }
+                    ),
                     iconRes = R.drawable.ic_device_node,
                     actionId = "spaces.configure",
                     badges = listOf(ControlCenterBadgeSpec(
-                        getString(if (homeAssistant.configured) R.string.cc_status_online else R.string.cc_status_not_configured),
-                        if (homeAssistant.configured) ControlCenterTone.GREEN else ControlCenterTone.AMBER
+                        getString(
+                            when {
+                                !homeAssistant.credentialsConfigured -> R.string.cc_status_not_configured
+                                homeAssistantReady -> R.string.status_enabled
+                                else -> R.string.common_off
+                            }
+                        ),
+                        if (homeAssistantReady) ControlCenterTone.GREEN else ControlCenterTone.AMBER
                     )),
                     metrics = listOf(
                         ControlCenterMetricSpec(customDevices.count { it.configured }.toString(), getString(R.string.count_devices, customDevices.size)),
                         ControlCenterMetricSpec(if (homeAssistant.enabled) getString(R.string.common_on) else getString(R.string.common_off), getString(R.string.common_status)),
-                        ControlCenterMetricSpec(getString(if (homeAssistant.configured) R.string.cc_status_ready else R.string.status_needs_setup), getString(R.string.cc_metric_security))
+                        ControlCenterMetricSpec(
+                            getString(
+                                when {
+                                    !homeAssistant.credentialsConfigured -> R.string.status_needs_setup
+                                    homeAssistantReady -> R.string.cc_status_ready
+                                    else -> R.string.common_off
+                                }
+                            ),
+                            getString(R.string.cc_metric_security)
+                        )
                     )
                 ),
                 sections = listOf(
                     ControlCenterSectionSpec(
                         getString(R.string.cc_smart_spaces_title),
                         listOf(
-                            ControlCenterRowSpec("spaces.entities", getString(R.string.cc_home_entities_title), getString(R.string.cc_home_entities_subtitle), R.drawable.ic_group, if (homeAssistant.configured) getString(R.string.common_view) else getString(R.string.status_needs_setup), if (homeAssistant.configured) ControlCenterTone.GREEN else ControlCenterTone.AMBER, enabled = homeAssistant.configured),
-                            ControlCenterRowSpec("spaces.automations", getString(R.string.cc_home_automations_title), getString(R.string.cc_home_automations_subtitle), R.drawable.ic_automation_line, if (homeAssistant.configured) getString(R.string.common_view) else getString(R.string.status_needs_setup), if (homeAssistant.configured) ControlCenterTone.BLUE else ControlCenterTone.AMBER, enabled = homeAssistant.configured),
+                            ControlCenterRowSpec("spaces.entities", getString(R.string.cc_home_entities_title), getString(R.string.cc_home_entities_subtitle), R.drawable.ic_group, if (homeAssistantReady) getString(R.string.common_view) else getString(R.string.status_needs_setup), if (homeAssistantReady) ControlCenterTone.GREEN else ControlCenterTone.AMBER, enabled = homeAssistantReady),
+                            ControlCenterRowSpec("spaces.automations", getString(R.string.cc_home_automations_title), getString(R.string.cc_home_automations_subtitle), R.drawable.ic_automation_line, if (homeAssistantReady) getString(R.string.common_view) else getString(R.string.status_needs_setup), if (homeAssistantReady) ControlCenterTone.BLUE else ControlCenterTone.AMBER, enabled = homeAssistantReady),
                             ControlCenterRowSpec("spaces.configure", getString(R.string.cc_custom_devices_title), getString(R.string.cc_custom_devices_subtitle), R.drawable.ic_device_node, customDevices.size.toString(), ControlCenterTone.VIOLET),
-                            ControlCenterRowSpec("spaces.configure", getString(R.string.cc_high_risk_devices_title), getString(R.string.cc_high_risk_devices_subtitle), R.drawable.ic_security_shield, getString(R.string.common_confirm), ControlCenterTone.RED)
+                            ControlCenterRowSpec(routeAction(ControlCenterRoute.EXECUTION_POLICY), getString(R.string.cc_high_risk_devices_title), getString(R.string.cc_high_risk_devices_subtitle), R.drawable.ic_security_shield, getString(R.string.common_confirm), ControlCenterTone.RED)
                         )
                     )
                 )
@@ -4521,14 +4786,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val state = mobileNativeAgent.snapshot()
         val desktops = desktopSecuritySummaries(activePcConnectorContacts())
         val targets = state.callableTargets.distinctBy { it.id }
+        val availableTargetIds = targets
+            .filter { it.status == AgentConnectorStatus.AVAILABLE }
+            .mapTo(linkedSetOf()) { it.id }
         val desktopRows = desktops.map { desktop ->
+            val online = desktop.agentIds.any { it in availableTargetIds }
             ControlCenterRowSpec(
                 actionId = "node.desktop:${desktop.id}",
                 title = desktop.name,
                 subtitle = getString(R.string.count_items, desktop.agentCount),
                 iconRes = R.drawable.ic_device_node,
-                status = getString(R.string.cc_status_online),
-                tone = ControlCenterTone.GREEN
+                status = getString(if (online) R.string.cc_status_online else R.string.status_disconnected),
+                tone = if (online) ControlCenterTone.GREEN else ControlCenterTone.NEUTRAL
             )
         }.ifEmpty {
             listOf(ControlCenterRowSpec("nodes.scan", getString(R.string.cc_no_desktop_title), getString(R.string.cc_no_desktop_subtitle), R.drawable.ic_scan, getString(R.string.security_scan), ControlCenterTone.AMBER))
@@ -4575,6 +4844,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val trustedDevices = desktopSecuritySummaries(activePcConnectorContacts()).size
         val trustedContacts = storedContacts().count { AppStore.canCommunicateWith(this, it.id) }
         val guard = mobileNativeAgent.safetySettings().highRiskGuard
+        val notificationsEnabled = appNotificationsEnabled()
         showControlCenterFeature(
             getString(R.string.cc_security_title),
             ControlCenterPageSpec(
@@ -4588,22 +4858,22 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     ControlCenterSectionSpec(
                         getString(R.string.cc_section_identity),
                         listOf(
-                            ControlCenterRowSpec("profile.copy_fingerprint", getString(R.string.settings_identity_fingerprint), compactFingerprint(fingerprint), R.drawable.ic_settings_fingerprint, getString(R.string.common_copy), ControlCenterTone.BLUE),
-                            ControlCenterRowSpec("profile.copy_id", getString(R.string.settings_signalasi_id), SignalASICrypto.localSignalasiId(), R.drawable.ic_protocol_link, getString(R.string.common_copy), ControlCenterTone.NEUTRAL)
+                            ControlCenterRowSpec("profile.copy_fingerprint", getString(R.string.settings_identity_fingerprint), compactFingerprint(fingerprint), R.drawable.ic_settings_fingerprint, getString(R.string.common_copy), ControlCenterTone.BLUE, showChevron = false),
+                            ControlCenterRowSpec("profile.copy_id", getString(R.string.settings_signalasi_id), SignalASICrypto.localSignalasiId(), R.drawable.ic_protocol_link, getString(R.string.common_copy), ControlCenterTone.NEUTRAL, showChevron = false)
                         )
                     ),
                     ControlCenterSectionSpec(
                         getString(R.string.security_section_paired_devices),
                         listOf(
                             ControlCenterRowSpec("security.manage", getString(R.string.settings_trusted_devices), getString(R.string.settings_trusted_devices_subtitle), R.drawable.ic_settings_devices, trustedDevices.toString(), ControlCenterTone.GREEN),
-                            ControlCenterRowSpec("security.manage", getString(R.string.cc_contacts_title), getString(R.string.cc_contacts_subtitle), R.drawable.ic_tab_contacts_outline, trustedContacts.toString(), ControlCenterTone.VIOLET)
+                            ControlCenterRowSpec("apps.contacts", getString(R.string.cc_contacts_title), getString(R.string.cc_contacts_subtitle), R.drawable.ic_tab_contacts_outline, trustedContacts.toString(), ControlCenterTone.VIOLET)
                         )
                     ),
                     ControlCenterSectionSpec(
                         getString(R.string.feature_identity_protection),
                         listOf(
                             ControlCenterRowSpec("security.toggle_guard", getString(R.string.on_device_agent_high_risk_guard), getString(R.string.cc_always_confirm_subtitle), R.drawable.ic_security_shield, switchValue = guard, showChevron = false),
-                            ControlCenterRowSpec("general.notifications", getString(R.string.cc_notifications_title), getString(R.string.cc_notifications_subtitle), R.drawable.ic_settings_notification, getString(R.string.status_enabled), ControlCenterTone.GREEN)
+                            ControlCenterRowSpec("general.notifications", getString(R.string.cc_notifications_title), getString(R.string.cc_notifications_subtitle), R.drawable.ic_settings_notification, getString(if (notificationsEnabled) R.string.status_enabled else R.string.status_needs_setup), if (notificationsEnabled) ControlCenterTone.GREEN else ControlCenterTone.AMBER)
                         )
                     )
                 )
@@ -4666,6 +4936,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val microphoneAllowed = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val modelAvailable = WhisperModelManager.isAvailable(this, selectedModel)
         val asrReady = microphoneAllowed && modelAvailable
+        val ttsReady = if (config.ttsProvider == VoiceAssistantSettings.PROVIDER_ANDROID) {
+            androidTtsReady
+        } else {
+            validatedInternetAvailable()
+        }
         showControlCenterFeature(
             getString(R.string.cc_voice_title),
             ControlCenterPageSpec(
@@ -4700,7 +4975,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                                 getString(if (asrReady) R.string.cc_status_ready else R.string.status_needs_setup),
                                 if (asrReady) ControlCenterTone.GREEN else ControlCenterTone.AMBER
                             ),
-                            ControlCenterRowSpec("voice.settings", getString(R.string.voice_tts_provider), ttsProviderLabel(config.ttsProvider), R.drawable.ic_send_plane, getString(R.string.cc_status_available), ControlCenterTone.VIOLET)
+                            ControlCenterRowSpec("voice.settings", getString(R.string.voice_tts_provider), ttsProviderLabel(config.ttsProvider), R.drawable.ic_send_plane, getString(if (ttsReady) R.string.cc_status_available else R.string.status_needs_setup), if (ttsReady) ControlCenterTone.VIOLET else ControlCenterTone.AMBER)
                         )
                     ),
                     ControlCenterSectionSpec(
@@ -4750,6 +5025,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun renderControlCenterGeneralPage() {
+        val textScale = AppDisplaySettings.textScale(this)
+        val notificationsEnabled = appNotificationsEnabled()
         showControlCenterFeature(
             getString(R.string.cc_general_page_title),
             ControlCenterPageSpec(
@@ -4758,13 +5035,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         getString(R.string.settings_control_general),
                         listOf(
                             ControlCenterRowSpec("general.language", getString(R.string.settings_language), AppLanguage.displayName(this), R.drawable.ic_settings_language, "", ControlCenterTone.NEUTRAL),
-                            ControlCenterRowSpec("general.display", getString(R.string.cc_appearance_title), getString(R.string.cc_appearance_subtitle), R.drawable.ic_tab_discover, "", ControlCenterTone.BLUE),
-                            ControlCenterRowSpec("general.display", getString(R.string.cc_text_size_title), getString(R.string.cc_text_size_subtitle), R.drawable.ic_info_outline, "", ControlCenterTone.NEUTRAL)
+                            ControlCenterRowSpec("general.appearance", getString(R.string.cc_appearance_title), getString(R.string.cc_appearance_subtitle), R.drawable.ic_tab_discover, getString(R.string.cc_managed_by_android), ControlCenterTone.BLUE),
+                            ControlCenterRowSpec("general.text_size", getString(R.string.cc_text_size_title), appTextScaleLabel(textScale), R.drawable.ic_info_outline, "", ControlCenterTone.NEUTRAL)
                         )
                     ),
                     ControlCenterSectionSpec(
                         getString(R.string.cc_notifications_title),
-                        listOf(ControlCenterRowSpec("general.notifications", getString(R.string.cc_notifications_title), getString(R.string.cc_notifications_subtitle), R.drawable.ic_settings_notification, getString(R.string.status_enabled), ControlCenterTone.GREEN))
+                        listOf(ControlCenterRowSpec("general.notifications", getString(R.string.cc_notifications_title), getString(R.string.cc_notifications_subtitle), R.drawable.ic_settings_notification, getString(if (notificationsEnabled) R.string.status_enabled else R.string.status_needs_setup), if (notificationsEnabled) ControlCenterTone.GREEN else ControlCenterTone.AMBER))
                     ),
                     ControlCenterSectionSpec(
                         getString(R.string.settings_about_section),
@@ -4780,6 +5057,86 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 )
             )
         )
+    }
+
+    private fun showTextSizeSettingsPage() {
+        val selected = AppDisplaySettings.textScale(this)
+        showControlCenterFeature(
+            getString(R.string.cc_text_size_title),
+            ControlCenterPageSpec(
+                banner = ControlCenterBannerSpec(
+                    getString(R.string.cc_text_size_preview_title),
+                    getString(R.string.cc_text_size_preview_subtitle),
+                    R.drawable.ic_info_outline,
+                    ControlCenterTone.GREEN
+                ),
+                sections = listOf(
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_text_size_section),
+                        AppDisplaySettings.TextScaleMode.entries.map { mode ->
+                            val isSelected = mode == selected
+                            ControlCenterRowSpec(
+                                actionId = if (isSelected) "" else "general.text_scale:${mode.wireValue}",
+                                title = appTextScaleLabel(mode),
+                                subtitle = appTextScaleDescription(mode),
+                                iconRes = R.drawable.ic_info_outline,
+                                status = if (isSelected) getString(R.string.settings_language_selected) else "",
+                                tone = if (isSelected) ControlCenterTone.GREEN else ControlCenterTone.NEUTRAL,
+                                showChevron = false
+                            )
+                        }
+                    ),
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_text_size_preview_section),
+                        listOf(
+                            ControlCenterRowSpec(
+                                actionId = "",
+                                title = getString(R.string.cc_text_size_preview_sample_title),
+                                subtitle = getString(R.string.cc_text_size_preview_sample_subtitle),
+                                iconRes = R.drawable.ic_agent_node,
+                                showChevron = false
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    }
+
+    private fun appTextScaleLabel(mode: AppDisplaySettings.TextScaleMode): String = getString(
+        when (mode) {
+            AppDisplaySettings.TextScaleMode.SYSTEM -> R.string.cc_text_size_system
+            AppDisplaySettings.TextScaleMode.STANDARD -> R.string.cc_text_size_standard
+            AppDisplaySettings.TextScaleMode.COMFORTABLE -> R.string.cc_text_size_comfortable
+            AppDisplaySettings.TextScaleMode.LARGE -> R.string.cc_text_size_large
+            AppDisplaySettings.TextScaleMode.EXTRA_LARGE -> R.string.cc_text_size_extra_large
+        }
+    )
+
+    private fun appTextScaleDescription(mode: AppDisplaySettings.TextScaleMode): String = getString(
+        when (mode) {
+            AppDisplaySettings.TextScaleMode.SYSTEM -> R.string.cc_text_size_system_subtitle
+            AppDisplaySettings.TextScaleMode.STANDARD -> R.string.cc_text_size_standard_subtitle
+            AppDisplaySettings.TextScaleMode.COMFORTABLE -> R.string.cc_text_size_comfortable_subtitle
+            AppDisplaySettings.TextScaleMode.LARGE -> R.string.cc_text_size_large_subtitle
+            AppDisplaySettings.TextScaleMode.EXTRA_LARGE -> R.string.cc_text_size_extra_large_subtitle
+        }
+    )
+
+    private fun recreateIntoControlCenterChild(child: String) {
+        intent.putExtra(EXTRA_REOPEN_CONTROL_CENTER_CHILD, child)
+        recreate()
+    }
+
+    private fun reopenRequestedControlCenterChild(sourceIntent: Intent?) {
+        val child = sourceIntent?.getStringExtra(EXTRA_REOPEN_CONTROL_CENTER_CHILD).orEmpty()
+        if (child.isBlank()) return
+        sourceIntent?.removeExtra(EXTRA_REOPEN_CONTROL_CENTER_CHILD)
+        showMainTab(PAGE_SETTINGS)
+        openControlCenterDestination(ControlCenterDestination(ControlCenterRoute.GENERAL))
+        when (child) {
+            CONTROL_CENTER_CHILD_TEXT_SIZE -> openExistingControlCenterPage { showTextSizeSettingsPage() }
+        }
     }
 
     private fun renderControlCenterAdvancedPage() {
@@ -4820,6 +5177,20 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
         checkSelfPermission(android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     ).count { it }
+
+    private fun appNotificationsEnabled(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            getSystemService(NotificationManager::class.java)?.areNotificationsEnabled() == true
+        } else {
+            true
+        }
+
+    private fun validatedInternetAvailable(): Boolean {
+        val connectivity = getSystemService(ConnectivityManager::class.java) ?: return false
+        val network = connectivity.activeNetwork ?: return false
+        return connectivity.getNetworkCapabilities(network)
+            ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+    }
 
     private fun renderControlCenterAppServicesPage() {
         val contactCount = storedContacts().size
@@ -5737,7 +6108,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun showAgentRecentTasksPage() {
         val state = mobileNativeAgent.snapshot()
-        showFeaturePage(getString(R.string.agent_section_recent_tasks))
+        showFeaturePage(getString(R.string.cc_tasks_title))
         if (state.recentTasks.isEmpty()) {
             featureContent.addView(agentRecentEmptyRow())
             return
@@ -7590,10 +7961,28 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val cloudModelsRoundtripToken = intent?.getStringExtra("signalasi_debug_cloud_models_roundtrip")?.trim().orEmpty()
         val voiceSettingsRoundtripToken = intent?.getStringExtra("signalasi_debug_voice_settings_roundtrip")?.trim().orEmpty()
         val controlCenterRoundtripToken = intent?.getStringExtra("signalasi_debug_control_center_roundtrip")?.trim().orEmpty()
+        val controlCenterThemeToken = intent?.getStringExtra("signalasi_debug_control_center_theme")?.trim().orEmpty()
         val homeAssistantTestUrl = intent?.getStringExtra("signalasi_debug_home_assistant_url")?.trim().orEmpty()
         val controlCenterPage = intent?.getStringExtra("signalasi_debug_control_center_page")?.trim().orEmpty()
         val scanPayload = intent?.getStringExtra("signalasi_debug_scan_payload")?.trim().orEmpty()
         val scanPayloadB64 = intent?.getStringExtra("signalasi_debug_scan_payload_b64")?.trim().orEmpty()
+        if (controlCenterThemeToken.isNotBlank()) {
+            intent?.removeExtra("signalasi_debug_control_center_theme")
+            val isNight = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+                Configuration.UI_MODE_NIGHT_YES
+            getSharedPreferences("signalasi_debug", MODE_PRIVATE).edit()
+                .putString(
+                    "control_center_theme_result",
+                    JSONObject()
+                        .put("token", controlCenterThemeToken)
+                        .put("night", isNight)
+                        .put("page_bg", getColorCompat(R.color.page_bg).toLong() and 0xffffffffL)
+                        .toString()
+                )
+                .commit()
+            showMainTab(PAGE_SETTINGS)
+            return
+        }
         if (controlCenterPage.isNotBlank()) {
             intent?.removeExtra("signalasi_debug_control_center_page")
             showMainTab(PAGE_SETTINGS)
@@ -10519,7 +10908,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val name: String,
         val fingerprint: String,
         val agentCount: Int,
-        val lastActivityAt: Long
+        val lastActivityAt: Long,
+        val agentIds: Set<String>
     )
 
     private fun activePcConnectorContacts(): List<JSONObject> {
@@ -10549,7 +10939,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     name = first.optString("desktop_name").ifBlank { "PC" },
                     fingerprint = fingerprint,
                     agentCount = contacts.size,
-                    lastActivityAt = contacts.maxOfOrNull { it.optLong("setup_updated_at", it.optLong("created_at", 0L)) } ?: 0L
+                    lastActivityAt = contacts.maxOfOrNull { it.optLong("setup_updated_at", it.optLong("created_at", 0L)) } ?: 0L,
+                    agentIds = contacts.flatMapTo(linkedSetOf()) { contact ->
+                        listOf(
+                            contact.optString("id"),
+                            jsonSignalasiId(contact),
+                            contact.optString("agent_id")
+                        ).filter(String::isNotBlank)
+                    }
                 )
             }
             .sortedBy { it.name.lowercase(Locale.ROOT) }
@@ -10782,6 +11179,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             setOnClickListener {
                 showChoiceDialog(getString(R.string.voice_asr_language), listOf("zh-CN", "en-US", "zh-HK", "zh-TW"), config.asrLanguage) {
                     VoiceAssistantSettings.setAsrLanguage(this@MainActivity, it)
+                    configureAndroidTtsLanguage()
                     showVoiceAssistantSettingsPage()
                 }
             }
@@ -11141,7 +11539,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             getString(R.string.agent_app_adapters_title),
             getString(R.string.agent_app_adapters_subtitle),
             R.drawable.ic_protocol_link,
-            getString(R.string.agent_app_adapters_count, 5)
+            getString(R.string.agent_app_adapters_count, agentAdapterReadiness().count { it.value })
         ).apply {
             setOnClickListener {
                 showAgentAppAdaptersPage()
@@ -11368,8 +11766,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun showAgentAppAdaptersPage() {
         showFeaturePage(getString(R.string.agent_app_adapters_title))
-        val screen = mobileNativeAgent.snapshot().currentScreen
-        val wechatInstalled = screen.installedApps.any { it.packageName == "com.tencent.mm" }
+        val readiness = agentAdapterReadiness()
         val accessibilityReady = SignalASIAccessibilityService.isActive()
         val notificationReady = SignalASINotificationListenerService.currentContext().hasAccess
         featureContent.addView(featureHeroCard(
@@ -11377,7 +11774,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             getString(R.string.agent_app_adapters_hero_subtitle),
             R.drawable.ic_protocol_link,
             "#16A085",
-            getString(R.string.agent_app_adapters_count, 5)
+            getString(R.string.agent_app_adapters_count, readiness.count { it.value })
         ))
         addSectionTitle(getString(R.string.agent_app_adapters_section))
         featureContent.addView(featureRow(
@@ -11389,7 +11786,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ),
             R.drawable.ic_tab_chat,
             getString(
-                if (wechatInstalled && accessibilityReady) R.string.permission_allowed
+                if (readiness.getValue("wechat")) R.string.permission_allowed
                 else R.string.permission_needs_setup
             )
         ))
@@ -11397,26 +11794,50 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             getString(R.string.agent_adapter_sms),
             getString(R.string.agent_adapter_sms_subtitle),
             R.drawable.ic_tab_chat,
-            getString(R.string.permission_allowed)
+            getString(if (readiness.getValue("sms")) R.string.permission_allowed else R.string.permission_needs_setup)
         ))
         featureContent.addView(featureRow(
             getString(R.string.agent_adapter_phone),
             getString(R.string.agent_adapter_phone_subtitle),
             R.drawable.ic_device_node,
-            getString(R.string.permission_allowed)
+            getString(if (readiness.getValue("phone")) R.string.permission_allowed else R.string.permission_needs_setup)
         ))
         featureContent.addView(featureRow(
             getString(R.string.agent_adapter_browser),
             getString(R.string.agent_adapter_browser_subtitle),
             R.drawable.ic_tab_discover,
-            getString(R.string.permission_allowed)
+            getString(if (readiness.getValue("browser")) R.string.permission_allowed else R.string.permission_needs_setup)
         ))
         featureContent.addView(featureRow(
             getString(R.string.agent_adapter_files),
             getString(R.string.agent_adapter_files_subtitle),
             R.drawable.ic_protocol_link,
-            getString(R.string.permission_allowed)
+            getString(if (readiness.getValue("files")) R.string.permission_allowed else R.string.permission_needs_setup)
         ))
+    }
+
+    private fun agentAdapterReadiness(): LinkedHashMap<String, Boolean> {
+        val accessibilityReady = SignalASIAccessibilityService.isActive()
+        val notificationReady = SignalASINotificationListenerService.currentContext().hasAccess
+        val wechatInstalled = packageManager.getLaunchIntentForPackage("com.tencent.mm") != null
+        val smsReady = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:"))
+            .resolveActivity(packageManager) != null
+        val phoneReady = packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY) &&
+            Intent(Intent.ACTION_DIAL, Uri.parse("tel:"))
+                .resolveActivity(packageManager) != null
+        val browserReady = Intent(Intent.ACTION_VIEW, Uri.parse("https://signalasi.org"))
+            .resolveActivity(packageManager) != null
+        val filesReady = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            type = "*/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+        }.resolveActivity(packageManager) != null
+        return linkedMapOf(
+            "wechat" to (wechatInstalled && accessibilityReady && notificationReady),
+            "sms" to smsReady,
+            "phone" to phoneReady,
+            "browser" to browserReady,
+            "files" to filesReady
+        )
     }
 
     private fun showAgentKnowledgePage(query: String = "") {
@@ -11786,7 +12207,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         showOnDeviceAgentFeaturePage()
     }
 
-    private fun showAgentModelPlannerSourceDialog() {
+    private fun showAgentModelPlannerSourceDialog(
+        onChanged: () -> Unit = { showOnDeviceAgentFeaturePage() }
+    ) {
         val settings = mobileNativeAgent.modelPlannerSettings()
         val sources = configuredAgentPlannerSources()
         val ids = listOf("") + sources.map { it.first }
@@ -11798,7 +12221,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .setSingleChoiceItems(labels.toTypedArray(), selected) { dialog, which ->
                 mobileNativeAgent.updateModelPlannerCloudContact(ids[which])
                 dialog.dismiss()
-                showOnDeviceAgentFeaturePage()
+                onChanged()
             }
             .setNegativeButton(getString(R.string.common_cancel), null)
             .show()
@@ -12753,6 +13176,24 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                                 getString(R.string.destroy_data_messages),
                                 getString(R.string.destroy_data_messages_subtitle),
                                 R.drawable.ic_delete,
+                                getString(R.string.cc_reset_removed_status),
+                                ControlCenterTone.RED,
+                                showChevron = false
+                            ),
+                            ControlCenterRowSpec(
+                                "",
+                                getString(R.string.cc_reset_agent_data_title),
+                                getString(R.string.cc_reset_agent_data_subtitle),
+                                R.drawable.ic_agent_node,
+                                getString(R.string.cc_reset_removed_status),
+                                ControlCenterTone.RED,
+                                showChevron = false
+                            ),
+                            ControlCenterRowSpec(
+                                "",
+                                getString(R.string.cc_reset_settings_assets_title),
+                                getString(R.string.cc_reset_settings_assets_subtitle),
+                                R.drawable.ic_settings_diagnostics,
                                 getString(R.string.cc_reset_removed_status),
                                 ControlCenterTone.RED,
                                 showChevron = false

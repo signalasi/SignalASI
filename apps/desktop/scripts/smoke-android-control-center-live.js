@@ -26,7 +26,7 @@ const pages = [
   ["memory", "Memory & Personalization", "\u8bb0\u5fc6\u4e0e\u4e2a\u6027\u5316"],
   ["knowledge", "Knowledge", "\u77e5\u8bc6\u5e93"],
   ["skills", "Skills", "\u6280\u80fd"],
-  ["tasks", "Recent Tasks", "\u6700\u8fd1\u4efb\u52a1"],
+  ["tasks", "Task Center", "\u4efb\u52a1\u4e2d\u5fc3"],
   ["phone_capabilities", "Phone Capabilities", "\u624b\u673a\u80fd\u529b"],
   ["app_tools", "Apps & Tools", "\u5e94\u7528\u4e0e\u5de5\u5177"],
   ["smart_spaces", "Smart Spaces", "\u667a\u80fd\u7a7a\u95f4"],
@@ -125,8 +125,17 @@ async function main() {
   adb(["shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"]);
   await sleep(1_500);
 
+  const requestedPages = new Set(
+    (process.env.SIGNALASI_CC_LIVE_PAGES || "")
+      .split(",")
+      .map(value => value.trim())
+      .filter(Boolean)
+  );
+  const selectedPages = requestedPages.size > 0
+    ? pages.filter(([page]) => requestedPages.has(page))
+    : pages;
   const results = [];
-  for (const [page, english, chinese] of pages) {
+  for (const [page, english, chinese] of selectedPages) {
     const result = await capturePage(page, english, chinese);
     results.push(result);
     process.stdout.write(`${result.passed ? "PASS" : "FAIL"} ${page} ${result.elapsed_ms}ms\n`);

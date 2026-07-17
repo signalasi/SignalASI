@@ -54,6 +54,9 @@ async function waitForChangedSignalStore(before) {
 }
 
 async function main() {
+  if (process.env.SIGNALASI_ALLOW_DESTRUCTIVE_RESET !== "1") {
+    fail("Destructive reset smoke is disabled. Run only on a disposable test device with SIGNALASI_ALLOW_DESTRUCTIVE_RESET=1.");
+  }
   if (!fs.existsSync(apkPath)) {
     fail(`Android debug APK missing. Build it first: ${apkPath}`);
   }

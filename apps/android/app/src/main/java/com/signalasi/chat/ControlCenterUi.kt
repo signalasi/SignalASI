@@ -2,6 +2,7 @@ package com.signalasi.chat
 
 import android.content.Context
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -140,7 +141,7 @@ class ControlCenterRenderer(private val context: Context) {
         LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(14))
-            background = cardBackground(dp(14), Color.WHITE, Color.parseColor("#E2E7ED"))
+            background = cardBackground(dp(14), color(R.color.surface_bg), dividerColor())
             isClickable = spec.actionId.isNotBlank()
             isFocusable = isClickable
             if (isClickable) setOnClickListener { onAction(spec.actionId) }
@@ -185,7 +186,7 @@ class ControlCenterRenderer(private val context: Context) {
             }
 
             if (spec.metrics.isNotEmpty()) {
-                addView(View(context).apply { setBackgroundColor(Color.parseColor("#EEF1F4")) },
+                addView(View(context).apply { setBackgroundColor(dividerColor()) },
                     LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply { topMargin = dp(13) })
                 addView(LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
@@ -195,6 +196,8 @@ class ControlCenterRenderer(private val context: Context) {
                         addView(LinearLayout(context).apply {
                             orientation = LinearLayout.VERTICAL
                             gravity = Gravity.CENTER
+                            minimumHeight = dp(48)
+                            setPadding(0, 0, 0, dp(4))
                             addView(TextView(context).apply {
                                 text = metric.value
                                 textSize = 16f
@@ -206,14 +209,14 @@ class ControlCenterRenderer(private val context: Context) {
                                 text = metric.label
                                 textSize = 9.5f
                                 gravity = Gravity.CENTER
-                                maxLines = 1
+                                maxLines = 2
                                 ellipsize = TextUtils.TruncateAt.END
                                 setTextColor(color(R.color.text_secondary))
                                 setPadding(dp(2), dp(3), dp(2), 0)
                             })
-                        }, LinearLayout.LayoutParams(0, dp(48), 1f))
+                        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                         if (index < spec.metrics.take(3).lastIndex) {
-                            addView(View(context).apply { setBackgroundColor(Color.parseColor("#EEF1F4")) },
+                            addView(View(context).apply { setBackgroundColor(dividerColor()) },
                                 LinearLayout.LayoutParams(1, dp(39)))
                         }
                     }
@@ -266,7 +269,7 @@ class ControlCenterRenderer(private val context: Context) {
     private fun sectionTitle(title: String): TextView = TextView(context).apply {
         text = title
         textSize = 12.5f
-        setTextColor(Color.parseColor("#475467"))
+        setTextColor(color(R.color.text_secondary))
         setTypeface(typeface, Typeface.BOLD)
         setPadding(dp(4), dp(14), 0, dp(7))
     }
@@ -274,11 +277,11 @@ class ControlCenterRenderer(private val context: Context) {
     private fun sectionCard(rows: List<ControlCenterRowSpec>, onAction: (String) -> Unit): View =
         LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            background = cardBackground(dp(12), Color.WHITE, Color.parseColor("#E2E7ED"))
+            background = cardBackground(dp(12), color(R.color.surface_bg), dividerColor())
             rows.forEachIndexed { index, spec ->
                 addView(row(spec, onAction))
                 if (index < rows.lastIndex) {
-                    addView(View(context).apply { setBackgroundColor(Color.parseColor("#EDF0F3")) },
+                    addView(View(context).apply { setBackgroundColor(dividerColor()) },
                         LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply {
                             marginStart = dp(58)
                         })
@@ -393,7 +396,7 @@ class ControlCenterRenderer(private val context: Context) {
 
     private fun chevron(): ImageView = ImageView(context).apply {
         setImageResource(R.drawable.ic_arrow_right)
-        imageTintList = ColorStateList.valueOf(Color.parseColor("#B8C0CA"))
+        imageTintList = ColorStateList.valueOf(color(R.color.icon_gray))
         scaleType = ImageView.ScaleType.CENTER
         layoutParams = LinearLayout.LayoutParams(dp(20), dp(36))
     }
@@ -408,14 +411,30 @@ class ControlCenterRenderer(private val context: Context) {
 
     private data class Palette(val soft: Int, val strong: Int, val border: Int)
 
-    private fun palette(tone: ControlCenterTone): Palette = when (tone) {
-        ControlCenterTone.GREEN -> Palette(Color.parseColor("#E8F8F0"), Color.parseColor("#14875A"), Color.parseColor("#CBEBD9"))
-        ControlCenterTone.BLUE -> Palette(Color.parseColor("#EAF2FF"), Color.parseColor("#286FD6"), Color.parseColor("#D2E2FB"))
-        ControlCenterTone.AMBER -> Palette(Color.parseColor("#FFF4DE"), Color.parseColor("#B26B00"), Color.parseColor("#F3D9A6"))
-        ControlCenterTone.RED -> Palette(Color.parseColor("#FFEDEC"), Color.parseColor("#C7372F"), Color.parseColor("#F5CECB"))
-        ControlCenterTone.VIOLET -> Palette(Color.parseColor("#F0ECFF"), Color.parseColor("#7052CC"), Color.parseColor("#DDD4FA"))
-        ControlCenterTone.NEUTRAL -> Palette(Color.parseColor("#F0F3F6"), Color.parseColor("#475467"), Color.parseColor("#E2E7ED"))
+    private fun palette(tone: ControlCenterTone): Palette = if (isNight()) {
+        when (tone) {
+            ControlCenterTone.GREEN -> Palette(Color.parseColor("#18382A"), Color.parseColor("#54D89A"), Color.parseColor("#24553D"))
+            ControlCenterTone.BLUE -> Palette(Color.parseColor("#1D2E4A"), Color.parseColor("#76A9FF"), Color.parseColor("#29436B"))
+            ControlCenterTone.AMBER -> Palette(Color.parseColor("#3D2D14"), Color.parseColor("#F4B95D"), Color.parseColor("#5C4320"))
+            ControlCenterTone.RED -> Palette(Color.parseColor("#44211F"), Color.parseColor("#FF8A83"), Color.parseColor("#62302D"))
+            ControlCenterTone.VIOLET -> Palette(Color.parseColor("#30274A"), Color.parseColor("#B8A1FF"), Color.parseColor("#493A70"))
+            ControlCenterTone.NEUTRAL -> Palette(Color.parseColor("#2D323A"), Color.parseColor("#C7CED8"), Color.parseColor("#3E4651"))
+        }
+    } else {
+        when (tone) {
+            ControlCenterTone.GREEN -> Palette(Color.parseColor("#E8F8F0"), Color.parseColor("#14875A"), Color.parseColor("#CBEBD9"))
+            ControlCenterTone.BLUE -> Palette(Color.parseColor("#EAF2FF"), Color.parseColor("#286FD6"), Color.parseColor("#D2E2FB"))
+            ControlCenterTone.AMBER -> Palette(Color.parseColor("#FFF4DE"), Color.parseColor("#B26B00"), Color.parseColor("#F3D9A6"))
+            ControlCenterTone.RED -> Palette(Color.parseColor("#FFEDEC"), Color.parseColor("#C7372F"), Color.parseColor("#F5CECB"))
+            ControlCenterTone.VIOLET -> Palette(Color.parseColor("#F0ECFF"), Color.parseColor("#7052CC"), Color.parseColor("#DDD4FA"))
+            ControlCenterTone.NEUTRAL -> Palette(Color.parseColor("#F0F3F6"), Color.parseColor("#475467"), Color.parseColor("#E2E7ED"))
+        }
     }
+
+    private fun isNight(): Boolean =
+        context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+
+    private fun dividerColor(): Int = color(R.color.separator)
 
     private fun color(resourceId: Int): Int = ContextCompat.getColor(context, resourceId)
     private fun dp(value: Int): Int = (value * context.resources.displayMetrics.density + 0.5f).toInt()
