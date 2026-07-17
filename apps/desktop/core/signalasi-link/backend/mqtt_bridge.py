@@ -75,6 +75,12 @@ pending_delivery_acks: dict[int, dict] = {}
 pending_delivery_acks_lock = threading.Lock()
 pending_outbound_acks: dict[int, tuple[str, str]] = {}
 pending_outbound_acks_lock = threading.Lock()
+PRESENCE_INTERVAL_SECONDS = max(
+    15,
+    int(os.environ.get("SIGNALASI_PRESENCE_INTERVAL_SECONDS", "60")),
+)
+presence_stop_event = threading.Event()
+presence_thread: threading.Thread | None = None
 
 TOOL_SESSION_START_TYPE = "tool_session_start"
 TOOL_CALL_REQUEST_TYPE = "tool_call_request"
@@ -1220,6 +1226,16 @@ def on_message(mqttc, userdata, msg):
             log.info("Client relationship revoked client=%s", client_route_id)
             return
 
+        if msg_type == "connector_status_request":
+            status = publish_connector_status(
+                mqttc,
+                reason="client_connected",
+                client_route_id=client_route_id,
+            )
+            if not status.get("ok"):
+                log.warning("Requested connector status publish failed: %s", status)
+            return
+
         if msg_type == "agent_task_cancel":
             task_id = str(payload.get("task_id") or "").strip()
             existing_task = agent_task_manager.get(task_id)
@@ -1408,7 +1424,7 @@ def mobile_connector_agents(client_route_id: str = "") -> list[dict]:
             "setup": agent.get("setup") or "",
             "kind": agent.get("kind") or "",
             "mqtt_topic": up_topic,
-            "updated_at": time.time(),
+            "updated_at": int(time.time() * 1000),
         })
     return agents
 
@@ -1540,6 +1556,31 @@ def publish_connector_status(mqttc=None, reason: str = "status_update", client_r
     except Exception as exc:
         log.warning(f"MQTT connector status skipped: {exc}")
         return api_error("publish_failed", str(exc), reason=reason, params={"reason": reason})
+
+
+def _presence_loop() -> None:
+    global presence_thread
+    try:
+        while not presence_stop_event.wait(PRESENCE_INTERVAL_SECONDS):
+            status = publish_connector_status(reason="heartbeat")
+            if not status.get("ok"):
+                log.debug("Desktop presence heartbeat skipped: %s", status)
+    finally:
+        if threading.current_thread() is presence_thread:
+            presence_thread = None
+
+
+def _ensure_presence_thread() -> None:
+    global presence_thread
+    if presence_thread is not None and presence_thread.is_alive():
+        return
+    presence_stop_event.clear()
+    presence_thread = threading.Thread(
+        target=_presence_loop,
+        daemon=True,
+        name="signalasi-presence",
+    )
+    presence_thread.start()
 
 
 def publish_pairing_revoked(mqttc=None, reason: str = "forgotten_by_desktop", client_route_id: str = "") -> dict:
@@ -1740,6 +1781,7 @@ def start():
 def start_background():
     """Start MQTT in a background thread."""
     _ensure_task_event_publisher()
+    _ensure_presence_thread()
     threading.Thread(target=warm_codex_app_server, daemon=True, name="signalasi-codex-prewarm").start()
     t = threading.Thread(target=start, daemon=True)
     t.start()
@@ -1747,8 +1789,9 @@ def start_background():
 
 
 def stop():
-    global client, running, codex_app_server
+    global client, running, codex_app_server, presence_thread
     running = False
+    presence_stop_event.set()
     _close_phone_tool_sessions(reason="Desktop MQTT bridge stopped")
     if client:
         client.disconnect()

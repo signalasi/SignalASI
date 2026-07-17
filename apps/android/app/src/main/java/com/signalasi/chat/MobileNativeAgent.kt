@@ -6748,7 +6748,9 @@ class DefaultAgentSafetyPolicy(
             PermissionMode.OBSERVE_ONLY,
             PermissionMode.SUGGEST_ONLY -> false
             PermissionMode.ASK_BEFORE_ACTION -> pendingActions.any {
-                it.kind != AgentActionKind.READ_SCREEN && it.kind != AgentActionKind.DRAFT_PLAN
+                it.kind != AgentActionKind.READ_SCREEN &&
+                    it.kind != AgentActionKind.DRAFT_PLAN &&
+                    it.kind != AgentActionKind.CALL_CONNECTOR
             }
             PermissionMode.AUTO_LOW_RISK -> requiresTierConfirmation
         }
@@ -8528,9 +8530,22 @@ class AppStoreAgentConnectorRegistry(
 
 object AgentConnectorAvailability {
     private val routableDesktopStates = setOf("ready", "busy")
+    private const val DESKTOP_STATUS_TTL_MILLIS = 10 * 60_000L
+    private const val MAX_CLOCK_SKEW_MILLIS = 60_000L
 
-    fun desktopAgentReady(contact: JSONObject): Boolean =
-        contact.optString("setup_status").ifBlank { "unknown" }.lowercase(Locale.US) in routableDesktopStates
+    fun desktopAgentReady(
+        contact: JSONObject,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Boolean {
+        val statusReady = contact.optString("setup_status")
+            .ifBlank { "unknown" }
+            .lowercase(Locale.US) in routableDesktopStates
+        if (!statusReady) return false
+        val updatedAtMillis = contact.optLong("setup_updated_at", 0L)
+        if (updatedAtMillis <= 0L) return false
+        val ageMillis = nowMillis - updatedAtMillis
+        return ageMillis in -MAX_CLOCK_SKEW_MILLIS..DESKTOP_STATUS_TTL_MILLIS
+    }
 
     fun cloudModelReady(contact: JSONObject): Boolean =
         contact.optString("setup_status").ifBlank { "ready" }.equals("ready", ignoreCase = true) &&

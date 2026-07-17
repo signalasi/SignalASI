@@ -43,6 +43,7 @@ object SignalASIMqttClient {
     private var client: MqttAsyncClient? = null
     @Volatile private var connected = false
     @Volatile private var secureReady = false
+    @Volatile private var lastConnectorStatusRequestAt = 0L
     @Volatile private var appContext: Context? = null
 
     interface Listener {
@@ -123,6 +124,7 @@ object SignalASIMqttClient {
                     setConnected(true)
                     subscribe()
                     scheduleOutboxRetries()
+                    scheduleConnectorStatusRequest()
                 }
 
                 override fun connectionLost(cause: Throwable?) {
@@ -163,6 +165,7 @@ object SignalASIMqttClient {
                 Handler(Looper.getMainLooper()).postDelayed(
                     {
                         requestMissingSignalSessions(context.applicationContext)
+                        requestConnectorStatuses(context.applicationContext)
                         retryPendingMessages()
                     },
                     800L
@@ -660,6 +663,44 @@ object SignalASIMqttClient {
         setSecureReady(SignalASILinkProtocol.allServerLinks(context).any { link ->
             link.paired && SignalASICrypto.hasDesktopSession(context, link.desktopId)
         })
+    }
+
+    private fun scheduleConnectorStatusRequest() {
+        retryHandler.postDelayed({
+            appContext?.let(::requestConnectorStatuses)
+        }, 500L)
+    }
+
+    private fun requestConnectorStatuses(context: Context) {
+        val mqtt = client ?: return
+        if (!mqtt.isConnected) return
+        val now = System.currentTimeMillis()
+        if (now - lastConnectorStatusRequestAt < 5_000L) return
+        lastConnectorStatusRequestAt = now
+        SignalASILinkProtocol.allServerLinks(context)
+            .filter { it.paired && SignalASICrypto.hasDesktopSession(context, it.desktopId) }
+            .forEach { link ->
+                val payload = JSONObject()
+                    .put("type", "connector_status_request")
+                    .put("contact_id", "system")
+                    .put("desktop_id", link.desktopId)
+                    .put("time", now)
+                val envelope = SignalASILinkProtocol.makeEnvelope(
+                    payload,
+                    SignalASICrypto.localSignalasiId(),
+                    link.desktopId
+                )
+                val encrypted = SignalASICrypto.encryptPayloadForDesktop(link.desktopId, envelope)
+                    ?: return@forEach
+                mqtt.publish(
+                    link.routes.control,
+                    MqttMessage(encrypted.toString().toByteArray(Charsets.UTF_8)).apply {
+                        qos = MQTT_QOS
+                        isRetained = false
+                    }
+                )
+                Log.i(TAG, "Requested connector status desktop=${link.desktopId.takeLast(8)}")
+            }
     }
 
     private fun subscribe() {

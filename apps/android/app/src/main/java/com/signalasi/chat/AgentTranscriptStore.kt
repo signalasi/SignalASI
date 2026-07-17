@@ -8,6 +8,11 @@ import java.util.UUID
 enum class AgentTranscriptRole { USER, ASSISTANT, PROCESS }
 enum class AgentConversationStatus { ACTIVE, ARCHIVED }
 
+object AgentTranscriptLifecyclePolicy {
+    fun isObsoletePlannerProcessEntry(role: AgentTranscriptRole, dedupeKey: String): Boolean =
+        role == AgentTranscriptRole.PROCESS && dedupeKey.startsWith("pending:")
+}
+
 data class AgentTranscriptEntry(
     val id: String,
     val role: AgentTranscriptRole,
@@ -189,6 +194,13 @@ class AgentTranscriptStore(context: Context) {
         allEntries().filter { it.conversationId == conversationId }.takeLast(MAX_ITEMS_PER_CONVERSATION)
 
     @Synchronized
+    fun conversationIdForTurn(turnId: String): String? {
+        val cleanTurnId = turnId.trim()
+        if (cleanTurnId.isBlank()) return null
+        return allEntries().lastOrNull { it.turnId == cleanTurnId }?.conversationId
+    }
+
+    @Synchronized
     fun deleteEntry(entryId: String): Boolean {
         val current = allEntries()
         if (current.none { it.id == entryId }) return false
@@ -341,6 +353,16 @@ class AgentTranscriptStore(context: Context) {
     fun removeExactText(text: String): Int {
         val current = allEntries()
         val filtered = current.filterNot { it.text == text }
+        if (filtered.size != current.size) saveEntries(filtered)
+        return current.size - filtered.size
+    }
+
+    @Synchronized
+    fun removeObsoletePlannerProcessEntries(): Int {
+        val current = allEntries()
+        val filtered = current.filterNot { entry ->
+            AgentTranscriptLifecyclePolicy.isObsoletePlannerProcessEntry(entry.role, entry.dedupeKey)
+        }
         if (filtered.size != current.size) saveEntries(filtered)
         return current.size - filtered.size
     }

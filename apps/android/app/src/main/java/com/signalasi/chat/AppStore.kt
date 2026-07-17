@@ -678,7 +678,13 @@ object AppStore {
         contact.put("setup_status", agent.optString("status", "needs_setup"))
         contact.put("setup_detail", agent.optString("detail"))
         contact.put("setup_next_step", agent.optString("setup"))
-        contact.put("setup_updated_at", agent.optLong("updated_at", now))
+        val rawUpdatedAt = agent.optLong("updated_at", now)
+        val updatedAtMillis = if (rawUpdatedAt in 1L..9_999_999_999L) {
+            rawUpdatedAt * 1_000L
+        } else {
+            rawUpdatedAt
+        }
+        contact.put("setup_updated_at", updatedAtMillis)
         contact.put("deleted", false)
         contact.put("trust_state", "verified")
         contact.put("signal_session", "pc_tunnel")

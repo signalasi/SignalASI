@@ -21,6 +21,13 @@ class AgentSafetySettingsBehaviorTest {
         assertFalse(askReview.blocked)
         assertTrue(askReview.requiresConfirmation)
 
+        val connectorReview = review(
+            settings(PermissionMode.ASK_BEFORE_ACTION),
+            action(AgentActionKind.CALL_CONNECTOR)
+        )
+        assertFalse(connectorReview.blocked)
+        assertFalse(connectorReview.requiresConfirmation)
+
         val automaticReview = review(settings(PermissionMode.AUTO_LOW_RISK), direct)
         assertFalse(automaticReview.blocked)
         assertFalse(automaticReview.requiresConfirmation)

@@ -11,6 +11,7 @@ from pairing_state import DATA_DIR
 
 DB_PATH = Path(DATA_DIR) / "signalasi_link_delivery.db"
 _lock = threading.RLock()
+OUTBOUND_RETENTION_SECONDS = 7 * 24 * 60 * 60
 
 
 def _connect() -> sqlite3.Connection:
@@ -138,11 +139,18 @@ def pending_outbound(max_attempts: int = 8) -> list[dict]:
     with _lock:
         db = _connect()
         try:
+            db.execute(
+                "DELETE FROM outbound_messages WHERE created_at < ?",
+                (time.time() - OUTBOUND_RETENTION_SECONDS,),
+            )
             rows = db.execute(
                 """SELECT client_route_id,message_id,topic,wire_payload,attempts,created_at
-                   FROM outbound_messages WHERE attempts < ? ORDER BY created_at""",
+                   FROM outbound_messages
+                   WHERE status='queued' AND attempts < ?
+                   ORDER BY created_at""",
                 (max_attempts,),
             ).fetchall()
+            db.commit()
         finally:
             db.close()
     return [

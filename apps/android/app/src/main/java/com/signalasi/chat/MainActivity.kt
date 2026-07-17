@@ -416,6 +416,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentSkillMatcher = AgentSkillMatcher(agentSkillRuntime)
         agentTranscriptStore.removeExactText("Create a safe local task plan")
         agentTranscriptStore.removeExactText("Task plan confirmed")
+        agentTranscriptStore.removeObsoletePlannerProcessEntries()
         microsoftTts = MicrosoftEdgeTts(applicationContext)
         androidTts = TextToSpeech(this) { status ->
             androidTtsReady = status == TextToSpeech.SUCCESS
@@ -659,8 +660,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun consumeAgentConnectorResponse(response: AgentConnectorResponse) {
-        val runtime = runtimeForConnectorResponse(response.sourceMessageId, response.contactId)
-        if (!runtime.canAcceptConnectorResponse(response.sourceMessageId, response.contactId)) return
+        val runtime = runtimeForConnectorResponse(
+            response.sourceMessageId,
+            response.contactId,
+            response.conversationId,
+            response.turnId
+        ) ?: return
         val responseKey = "${response.sourceMessageId}:${response.contactId}"
         if (!agentConnectorResponsesInFlight.add(responseKey)) return
         resumeAgentConnectorResponse(response, runtime, responseKey)
@@ -672,21 +677,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         responseKey: String,
         attempt: Int = 0
     ) {
-        val explicitConversationId = response.conversationId.trim()
-        val conversationId = if (explicitConversationId.isNotBlank()) {
-            val exists = agentTranscriptStore.conversations(includeArchived = true)
-                .any { it.id == explicitConversationId }
-            if (!exists) {
-                AgentConnectorResponseStore.remove(this, response)
-                activeAgentTasks.remove(response.sourceMessageId)
-                agentConnectorResponsesInFlight.remove(responseKey)
-                return
-            }
-            explicitConversationId
-        } else {
-            agentRuntimeConversationIds[runtime] ?: agentTranscriptStore.activeConversation().id
-        }
         val turnId = response.turnId.ifBlank { agentRuntimeTurnIds[runtime].orEmpty() }
+        val conversationId = connectorConversationId(response.conversationId, runtime, turnId)
+        if (conversationId == null) {
+            Log.w(
+                "SignalASIAgent",
+                "Discarding unroutable connector response source=${response.sourceMessageId} turn=${turnId.take(8)}"
+            )
+            AgentConnectorResponseStore.remove(this, response)
+            activeAgentTasks.remove(response.sourceMessageId)
+            agentConnectorResponsesInFlight.remove(responseKey)
+            return
+        }
         val supervisor = AgentTaskRuntime.supervisor(this)
         if (turnId.isBlank()) {
             consumeLegacyAgentConnectorResponse(response, runtime, responseKey, conversationId)
@@ -835,8 +837,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
-    private fun runtimeForConnectorResponse(sourceMessageId: Long, contactId: String): MobileNativeAgent {
-        activeAgentTasks[sourceMessageId]?.let { return it }
+    private fun runtimeForConnectorResponse(
+        sourceMessageId: Long,
+        contactId: String,
+        conversationId: String = "",
+        turnId: String = ""
+    ): MobileNativeAgent? {
+        activeAgentTasks[sourceMessageId]
+            ?.takeIf { it.canAcceptConnectorResponse(sourceMessageId, contactId) }
+            ?.let { return it }
         provisionalAgentTasks.firstOrNull {
             it.canAcceptConnectorResponse(sourceMessageId, contactId)
         }?.let { runtime ->
@@ -844,7 +853,37 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             provisionalAgentTasks.remove(runtime)
             return runtime
         }
-        return mobileNativeAgent
+        val cleanTurnId = turnId.trim()
+        if (cleanTurnId.isNotBlank()) {
+            val restored = MobileNativeAgent(
+                this,
+                sessionStore = SharedPreferencesAgentSessionStore(this, "task:$cleanTurnId")
+            )
+            if (restored.canAcceptConnectorResponse(sourceMessageId, contactId)) {
+                activeAgentTasks[sourceMessageId] = restored
+                agentRuntimeTurnIds[restored] = cleanTurnId
+                connectorConversationId(conversationId, restored, cleanTurnId)?.let {
+                    agentRuntimeConversationIds[restored] = it
+                }
+                return restored
+            }
+        }
+        return mobileNativeAgent.takeIf {
+            it.canAcceptConnectorResponse(sourceMessageId, contactId)
+        }
+    }
+
+    private fun connectorConversationId(
+        explicitConversationId: String,
+        runtime: MobileNativeAgent?,
+        turnId: String
+    ): String? {
+        val knownIds = agentTranscriptStore.conversations(includeArchived = true).mapTo(HashSet()) { it.id }
+        val explicit = explicitConversationId.trim()
+        if (explicit.isNotBlank()) return explicit.takeIf { it in knownIds }
+        val runtimeConversation = runtime?.let(agentRuntimeConversationIds::get).orEmpty()
+        if (runtimeConversation in knownIds) return runtimeConversation
+        return agentTranscriptStore.conversationIdForTurn(turnId)?.takeIf { it in knownIds }
     }
 
     override fun onBackPressed() {
@@ -889,7 +928,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     .toLongOrNull()
                 if (acknowledgedId != null) {
                     runtimeForConnectorResponse(acknowledgedId, "")
-                        .recordConnectorTransportAccepted(acknowledgedId)
+                        ?.recordConnectorTransportAccepted(acknowledgedId)
                 }
             }
             if (handleAgentTaskEvent(envelope)) return@runOnUiThread
@@ -907,31 +946,36 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             val sourceMessageId = envelope?.optString("source_message_id")?.toLongOrNull()
                 ?: envelope?.optLong("source_message_id", 0L)
                 ?: 0L
-            val supersededResponse = sourceMessageId > 0L && sourceMessageId in supersededConnectorSourceIds
-            val nativeAgentResponse = supersededResponse || sourceMessageId > 0L && (
-                activeAgentTasks[sourceMessageId]?.canAcceptConnectorResponse(sourceMessageId, msg.contact.id) == true ||
-                    provisionalAgentTasks.any {
-                        it.canAcceptConnectorResponse(sourceMessageId, msg.contact.id)
-                    } ||
-                    mobileNativeAgent.canAcceptConnectorResponse(sourceMessageId, msg.contact.id)
-                )
-            if (supersededResponse) supersededConnectorSourceIds.remove(sourceMessageId)
             val responseConversationId = envelope?.optString("conversation_id").orEmpty()
             val responseTurnId = envelope?.optString("turn_id").orEmpty()
             val responseTaskId = envelope?.optString("task_id").orEmpty()
+            val supersededResponse = sourceMessageId > 0L && sourceMessageId in supersededConnectorSourceIds
+            val matchingAgentRuntime = if (sourceMessageId > 0L) {
+                runtimeForConnectorResponse(
+                    sourceMessageId,
+                    msg.contact.id,
+                    responseConversationId,
+                    responseTurnId
+                )
+            } else null
+            val nativeAgentResponse = supersededResponse || matchingAgentRuntime != null
+            if (supersededResponse) supersededConnectorSourceIds.remove(sourceMessageId)
             if (responseTaskId.isNotBlank()) {
                 completedConnectorTaskIds.add(responseTaskId)
-                val processConversationId = responseConversationId.ifBlank {
-                    agentTranscriptStore.activeConversation().id
+                connectorConversationId(
+                    responseConversationId,
+                    matchingAgentRuntime,
+                    responseTurnId
+                )?.let { processConversationId ->
+                    agentTranscriptStore.upsert(
+                        AgentTranscriptRole.PROCESS,
+                        "${contactById(msg.contact.id).name} · ${getString(R.string.agent_task_status_completed)}",
+                        dedupeKey = "connector-task:$responseTaskId",
+                        conversationId = processConversationId,
+                        turnId = responseTurnId,
+                        taskId = responseTaskId
+                    )
                 }
-                agentTranscriptStore.upsert(
-                    AgentTranscriptRole.PROCESS,
-                    "${contactById(msg.contact.id).name} · ${getString(R.string.agent_task_status_completed)}",
-                    dedupeKey = "connector-task:$responseTaskId",
-                    conversationId = processConversationId,
-                    turnId = responseTurnId,
-                    taskId = responseTaskId
-                )
             }
             publishAgentConnectorResponse(envelope, msg)
             if (!nativeAgentResponse && responseConversationId.isNotBlank() &&
@@ -1008,8 +1052,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ChatHistoryStore.applyAgentTaskEvent(this, envelope)
             reloadChatHistoryIfChanged(force = true)
         }
-        val taskRuntime = runtimeForConnectorResponse(sourceMessageId, contactId)
-        val nativeState = taskRuntime.recordConnectorTaskStatus(
+        val envelopeConversationId = envelope.optString("conversation_id")
+        val envelopeTurnId = envelope.optString("turn_id")
+        val taskRuntime = runtimeForConnectorResponse(
+            sourceMessageId,
+            contactId,
+            envelopeConversationId,
+            envelopeTurnId
+        )
+        val nativeState = taskRuntime?.recordConnectorTaskStatus(
             sourceMessageId = sourceMessageId,
             contactId = contactId,
             taskId = taskId,
@@ -1017,11 +1068,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             statusSeq = statusSeq
         )
         val targetName = contactById(contactId).name
-        val conversationId = envelope.optString("conversation_id").takeIf { it.isNotBlank() }
-            ?: agentRuntimeConversationIds[taskRuntime]
-            ?: agentTranscriptStore.activeConversation().id
-        val turnId = envelope.optString("turn_id").takeIf { it.isNotBlank() }
-            ?: agentRuntimeTurnIds[taskRuntime].orEmpty()
+        val turnId = envelopeTurnId.takeIf { it.isNotBlank() }
+            ?: taskRuntime?.let(agentRuntimeTurnIds::get).orEmpty()
+        val conversationId = connectorConversationId(
+            envelopeConversationId,
+            taskRuntime,
+            turnId
+        ) ?: return true
         // A task can gain a Codex turn id after it starts. Keep one stable key so
         // accepted, running steps, and completion update one process row in place.
         val connectorProcessKey = "connector-task:$taskId"
@@ -1087,7 +1140,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             when (status) {
                 "cancelled" -> {
                     activeAgentTasks.remove(sourceMessageId)
-                    renderAgentState(taskRuntime.cancelCurrentTask(), conversationId, turnId)
+                    taskRuntime?.cancelCurrentTask()?.let {
+                        renderAgentState(it, conversationId, turnId)
+                    }
                 }
                 "failed", "timed_out", "not_found" -> AgentConnectorResponseBus.publish(
                     this,
@@ -1787,7 +1842,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     .toString()
             )
             runOnUiThread {
-                mobileNativeAgent = runtime
+                if (conversationId == agentTranscriptStore.activeConversation().id) {
+                    mobileNativeAgent = runtime
+                }
                 state.lastActionResult?.metadata?.get("source_message_id")?.toLongOrNull()?.let { sourceId ->
                     activeAgentTasks[sourceId] = runtime
                     provisionalAgentTasks.remove(runtime)
@@ -5545,6 +5602,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         turnId: String = "",
         syncTranscript: Boolean = true
     ) {
+        if (conversationId != agentTranscriptStore.activeConversation().id) {
+            if (syncTranscript) syncAgentTranscript(state, conversationId, turnId)
+            return
+        }
         if (state == lastRenderedAgentState) return
         lastRenderedAgentState = state
         val pendingAction = state.pendingAction
@@ -5605,11 +5666,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 taskId = state.sessionId
             )
         }
-        state.pendingAction?.let { pending ->
+        state.pendingAction?.takeIf { it.kind != AgentActionKind.CALL_CONNECTOR }?.let { pending ->
             val description = pending.description.trim()
             if (state.phase == AgentPhase.WAITING_CONFIRMATION &&
-                description.isNotBlank() &&
-                AgentConfirmationPolicy.tier(pending) != AgentConfirmationTier.DIRECT
+                description.isNotBlank()
             ) {
                 val richOutput = AgentRichContentCodec.encode(listOf(
                     AgentRichBlock(
@@ -5644,32 +5704,34 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 description != "Create a safe local task plan" &&
                 !description.contains(':')
             ) {
-                val connectorProcess = pending.kind == AgentActionKind.CALL_CONNECTOR && turnId.isNotBlank()
-                val processKey = if (connectorProcess) {
-                    "connector-turn:$turnId"
-                } else {
-                    "pending:$planId:${pending.id}:${description.hashCode()}"
-                }
-                if (connectorProcess) {
-                    agentTranscriptStore.upsert(
-                        AgentTranscriptRole.PROCESS,
-                        "${pending.target} · ${getString(R.string.agent_task_status_starting)}",
-                        dedupeKey = processKey,
-                        conversationId = conversationId,
-                        turnId = turnId,
-                        taskId = state.sessionId
-                    )
-                } else {
-                    agentTranscriptStore.append(
-                        AgentTranscriptRole.PROCESS,
-                        description,
-                        dedupeKey = processKey,
-                        conversationId = conversationId,
-                        turnId = turnId,
-                        taskId = state.sessionId
-                    )
-                }
+                agentTranscriptStore.append(
+                    AgentTranscriptRole.PROCESS,
+                    description,
+                    dedupeKey = "pending:$planId:${pending.id}:${description.hashCode()}",
+                    conversationId = conversationId,
+                    turnId = turnId,
+                    taskId = state.sessionId
+                )
             }
+        }
+        val connectorMetadata = state.lastActionResult?.metadata.orEmpty()
+        val connectorPublished = state.phase == AgentPhase.WAITING_RESPONSE &&
+            connectorMetadata["awaiting_response"] == "true" &&
+            connectorMetadata["source_message_id"].orEmpty().isNotBlank()
+        val remoteTaskCreated = connectorMetadata["remote_task_id"].orEmpty().isNotBlank()
+        if (connectorPublished && !remoteTaskCreated && turnId.isNotBlank()) {
+            val target = connectorMetadata["target"].orEmpty()
+                .ifBlank { state.plan?.route?.targetTitle.orEmpty() }
+                .ifBlank { state.plan?.selectedAgentOrModel.orEmpty() }
+                .ifBlank { getString(R.string.tab_agent) }
+            agentTranscriptStore.upsert(
+                AgentTranscriptRole.PROCESS,
+                "$target · ${getString(R.string.agent_task_status_starting)}",
+                dedupeKey = "connector-turn:$turnId",
+                conversationId = conversationId,
+                turnId = turnId,
+                taskId = state.sessionId
+            )
         }
         val result = CodexStyleResponsePolicy.sanitizeAssistantText(
             state.lastActionResult?.message.orEmpty()
