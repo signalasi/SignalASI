@@ -154,6 +154,17 @@
     <string name="cc_runtime_uninstall_failed">运行包卸载失败：%1$s</string>
     <string name="cc_runtime_section_packs">运行包</string>
     <string name="cc_runtime_section_security">隔离与策略</string>
+    <string name="cc_runtime_section_receipts">最近执行回执</string>
+    <string name="cc_runtime_receipt_empty_title">还没有运行环境执行记录</string>
+    <string name="cc_runtime_receipt_empty_subtitle">本机任务运行后将在这里显示已验证的执行回执</string>
+    <string name="cc_runtime_receipt_title">%1$s 执行</string>
+    <string name="cc_runtime_receipt_subtitle">%1$s · 请求 %2$s</string>
+    <string name="cc_runtime_receipt_running">运行中</string>
+    <string name="cc_runtime_receipt_completed">已完成</string>
+    <string name="cc_runtime_receipt_failed">失败</string>
+    <string name="cc_runtime_receipt_cancelled">已取消</string>
+    <string name="cc_runtime_receipt_timed_out">已超时</string>
+    <string name="cc_runtime_receipt_details">请求：%1$s\n状态：%2$s\n源代码 SHA-256：%3$s\n运行包：%4$s\n退出码：%5$s\n产物：%6$d\n错误：%7$s</string>
     <string name="cc_runtime_pack_subtitle">签名的模块化运行包</string>
     <string name="cc_runtime_pack_linux">Linux 基础环境</string>
     <string name="cc_runtime_pack_python">Python 与 uv</string>

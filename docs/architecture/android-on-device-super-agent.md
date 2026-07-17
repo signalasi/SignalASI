@@ -146,6 +146,23 @@ The Linux guest is persistent and controlled by a small guest agent. SignalASI d
 for each command. Host and guest communicate through a bounded request protocol with per-task
 workspaces, cancellation, heartbeats, output limits, artifact hashes, and execution receipts.
 
+The Android host contract is implemented as an authenticated, length-prefixed local-socket
+protocol. Host and guest negotiate the API version before work begins. Every frame carries a
+request id, monotonic sequence, timestamp, and HMAC-SHA256 authentication; oversized, stale,
+tampered, and incompatible frames fail closed. Execution supports progress, cancellation,
+timeouts, bounded results, explicit network-domain allowlists, and health probes.
+
+Each request receives an app-private workspace and an encrypted execution receipt containing the
+source digest, runtime-pack versions, resource limits, network scope, terminal state, output
+digests, exit code, and verified artifact hashes. Only explicitly requested relative artifacts
+are collected. Workspaces expire after a bounded retention period and cannot escape their task
+root.
+
+This host-side protocol and policy layer does not by itself make Linux execution available. The
+runtime remains unavailable until a trusted native QEMU engine, `linux-base` image, and compatible
+guest agent are installed and complete the health handshake. SignalASI never reports a placeholder
+or manifest-only runtime as ready.
+
 ## Runtime packs
 
 The base APK remains small. Runtime components are signed, versioned, and independently removable:
@@ -189,20 +206,30 @@ the guest bridge are all active.
 ## OCR and media
 
 OCR is Android-native first and supports Latin, Chinese, Japanese, Korean, and Devanagari script
-selection, image orientation, bounded decoding, reading-order sorting, duplicate-line removal, and
-structured boxes. A later document pipeline adds layout, tables, handwriting, equations, and
-offline visual-model review as optional packs.
+selection, image orientation, and bounded decoding. Automatic mode merges multiple recognizers
+instead of discarding all but one script. Spatial duplicate removal, structured lines and blocks,
+language provenance, layout classification, heuristic quality, and warnings are returned to the
+planner so mixed-language and low-quality pages can be handled honestly.
+
+The local knowledge importer extracts text from PDF, DOCX, XLSX, PPTX, HTML, images, source code,
+configuration files, and common text formats. XLSX and PPTX are parsed from bounded OOXML entries;
+archive expansion, entry count, XML document types, external entities, and extracted output are
+limited. Images use the same on-device OCR path. Handwriting, equations, complex tables, and
+offline visual-model review remain optional future model-pack capabilities.
 
 FFmpeg is exposed through the runtime broker with argument validation, bounded inputs and outputs,
 progress events, cancellation, and artifact previews. Media conversion never grants a shell direct
 access to the user's shared storage.
 
-## Delivery stages
+## Delivery status
 
-1. Strengthen memory metadata, ranking, conflict handling, and encrypted database storage.
-2. Add automatic learning evidence and reviewed Skill proposals.
-3. Add runtime capability, pack, policy, and receipt contracts to the Android tool catalog.
-4. Ship and validate the QEMU/guest-agent base runtime as a separately licensed component.
-5. Add Python/uv, Node, Go, Rust, C/C++, Java, and FFmpeg packs.
-6. Expand multilingual OCR and document understanding.
-7. Add Control Center pages for memory, learning proposals, runtime packs, resource use, and audit.
+| Capability | Status |
+| --- | --- |
+| Encrypted memory metadata, ranking, conflict handling, and no-migration storage | Host complete |
+| Evidence-based learning, repeated-failure lessons, and reviewed Skill proposals/upgrades | Host complete |
+| Runtime capability, signed-pack, policy, guest-protocol, workspace, cancellation, and receipt contracts | Host complete |
+| Control Center pages for memory, learning proposals, runtime packs, and execution receipts | Host complete |
+| Mixed-script OCR and local PDF/DOCX/XLSX/PPTX/image/source ingestion | Host complete |
+| Signed QEMU engine and compatible `linux-base` guest image | Not shipped |
+| Python/uv, Node, Go, Rust, C/C++, Java, FFmpeg, and extended OCR runtime packs | Not shipped |
+| Handwriting, equation, complex-table, and local visual-model understanding | Planned |

@@ -172,6 +172,37 @@ class AgentConversationSkillLifecycleTest {
         assertEquals("second", manifest.steps.single().input["value"])
     }
 
+    @Test
+    fun reviewedUpgradeBuildDoesNotInstallBeforeApproval() {
+        val runtime = AgentSkillRuntime(availableNativeToolIds = setOf(AGENT_ORCHESTRATION_TOOL_ID))
+        val installed = runtime.install(
+            AgentSkillManifest(
+                id = "reviewed-workflow",
+                version = "1.0.0",
+                title = "Reviewed workflow",
+                instructions = "Use the original workflow.",
+                nativeTools = setOf(AGENT_ORCHESTRATION_TOOL_ID),
+                steps = listOf(AgentSkillStep("run", AGENT_ORCHESTRATION_TOOL_ID))
+            )
+        )
+        val corrected = AgentRecordedRun(
+            runId = "corrected-run",
+            conversationId = "conversation",
+            taskThreadId = "thread",
+            originalRequest = "Run the workflow with the local source",
+            userFeedback = listOf("Use the local source instead"),
+            activeSkillId = installed.id,
+            status = AgentRecordedRunStatus.COMPLETED
+        )
+
+        val proposal = AgentSkillVersionManager(runtime).buildUpgrade(installed, listOf(corrected))
+
+        assertEquals("1.1.0", proposal.version)
+        assertTrue(proposal.instructions.contains("Use the local source instead"))
+        assertEquals(1, runtime.list().size)
+        assertNull(runtime.list().firstOrNull { it.version == proposal.version })
+    }
+
     private fun completedRun(id: String, request: String, value: String) = AgentRecordedRun(
         runId = id,
         conversationId = "conversation",

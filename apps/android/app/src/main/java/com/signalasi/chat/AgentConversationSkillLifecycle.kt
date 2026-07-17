@@ -137,6 +137,12 @@ class AgentRunRecorder(context: Context) {
         .asReversed()
 
     @Synchronized
+    fun recentRuns(limit: Int = 200): List<AgentRecordedRun> = allRuns()
+        .sortedByDescending { it.createdAtMillis }
+        .take(limit.coerceIn(1, MAX_RUNS))
+        .asReversed()
+
+    @Synchronized
     fun runningRuns(): List<AgentRecordedRun> = allRuns()
         .filter { it.status == AgentRecordedRunStatus.RUNNING }
         .sortedBy { it.createdAtMillis }
@@ -585,7 +591,7 @@ private fun generalizeSkillText(value: String): String = sanitizeSecrets(value)
     .take(8_000)
 
 class AgentSkillVersionManager(private val runtime: AgentSkillRuntime) {
-    fun upgrade(base: AgentSkillInstallation, improvedRuns: List<AgentRecordedRun>): AgentSkillInstallation {
+    fun buildUpgrade(base: AgentSkillInstallation, improvedRuns: List<AgentRecordedRun>): AgentSkillManifest {
         val latest = improvedRuns.lastOrNull() ?: error("An improved run is required")
         val feedback = improvedRuns.flatMap { it.userFeedback }.distinct().joinToString("; ")
         val next = base.manifest.copy(
@@ -599,8 +605,11 @@ class AgentSkillVersionManager(private val runtime: AgentSkillRuntime) {
             )).take(AgentSkillLimits.MAX_TESTS)
         )
         runtime.validate(next).requireValid()
-        return runtime.install(next)
+        return next
     }
+
+    fun upgrade(base: AgentSkillInstallation, improvedRuns: List<AgentRecordedRun>): AgentSkillInstallation =
+        runtime.install(buildUpgrade(base, improvedRuns))
 
     fun rollback(id: String, currentVersion: String): AgentSkillInstallation {
         val previous = runtime.list().filter { it.id == id && compareVersions(it.version, currentVersion) < 0 }

@@ -11,6 +11,7 @@ import java.security.MessageDigest
 import java.security.Signature
 import java.security.cert.CertificateFactory
 import java.util.Locale
+import java.util.UUID
 
 enum class AgentOnDeviceRuntimeBackend(val wireValue: String) {
     QEMU_TCG("qemu_tcg"),
@@ -154,7 +155,16 @@ data class AgentRuntimeExecutionRequest(
     val timeoutMillis: Long,
     val networkEnabled: Boolean,
     val artifactPaths: List<String>,
-    val workspaceId: String
+    val workspaceId: String,
+    val requestId: String = UUID.randomUUID().toString(),
+    val allowedNetworkDomains: List<String> = emptyList(),
+    val resourceLimits: AgentRuntimeResourceLimits = AgentRuntimeResourceLimits(
+        wallClockMillis = timeoutMillis,
+        cpuMillis = (timeoutMillis * 3L / 4L).coerceAtLeast(100L)
+    ),
+    val cancellationToken: AgentNativeToolCancellationToken = AgentNativeToolCancellationToken.NONE,
+    val progressListener: (AgentRuntimeProgress) -> Unit = {},
+    val hostWorkspacePath: String = ""
 )
 
 data class AgentRuntimeExecutionResponse(
@@ -162,11 +172,14 @@ data class AgentRuntimeExecutionResponse(
     val stdout: String,
     val stderr: String,
     val durationMillis: Long,
-    val artifacts: List<Map<String, Any?>> = emptyList()
+    val artifacts: List<Map<String, Any?>> = emptyList(),
+    val requestId: String = ""
 )
 
 fun interface AgentOnDeviceRuntimeBridge {
     fun execute(request: AgentRuntimeExecutionRequest): AgentRuntimeExecutionResponse
+    fun health(): AgentRuntimeBridgeHealth = AgentRuntimeBridgeHealth(ready = true)
+    fun cancel(requestId: String): Boolean = false
 }
 
 object AgentOnDeviceRuntimeBridgeRegistry {
@@ -193,6 +206,8 @@ class AgentOnDeviceRuntimeManager(
     private val runtimeRoot = File(appContext.filesDir, RUNTIME_DIRECTORY)
     private val packsRoot = File(runtimeRoot, PACKS_DIRECTORY)
     private val integrityCache = appContext.getSharedPreferences(INTEGRITY_CACHE, Context.MODE_PRIVATE)
+    private val workspaceManager = AgentRuntimeWorkspaceManager(appContext)
+    private val receiptStore = AgentRuntimeExecutionReceiptStore(appContext)
 
     fun status(): AgentOnDeviceRuntimeStatus {
         val engine = qemuEngineFile()
@@ -205,9 +220,17 @@ class AgentOnDeviceRuntimeManager(
             else -> AgentOnDeviceRuntimeBackend.NONE
         }
         val activeBridge = bridge ?: AgentOnDeviceRuntimeBridgeRegistry.current()
+            ?: AgentOnDeviceRuntimeSupervisor.discover(appContext)
+        val bridgeHealth = activeBridge?.let { candidate ->
+            runCatching { candidate.health() }.getOrElse { error ->
+                AgentRuntimeBridgeHealth(false, reason = error.message ?: "Guest bridge health check failed")
+            }
+        }
         val reason = when {
             backend == AgentOnDeviceRuntimeBackend.QEMU_TCG && activeBridge == null ->
                 "Runtime engine and base pack are present, but the guest bridge is not connected"
+            backend == AgentOnDeviceRuntimeBackend.QEMU_TCG && bridgeHealth?.ready != true ->
+                bridgeHealth?.reason.orEmpty().ifBlank { "The guest bridge is not healthy" }
             backend == AgentOnDeviceRuntimeBackend.QEMU_TCG -> "On-device Linux runtime is ready"
             !engineReady -> "Install the SignalASI QEMU engine"
             !baseReady -> "Install the linux-base runtime pack"
@@ -215,7 +238,7 @@ class AgentOnDeviceRuntimeManager(
         }
         return AgentOnDeviceRuntimeStatus(
             backend = backend,
-            backendReady = backend != AgentOnDeviceRuntimeBackend.NONE && activeBridge != null,
+            backendReady = backend != AgentOnDeviceRuntimeBackend.NONE && bridgeHealth?.ready == true,
             reason = reason,
             architecture = Build.SUPPORTED_ABIS.firstOrNull().orEmpty(),
             enginePath = engine.absolutePath,
@@ -234,13 +257,55 @@ class AgentOnDeviceRuntimeManager(
             "Runtime timeout is outside the allowed range"
         }
         require(request.artifactPaths.size <= MAX_ARTIFACTS) { "Too many runtime artifact paths" }
+        require(request.requestId.matches(REQUEST_ID_PATTERN)) { "Runtime request id is invalid" }
+        require(request.workspaceId.isNotBlank()) { "Runtime workspace id is required" }
+        require(request.allowedNetworkDomains.size <= MAX_NETWORK_DOMAINS) { "Too many runtime network domains" }
+        if (request.networkEnabled) require(request.allowedNetworkDomains.isNotEmpty()) {
+            "Runtime network access requires an explicit domain allowlist"
+        }
+        if (!request.networkEnabled) require(request.allowedNetworkDomains.isEmpty()) {
+            "Runtime network domains require network access"
+        }
+        request.resourceLimits.validated()
+        if (request.cancellationToken.isCancellationRequested) throw AgentNativeToolCancelledException()
         val current = status()
         check(current.languageReady(request.language)) {
             "${request.language.wireValue} requires the ${request.language.requiredPack} pack"
         }
         val activeBridge = bridge ?: AgentOnDeviceRuntimeBridgeRegistry.current()
+            ?: AgentOnDeviceRuntimeSupervisor.discover(appContext)
             ?: error("The on-device guest bridge is not connected")
-        return activeBridge.execute(request).bounded()
+        val prepared = workspaceManager.prepare(request)
+        val normalizedRequest = request.copy(hostWorkspacePath = prepared.directory.absolutePath)
+        val packVersions = current.packs.mapNotNull { pack ->
+            pack.manifest?.version?.takeIf(String::isNotBlank)?.let { version -> pack.id to version }
+        }.toMap()
+        receiptStore.begin(normalizedRequest, packVersions)
+        return try {
+            val rawResponse = activeBridge.execute(normalizedRequest)
+            val artifacts = workspaceManager.collectArtifacts(prepared, normalizedRequest)
+            val response = rawResponse.copy(
+                artifacts = artifacts,
+                requestId = normalizedRequest.requestId
+            ).bounded()
+            receiptStore.complete(normalizedRequest.requestId, response, artifacts)
+            workspaceManager.markFinished(
+                prepared,
+                if (response.exitCode == 0) AgentRuntimeReceiptStatus.COMPLETED else AgentRuntimeReceiptStatus.FAILED
+            )
+            response
+        } catch (error: Throwable) {
+            receiptStore.fail(normalizedRequest.requestId, error)
+            workspaceManager.markFinished(
+                prepared,
+                when (error) {
+                    is AgentNativeToolCancelledException -> AgentRuntimeReceiptStatus.CANCELLED
+                    is AgentNativeToolTimeoutException -> AgentRuntimeReceiptStatus.TIMED_OUT
+                    else -> AgentRuntimeReceiptStatus.FAILED
+                }
+            )
+            throw error
+        }
     }
 
     private fun qemuEngineFile(): File = File(appContext.applicationInfo.nativeLibraryDir, QEMU_ENGINE_FILE)
@@ -419,6 +484,7 @@ class AgentOnDeviceRuntimeManager(
         private const val MAX_ARGUMENTS = 256
         private const val MAX_ARGUMENT_BYTES = 8 * 1024
         private const val MAX_ARTIFACTS = 32
+        private const val MAX_NETWORK_DOMAINS = 64
         private const val MAX_OUTPUT_CHARS = 512 * 1024
         private const val MAX_ID_CHARS = 80
         private const val MAX_CAPABILITIES = 128
@@ -431,6 +497,7 @@ class AgentOnDeviceRuntimeManager(
         private val VERSION_PATTERN = Regex("[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?")
         private val SHA256_PATTERN = Regex("[0-9a-f]{64}")
         private val PACK_ID_PATTERN = Regex("[a-z0-9][a-z0-9._-]{0,79}")
+        private val REQUEST_ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
     }
 }
 
@@ -499,10 +566,13 @@ object AgentOnDeviceRuntimeTools {
                         arguments = invocation.input.stringList("arguments"),
                         timeoutMillis = (invocation.input["timeout_ms"] as? Number)?.toLong() ?: 60_000L,
                         networkEnabled = invocation.input["network_enabled"] as? Boolean ?: false,
+                        allowedNetworkDomains = invocation.input.stringList("allowed_network_domains"),
                         artifactPaths = invocation.input.stringList("artifact_paths"),
                         workspaceId = invocation.context.turnId
                             .ifBlank { invocation.context.conversationId }
-                            .ifBlank { invocation.context.invocationId }
+                            .ifBlank { invocation.context.invocationId },
+                        requestId = invocation.context.invocationId,
+                        cancellationToken = invocation.cancellationToken
                     )
                     runCatching { manager.execute(request) }.fold(
                         onSuccess = { response -> AgentNativeToolExecutionResult.success(
@@ -561,6 +631,10 @@ object AgentOnDeviceRuntimeTools {
             "arguments" to AgentNativeJsonSchema.array(AgentNativeJsonSchema.string(maxLength = 8 * 1024), maxItems = 256),
             "timeout_ms" to AgentNativeJsonSchema.integer(100, 30 * 60_000L),
             "network_enabled" to AgentNativeJsonSchema.boolean(),
+            "allowed_network_domains" to AgentNativeJsonSchema.array(
+                AgentNativeJsonSchema.string(maxLength = 253),
+                maxItems = 64
+            ),
             "artifact_paths" to AgentNativeJsonSchema.array(AgentNativeJsonSchema.string(maxLength = 1_024), maxItems = 32)
         ),
         required = setOf("language", "source"),

@@ -25,6 +25,29 @@ class AgentLearningEngineTest {
     }
 
     @Test
+    fun correctionFeedbackRequiresActionableNonSecretGuidance() {
+        assertEquals(
+            "No, use the local tool instead",
+            AgentLearningAnalyzer.correctionFeedback("No, use the local tool instead")
+        )
+        assertEquals(null, AgentLearningAnalyzer.correctionFeedback("No"))
+        assertEquals(null, AgentLearningAnalyzer.correctionFeedback("Use token=secret instead"))
+    }
+
+    @Test
+    fun repeatedFailureLearningRequiresTwoMatchingFailures() {
+        val first = failedRun("failure-1", "Summarize C:\\Work\\alpha.pdf")
+        val second = failedRun("failure-2", "Summarize C:\\Temp\\beta.pdf")
+        val unrelated = failedRun("failure-3", "Turn on the flashlight")
+
+        assertEquals(null, AgentLearningAnalyzer.repeatedFailureFamily(first, listOf(first)))
+        assertEquals(
+            AgentLearningAnalyzer.taskFamily(second.originalRequest),
+            AgentLearningAnalyzer.repeatedFailureFamily(second, listOf(first, second, unrelated))
+        )
+    }
+
+    @Test
     fun memoryMetadataSupportsConfidenceEvidenceAndExpiration() {
         val now = 10_000L
         val memory = AgentMemoryItem(
@@ -112,5 +135,13 @@ class AgentLearningEngineTest {
         signatureKeyId = "b".repeat(64),
         signature = "signature",
         archiveSizeBytes = 512
+    )
+
+    private fun failedRun(id: String, request: String) = AgentRecordedRun(
+        runId = id,
+        conversationId = "conversation",
+        taskThreadId = "thread",
+        originalRequest = request,
+        status = AgentRecordedRunStatus.FAILED
     )
 }

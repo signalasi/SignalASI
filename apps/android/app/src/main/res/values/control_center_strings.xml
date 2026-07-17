@@ -154,6 +154,17 @@
     <string name="cc_runtime_uninstall_failed">Runtime pack was not uninstalled: %1$s</string>
     <string name="cc_runtime_section_packs">Runtime Packs</string>
     <string name="cc_runtime_section_security">Isolation &amp; Policy</string>
+    <string name="cc_runtime_section_receipts">Recent Execution Receipts</string>
+    <string name="cc_runtime_receipt_empty_title">No runtime executions yet</string>
+    <string name="cc_runtime_receipt_empty_subtitle">Verified receipts appear here after an on-device task runs</string>
+    <string name="cc_runtime_receipt_title">%1$s execution</string>
+    <string name="cc_runtime_receipt_subtitle">%1$s · request %2$s</string>
+    <string name="cc_runtime_receipt_running">Running</string>
+    <string name="cc_runtime_receipt_completed">Completed</string>
+    <string name="cc_runtime_receipt_failed">Failed</string>
+    <string name="cc_runtime_receipt_cancelled">Cancelled</string>
+    <string name="cc_runtime_receipt_timed_out">Timed out</string>
+    <string name="cc_runtime_receipt_details">Request: %1$s\nStatus: %2$s\nSource SHA-256: %3$s\nRuntime packs: %4$s\nExit code: %5$s\nArtifacts: %6$d\nError: %7$s</string>
     <string name="cc_runtime_pack_subtitle">Signed modular runtime pack</string>
     <string name="cc_runtime_pack_linux">Linux Base</string>
     <string name="cc_runtime_pack_python">Python &amp; uv</string>

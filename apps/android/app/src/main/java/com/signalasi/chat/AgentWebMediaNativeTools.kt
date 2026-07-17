@@ -632,7 +632,19 @@ data class AgentOcrLine(
     val left: Int = 0,
     val top: Int = 0,
     val right: Int = 0,
-    val bottom: Int = 0
+    val bottom: Int = 0,
+    val languageTag: String = "",
+    val blockIndex: Int = 0,
+    val lineIndex: Int = 0
+)
+
+data class AgentOcrBlock(
+    val text: String,
+    val left: Int,
+    val top: Int,
+    val right: Int,
+    val bottom: Int,
+    val lineCount: Int
 )
 
 data class AgentOcrResult(
@@ -640,7 +652,11 @@ data class AgentOcrResult(
     val lines: List<AgentOcrLine>,
     val width: Int,
     val height: Int,
-    val languageTags: List<String> = emptyList()
+    val languageTags: List<String> = emptyList(),
+    val blocks: List<AgentOcrBlock> = emptyList(),
+    val layoutMode: String = "unknown",
+    val qualityScore: Double = 0.0,
+    val warnings: List<String> = emptyList()
 )
 
 interface AgentContentOcr {
@@ -660,6 +676,13 @@ class AgentAndroidMlKitContentOcr(
     override fun recognize(request: AgentOcrRequest): AgentOcrResult {
         val uri = parseAndroidContentUri(request.contentUri)
         val bytes = readContentUriBounded(resolver, uri, request.maxSourceBytes)
+        return recognizeBytes(bytes, request)
+    }
+
+    internal fun recognizeBytes(bytes: ByteArray, request: AgentOcrRequest): AgentOcrResult {
+        if (bytes.isEmpty() || bytes.size.toLong() > request.maxSourceBytes) {
+            throw AgentWebMediaException("invalid_ocr_source_size", "Selected OCR content exceeds its bounded size")
+        }
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
@@ -710,31 +733,46 @@ class AgentAndroidMlKitContentOcr(
                     }
                 }
             }
-            val selected = candidates.maxByOrNull { (_, text) -> recognitionScore(text.text) }
-                ?: throw AgentWebMediaException("ocr_empty_result", "OCR did not produce a result")
-            val lines = selected.second.textBlocks
-                .flatMap { it.lines }
-                .map { line ->
-                    val box = line.boundingBox
-                    AgentOcrLine(
-                        text = line.text.trim(),
-                        left = box?.left ?: 0,
-                        top = box?.top ?: 0,
-                        right = box?.right ?: 0,
-                        bottom = box?.bottom ?: 0
-                    )
-                }
-                .filter { it.text.isNotBlank() }
-                .distinctBy { line -> "${line.text.lowercase(Locale.ROOT)}:${line.left / BOX_BUCKET}:${line.top / BOX_BUCKET}" }
-                .sortedWith(compareBy<AgentOcrLine> { it.top }.thenBy { it.left })
             val outputWidth = if (rotation == 90 || rotation == 270) bitmap.height else bitmap.width
             val outputHeight = if (rotation == 90 || rotation == 270) bitmap.width else bitmap.height
+            val merged = AgentOcrLayoutAnalyzer.merge(
+                candidates.map { (script, result) ->
+                    AgentOcrCandidate(
+                        script = script,
+                        fallbackText = result.text.trim(),
+                        lines = result.textBlocks.flatMapIndexed { blockIndex, block ->
+                            block.lines.mapIndexed { lineIndex, line ->
+                                val box = line.boundingBox
+                                AgentOcrLine(
+                                    text = line.text.trim(),
+                                    left = box?.left ?: 0,
+                                    top = box?.top ?: 0,
+                                    right = box?.right ?: 0,
+                                    bottom = box?.bottom ?: 0,
+                                    languageTag = script.languageTag,
+                                    blockIndex = blockIndex,
+                                    lineIndex = lineIndex
+                                )
+                            }
+                        }
+                    )
+                },
+                outputWidth,
+                outputHeight
+            )
+            if (merged.text.isBlank()) {
+                throw AgentWebMediaException("ocr_empty_result", "OCR did not produce readable text")
+            }
             return AgentOcrResult(
-                text = lines.joinToString("\n") { it.text }.ifBlank { selected.second.text.trim() },
-                lines = lines,
+                text = merged.text,
+                lines = merged.lines,
                 width = outputWidth,
                 height = outputHeight,
-                languageTags = listOf(selected.first.languageTag)
+                languageTags = merged.languageTags,
+                blocks = merged.blocks,
+                layoutMode = merged.layoutMode,
+                qualityScore = merged.qualityScore,
+                warnings = merged.warnings
             )
         } finally {
             bitmap.recycle()
@@ -777,16 +815,8 @@ class AgentAndroidMlKitContentOcr(
         }
     }.getOrDefault(0)
 
-    private fun recognitionScore(value: String): Double {
-        if (value.isBlank()) return 0.0
-        val meaningful = value.count { it.isLetterOrDigit() }
-        val replacementPenalty = value.count { it == '\uFFFD' } * 4
-        return meaningful.toDouble() - replacementPenalty
-    }
-
     companion object {
         private const val TARGET_OCR_PIXELS = 12_000_000L
-        private const val BOX_BUCKET = 12
     }
 }
 
@@ -936,6 +966,7 @@ object AgentWebMediaNativeTools {
     const val MAX_OCR_SOURCE_BYTES = 12L * 1_048_576L
     const val MAX_OCR_TEXT_CHARS = 240_000
     const val MAX_OCR_LINES = 500
+    const val MAX_OCR_BLOCKS = 200
     const val MAX_TOOL_TIMEOUT_MILLIS = 15_000L
 
     private const val VERSION = "1.0.0"
@@ -1424,13 +1455,29 @@ object AgentWebMediaNativeTools {
                                 "text" to line.text,
                                 "left" to line.left,
                                 "top" to line.top,
-                                "right" to line.right,
-                                "bottom" to line.bottom
+                        "right" to line.right,
+                                "bottom" to line.bottom,
+                                "language_tag" to line.languageTag,
+                                "block_index" to line.blockIndex,
+                                "line_index" to line.lineIndex
+                            )
+                        },
+                        "blocks" to result.blocks.map { block ->
+                            mapOf(
+                                "text" to block.text,
+                                "left" to block.left,
+                                "top" to block.top,
+                                "right" to block.right,
+                                "bottom" to block.bottom,
+                                "line_count" to block.lineCount
                             )
                         },
                         "width" to result.width,
                         "height" to result.height,
                         "language_tags" to result.languageTags,
+                        "layout_mode" to result.layoutMode,
+                        "quality_score" to result.qualityScore,
+                        "warnings" to result.warnings,
                         "observed_at_epoch_ms" to System.currentTimeMillis(),
                         "source" to mapOf("content_uri" to contentUri, "source_kind" to sourceKind.wireValue)
                     ),
@@ -1750,19 +1797,47 @@ object AgentWebMediaNativeTools {
                         "left" to AgentNativeJsonSchema.integer(minimum = 0),
                         "top" to AgentNativeJsonSchema.integer(minimum = 0),
                         "right" to AgentNativeJsonSchema.integer(minimum = 0),
-                        "bottom" to AgentNativeJsonSchema.integer(minimum = 0)
+                        "bottom" to AgentNativeJsonSchema.integer(minimum = 0),
+                        "language_tag" to AgentNativeJsonSchema.string(maxLength = 64),
+                        "block_index" to AgentNativeJsonSchema.integer(minimum = 0),
+                        "line_index" to AgentNativeJsonSchema.integer(minimum = 0)
                     ),
-                    required = setOf("text", "left", "top", "right", "bottom")
+                    required = setOf(
+                        "text", "left", "top", "right", "bottom",
+                        "language_tag", "block_index", "line_index"
+                    )
                 ),
                 maxItems = MAX_OCR_LINES
+            ),
+            "blocks" to AgentNativeJsonSchema.array(
+                objectSchema(
+                    properties = mapOf(
+                        "text" to AgentNativeJsonSchema.string(maxLength = 16_384),
+                        "left" to AgentNativeJsonSchema.integer(minimum = 0),
+                        "top" to AgentNativeJsonSchema.integer(minimum = 0),
+                        "right" to AgentNativeJsonSchema.integer(minimum = 0),
+                        "bottom" to AgentNativeJsonSchema.integer(minimum = 0),
+                        "line_count" to AgentNativeJsonSchema.integer(minimum = 1)
+                    ),
+                    required = setOf("text", "left", "top", "right", "bottom", "line_count")
+                ),
+                maxItems = MAX_OCR_BLOCKS
             ),
             "width" to AgentNativeJsonSchema.integer(minimum = 0),
             "height" to AgentNativeJsonSchema.integer(minimum = 0),
             "language_tags" to AgentNativeJsonSchema.array(AgentNativeJsonSchema.string(maxLength = 64), maxItems = 64),
+            "layout_mode" to AgentNativeJsonSchema.string(
+                enumValues = listOf("unknown", "empty", "sparse", "single_column", "multi_column")
+            ),
+            "quality_score" to AgentNativeJsonSchema.number(0.0, 1.0),
+            "warnings" to AgentNativeJsonSchema.array(AgentNativeJsonSchema.string(maxLength = 128), maxItems = 16),
             "observed_at_epoch_ms" to AgentNativeJsonSchema.integer(minimum = 0),
             "source" to contentSourceSchema(includeKind = true)
         ),
-        required = setOf("text", "lines", "width", "height", "language_tags", "observed_at_epoch_ms", "source")
+        required = setOf(
+            "text", "lines", "blocks", "width", "height", "language_tags",
+            "layout_mode", "quality_score", "warnings", "observed_at_epoch_ms", "source"
+        )
     )
 
     private fun mediaMetadataOutputSchema() = objectSchema(
@@ -1908,17 +1983,24 @@ object AgentWebMediaNativeTools {
         if (text.length > MAX_OCR_TEXT_CHARS) {
             throw AgentWebMediaException("ocr_result_too_large", "OCR text exceeded the character limit")
         }
-        if (lines.size > MAX_OCR_LINES || lines.any { it.text.length > 4_096 }) {
+        if (lines.size > MAX_OCR_LINES || lines.any { it.text.length > 4_096 } ||
+            blocks.size > MAX_OCR_BLOCKS || blocks.any { it.text.length > 16_384 }
+        ) {
             throw AgentWebMediaException("ocr_result_too_large", "OCR lines exceeded the result limit")
         }
         if (
             width < 0 || height < 0 ||
             lines.any { it.left < 0 || it.top < 0 || it.right < it.left || it.bottom < it.top } ||
-            languageTags.any { it.length > 64 }
+            blocks.any { it.left < 0 || it.top < 0 || it.right < it.left || it.bottom < it.top || it.lineCount < 1 } ||
+            languageTags.any { it.length > 64 } || layoutMode.length > 64 ||
+            !qualityScore.isFinite() || qualityScore !in 0.0..1.0 || warnings.any { it.length > 128 }
         ) {
             throw AgentWebMediaException("invalid_ocr_result", "OCR implementation returned invalid bounded output")
         }
-        return copy(languageTags = languageTags.distinct().take(64))
+        return copy(
+            languageTags = languageTags.distinct().take(64),
+            warnings = warnings.distinct().take(16)
+        )
     }
 
     private fun AgentMediaMetadata.bounded(expectedContentUri: String): AgentMediaMetadata {

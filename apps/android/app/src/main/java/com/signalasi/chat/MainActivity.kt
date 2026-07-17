@@ -1834,6 +1834,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             return
         }
         val conversation = agentTranscriptStore.activeConversation()
+        AgentLearningAnalyzer.correctionFeedback(goal)?.let { feedback ->
+            agentRunRecorder.addFeedback(conversation.id, feedback)?.let { correctedRun ->
+                agentLearningEngine.observeFeedback(correctedRun, agentRunRecorder.recentRuns())
+            }
+        }
         val turnId = UUID.randomUUID().toString()
         val attachmentLabel = when (attachments.size) {
             0 -> ""
@@ -2497,11 +2502,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 AgentRecordedRunStatus.RUNNING, AgentRecordedRunStatus.FAILED -> AgentRunControlEventType.RUN_FAILED
             }
         )
-        if (run.status != AgentRecordedRunStatus.COMPLETED) return
         val privateMode = agentTranscriptStore.context(run.conversationId).privateMode
         agentLearningEngine.observeCompletedRun(
             run = run,
-            recentRuns = agentRunRecorder.recentCompletedRuns(),
+            recentRuns = agentRunRecorder.recentRuns(),
             privateMode = privateMode,
             memoryCaptureEnabled = mobileNativeAgent.safetySettings().memoryCapture
         )
@@ -4453,6 +4457,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 actionId.startsWith("runtime.pack:") -> {
                     showRuntimePackDialog(actionId.substringAfter("runtime.pack:"))
                 }
+                actionId.startsWith("runtime.receipt:") -> {
+                    showRuntimeReceiptDialog(actionId.substringAfter("runtime.receipt:"))
+                }
                 actionId.startsWith("routing.target:") -> showControlCenterTarget(actionId.substringAfter("routing.target:"))
                 actionId.startsWith("tool.detail:") -> showNativeToolDetailPage(actionId.substringAfter("tool.detail:"))
                 actionId.startsWith("node.desktop:") -> showControlCenterDesktop(actionId.substringAfter("node.desktop:"))
@@ -4870,6 +4877,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun renderControlCenterRuntimePage() {
         val status = AgentOnDeviceRuntimeManager(this).status()
+        val receipts = AgentRuntimeExecutionReceiptStore(this).list(limit = 5)
         val readyPacks = status.packs.count { it.state == AgentRuntimePackState.READY }
         val packRows = status.packs.map { pack ->
             val stateText = getString(
@@ -4892,6 +4900,44 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 tone = if (pack.state == AgentRuntimePackState.READY) ControlCenterTone.GREEN else ControlCenterTone.AMBER,
                 showChevron = true
             )
+        }
+        val receiptRows = if (receipts.isEmpty()) {
+            listOf(
+                ControlCenterRowSpec(
+                    actionId = "",
+                    title = getString(R.string.cc_runtime_receipt_empty_title),
+                    subtitle = getString(R.string.cc_runtime_receipt_empty_subtitle),
+                    iconRes = R.drawable.ic_agent_history,
+                    status = "",
+                    tone = ControlCenterTone.NEUTRAL,
+                    showChevron = false
+                )
+            )
+        } else {
+            receipts.map { receipt ->
+                ControlCenterRowSpec(
+                    actionId = "runtime.receipt:${receipt.requestId}",
+                    title = getString(
+                        R.string.cc_runtime_receipt_title,
+                        runtimeLanguageTitle(receipt.language)
+                    ),
+                    subtitle = getString(
+                        R.string.cc_runtime_receipt_subtitle,
+                        listTime(receipt.createdAtMillis),
+                        receipt.requestId.take(8)
+                    ),
+                    iconRes = R.drawable.ic_agent_history,
+                    status = runtimeReceiptStatus(receipt.status),
+                    tone = if (receipt.status == AgentRuntimeReceiptStatus.COMPLETED) {
+                        ControlCenterTone.GREEN
+                    } else if (receipt.status == AgentRuntimeReceiptStatus.RUNNING) {
+                        ControlCenterTone.BLUE
+                    } else {
+                        ControlCenterTone.AMBER
+                    },
+                    showChevron = true
+                )
+            }
         }
         showControlCenterFeature(
             getString(R.string.cc_runtime_title),
@@ -4931,6 +4977,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         )
                     ),
                     ControlCenterSectionSpec(getString(R.string.cc_runtime_section_packs), packRows),
+                    ControlCenterSectionSpec(getString(R.string.cc_runtime_section_receipts), receiptRows),
                     ControlCenterSectionSpec(
                         getString(R.string.cc_runtime_section_security),
                         listOf(
@@ -4953,6 +5000,50 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         "java" -> "Java"
         "ffmpeg" -> "FFmpeg"
         else -> id
+    }
+
+    private fun runtimeLanguageTitle(language: AgentRuntimeLanguage): String = when (language) {
+        AgentRuntimeLanguage.SHELL -> "Shell"
+        AgentRuntimeLanguage.PYTHON -> "Python"
+        AgentRuntimeLanguage.UV -> "uv"
+        AgentRuntimeLanguage.JAVASCRIPT -> "JavaScript"
+        AgentRuntimeLanguage.TYPESCRIPT -> "TypeScript"
+        AgentRuntimeLanguage.GO -> "Go"
+        AgentRuntimeLanguage.RUST -> "Rust"
+        AgentRuntimeLanguage.C -> "C"
+        AgentRuntimeLanguage.CPP -> "C++"
+        AgentRuntimeLanguage.JAVA -> "Java"
+        AgentRuntimeLanguage.FFMPEG -> "FFmpeg"
+    }
+
+    private fun runtimeReceiptStatus(status: AgentRuntimeReceiptStatus): String = getString(
+        when (status) {
+            AgentRuntimeReceiptStatus.RUNNING -> R.string.cc_runtime_receipt_running
+            AgentRuntimeReceiptStatus.COMPLETED -> R.string.cc_runtime_receipt_completed
+            AgentRuntimeReceiptStatus.FAILED -> R.string.cc_runtime_receipt_failed
+            AgentRuntimeReceiptStatus.CANCELLED -> R.string.cc_runtime_receipt_cancelled
+            AgentRuntimeReceiptStatus.TIMED_OUT -> R.string.cc_runtime_receipt_timed_out
+        }
+    )
+
+    private fun showRuntimeReceiptDialog(requestId: String) {
+        val receipt = AgentRuntimeExecutionReceiptStore(this).find(requestId) ?: return
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.cc_runtime_receipt_title, runtimeLanguageTitle(receipt.language)))
+            .setMessage(
+                getString(
+                    R.string.cc_runtime_receipt_details,
+                    receipt.requestId,
+                    runtimeReceiptStatus(receipt.status),
+                    receipt.sourceSha256,
+                    receipt.packVersions.entries.joinToString { "${it.key} ${it.value}" }.ifBlank { "-" },
+                    receipt.exitCode?.toString() ?: "-",
+                    receipt.artifacts.size,
+                    receipt.error.ifBlank { "-" }
+                )
+            )
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
     }
 
     private fun openRuntimePackPicker() {

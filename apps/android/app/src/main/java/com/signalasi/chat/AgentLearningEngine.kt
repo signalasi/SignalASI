@@ -7,7 +7,7 @@ import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
 
-enum class AgentLearningProposalKind { SKILL, BEHAVIOR_RULE }
+enum class AgentLearningProposalKind { SKILL, SKILL_UPGRADE, BEHAVIOR_RULE }
 
 enum class AgentLearningProposalStatus { PENDING, APPROVED, REJECTED }
 
@@ -46,6 +46,12 @@ object AgentLearningAnalyzer {
     private val cjkPreference = Regex(
         "^(?:\\u8bf7)?(?:\\u8bb0\\u4f4f|\\u6211\\u559c\\u6b22|\\u6211\\u504f\\u597d|\\u4ee5\\u540e|\\u9ed8\\u8ba4)[\\s:\\uFF1A,\\uFF0C-]*(.+)$"
     )
+    private val englishCorrection = Regex(
+        "(?i)^(?:no\\b|wrong\\b|that(?:'s| is) (?:wrong|not right)|not (?:that|this) way|instead\\b|change (?:it|that) to\\b|use .+ instead\\b|try again\\b).+"
+    )
+    private val cjkCorrection = Regex(
+        "^(?:\\u4e0d\\u5bf9|\\u9519\\u4e86|\\u4e0d\\u662f\\u8fd9\\u6837|\\u6539\\u6210|\\u5e94\\u8be5|\\u4e0d\\u8981.+\\u8981|\\u91cd\\u65b0).+"
+    )
 
     fun taskFamily(request: String): String = request
         .trim()
@@ -83,6 +89,30 @@ object AgentLearningAnalyzer {
             ?: cjkPreference.find(clean)?.groupValues?.getOrNull(1)
             ?: return null
         return value.trim().takeIf { it.length in MIN_MEMORY_CHARS..MAX_MEMORY_CHARS }
+    }
+
+    fun correctionFeedback(request: String): String? {
+        val clean = request.trim().take(MAX_MEMORY_CHARS)
+        if (clean.isBlank() || containsSensitiveData(clean)) return null
+        return clean.takeIf { englishCorrection.matches(it) || cjkCorrection.matches(it) }
+    }
+
+    internal fun repeatedFailureFamily(
+        run: AgentRecordedRun,
+        recentRuns: List<AgentRecordedRun>,
+        minimumFailures: Int = 2
+    ): String? {
+        if (run.status != AgentRecordedRunStatus.FAILED ||
+            minimumFailures < 1 ||
+            containsSensitiveData(run.originalRequest)
+        ) return null
+        val family = taskFamily(run.originalRequest)
+        if (family.isBlank()) return null
+        val failures = recentRuns.count { candidate ->
+            candidate.status == AgentRecordedRunStatus.FAILED &&
+                sameTaskFamily(candidate.originalRequest, family)
+        }
+        return family.takeIf { failures >= minimumFailures }
     }
 
     fun containsSensitiveData(value: String): Boolean = secret.containsMatchIn(value) ||
@@ -139,7 +169,14 @@ class AgentLearningEngine(
         privateMode: Boolean,
         memoryCaptureEnabled: Boolean
     ): AgentLearningOutcome {
-        if (privateMode || run.status != AgentRecordedRunStatus.COMPLETED) return AgentLearningOutcome()
+        if (privateMode || run.status !in setOf(AgentRecordedRunStatus.COMPLETED, AgentRecordedRunStatus.FAILED)) {
+            return AgentLearningOutcome()
+        }
+        if (run.status == AgentRecordedRunStatus.FAILED) {
+            return AgentLearningOutcome(
+                memories = if (memoryCaptureEnabled) learnRepeatedFailure(run, recentRuns) else emptyList()
+            )
+        }
         val memoryResults = buildList {
             if (memoryCaptureEnabled) {
                 AgentLearningAnalyzer.explicitPreference(run.originalRequest)?.let { preference ->
@@ -184,6 +221,40 @@ class AgentLearningEngine(
         }
         val proposal = proposeSkill(run, recentRuns)
         return AgentLearningOutcome(memoryResults, listOfNotNull(proposal))
+    }
+
+    @Synchronized
+    fun observeFeedback(run: AgentRecordedRun, recentRuns: List<AgentRecordedRun>): AgentLearningProposal? {
+        if (run.activeSkillId.isBlank() || run.userFeedback.isEmpty() ||
+            run.userFeedback.any(AgentLearningAnalyzer::containsSensitiveData)
+        ) return null
+        val base = skillRuntime.list()
+            .filter { it.id == run.activeSkillId }
+            .maxWithOrNull(compareBy<AgentSkillInstallation> { versionPart(it.version, 0) }
+                .thenBy { versionPart(it.version, 1) }
+                .thenBy { versionPart(it.version, 2) })
+            ?: return null
+        if (loadProposals().any { proposal ->
+                proposal.kind == AgentLearningProposalKind.SKILL_UPGRADE &&
+                    run.runId in proposal.evidenceRunIds &&
+                    proposal.status == AgentLearningProposalStatus.PENDING
+            }) return null
+        val improvedRuns = recentRuns.filter { candidate ->
+            candidate.activeSkillId == run.activeSkillId && candidate.userFeedback.isNotEmpty()
+        }.takeLast(MAX_EVIDENCE_RUNS).ifEmpty { listOf(run) }
+        val manifest = runCatching { AgentSkillVersionManager(skillRuntime).buildUpgrade(base, improvedRuns) }
+            .getOrNull() ?: return null
+        val proposal = AgentLearningProposal(
+            id = UUID.randomUUID().toString(),
+            kind = AgentLearningProposalKind.SKILL_UPGRADE,
+            title = manifest.title,
+            taskFamily = AgentLearningAnalyzer.taskFamily(run.originalRequest),
+            summary = "User correction is ready as a reviewed Skill upgrade",
+            evidenceRunIds = improvedRuns.map { it.runId },
+            manifestJson = AgentSkillManifestCodec.encode(manifest)
+        )
+        saveProposals((loadProposals() + proposal).takeLast(MAX_PROPOSALS))
+        return proposal
     }
 
     @Synchronized
@@ -265,6 +336,32 @@ class AgentLearningEngine(
         return proposal
     }
 
+    private fun learnRepeatedFailure(
+        run: AgentRecordedRun,
+        recentRuns: List<AgentRecordedRun>
+    ): List<AgentMemoryWriteResult> {
+        val family = AgentLearningAnalyzer.repeatedFailureFamily(
+            run,
+            recentRuns,
+            MIN_REPEATED_FAILURES
+        ) ?: return emptyList()
+        return listOf(
+            memoryStore.remember(
+                AgentMemoryItem(
+                    kind = AgentMemoryKind.WORKFLOW,
+                    value = "Do not repeat the unchanged failed workflow for: $family. Replan or change the execution resource before retrying.",
+                    source = "automatic_failure_learning",
+                    key = "failure:${AgentLearningAnalyzer.stableKey(family)}",
+                    scope = AgentMemoryScope.GLOBAL,
+                    confidence = 0.68,
+                    evidenceCount = 1,
+                    autoLearned = true,
+                    expiresAtMillis = System.currentTimeMillis() + FAILURE_MEMORY_TTL_MILLIS
+                )
+            )
+        )
+    }
+
     private fun review(id: String, status: AgentLearningProposalStatus): Boolean {
         val proposals = loadProposals().toMutableList()
         val index = proposals.indexOfFirst { it.id == id && it.status == AgentLearningProposalStatus.PENDING }
@@ -321,14 +418,19 @@ class AgentLearningEngine(
     private inline fun <reified T : Enum<T>> enumValue(value: String, fallback: T): T =
         enumValues<T>().firstOrNull { it.name == value } ?: fallback
 
+    private fun versionPart(version: String, index: Int): Int =
+        version.split('.').getOrNull(index)?.toIntOrNull() ?: 0
+
     companion object {
         private const val STORAGE_NAME = "signalasi_agent_learning"
         private const val KEY_PROPOSALS = "proposals"
         private const val MIN_SUCCESSFUL_RUNS = 3
         private const val MIN_WORKFLOW_MEMORY_RUNS = 2
+        private const val MIN_REPEATED_FAILURES = 2
         private const val MAX_EVIDENCE_RUNS = 12
         private const val MAX_PROPOSALS = 128
         private const val MAX_INSTRUCTIONS_CHARS = 24_000
         private const val WORKFLOW_MEMORY_TTL_MILLIS = 180L * 24L * 60L * 60L * 1_000L
+        private const val FAILURE_MEMORY_TTL_MILLIS = 90L * 24L * 60L * 60L * 1_000L
     }
 }

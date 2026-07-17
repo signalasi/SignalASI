@@ -50,7 +50,7 @@ class AgentKnowledgeImporter(
         }
         return runCatching {
             val bytes = readDocumentBytes(uri)
-            val extracted = extractText(metadata.name, mimeType, bytes)
+            val extracted = extractText(uri, metadata.name, mimeType, bytes)
             indexExtractedContent(
                 title = metadata.name,
                 source = source,
@@ -301,18 +301,40 @@ class AgentKnowledgeImporter(
         return output.toByteArray()
     }
 
-    private fun extractText(name: String, mimeType: String, bytes: ByteArray): String {
+    private fun extractText(uri: Uri, name: String, mimeType: String, bytes: ByteArray): String {
         val extension = name.substringAfterLast('.', "").lowercase(Locale.US)
         return when {
             extension == "pdf" || mimeType == "application/pdf" -> extractPdf(bytes)
             extension == "docx" || mimeType == DOCX_MIME_TYPE -> extractDocx(bytes)
+            extension == "xlsx" || mimeType == XLSX_MIME_TYPE -> AgentOfficeDocumentExtractor.extractXlsx(bytes)
+            extension == "pptx" || mimeType == PPTX_MIME_TYPE -> AgentOfficeDocumentExtractor.extractPptx(bytes)
+            extension in IMAGE_EXTENSIONS || mimeType.startsWith("image/") -> extractImageText(uri, bytes)
             extension == "html" || extension == "htm" || mimeType == "text/html" -> extractHtml(bytes)
-            extension in TEXT_EXTENSIONS || mimeType.startsWith("text/") || mimeType == "application/json" ->
+            extension in TEXT_EXTENSIONS || name.lowercase(Locale.US) in EXTENSIONLESS_TEXT_FILES ||
+                mimeType.startsWith("text/") || mimeType in TEXT_APPLICATION_MIME_TYPES ->
                 bytes.toString(Charsets.UTF_8)
             extension == "doc" || mimeType == "application/msword" ->
                 throw IllegalArgumentException("Legacy .doc files are not supported; save the document as .docx")
+            extension in setOf("xls", "ppt") ->
+                throw IllegalArgumentException("Legacy Office files are not supported; save as XLSX or PPTX")
             else -> throw IllegalArgumentException("Unsupported knowledge document type")
         }
+    }
+
+    private fun extractImageText(uri: Uri, bytes: ByteArray): String {
+        require(bytes.size <= AgentWebMediaNativeTools.MAX_OCR_SOURCE_BYTES) {
+            "Image exceeds the 12 MB OCR limit"
+        }
+        return AgentAndroidMlKitContentOcr(appContext).recognizeBytes(
+            bytes,
+            AgentOcrRequest(
+                contentUri = uri.toString(),
+                sourceKind = AgentOcrSourceKind.SELECTED,
+                maxSourceBytes = AgentWebMediaNativeTools.MAX_OCR_SOURCE_BYTES,
+                timeoutMillis = AgentWebMediaNativeTools.MAX_TOOL_TIMEOUT_MILLIS,
+                scriptHint = AgentOcrScript.AUTO
+            )
+        ).text
     }
 
     private fun extractPdf(bytes: ByteArray): String {
@@ -425,7 +447,23 @@ class AgentKnowledgeImporter(
         const val CHUNK_CHARACTERS = 6_000
         const val CHUNK_OVERLAP_CHARACTERS = 400
         const val DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        val TEXT_EXTENSIONS = setOf("txt", "md", "markdown", "csv", "json", "log", "xml", "yaml", "yml")
+        const val XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        const val PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "webp", "bmp", "gif", "heic", "heif")
+        val TEXT_EXTENSIONS = setOf(
+            "txt", "md", "markdown", "csv", "tsv", "json", "jsonl", "log", "xml", "yaml", "yml", "toml",
+            "ini", "conf", "properties", "env", "gradle", "kt", "kts", "java", "py", "pyi", "js", "mjs",
+            "cjs", "jsx", "ts", "tsx", "go", "rs", "c", "h", "cc", "cpp", "cxx", "hpp", "cs", "swift",
+            "rb", "php", "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd", "sql", "graphql", "proto",
+            "dart", "lua", "r", "scala", "clj", "ex", "exs", "erl", "hrl", "fs", "fsx", "vb", "asm", "s"
+        )
+        val EXTENSIONLESS_TEXT_FILES = setOf(
+            "dockerfile", "makefile", "rakefile", "gemfile", "podfile", "license", "readme", "changelog"
+        )
+        val TEXT_APPLICATION_MIME_TYPES = setOf(
+            "application/json", "application/ld+json", "application/xml", "application/javascript",
+            "application/x-javascript", "application/sql", "application/x-httpd-php", "application/x-sh"
+        )
         val WEB_MIME_TYPES = setOf("text/html", "application/xhtml+xml", "text/plain")
         val PRIVATE_KEY_PATTERN = Regex("-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", RegexOption.IGNORE_CASE)
         val SECRET_ASSIGNMENT_PATTERN = Regex(
