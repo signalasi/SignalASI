@@ -122,6 +122,8 @@ object AgentPhoneNativeToolCatalog {
             )
         ).registerAll(
             AgentAndroidSystemNativeTools.definitions(context.applicationContext)
+        ).registerAll(
+            AgentMcpNativeTools.definitions(context.applicationContext)
         )
     }
 

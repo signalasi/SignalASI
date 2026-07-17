@@ -1,6 +1,7 @@
 ﻿package com.signalasi.chat
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.DownloadManager
 import android.app.Dialog
 import android.app.NotificationManager
@@ -72,6 +73,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -125,8 +127,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_AGENT_ATTACHMENTS = 2014
         private const val REQUEST_AGENT_IMAGES = 2015
         private const val REQUEST_CONTROL_CENTER_PERMISSION = 2016
+        private const val REQUEST_IMPORT_MCP_PACKAGE = 2017
         private const val EXTRA_REOPEN_CONTROL_CENTER_CHILD = "signalasi_reopen_control_center_child"
         private const val CONTROL_CENTER_CHILD_TEXT_SIZE = "text_size"
+        private const val CAPABILITY_KIND_MCP = "mcp"
+        private const val CAPABILITY_KIND_SKILL = "skill"
         private const val MAX_AGENT_ATTACHMENTS = 10
         private const val MAX_AGENT_ATTACHMENT_BYTES = 20L * 1024L * 1024L
         private const val UI_PREFS = "signalasi_ui_preferences"
@@ -284,6 +289,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentRunRecorder: AgentRunRecorder
     private lateinit var agentSkillRuntime: AgentSkillRuntime
     private lateinit var agentSkillMatcher: AgentSkillMatcher
+    private lateinit var agentMcpRegistry: AgentMcpRegistry
+    private lateinit var agentMcpPackageRepository: AgentMcpPackageRepository
     private val agentRunIdsByTurn = ConcurrentHashMap<String, String>()
     private var agentSessionsDialog: android.app.Dialog? = null
     private val agentConnectorResponseListener = AgentConnectorResponseListener { response ->
@@ -414,6 +421,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         )
         AgentBuiltInSkills.installAvailable(agentSkillRuntime)
         agentSkillMatcher = AgentSkillMatcher(agentSkillRuntime)
+        agentMcpRegistry = AgentMcpRegistry(EncryptedAgentMcpStore(this))
+        agentMcpPackageRepository = AgentMcpPackageRepository(this)
         agentTranscriptStore.removeExactText("Create a safe local task plan")
         agentTranscriptStore.removeExactText("Task plan confirmed")
         agentTranscriptStore.removeObsoletePlannerProcessEntries()
@@ -628,6 +637,25 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         consumePendingAgentConnectorResponses()
         reloadChatHistoryIfChanged()
+        maintainMcpCredentials()
+    }
+
+    private fun maintainMcpCredentials() {
+        if (!::agentMcpRegistry.isInitialized) return
+        val due = agentMcpRegistry.list().filter {
+            it.enabled && it.authProfile.refreshExchange != null &&
+                it.effectiveAuthState(System.currentTimeMillis()) == AgentMcpAuthState.REFRESHING
+        }
+        if (due.isEmpty()) return
+        thread(name = "signalasi-mcp-maintenance") {
+            val coordinator = AgentMcpAuthenticationCoordinator(agentMcpRegistry)
+            due.forEach { connection -> runCatching { runBlocking { coordinator.refreshIfNeeded(connection.id) } } }
+            runOnUiThread {
+                if (controlCenterDestination?.route == ControlCenterRoute.MCP) {
+                    renderCurrentControlCenterDestination()
+                }
+            }
+        }
     }
 
     override fun onPause() {
@@ -1231,6 +1259,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             importAgentSkillFromUri(data?.data ?: return)
             return
         }
+        if (requestCode == REQUEST_IMPORT_MCP_PACKAGE && resultCode == RESULT_OK) {
+            importAgentMcpPackageFromUri(data?.data ?: return)
+            return
+        }
         if (requestCode == REQUEST_EXPORT_SKILL) {
             if (resultCode == RESULT_OK && data?.data != null) {
                 exportAgentSkillToUri(data.data!!)
@@ -1407,7 +1439,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         findViewById<View>(R.id.settingsAgentKnowledgeButton).setOnClickListener { showAgentKnowledgePage() }
         findViewById<View>(R.id.settingsAgentControlButton).setOnClickListener { showOnDeviceAgentFeaturePage() }
         findViewById<View>(R.id.settingsRecentTasksButton).setOnClickListener { showAgentRecentTasksPage() }
-        findViewById<View>(R.id.settingsAgentSkillsButton).setOnClickListener { showAgentSkillsPage() }
         meProfileText.setOnClickListener { showEditNicknameDialog() }
         findViewById<View>(R.id.meProfileCard).setOnClickListener { showEditNicknameDialog() }
         meAvatar.setOnClickListener { pickAvatar() }
@@ -3863,7 +3894,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                                 if (homeAssistantReady) ControlCenterTone.GREEN else ControlCenterTone.AMBER
                             ),
                             ccRouteRow(ControlCenterRoute.TASKS, R.string.cc_tasks_title, R.string.cc_tasks_subtitle, R.drawable.ic_agent_history, recentTasks.toString(), if (state.runningTaskCount > 0) ControlCenterTone.AMBER else ControlCenterTone.NEUTRAL),
-                            ccRouteRow(ControlCenterRoute.SKILLS, R.string.agent_skills_title, R.string.settings_status_skills, R.drawable.ic_agent_skill, agentSkillRuntime.list(enabledOnly = true).size.toString(), ControlCenterTone.VIOLET)
+                            ccRouteRow(
+                                ControlCenterRoute.MCP,
+                                R.string.agent_capability_library_title,
+                                R.string.agent_capability_library_subtitle,
+                                R.drawable.ic_agent_skill,
+                                (agentMcpRegistry.list().size + agentSkillRuntime.list(enabledOnly = true).map { it.id }.distinct().size).toString(),
+                                ControlCenterTone.VIOLET
+                            )
                         )
                     ),
                     ControlCenterSectionSpec(
@@ -4115,7 +4153,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 ControlCenterRoute.RESOURCE_ROUTING -> renderControlCenterRoutingPage()
                 ControlCenterRoute.MEMORY -> renderControlCenterMemoryPage()
                 ControlCenterRoute.KNOWLEDGE -> showAgentKnowledgePage()
-                ControlCenterRoute.SKILLS -> showAgentSkillsPage()
+                ControlCenterRoute.MCP -> showCapabilityLibraryPage(
+                    if (destination.payload == CAPABILITY_KIND_SKILL) AgentCapabilityCatalogKind.SKILL
+                    else AgentCapabilityCatalogKind.MCP
+                )
                 ControlCenterRoute.TASKS -> showAgentRecentTasksPage()
                 ControlCenterRoute.PHONE_CAPABILITIES -> renderControlCenterPhoneCapabilitiesPage()
                 ControlCenterRoute.APP_TOOLS -> renderControlCenterAppToolsPage()
@@ -6180,16 +6221,135 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
-    private fun showAgentSkillsPage() {
-        showFeaturePage(getString(R.string.agent_skills_title))
+    private fun showCapabilityLibraryPage(selectedKind: AgentCapabilityCatalogKind) {
+        showFeaturePage(getString(R.string.agent_capability_library_title))
         setFeatureBackAction()
+        val installedCount = agentMcpRegistry.list().size + agentSkillRuntime.list().map { it.id }.distinct().size
         featureContent.addView(featureHeroCard(
-            getString(R.string.agent_skills_title),
-            getString(R.string.agent_skills_subtitle),
-            R.drawable.ic_agent_node,
-            "#14C66A",
-            agentSkillRuntime.list().size.toString()
+            getString(R.string.agent_capability_library_title),
+            getString(R.string.agent_capability_library_subtitle),
+            R.drawable.ic_agent_skill,
+            if (selectedKind == AgentCapabilityCatalogKind.MCP) "#2979FF" else "#7C4DFF",
+            installedCount.toString()
         ))
+        addCapabilityLibraryTabs(selectedKind)
+        when (selectedKind) {
+            AgentCapabilityCatalogKind.MCP -> renderMcpCapabilityLibrary()
+            AgentCapabilityCatalogKind.SKILL -> renderSkillCapabilityLibrary()
+        }
+    }
+
+    private fun returnToCapabilityLibrary(kind: AgentCapabilityCatalogKind) {
+        if (controlCenterBackStack.lastOrNull()?.route == ControlCenterRoute.MCP) controlCenterBackStack.removeLast()
+        openControlCenterDestination(
+            ControlCenterDestination(ControlCenterRoute.MCP, capabilityKindPayload(kind)),
+            pushCurrent = false
+        )
+    }
+
+    private fun addCapabilityLibraryTabs(selectedKind: AgentCapabilityCatalogKind) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(3), dp(3), dp(3), dp(3))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(10).toFloat()
+                setColor(Color.parseColor("#EEF1F5"))
+            }
+        }
+        listOf(
+            AgentCapabilityCatalogKind.MCP to getString(R.string.agent_mcp_title),
+            AgentCapabilityCatalogKind.SKILL to getString(R.string.agent_skills_title)
+        ).forEach { (kind, label) ->
+            val selected = kind == selectedKind
+            row.addView(TextView(this).apply {
+                text = label
+                gravity = Gravity.CENTER
+                textSize = 14f
+                setTypeface(typeface, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                setTextColor(getColorCompat(if (selected) R.color.text_primary else R.color.text_secondary))
+                background = if (selected) GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dp(8).toFloat()
+                    setColor(Color.WHITE)
+                    setStroke(1, Color.parseColor("#DDE3EA"))
+                } else null
+                setOnClickListener {
+                    if (!selected) {
+                        openControlCenterDestination(
+                            ControlCenterDestination(ControlCenterRoute.MCP, capabilityKindPayload(kind)),
+                            pushCurrent = false
+                        )
+                    }
+                }
+            }, LinearLayout.LayoutParams(0, dp(40), 1f))
+        }
+        featureContent.addView(row, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(46)
+        ).apply { bottomMargin = dp(14) })
+    }
+
+    private fun renderMcpCapabilityLibrary() {
+        featureContent.addView(featureRow(
+            getString(R.string.agent_mcp_add_remote),
+            getString(R.string.agent_mcp_add_remote_subtitle),
+            R.drawable.ic_protocol_link,
+            getString(R.string.agent_capability_add)
+        ).apply { setOnClickListener { showRemoteMcpSetupPage() } })
+        featureContent.addView(featureRow(
+            getString(R.string.agent_mcp_install_package),
+            getString(R.string.agent_mcp_install_package_subtitle),
+            R.drawable.ic_import,
+            getString(R.string.common_select)
+        ).apply { setOnClickListener { openMcpPackagePicker() } })
+
+        val installed = agentMcpRegistry.list()
+        addSectionTitle(getString(R.string.agent_capability_installed))
+        if (installed.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.agent_mcp_empty),
+                getString(R.string.agent_mcp_empty_subtitle),
+                R.drawable.ic_agent_skill,
+                ""
+            ))
+        } else {
+            installed.forEach { connection ->
+                featureContent.addView(featureRow(
+                    connection.displayName,
+                    mcpConnectionSubtitle(connection),
+                    R.drawable.ic_agent_skill,
+                    mcpConnectionStatus(connection)
+                ).apply { setOnClickListener { showMcpConnectionDetailPage(connection.id) } })
+            }
+        }
+
+        addSectionTitle(getString(R.string.agent_capability_recommended))
+        AgentDefaultCapabilityCatalog.mcpEntries.forEach { entry ->
+            val connection = installed.firstOrNull { it.catalogId == entry.id }
+            featureContent.addView(featureRow(
+                entry.name,
+                localizedMcpSummary(entry),
+                R.drawable.ic_agent_skill,
+                when {
+                    connection != null -> mcpConnectionStatus(connection)
+                    entry.requiresPackage -> getString(R.string.agent_capability_install)
+                    else -> getString(R.string.agent_capability_add)
+                }
+            ).apply {
+                setOnClickListener {
+                    when {
+                        connection != null -> showMcpConnectionDetailPage(connection.id)
+                        entry.requiresPackage -> openMcpPackagePicker()
+                        else -> showRemoteMcpSetupPage(entry)
+                    }
+                }
+            })
+        }
+    }
+
+    private fun renderSkillCapabilityLibrary() {
         featureContent.addView(featureRow(
             getString(R.string.agent_skill_install_local),
             getString(R.string.agent_skill_install_local_subtitle),
@@ -6209,39 +6369,463 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .values
             .mapNotNull { versions -> versions.maxByOrNull { skillVersionParts(it.version) } }
             .sortedBy { it.manifest.title.lowercase(Locale.ROOT) }
+        addSectionTitle(getString(R.string.agent_capability_installed))
         if (installations.isEmpty()) {
             featureContent.addView(featureRow(
                 getString(R.string.agent_skills_empty),
                 getString(R.string.agent_skills_empty_subtitle),
-                R.drawable.ic_agent_node,
+                R.drawable.ic_agent_skill,
                 ""
             ))
-            return
-        }
-        listOf(
-            R.string.agent_skill_section_installed to installations.filter { it.manifest.source != "built_in" },
-            R.string.agent_skill_section_built_in to installations.filter { it.manifest.source == "built_in" }
-        ).forEach { (titleRes, skills) ->
-            if (skills.isEmpty()) return@forEach
-            addSectionTitle(getString(titleRes))
-            skills.forEach { installation ->
+        } else {
+            installations.forEach { installation ->
                 val state = getString(if (installation.enabled) R.string.agent_skill_enabled else R.string.agent_skill_disabled)
                 featureContent.addView(featureRow(
                     installation.manifest.title,
                     listOf(installation.manifest.description, "v${installation.version}", getString(R.string.agent_skill_uses, installation.useCount))
                         .filter(String::isNotBlank).joinToString(" · "),
-                    R.drawable.ic_agent_node,
+                    R.drawable.ic_agent_skill,
                     state
                 ).apply { setOnClickListener { showAgentSkillDetailPage(installation.id, installation.version) } })
             }
         }
+
+        val installedIds = installations.mapTo(mutableSetOf()) { it.id }
+        val nativeTools = mobileNativeAgent.nativeToolCatalog().mapTo(mutableSetOf()) { it.id }
+        addSectionTitle(getString(R.string.agent_capability_recommended))
+        AgentDefaultCapabilityCatalog.skillEntries.forEach { entry ->
+            val dependency = AgentCapabilityDependencyResolver.resolve(entry, agentMcpRegistry.list(), nativeTools)
+            val installed = entry.id in installedIds
+            featureContent.addView(featureRow(
+                entry.name,
+                localizedSkillSummary(entry, dependency),
+                R.drawable.ic_agent_skill,
+                when {
+                    installed -> getString(R.string.agent_capability_added)
+                    dependency.available -> getString(R.string.agent_capability_add)
+                    else -> getString(R.string.agent_capability_requires_setup)
+                }
+            ).apply {
+                setOnClickListener {
+                    when {
+                        installed -> installations.firstOrNull { it.id == entry.id }
+                            ?.let { showAgentSkillDetailPage(it.id, it.version) }
+                        !dependency.available -> {
+                            Toast.makeText(this@MainActivity, getString(R.string.agent_skill_dependency_missing), Toast.LENGTH_LONG).show()
+                            openControlCenterDestination(ControlCenterDestination(ControlCenterRoute.MCP), pushCurrent = false)
+                        }
+                        else -> runCatching { agentSkillRuntime.install(entry.manifest) }
+                            .onSuccess { showAgentSkillDetailPage(it.id, it.version) }
+                            .onFailure { Toast.makeText(this@MainActivity, it.message ?: getString(R.string.agent_skill_install_failed), Toast.LENGTH_LONG).show() }
+                    }
+                }
+            })
+        }
+    }
+
+    private fun showRemoteMcpSetupPage(entry: AgentMcpCatalogEntry? = null) {
+        showFeaturePage(getString(R.string.agent_mcp_add_remote))
+        setFeatureBackAction { returnToCapabilityLibrary(AgentCapabilityCatalogKind.MCP) }
+        featureContent.addView(featureHeroCard(
+            entry?.name ?: getString(R.string.agent_mcp_custom_server),
+            entry?.let(::localizedMcpSummary) ?: getString(R.string.agent_mcp_custom_server_subtitle),
+            R.drawable.ic_agent_skill,
+            "#2979FF",
+            getString(R.string.agent_mcp_remote_badge)
+        ))
+        val nameInput = capabilityTextInput(
+            getString(R.string.agent_mcp_server_name),
+            entry?.name.orEmpty(),
+            getString(R.string.agent_mcp_server_name_hint)
+        )
+        val endpointInput = capabilityTextInput(
+            getString(R.string.agent_mcp_server_url),
+            entry?.defaultEndpoint.orEmpty(),
+            "https://example.com/mcp"
+        )
+        val profiles = entry?.authProfiles ?: listOf(
+            AgentMcpAuthProfile(AgentMcpAuthMethod.NONE),
+            AgentMcpAuthProfile(AgentMcpAuthMethod.BEARER_TOKEN),
+            AgentMcpAuthProfile(AgentMcpAuthMethod.API_KEY),
+            AgentMcpAuthProfile(AgentMcpAuthMethod.USERNAME_PASSWORD),
+            AgentMcpAuthProfile(AgentMcpAuthMethod.OAUTH2, supportsRefresh = true),
+            AgentMcpAuthProfile(AgentMcpAuthMethod.DEVICE_CODE),
+            AgentMcpAuthProfile(AgentMcpAuthMethod.DYNAMIC)
+        )
+        addCapabilityFormLabel(getString(R.string.agent_mcp_auth_method))
+        val authSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                profiles.map { mcpAuthMethodLabel(it.method) }
+            )
+            background = getDrawable(R.drawable.glass_card_background)
+            setPadding(dp(12), 0, dp(12), 0)
+        }
+        featureContent.addView(authSpinner, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(52)
+        ).apply { bottomMargin = dp(14) })
+        featureContent.addView(capabilityPrimaryButton(getString(R.string.agent_mcp_continue)) {
+            runCatching {
+                val profile = profiles[authSpinner.selectedItemPosition.coerceIn(profiles.indices)]
+                agentMcpRegistry.addRemote(
+                    displayName = nameInput.text.toString(),
+                    endpoint = endpointInput.text.toString(),
+                    authProfile = profile,
+                    catalogId = entry?.id.orEmpty()
+                )
+            }.onSuccess { connection ->
+                if (connection.authProfile.method == AgentMcpAuthMethod.NONE) {
+                    showMcpConnectionDetailPage(connection.id)
+                } else {
+                    agentMcpRegistry.beginAuthentication(connection.id)
+                    showMcpAuthenticationPage(connection.id)
+                }
+            }.onFailure { error ->
+                Toast.makeText(this@MainActivity, error.message ?: getString(R.string.agent_mcp_add_failed), Toast.LENGTH_LONG).show()
+            }
+        })
+    }
+
+    private fun showMcpAuthenticationPage(connectionId: String) {
+        val connection = agentMcpRegistry.get(connectionId) ?: return showCapabilityLibraryPage(AgentCapabilityCatalogKind.MCP)
+        val step = connection.currentAuthStep ?: return showMcpConnectionDetailPage(connectionId)
+        showFeaturePage(getString(R.string.agent_mcp_sign_in))
+        setFeatureBackAction { showMcpConnectionDetailPage(connectionId) }
+        featureContent.addView(featureHeroCard(
+            connection.displayName,
+            step.description.ifBlank { getString(R.string.agent_mcp_sign_in_subtitle) },
+            R.drawable.ic_security_shield,
+            "#2979FF",
+            getString(R.string.agent_mcp_step_count, connection.authStepIndex + 1, connection.authProfile.steps.size)
+        ))
+        if (connection.authProfile.authorizationUrl.isNotBlank()) {
+            featureContent.addView(featureRow(
+                getString(R.string.agent_mcp_open_authorization),
+                connection.authProfile.authorizationUrl,
+                R.drawable.ic_protocol_link,
+                getString(R.string.common_open)
+            ).apply {
+                setOnClickListener { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(connection.authProfile.authorizationUrl))) }
+            })
+        }
+        val inputs = linkedMapOf<String, View>()
+        step.fields.forEach { field ->
+            addCapabilityFormLabel(field.label)
+            val input: View = when (field.type) {
+                AgentMcpAuthFieldType.SELECT -> Spinner(this).apply {
+                    adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, field.options)
+                    background = getDrawable(R.drawable.glass_card_background)
+                    setPadding(dp(12), 0, dp(12), 0)
+                }
+                AgentMcpAuthFieldType.CHECKBOX -> CheckBox(this).apply {
+                    text = field.placeholder.ifBlank { field.label }
+                    setTextColor(getColorCompat(R.color.text_primary))
+                }
+                else -> EditText(this).apply {
+                    hint = field.placeholder
+                    textSize = 15f
+                    setTextColor(getColorCompat(R.color.text_primary))
+                    setHintTextColor(getColorCompat(R.color.text_secondary))
+                    setSingleLine(true)
+                    setPadding(dp(14), 0, dp(14), 0)
+                    inputType = when (field.type) {
+                        AgentMcpAuthFieldType.PASSWORD,
+                        AgentMcpAuthFieldType.API_KEY -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                        AgentMcpAuthFieldType.PHONE -> InputType.TYPE_CLASS_PHONE
+                        AgentMcpAuthFieldType.EMAIL -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+                        AgentMcpAuthFieldType.OTP,
+                        AgentMcpAuthFieldType.TOTP -> InputType.TYPE_CLASS_NUMBER
+                        AgentMcpAuthFieldType.URL -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                        else -> InputType.TYPE_CLASS_TEXT
+                    }
+                    background = getDrawable(R.drawable.glass_card_background)
+                }
+            }
+            inputs[field.id] = input
+            featureContent.addView(input, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(52)
+            ).apply { bottomMargin = dp(12) })
+        }
+        featureContent.addView(capabilityPrimaryButton(getString(R.string.agent_mcp_continue)) {
+            val values = inputs.mapValues { (_, view) ->
+                when (view) {
+                    is EditText -> view.text.toString()
+                    is Spinner -> view.selectedItem?.toString().orEmpty()
+                    is CheckBox -> view.isChecked.toString()
+                    else -> ""
+                }
+            }
+            thread(name = "signalasi-mcp-auth") {
+                val result = runCatching {
+                    runBlocking {
+                        AgentMcpAuthenticationCoordinator(
+                            agentMcpRegistry
+                        ).submitStep(connectionId, values)
+                    }
+                }
+                runOnUiThread {
+                    result.onSuccess { updated ->
+                        if (updated.authState == AgentMcpAuthState.AUTHENTICATED) showMcpConnectionDetailPage(connectionId)
+                        else showMcpAuthenticationPage(connectionId)
+                    }.onFailure {
+                        Toast.makeText(this@MainActivity, it.message ?: getString(R.string.agent_mcp_auth_failed), Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        })
+    }
+
+    private fun showMcpConnectionDetailPage(connectionId: String) {
+        val connection = agentMcpRegistry.get(connectionId) ?: return showCapabilityLibraryPage(AgentCapabilityCatalogKind.MCP)
+        showFeaturePage(connection.displayName)
+        setFeatureBackAction { returnToCapabilityLibrary(AgentCapabilityCatalogKind.MCP) }
+        featureContent.addView(featureHeroCard(
+            connection.displayName,
+            mcpConnectionSubtitle(connection),
+            R.drawable.ic_agent_skill,
+            if (connection.isCallable(System.currentTimeMillis())) "#14C66A" else "#F0A500",
+            mcpConnectionStatus(connection)
+        ))
+        featureContent.addView(featureRow(
+            getString(R.string.agent_mcp_endpoint),
+            connection.endpoint,
+            R.drawable.ic_protocol_link,
+            ""
+        ))
+        featureContent.addView(featureRow(
+            getString(R.string.agent_mcp_auth_method),
+            mcpAuthMethodLabel(connection.authProfile.method),
+            R.drawable.ic_security_shield,
+            mcpAuthStateLabel(connection.effectiveAuthState(System.currentTimeMillis()))
+        ).apply {
+            setOnClickListener {
+                if (connection.authProfile.method != AgentMcpAuthMethod.NONE) {
+                    agentMcpRegistry.beginAuthentication(connectionId)
+                    showMcpAuthenticationPage(connectionId)
+                }
+            }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.agent_mcp_tools),
+            connection.toolIds.joinToString(" · ").ifBlank { getString(R.string.agent_mcp_tools_not_discovered) },
+            R.drawable.ic_agent_skill,
+            connection.toolIds.size.toString()
+        ))
+        featureContent.addView(featureRow(
+            getString(R.string.agent_mcp_test_connection),
+            connection.lastError.ifBlank { getString(R.string.agent_mcp_test_connection_subtitle) },
+            R.drawable.ic_info_outline,
+            getString(R.string.common_test)
+        ).apply { setOnClickListener { testMcpConnection(connectionId) } })
+        featureContent.addView(featureRow(
+            getString(if (connection.enabled) R.string.common_enabled else R.string.status_disabled),
+            getString(R.string.agent_mcp_enable_subtitle),
+            R.drawable.ic_agent_control,
+            getString(if (connection.enabled) R.string.common_disable else R.string.common_enable)
+        ).apply {
+            setOnClickListener {
+                agentMcpRegistry.setEnabled(connectionId, !connection.enabled)
+                showMcpConnectionDetailPage(connectionId)
+            }
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.agent_mcp_remove),
+            getString(R.string.agent_mcp_remove_subtitle),
+            R.drawable.ic_delete,
+            getString(R.string.common_delete)
+        ).apply {
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle(getString(R.string.agent_mcp_remove))
+                    .setMessage(connection.displayName)
+                    .setNegativeButton(getString(R.string.common_cancel), null)
+                    .setPositiveButton(getString(R.string.common_delete)) { _, _ ->
+                        AgentMcpClientManager(this@MainActivity, agentMcpRegistry, agentMcpPackageRepository).close(connectionId)
+                        agentMcpPackageRepository.delete(connectionId)
+                        agentMcpRegistry.delete(connectionId)
+                        showCapabilityLibraryPage(AgentCapabilityCatalogKind.MCP)
+                    }.show()
+            }
+        })
+    }
+
+    private fun testMcpConnection(connectionId: String) {
+        Toast.makeText(this, getString(R.string.agent_mcp_testing), Toast.LENGTH_SHORT).show()
+        thread(name = "signalasi-mcp-test") {
+            val result = runCatching {
+                runBlocking { AgentMcpClientManager(this@MainActivity, agentMcpRegistry, agentMcpPackageRepository).listTools(connectionId) }
+            }
+            runOnUiThread {
+                result.onSuccess {
+                    Toast.makeText(this, getString(R.string.agent_mcp_test_success, it.size), Toast.LENGTH_SHORT).show()
+                }.onFailure {
+                    Toast.makeText(this, it.message ?: getString(R.string.agent_mcp_test_failed), Toast.LENGTH_LONG).show()
+                }
+                showMcpConnectionDetailPage(connectionId)
+            }
+        }
+    }
+
+    private fun openMcpPackagePicker() {
+        startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/zip"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/zip", "application/octet-stream", "application/vnd.signalasi.mcp"))
+        }, REQUEST_IMPORT_MCP_PACKAGE)
+    }
+
+    private fun importAgentMcpPackageFromUri(uri: Uri) {
+        val inspection = runCatching {
+            contentResolver.openInputStream(uri)?.use { AgentMcpPackageInstaller().inspect(it) }
+                ?: error("Unable to open MCP package")
+        }.getOrElse { error ->
+            Toast.makeText(this, error.message ?: getString(R.string.agent_mcp_package_invalid), Toast.LENGTH_LONG).show()
+            return
+        }
+        val manifest = inspection.manifest
+        val details = buildString {
+            append(manifest.description)
+            append("\n\n").append(getString(R.string.agent_mcp_tools)).append(":\n")
+            manifest.tools.take(12).forEach { append("• ").append(it.title).append('\n') }
+            append("\n").append(getString(if (inspection.integrityVerified) R.string.agent_mcp_integrity_verified else R.string.agent_mcp_integrity_unsigned))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("${manifest.name} · v${manifest.version}")
+            .setMessage(details.trim())
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .setPositiveButton(getString(R.string.agent_capability_install)) { _, _ ->
+                runCatching {
+                    agentMcpPackageRepository.save(inspection)
+                    agentMcpRegistry.installPackage(manifest, inspection.packageSha256)
+                }.onSuccess { connection ->
+                    if (connection.authProfile.method == AgentMcpAuthMethod.NONE) {
+                        showMcpConnectionDetailPage(connection.id)
+                    } else {
+                        agentMcpRegistry.beginAuthentication(connection.id)
+                        showMcpAuthenticationPage(connection.id)
+                    }
+                }.onFailure { error ->
+                    agentMcpPackageRepository.delete(manifest.id)
+                    Toast.makeText(this, error.message ?: getString(R.string.agent_mcp_install_failed), Toast.LENGTH_LONG).show()
+                }
+            }.show()
+    }
+
+    private fun capabilityTextInput(label: String, value: String, hintValue: String): EditText {
+        addCapabilityFormLabel(label)
+        return EditText(this).apply {
+            setText(value)
+            hint = hintValue
+            textSize = 15f
+            setTextColor(getColorCompat(R.color.text_primary))
+            setHintTextColor(getColorCompat(R.color.text_secondary))
+            setSingleLine(true)
+            setPadding(dp(14), 0, dp(14), 0)
+            background = getDrawable(R.drawable.glass_card_background)
+            featureContent.addView(this, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(52)
+            ).apply { bottomMargin = dp(12) })
+        }
+    }
+
+    private fun addCapabilityFormLabel(label: String) {
+        featureContent.addView(TextView(this).apply {
+            text = label
+            textSize = 12f
+            setTextColor(getColorCompat(R.color.text_secondary))
+            setPadding(dp(4), dp(3), 0, dp(6))
+        })
+    }
+
+    private fun capabilityPrimaryButton(label: String, action: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        gravity = Gravity.CENTER
+        textSize = 15f
+        setTypeface(typeface, android.graphics.Typeface.BOLD)
+        setTextColor(Color.WHITE)
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(10).toFloat()
+            setColor(getColorCompat(R.color.signalasi_green))
+        }
+        setOnClickListener { action() }
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)).apply {
+            topMargin = dp(5)
+            bottomMargin = dp(14)
+        }
+    }
+
+    private fun mcpConnectionSubtitle(connection: AgentMcpConnection): String = listOf(
+        if (connection.distribution == AgentMcpDistribution.LOCAL_PACKAGE) getString(R.string.agent_mcp_local_package_badge) else getString(R.string.agent_mcp_remote_badge),
+        mcpAuthMethodLabel(connection.authProfile.method),
+        connection.lastError.takeIf(String::isNotBlank)
+    ).filterNotNull().joinToString(" · ")
+
+    private fun mcpConnectionStatus(connection: AgentMcpConnection): String = when {
+        !connection.enabled -> getString(R.string.status_disabled)
+        connection.state == AgentMcpConnectionState.CONNECTED -> getString(R.string.status_connected)
+        connection.effectiveAuthState(System.currentTimeMillis()) in setOf(
+            AgentMcpAuthState.NOT_CONFIGURED,
+            AgentMcpAuthState.CHALLENGE_REQUIRED,
+            AgentMcpAuthState.REAUTHENTICATION_REQUIRED,
+            AgentMcpAuthState.ERROR
+        ) -> getString(R.string.agent_capability_requires_setup)
+        connection.state == AgentMcpConnectionState.ERROR -> getString(R.string.agent_mcp_status_error)
+        else -> getString(R.string.status_ready)
+    }
+
+    private fun mcpAuthMethodLabel(method: AgentMcpAuthMethod): String = getString(when (method) {
+        AgentMcpAuthMethod.NONE -> R.string.agent_mcp_auth_none
+        AgentMcpAuthMethod.BEARER_TOKEN -> R.string.agent_mcp_auth_token
+        AgentMcpAuthMethod.API_KEY -> R.string.agent_mcp_auth_api_key
+        AgentMcpAuthMethod.USERNAME_PASSWORD -> R.string.agent_mcp_auth_password
+        AgentMcpAuthMethod.OAUTH2 -> R.string.agent_mcp_auth_oauth
+        AgentMcpAuthMethod.DEVICE_CODE -> R.string.agent_mcp_auth_device_code
+        AgentMcpAuthMethod.DYNAMIC -> R.string.agent_mcp_auth_dynamic
+    })
+
+    private fun mcpAuthStateLabel(state: AgentMcpAuthState): String = getString(when (state) {
+        AgentMcpAuthState.NOT_REQUIRED -> R.string.agent_mcp_auth_not_required
+        AgentMcpAuthState.AUTHENTICATED -> R.string.agent_mcp_auth_authenticated
+        AgentMcpAuthState.REFRESHING -> R.string.agent_mcp_auth_refreshing
+        AgentMcpAuthState.REAUTHENTICATION_REQUIRED -> R.string.agent_mcp_auth_reauth_required
+        AgentMcpAuthState.ERROR -> R.string.agent_mcp_status_error
+        else -> R.string.agent_capability_requires_setup
+    })
+
+    private fun localizedMcpSummary(entry: AgentMcpCatalogEntry): String = getString(when (entry.id) {
+        "signalasi.mcp.github" -> R.string.agent_mcp_catalog_github
+        "signalasi.mcp.notion" -> R.string.agent_mcp_catalog_notion
+        "signalasi.mcp.home_assistant" -> R.string.agent_mcp_catalog_home_assistant
+        "signalasi.mcp.relay_controller" -> R.string.agent_mcp_catalog_relay
+        else -> R.string.agent_mcp_custom_server_subtitle
+    })
+
+    private fun localizedSkillSummary(
+        entry: AgentSkillCatalogEntry,
+        dependency: AgentCapabilityDependencyStatus
+    ): String {
+        val summary = getString(when (entry.id) {
+            "signalasi.catalog.deep-research" -> R.string.agent_skill_catalog_research
+            "signalasi.catalog.device-health" -> R.string.agent_skill_catalog_device_health
+            "signalasi.catalog.github-triage" -> R.string.agent_skill_catalog_github
+            "signalasi.catalog.notion-brief" -> R.string.agent_skill_catalog_notion
+            "signalasi.catalog.smart-home-routine" -> R.string.agent_skill_catalog_smart_home
+            else -> R.string.agent_skills_subtitle
+        })
+        return if (dependency.available) summary else "$summary · ${getString(R.string.agent_skill_dependency_missing)}"
     }
 
     private fun showAgentSkillDetailPage(id: String, version: String) {
-        val installation = agentSkillRuntime.get(id, version) ?: return showAgentSkillsPage()
+        val installation = agentSkillRuntime.get(id, version)
+            ?: return showCapabilityLibraryPage(AgentCapabilityCatalogKind.SKILL)
         val manifest = installation.manifest
         showFeaturePage(manifest.title)
-        setFeatureBackAction { showAgentSkillsPage() }
+        setFeatureBackAction { returnToCapabilityLibrary(AgentCapabilityCatalogKind.SKILL) }
         featureContent.addView(featureHeroCard(
             manifest.title,
             manifest.description.ifBlank { manifest.instructions.take(180) },
@@ -6345,11 +6929,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     .setNegativeButton(getString(R.string.common_cancel), null)
                     .setPositiveButton(getString(R.string.common_delete)) { _, _ ->
                         agentSkillRuntime.delete(id, version)
-                        showAgentSkillsPage()
+                        showCapabilityLibraryPage(AgentCapabilityCatalogKind.SKILL)
                     }.show()
             }
         })
     }
+
+    private fun capabilityKindPayload(kind: AgentCapabilityCatalogKind): String =
+        if (kind == AgentCapabilityCatalogKind.SKILL) CAPABILITY_KIND_SKILL else CAPABILITY_KIND_MCP
 
     private fun skillVersionParts(version: String): String = version.split('.')
         .joinToString(".") { (it.toIntOrNull() ?: 0).toString().padStart(8, '0') }

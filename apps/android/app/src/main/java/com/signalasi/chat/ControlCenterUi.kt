@@ -33,7 +33,7 @@ enum class ControlCenterRoute(val wireValue: String) {
     RESOURCE_ROUTING("resource_routing"),
     MEMORY("memory"),
     KNOWLEDGE("knowledge"),
-    SKILLS("skills"),
+    MCP("mcp"),
     TASKS("tasks"),
     PHONE_CAPABILITIES("phone_capabilities"),
     APP_TOOLS("app_tools"),
