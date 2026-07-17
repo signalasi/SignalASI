@@ -187,6 +187,21 @@ Import rejects path traversal, unknown pack ids, incompatible architectures, exc
 untrusted signatures, unsupported protocol versions, and invalid hashes. Activation uses a
 same-volume staging directory and rollback backup; dependencies prevent unsafe removal.
 
+Compatible packs are discovered through a bounded, signed release catalog rather than arbitrary
+URLs entered by the planner. Catalog and pack signatures are verified against the installed app's
+signing identity, catalog generations cannot roll back or reuse a timestamp with different
+content, and an expired catalog is never offered for installation. Downloads require public
+HTTPS endpoints, pin each DNS resolution for the connection, revalidate every redirect, reject
+private and special-use destinations, and verify the catalog-declared byte count and SHA-256.
+Interrupted downloads retain an app-private partial file and resume with `Range` and `If-Range`;
+the completed archive remains cached if installation fails so a verified multi-gigabyte pack does
+not need to be downloaded again.
+
+The Control Center exposes catalog refresh, compatibility, size, license, dependencies, progress,
+cancellation, atomic activation, update, reinstall, uninstall, and recent execution receipts.
+Manual `.sarpack` import remains available for offline deployments. If no signed catalog has been
+published or cached, the UI reports that state directly and does not advertise placeholder packs.
+
 Large image hashes are cached only after a full successful verification and are keyed by image
 size, modification time, and expected digest. Installation and update always force a complete
 verification. The app never treats the runtime as ready until the native engine, `linux-base`, and
@@ -227,7 +242,7 @@ access to the user's shared storage.
 | --- | --- |
 | Encrypted memory metadata, ranking, conflict handling, and no-migration storage | Host complete |
 | Evidence-based learning, repeated-failure lessons, and reviewed Skill proposals/upgrades | Host complete |
-| Runtime capability, signed-pack, policy, guest-protocol, workspace, cancellation, and receipt contracts | Host complete |
+| Runtime capability, signed-pack catalog/download/install policy, guest protocol, workspace, cancellation, and receipt contracts | Host complete |
 | Control Center pages for memory, learning proposals, runtime packs, and execution receipts | Host complete |
 | Mixed-script OCR and local PDF/DOCX/XLSX/PPTX/image/source ingestion | Host complete |
 | Signed QEMU engine and compatible `linux-base` guest image | Not shipped |

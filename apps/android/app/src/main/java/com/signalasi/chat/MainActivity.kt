@@ -279,6 +279,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var renderingControlCenterDestination = false
     private var featureBackAction: (() -> Unit)? = null
     private var pendingVoiceEnableFromControlCenter = false
+    @Volatile private var runtimeCatalogRefreshInProgress = false
 
     // State
     private val handler = Handler(Looper.getMainLooper())
@@ -4363,6 +4364,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 mobileNativeAgent.updateMemoryCapture(next)
                 renderCurrentControlCenterDestination()
             }
+            "runtime.catalog_refresh" -> refreshRuntimePackCatalog()
             "runtime.import" -> openRuntimePackPicker()
             "phone.catalog" -> openExistingControlCenterPage { showNativeToolCatalogPage() }
             "apps.adapters" -> openExistingControlCenterPage { showAgentAppAdaptersPage() }
@@ -4456,6 +4458,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
                 actionId.startsWith("runtime.pack:") -> {
                     showRuntimePackDialog(actionId.substringAfter("runtime.pack:"))
+                }
+                actionId.startsWith("runtime.catalog_pack:") -> {
+                    showRuntimeCatalogPackDialog(actionId.substringAfter("runtime.catalog_pack:"))
                 }
                 actionId.startsWith("runtime.receipt:") -> {
                     showRuntimeReceiptDialog(actionId.substringAfter("runtime.receipt:"))
@@ -4877,6 +4882,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun renderControlCenterRuntimePage() {
         val status = AgentOnDeviceRuntimeManager(this).status()
+        val catalogManager = AgentRuntimePackCatalogManager(this)
+        val catalog = catalogManager.cachedVerified()
+        val catalogEntries = catalogManager.cachedCompatible()
+        val catalogById = catalogEntries.associateBy(AgentRuntimePackCatalogEntry::packId)
         val receipts = AgentRuntimeExecutionReceiptStore(this).list(limit = 5)
         val readyPacks = status.packs.count { it.state == AgentRuntimePackState.READY }
         val packRows = status.packs.map { pack ->
@@ -4888,7 +4897,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
             )
             ControlCenterRowSpec(
-                actionId = if (pack.state == AgentRuntimePackState.READY) "runtime.pack:${pack.id}" else "runtime.import",
+                actionId = when {
+                    pack.state == AgentRuntimePackState.READY -> "runtime.pack:${pack.id}"
+                    catalogById.containsKey(pack.id) -> "runtime.catalog_pack:${pack.id}"
+                    else -> "runtime.import"
+                },
                 title = runtimePackTitle(pack.id),
                 subtitle = pack.reason.ifBlank {
                     pack.manifest?.capabilities?.joinToString().orEmpty().ifBlank {
@@ -4900,6 +4913,46 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 tone = if (pack.state == AgentRuntimePackState.READY) ControlCenterTone.GREEN else ControlCenterTone.AMBER,
                 showChevron = true
             )
+        }
+        val catalogRows = if (catalogEntries.isEmpty()) {
+            listOf(
+                ControlCenterRowSpec(
+                    actionId = if (runtimeCatalogRefreshInProgress) "" else "runtime.catalog_refresh",
+                    title = getString(R.string.cc_runtime_catalog_empty_title),
+                    subtitle = getString(R.string.cc_runtime_catalog_empty_subtitle),
+                    iconRes = R.drawable.ic_settings_diagnostics,
+                    status = getString(R.string.cc_status_not_installed),
+                    tone = ControlCenterTone.NEUTRAL,
+                    showChevron = !runtimeCatalogRefreshInProgress
+                )
+            )
+        } else {
+            catalogEntries.map { entry ->
+                val installed = status.packs.firstOrNull { it.id == entry.packId }
+                val sameVersion = installed?.state == AgentRuntimePackState.READY &&
+                    installed.manifest?.version == entry.version
+                val update = installed?.state == AgentRuntimePackState.READY && !sameVersion
+                ControlCenterRowSpec(
+                    actionId = "runtime.catalog_pack:${entry.packId}",
+                    title = runtimePackTitle(entry.packId),
+                    subtitle = getString(
+                        R.string.cc_runtime_catalog_pack_subtitle,
+                        entry.version,
+                        formatBytes(entry.archiveSizeBytes),
+                        entry.license
+                    ),
+                    iconRes = if (entry.packId == "ffmpeg") R.drawable.ic_tab_discover else R.drawable.ic_settings_diagnostics,
+                    status = getString(
+                        when {
+                            sameVersion -> R.string.cc_runtime_catalog_installed
+                            update -> R.string.cc_runtime_catalog_update
+                            else -> R.string.cc_runtime_catalog_available
+                        }
+                    ),
+                    tone = if (sameVersion) ControlCenterTone.GREEN else ControlCenterTone.BLUE,
+                    showChevron = true
+                )
+            }
         }
         val receiptRows = if (receipts.isEmpty()) {
             listOf(
@@ -4967,6 +5020,27 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         getString(R.string.cc_runtime_section_management),
                         listOf(
                             ControlCenterRowSpec(
+                                actionId = if (runtimeCatalogRefreshInProgress) "" else "runtime.catalog_refresh",
+                                title = getString(R.string.cc_runtime_catalog_refresh_title),
+                                subtitle = if (catalog == null) {
+                                    getString(R.string.cc_runtime_catalog_refresh_subtitle)
+                                } else {
+                                    getString(
+                                        R.string.cc_runtime_catalog_loaded_subtitle,
+                                        catalog.catalogVersion,
+                                        catalogEntries.size
+                                    )
+                                },
+                                iconRes = R.drawable.ic_settings_diagnostics,
+                                status = if (runtimeCatalogRefreshInProgress) {
+                                    getString(R.string.cc_runtime_catalog_refreshing)
+                                } else {
+                                    catalog?.catalogVersion.orEmpty()
+                                },
+                                tone = if (catalog == null) ControlCenterTone.NEUTRAL else ControlCenterTone.GREEN,
+                                showChevron = !runtimeCatalogRefreshInProgress
+                            ),
+                            ControlCenterRowSpec(
                                 actionId = "runtime.import",
                                 title = getString(R.string.cc_runtime_import_title),
                                 subtitle = getString(R.string.cc_runtime_import_subtitle),
@@ -4976,6 +5050,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             )
                         )
                     ),
+                    ControlCenterSectionSpec(getString(R.string.cc_runtime_section_catalog), catalogRows),
                     ControlCenterSectionSpec(getString(R.string.cc_runtime_section_packs), packRows),
                     ControlCenterSectionSpec(getString(R.string.cc_runtime_section_receipts), receiptRows),
                     ControlCenterSectionSpec(
@@ -5044,6 +5119,187 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             )
             .setPositiveButton(android.R.string.ok, null)
             .show()
+    }
+
+    private fun refreshRuntimePackCatalog() {
+        if (runtimeCatalogRefreshInProgress) return
+        runtimeCatalogRefreshInProgress = true
+        if (controlCenterDestination?.route == ControlCenterRoute.ON_DEVICE_RUNTIME) {
+            renderControlCenterRuntimePage()
+        }
+        thread(name = "signalasi-runtime-catalog-refresh") {
+            val outcome = runCatching { AgentRuntimePackCatalogManager(this).refresh() }
+            runOnUiThread {
+                runtimeCatalogRefreshInProgress = false
+                Toast.makeText(
+                    this,
+                    outcome.fold(
+                        onSuccess = { catalog ->
+                            getString(R.string.cc_runtime_catalog_refresh_success, catalog.catalogVersion)
+                        },
+                        onFailure = { error ->
+                            getString(
+                                R.string.cc_runtime_catalog_refresh_failed,
+                                error.message ?: getString(R.string.status_unknown)
+                            )
+                        }
+                    ),
+                    Toast.LENGTH_LONG
+                ).show()
+                if (controlCenterDestination?.route == ControlCenterRoute.ON_DEVICE_RUNTIME) {
+                    renderControlCenterRuntimePage()
+                }
+            }
+        }
+    }
+
+    private fun showRuntimeCatalogPackDialog(packId: String) {
+        val entry = AgentRuntimePackCatalogManager(this).cachedCompatible()
+            .firstOrNull { it.packId == packId } ?: return
+        val installed = AgentOnDeviceRuntimeManager(this).status().packs.firstOrNull { it.id == packId }
+        val sameVersion = installed?.state == AgentRuntimePackState.READY &&
+            installed.manifest?.version == entry.version
+        val dependencies = entry.dependencies.joinToString { runtimePackTitle(it) }
+            .ifBlank { getString(R.string.cc_runtime_catalog_no_dependencies) }
+        val message = getString(
+            R.string.cc_runtime_catalog_details,
+            entry.version,
+            entry.architecture,
+            formatBytes(entry.archiveSizeBytes),
+            formatBytes(entry.installedSizeBytes),
+            entry.license,
+            dependencies,
+            entry.releaseNotes.ifBlank { getString(R.string.cc_runtime_catalog_no_release_notes) }
+        )
+        AlertDialog.Builder(this)
+            .setTitle(runtimePackTitle(packId))
+            .setMessage(message)
+            .setPositiveButton(
+                if (sameVersion) R.string.cc_runtime_catalog_reinstall else R.string.cc_runtime_catalog_install
+            ) { _, _ -> installRuntimeCatalogPack(entry) }
+            .setNegativeButton(R.string.common_cancel, null)
+            .show()
+    }
+
+    private fun installRuntimeCatalogPack(entry: AgentRuntimePackCatalogEntry) {
+        val manager = AgentRuntimePackCatalogManager(this)
+        val plan = runCatching { manager.installationPlan(entry) }.getOrElse { error ->
+            Toast.makeText(
+                this,
+                getString(R.string.cc_runtime_install_failed, error.message ?: getString(R.string.status_unknown)),
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        val installedById = AgentOnDeviceRuntimeManager(this).status().packs.associateBy(AgentRuntimePackStatus::id)
+        val pending = plan.filter { item ->
+            item.packId == entry.packId || installedById[item.packId]?.let { installed ->
+                installed.state != AgentRuntimePackState.READY || installed.manifest?.version != item.version
+            } != false
+        }
+        val cancellation = AgentNativeToolCancellationSource()
+        val progressText = TextView(this).apply {
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+            setTextColor(Color.rgb(43, 48, 58))
+            textSize = 15f
+            text = getString(R.string.cc_runtime_install_progress_preparing)
+        }
+        val progressDialog = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.cc_runtime_install_progress_title))
+            .setView(progressText)
+            .setNegativeButton(R.string.common_cancel) { _, _ -> cancellation.cancel() }
+            .create()
+        progressDialog.setCanceledOnTouchOutside(false)
+        progressDialog.setOnCancelListener { cancellation.cancel() }
+        progressDialog.show()
+
+        fun updateProgress(pack: AgentRuntimePackCatalogEntry, index: Int, stage: String, percent: Int) {
+            runOnUiThread {
+                if (progressDialog.isShowing) {
+                    progressText.text = getString(
+                        R.string.cc_runtime_install_progress,
+                        runtimePackTitle(pack.packId),
+                        index + 1,
+                        pending.size,
+                        stage,
+                        percent.coerceIn(0, 100)
+                    )
+                }
+            }
+        }
+
+        thread(name = "signalasi-runtime-catalog-install") {
+            val outcome = runCatching {
+                pending.forEachIndexed { index, pack ->
+                    if (cancellation.token.isCancellationRequested) throw AgentNativeToolCancelledException()
+                    val result = manager.downloadAndInstall(
+                        pack,
+                        cancellation.token,
+                        onDownloadProgress = { progress ->
+                            val percent = if (progress.totalBytes > 0L) {
+                                ((progress.downloadedBytes * 80L) / progress.totalBytes).toInt()
+                            } else 0
+                            updateProgress(
+                                pack,
+                                index,
+                                getString(R.string.cc_runtime_install_stage_downloading),
+                                percent
+                            )
+                        },
+                        onInstallProgress = { progress ->
+                            val percent = when (progress.stage) {
+                                AgentRuntimePackInstallStage.PREPARING -> 81
+                                AgentRuntimePackInstallStage.COPYING -> 83
+                                AgentRuntimePackInstallStage.EXTRACTING -> 88
+                                AgentRuntimePackInstallStage.VERIFYING -> 94
+                                AgentRuntimePackInstallStage.ACTIVATING -> 98
+                                AgentRuntimePackInstallStage.COMPLETED -> 100
+                            }
+                            updateProgress(
+                                pack,
+                                index,
+                                getString(runtimeInstallStageLabel(progress.stage)),
+                                percent
+                            )
+                        }
+                    )
+                    check(result.state == AgentRuntimePackState.READY) {
+                        result.reason.ifBlank { "Runtime pack did not become ready" }
+                    }
+                }
+            }
+            runOnUiThread {
+                if (progressDialog.isShowing) progressDialog.dismiss()
+                val message = outcome.fold(
+                    onSuccess = {
+                        getString(R.string.cc_runtime_install_success, runtimePackTitle(entry.packId), entry.version)
+                    },
+                    onFailure = { error ->
+                        if (error is AgentNativeToolCancelledException) {
+                            getString(R.string.cc_runtime_install_cancelled)
+                        } else {
+                            getString(
+                                R.string.cc_runtime_install_failed,
+                                error.message ?: getString(R.string.status_unknown)
+                            )
+                        }
+                    }
+                )
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                if (controlCenterDestination?.route == ControlCenterRoute.ON_DEVICE_RUNTIME) {
+                    renderControlCenterRuntimePage()
+                }
+            }
+        }
+    }
+
+    private fun runtimeInstallStageLabel(stage: AgentRuntimePackInstallStage): Int = when (stage) {
+        AgentRuntimePackInstallStage.PREPARING -> R.string.cc_runtime_install_stage_preparing
+        AgentRuntimePackInstallStage.COPYING -> R.string.cc_runtime_install_stage_copying
+        AgentRuntimePackInstallStage.EXTRACTING -> R.string.cc_runtime_install_stage_extracting
+        AgentRuntimePackInstallStage.VERIFYING -> R.string.cc_runtime_install_stage_verifying
+        AgentRuntimePackInstallStage.ACTIVATING -> R.string.cc_runtime_install_stage_activating
+        AgentRuntimePackInstallStage.COMPLETED -> R.string.cc_runtime_install_stage_completed
     }
 
     private fun openRuntimePackPicker() {

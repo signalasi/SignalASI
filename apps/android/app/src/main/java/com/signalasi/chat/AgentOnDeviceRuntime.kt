@@ -57,22 +57,23 @@ data class AgentRuntimePackManifest(
     val minimumHostVersionCode: Long = 1L,
     val guestApiVersion: Int = 1
 ) {
-    fun signingPayload(): ByteArray = buildString {
-        append(formatVersion).append('\n')
-        append(id).append('\n')
-        append(version).append('\n')
-        append(architecture).append('\n')
-        append(imageFile).append('\n')
-        append(imageSha256.lowercase(Locale.ROOT)).append('\n')
-        append(capabilities.sorted().joinToString(",")).append('\n')
-        append(dependencies.sorted().joinToString(",")).append('\n')
-        append(installedSizeBytes).append('\n')
-        append(archiveSizeBytes).append('\n')
-        append(minimumHostVersionCode).append('\n')
-        append(guestApiVersion).append('\n')
-        append(license).append('\n')
-        append(signatureKeyId.lowercase(Locale.ROOT))
-    }.toByteArray(Charsets.UTF_8)
+    fun signingPayload(): ByteArray = listOf(
+        formatVersion.toString(),
+        id,
+        version,
+        architecture,
+        imageFile,
+        imageSha256.lowercase(Locale.ROOT),
+        capabilities.sorted().joinToString(","),
+        dependencies.sorted().joinToString(","),
+        installedSizeBytes.toString(),
+        archiveSizeBytes.toString(),
+        minimumHostVersionCode.toString(),
+        guestApiVersion.toString(),
+        license,
+        signatureKeyId.lowercase(Locale.ROOT)
+    ).joinToString("") { value -> "${value.toByteArray(Charsets.UTF_8).size}:$value" }
+        .toByteArray(Charsets.UTF_8)
 }
 
 fun interface AgentRuntimePackSignatureVerifier {
@@ -80,10 +81,20 @@ fun interface AgentRuntimePackSignatureVerifier {
 }
 
 class AndroidAppSigningRuntimePackVerifier(context: Context) : AgentRuntimePackSignatureVerifier {
+    private val verifier = AndroidAppSigningPayloadVerifier(context)
+
+    override fun verify(manifest: AgentRuntimePackManifest): Boolean = verifier.verify(
+        manifest.signatureKeyId,
+        manifest.signature,
+        manifest.signingPayload()
+    )
+}
+
+class AndroidAppSigningPayloadVerifier(context: Context) {
     private val appContext = context.applicationContext
 
-    override fun verify(manifest: AgentRuntimePackManifest): Boolean {
-        val signatureBytes = runCatching { Base64.decode(manifest.signature, Base64.DEFAULT) }.getOrNull()
+    fun verify(signatureKeyId: String, signature: String, payload: ByteArray): Boolean {
+        val signatureBytes = runCatching { Base64.decode(signature, Base64.DEFAULT) }.getOrNull()
             ?: return false
         return signingCertificates().any { certificateBytes ->
             runCatching {
@@ -92,7 +103,7 @@ class AndroidAppSigningRuntimePackVerifier(context: Context) : AgentRuntimePackS
                 val keyId = MessageDigest.getInstance("SHA-256")
                     .digest(certificate.encoded)
                     .joinToString("") { "%02x".format(it) }
-                if (!keyId.equals(manifest.signatureKeyId, ignoreCase = true)) return@runCatching false
+                if (!keyId.equals(signatureKeyId, ignoreCase = true)) return@runCatching false
                 val algorithm = when (certificate.publicKey.algorithm.uppercase(Locale.ROOT)) {
                     "RSA" -> "SHA256withRSA"
                     "EC", "ECDSA" -> "SHA256withECDSA"
@@ -101,7 +112,7 @@ class AndroidAppSigningRuntimePackVerifier(context: Context) : AgentRuntimePackS
                 }
                 Signature.getInstance(algorithm).run {
                     initVerify(certificate.publicKey)
-                    update(manifest.signingPayload())
+                    update(payload)
                     verify(signatureBytes)
                 }
             }.getOrDefault(false)
@@ -341,13 +352,17 @@ class AgentOnDeviceRuntimeManager(
         ) {
             return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INCOMPATIBLE, "Runtime pack protocol is incompatible", manifest)
         }
-        if (manifest.archiveSizeBytes <= 0L || manifest.license.isBlank() ||
-            manifest.capabilities.any(String::isBlank) ||
+        if (manifest.archiveSizeBytes !in 1..MAX_ARCHIVE_BYTES ||
+            manifest.installedSizeBytes !in 1..MAX_INSTALLED_BYTES ||
+            manifest.license.isBlank() || manifest.license.length > MAX_LICENSE_CHARS ||
+            manifest.capabilities.distinct().size != manifest.capabilities.size ||
+            manifest.capabilities.any { !CAPABILITY_PATTERN.matches(it) } ||
+            manifest.dependencies.distinct().size != manifest.dependencies.size ||
             manifest.dependencies.any { it !in REQUIRED_PACKS || it == manifest.id }
         ) {
             return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INVALID, "Runtime pack metadata is incomplete", manifest)
         }
-        if (manifest.signature.isBlank() || manifest.signatureKeyId.isBlank()) {
+        if (manifest.signature.isBlank() || !SHA256_PATTERN.matches(manifest.signatureKeyId)) {
             return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INVALID, "Runtime pack signature is missing", manifest)
         }
         if (!signatureVerifier.verify(manifest)) {
@@ -489,6 +504,9 @@ class AgentOnDeviceRuntimeManager(
         private const val MAX_ID_CHARS = 80
         private const val MAX_CAPABILITIES = 128
         private const val MAX_DEPENDENCIES = 32
+        private const val MAX_LICENSE_CHARS = 256
+        private const val MAX_ARCHIVE_BYTES = 6L * 1024L * 1024L * 1024L
+        private const val MAX_INSTALLED_BYTES = 12L * 1024L * 1024L * 1024L
         private const val INSTALL_SIZE_TOLERANCE_BYTES = 16L * 1024L * 1024L
         private const val SUPPORTED_PACK_FORMAT_VERSION = 1
         private const val SUPPORTED_GUEST_API_VERSION = 1
@@ -498,6 +516,7 @@ class AgentOnDeviceRuntimeManager(
         private val SHA256_PATTERN = Regex("[0-9a-f]{64}")
         private val PACK_ID_PATTERN = Regex("[a-z0-9][a-z0-9._-]{0,79}")
         private val REQUEST_ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+        private val CAPABILITY_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
     }
 }
 
