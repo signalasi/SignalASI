@@ -1,6 +1,7 @@
 package com.signalasi.chat
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -22,10 +23,12 @@ import android.text.style.TypefaceSpan
 import android.text.style.URLSpan
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -214,6 +217,7 @@ class AgentRichContentView(
         val webView = WebView(activity).apply {
             setBackgroundColor(Color.TRANSPARENT)
             settings.javaScriptEnabled = true
+            configureEmbeddedWebContent()
             settings.domStorageEnabled = false
             settings.databaseEnabled = false
             settings.allowFileAccess = false
@@ -236,7 +240,9 @@ class AgentRichContentView(
             loadDataWithBaseURL(null, isolatedHtmlDocument(block.text), "text/html", "utf-8", null)
         }
         coordinatePlayback(webView)
-        addView(webView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(280)))
+        addView(SignalASIPinchZoomViewport(activity).apply {
+            attach(webView)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(280)))
         if (block.fallbackText.isNotBlank()) addView(selectableText(block.fallbackText, 12f).apply {
             setTextColor(Color.parseColor("#66717D"))
             setPadding(0, dp(6), 0, 0)
@@ -245,7 +251,7 @@ class AgentRichContentView(
 
     private fun isolatedHtmlDocument(fragment: String): String = """
         <!doctype html><html><head>
-        <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+        <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=5,user-scalable=yes">
         <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; media-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; frame-src 'none'; font-src 'none'; form-action 'none'; base-uri 'none'">
         <style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:transparent;color:#14202b;font-family:system-ui,sans-serif}*{box-sizing:border-box}</style>
         </head><body>${fragment.take(32_000)}</body></html>
@@ -274,6 +280,7 @@ class AgentRichContentView(
                 isNestedScrollingEnabled = true
                 overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
                 settings.javaScriptEnabled = true
+                configureEmbeddedWebContent()
                 settings.domStorageEnabled = false
                 settings.databaseEnabled = false
                 settings.allowFileAccess = false
@@ -310,7 +317,9 @@ class AgentRichContentView(
                 loadUrl(block.uri)
             }
             coordinatePlayback(webView)
-            addView(webView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(420)))
+            addView(SignalASIPinchZoomViewport(activity).apply {
+                attach(webView)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(420)))
             addView(selectableText(block.uri, 11f).apply {
                 setTextColor(Color.parseColor("#66717D"))
                 maxLines = 1
@@ -339,6 +348,16 @@ class AgentRichContentView(
             }
         })
         webView.post { AgentRichPlaybackCoordinator.activate(webView) }
+    }
+
+    private fun WebView.configureEmbeddedWebContent() {
+        settings.setSupportZoom(false)
+        settings.builtInZoomControls = false
+        settings.displayZoomControls = false
+        settings.useWideViewPort = true
+        settings.loadWithOverviewMode = true
+        isLongClickable = false
+        setOnLongClickListener { true }
     }
 
     private fun artifactBlock(block: AgentRichBlock, fallbackTitle: String): View =
@@ -642,6 +661,94 @@ class AgentRichContentView(
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
             .build()
+    }
+}
+
+internal class SignalASIPinchZoomViewport(context: Context) : FrameLayout(context) {
+    private var zoomTarget: View? = null
+    private var zoomScale = 1f
+    internal val currentZoomScale: Float get() = zoomScale
+    private var multiTouchActive = false
+    private var lastFocusX = 0f
+    private var lastFocusY = 0f
+    private val scaleDetector = ScaleGestureDetector(
+        context,
+        object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                lastFocusX = detector.focusX
+                lastFocusY = detector.focusY
+                return zoomTarget != null
+            }
+
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                val target = zoomTarget ?: return false
+                val oldScale = zoomScale
+                val nextScale = (oldScale * detector.scaleFactor).coerceIn(MIN_ZOOM, MAX_ZOOM)
+                val focusDeltaX = detector.focusX - lastFocusX
+                val focusDeltaY = detector.focusY - lastFocusY
+                val centerX = width / 2f
+                val centerY = height / 2f
+                val scaleRatio = nextScale / oldScale
+
+                target.translationX += focusDeltaX
+                target.translationY += focusDeltaY
+                target.translationX = detector.focusX - centerX -
+                    scaleRatio * (detector.focusX - centerX - target.translationX)
+                target.translationY = detector.focusY - centerY -
+                    scaleRatio * (detector.focusY - centerY - target.translationY)
+                zoomScale = nextScale
+                target.scaleX = nextScale
+                target.scaleY = nextScale
+                clampTranslation(target)
+                lastFocusX = detector.focusX
+                lastFocusY = detector.focusY
+                return true
+            }
+        }
+    )
+
+    init {
+        clipChildren = true
+        clipToPadding = true
+    }
+
+    internal fun attach(target: View) {
+        removeAllViews()
+        zoomTarget = target
+        addView(target, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+    }
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        scaleDetector.onTouchEvent(event)
+        if (event.actionMasked == MotionEvent.ACTION_POINTER_DOWN) {
+            multiTouchActive = true
+            parent?.requestDisallowInterceptTouchEvent(true)
+            val cancelEvent = MotionEvent.obtain(event)
+            cancelEvent.action = MotionEvent.ACTION_CANCEL
+            super.dispatchTouchEvent(cancelEvent)
+            cancelEvent.recycle()
+        }
+        if (multiTouchActive || event.pointerCount > 1 || scaleDetector.isInProgress) {
+            parent?.requestDisallowInterceptTouchEvent(true)
+            if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                multiTouchActive = false
+                parent?.requestDisallowInterceptTouchEvent(false)
+            }
+            return true
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
+    private fun clampTranslation(target: View) {
+        val maxTranslationX = width * (zoomScale - 1f) / 2f
+        val maxTranslationY = height * (zoomScale - 1f) / 2f
+        target.translationX = target.translationX.coerceIn(-maxTranslationX, maxTranslationX)
+        target.translationY = target.translationY.coerceIn(-maxTranslationY, maxTranslationY)
+    }
+
+    private companion object {
+        const val MIN_ZOOM = 1f
+        const val MAX_ZOOM = 4f
     }
 }
 
