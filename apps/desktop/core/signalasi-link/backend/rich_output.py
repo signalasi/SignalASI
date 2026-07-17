@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import mimetypes
 import re
+from io import BytesIO
+from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -14,6 +17,8 @@ MAX_BLOCKS = 100
 MAX_TEXT = 32_000
 MAX_ROWS = 500
 MAX_COLUMNS = 24
+MAX_INLINE_ARTIFACT_BYTES = 300 * 1024
+MAX_INLINE_ARTIFACT_B64 = ((MAX_INLINE_ARTIFACT_BYTES + 2) // 3) * 4
 ALLOWED_TYPES = {
     "text", "heading", "quote", "list", "divider", "code", "json", "key_value",
     "table", "image", "gallery", "video", "audio",
@@ -72,7 +77,7 @@ def _normalize_block(raw: dict) -> dict:
     }
     for key, limit in (
         ("title", 500), ("text", MAX_TEXT), ("uri", 4096), ("mime_type", 160),
-        ("language", 80), ("fallback_text", MAX_TEXT),
+        ("language", 80), ("fallback_text", MAX_TEXT), ("data_b64", MAX_INLINE_ARTIFACT_B64),
     ):
         value = str(raw.get(key) or "").strip()[:limit]
         if value:
@@ -141,7 +146,7 @@ def _artifact_block(raw: dict, task_id: str) -> dict:
         block_type = "file"
     safe_task = quote(str(task_id or "task"), safe="")
     safe_path = quote(relative, safe="/")
-    return {
+    block = {
         "id": f"artifact-{abs(hash((task_id, relative)))}",
         "type": block_type,
         "title": name,
@@ -154,6 +159,61 @@ def _artifact_block(raw: dict, task_id: str) -> dict:
             "category": str(raw.get("category") or "output")[:80],
         },
     }
+    inline = _inline_artifact(task_id, relative, mime_type)
+    if inline is not None:
+        encoded, inline_mime = inline
+        block["data_b64"] = encoded
+        block["mime_type"] = inline_mime
+        block["metadata"]["transport"] = "encrypted-inline"
+    return block
+
+
+def _inline_artifact(task_id: str, relative: str, mime_type: str) -> tuple[str, str] | None:
+    if not str(mime_type or "").lower().startswith("image/"):
+        return None
+    try:
+        from task_workspace import task_workspace
+        root = task_workspace(task_id).resolve()
+        source = (root / relative).resolve()
+        source.relative_to(root)
+        if not source.is_file() or source.is_symlink():
+            return None
+        raw = source.read_bytes()
+        output_mime = mime_type
+        if len(raw) > MAX_INLINE_ARTIFACT_BYTES:
+            raw = _compress_image_for_transport(source)
+            output_mime = "image/jpeg"
+        if not raw or len(raw) > MAX_INLINE_ARTIFACT_BYTES:
+            return None
+        return base64.b64encode(raw).decode("ascii"), output_mime
+    except Exception:
+        return None
+
+
+def _compress_image_for_transport(source: Path) -> bytes:
+    from PIL import Image, ImageOps
+    with Image.open(source) as opened:
+        image = ImageOps.exif_transpose(opened)
+        image.thumbnail((2400, 2400), Image.Resampling.LANCZOS)
+        if image.mode not in {"RGB", "L"}:
+            background = Image.new("RGB", image.size, "white")
+            if "A" in image.getbands():
+                background.paste(image, mask=image.getchannel("A"))
+            else:
+                background.paste(image.convert("RGB"))
+            image = background
+        elif image.mode == "L":
+            image = image.convert("RGB")
+        best = b""
+        for quality in (92, 88, 84, 80, 74, 68, 60, 52, 44, 36):
+            output = BytesIO()
+            image.save(output, format="JPEG", quality=quality, optimize=True, progressive=True)
+            candidate = output.getvalue()
+            if not best or len(candidate) < len(best):
+                best = candidate
+            if len(candidate) <= MAX_INLINE_ARTIFACT_BYTES:
+                return candidate
+        return best
 
 
 def _fallback_text(blocks: list[dict]) -> str:

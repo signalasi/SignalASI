@@ -122,6 +122,10 @@ def remove_unfulfilled_artifact_claims(response: str, output_files: list[dict] |
         r"(?:\u6b63\u5728|\u63a5\u4e0b\u6765(?:\u4f1a)?|\u5c06(?:\u4f1a)?)[^\u3002\uff01\uff1f\n]{0,24}"
         r"(?:\u751f\u6210|\u5236\u4f5c|\u521b\u5efa|\u5bfc\u51fa|\u4fdd\u5b58|\u5b8c\u6210|\u7f16\u8f91)"
         r"[^\u3002\uff01\uff1f\n]{0,80}(?:\u56fe\u7247|\u56fe\u50cf|\u6279\u6ce8\u56fe|\u6587\u4ef6|\u539f\u56fe\u7248\u672c|\u4ea7\u7269)[\u3002\uff01\uff1f]?",
+        r"(?:\u56fe\u7247|\u56fe\u50cf|\u6279\u6ce8\u56fe)[^\u3002\uff01\uff1f\n]{0,20}"
+        r"(?:\u6b63\u5728|\u5c06(?:\u4f1a)?)[^\u3002\uff01\uff1f\n]{0,20}"
+        r"(?:\u52a0\u6279\u6ce8|\u6279\u6ce8|\u6807\u6ce8|\u751f\u6210|\u5236\u4f5c|\u7f16\u8f91)"
+        r"[^\u3002\uff01\uff1f\n]{0,80}[\u3002\uff01\uff1f]?",
         r"(?:I(?:'m| am)|we are|currently)\s+(?:generating|creating|editing|exporting|saving)"
         r"[^.!?\n]{0,100}(?:image|file|artifact|annotated version)[.!?]?",
     )

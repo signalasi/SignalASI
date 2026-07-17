@@ -61,6 +61,7 @@ data class AgentRichBlock(
     val title: String = "",
     val text: String = "",
     val uri: String = "",
+    val dataB64: String = "",
     val mimeType: String = "",
     val language: String = "",
     val columns: List<String> = emptyList(),
@@ -77,7 +78,8 @@ object AgentRichContentCodec {
     const val VERSION = 1
     private const val MAX_BLOCKS = 100
     private const val MAX_BLOCK_TEXT = 32_000
-    private const val MAX_SERIALIZED_SIZE = 256 * 1024
+    private const val MAX_SERIALIZED_SIZE = 640 * 1024
+    private const val MAX_INLINE_DATA_CHARS = 420 * 1024
     private const val MAX_TABLE_COLUMNS = 24
     private const val MAX_TABLE_ROWS = 500
 
@@ -119,6 +121,7 @@ object AgentRichContentCodec {
                     title = item.optString("title").trim().take(500),
                     text = normalizeBlockText(item.optString("text").take(MAX_BLOCK_TEXT), type),
                     uri = uri,
+                    dataB64 = item.optString("data_b64").trim().take(MAX_INLINE_DATA_CHARS),
                     mimeType = mimeType,
                     language = language,
                     columns = columns,
@@ -144,6 +147,7 @@ object AgentRichContentCodec {
                 .put("title", block.title.take(500))
                 .put("text", block.text.take(MAX_BLOCK_TEXT))
                 .put("uri", block.uri.take(4_096))
+                .put("data_b64", block.dataB64.take(MAX_INLINE_DATA_CHARS))
                 .put("mime_type", block.mimeType.take(160))
                 .put("language", block.language.take(80))
                 .put("columns", JSONArray(block.columns.take(MAX_TABLE_COLUMNS)))
@@ -289,7 +293,7 @@ object AgentRichContentCodec {
     }
 
     private fun AgentRichBlock.hasRenderableContent(): Boolean =
-        text.isNotBlank() || title.isNotBlank() || uri.isNotBlank() || columns.isNotEmpty() ||
+        text.isNotBlank() || title.isNotBlank() || uri.isNotBlank() || dataB64.isNotBlank() || columns.isNotEmpty() ||
             rows.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty() ||
             type in setOf(AgentRichBlockType.PROGRESS, AgentRichBlockType.STATUS, AgentRichBlockType.DIVIDER)
 

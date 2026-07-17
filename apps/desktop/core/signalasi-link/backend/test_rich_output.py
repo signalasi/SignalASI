@@ -1,4 +1,9 @@
+import base64
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from rich_output import build_rich_output
 
@@ -73,6 +78,26 @@ class RichOutputTests(unittest.TestCase):
             "task-2",
         )
         self.assertEqual("2.0 KB", document["blocks"][0]["metadata"]["size"])
+
+    def test_small_image_artifact_is_embedded_for_encrypted_phone_delivery(self):
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(
+            os.environ, {"SIGNALASI_WORKSPACE_ROOT": temporary}
+        ):
+            output = Path(temporary) / "tasks" / "task-inline" / "outputs" / "marked.png"
+            output.parent.mkdir(parents=True)
+            output.write_bytes(png)
+            _, document = build_rich_output(
+                "Created output.",
+                [{"name": output.name, "relative_path": "outputs/marked.png", "size": len(png)}],
+                "task-inline",
+            )
+
+        block = document["blocks"][0]
+        self.assertEqual(base64.b64encode(png).decode("ascii"), block["data_b64"])
+        self.assertEqual("encrypted-inline", block["metadata"]["transport"])
 
 
 if __name__ == "__main__":

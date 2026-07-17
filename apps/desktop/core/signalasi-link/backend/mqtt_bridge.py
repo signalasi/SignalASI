@@ -79,6 +79,7 @@ pending_outbound_acks: dict[int, tuple[str, str]] = {}
 pending_outbound_acks_lock = threading.Lock()
 MAX_MQTT_WIRE_BYTES = 768 * 1024
 MAX_INLINE_ATTACHMENT_BYTES = 320 * 1024
+IMAGE_ATTACHMENT_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic", ".heif"}
 PRESENCE_INTERVAL_SECONDS = max(
     15,
     int(os.environ.get("SIGNALASI_PRESENCE_INTERVAL_SECONDS", "60")),
@@ -931,6 +932,30 @@ def flush_pending_task_events(mqttc) -> None:
             log.warning(f"Agent task event replay deferred task_id={task_id}: {exc}")
 
 
+def _requests_returned_image(prompt: str) -> bool:
+    value = str(prompt or "").strip().lower()
+    return bool(re.search(
+        r"(?:send|return|give|provide)[^\n]{0,40}(?:annotated|marked|edited|corrected)?\s*(?:image|photo|picture)|"
+        r"(?:annotate|mark|correct)[^\n]{0,40}(?:and\s+)?(?:send|return)[^\n]{0,20}(?:image|photo|picture)|"
+        r"(?:\u53d1|\u4f20|\u8fd4)(?:\u56de|\u6765)?[^\n]{0,12}\u56fe(?:\u7247|\u50cf)|"
+        r"(?:\u6279\u6ce8|\u6807\u6ce8|\u6279\u6539)[^\n]{0,24}\u56fe(?:\u7247|\u50cf)",
+        value,
+        flags=re.IGNORECASE,
+    ))
+
+
+def _returned_image_artifact_contract(output_directory: Path) -> str:
+    destination = str(output_directory.resolve())
+    return (
+        "\n\nRequired returned-image artifact contract:\n"
+        f"- Save at least one finished annotated image inside: {destination}\n"
+        "- Use the supplied local image as the source and perform the requested review before annotating it.\n"
+        "- Use a local image tool or a short script; preserve readable resolution and orientation.\n"
+        "- Verify the output file exists and is non-empty before writing the final response.\n"
+        "- Do not say that an image is being created or will be returned. Finish the file first, then report its filename."
+    )
+
+
 def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: list[dict], content: str, msg_type: str) -> None:
     contact_id = str(payload.get("contact_id") or "hermes")
     agent_id = _agent_id_from_contact(contact_id, payload.get("agent_id"))
@@ -940,6 +965,15 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         _trace_event("desktop_task_dispatch_started", agent_id),
     )
     task_trace_lock = threading.Lock()
+    attachments = payload.get("attachments") or []
+    has_image_attachment = any(
+        isinstance(item, dict) and (
+            str(item.get("mime_type") or item.get("type") or "").lower().startswith("image/")
+            or Path(str(item.get("name") or "")).suffix.lower() in IMAGE_ATTACHMENT_SUFFIXES
+        )
+        for item in attachments if isinstance(attachments, list)
+    )
+    image_artifact_required = has_image_attachment and _requests_returned_image(content)
 
     def add_task_trace(stage: str, detail: object = "") -> None:
         with task_trace_lock:
@@ -1072,6 +1106,20 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             event_status = str(event.get("status") or "running")
             add_task_trace(f"codex_{event_status}", event.get("current_step") or "")
             event_result = event.get("result")
+            if event_status == "completed" and image_artifact_required:
+                from task_workspace import task_artifacts
+                generated_images = [
+                    item for item in task_artifacts(task_id)
+                    if Path(str(item.get("name") or "")).suffix.lower() in IMAGE_ATTACHMENT_SUFFIXES
+                ]
+                if not generated_images:
+                    event_status = "failed"
+                    event_result = (
+                        "\u672a\u751f\u6210\u53ef\u56de\u4f20\u7684\u6279\u6ce8\u56fe\u7247\u3002\u8bf7\u91cd\u65b0\u53d1\u9001\uff0c\u6211\u4f1a\u5728\u56fe\u7247\u6587\u4ef6\u771f\u6b63\u751f\u6210\u540e\u518d\u56de\u590d\u3002"
+                        if any("\u4e00" <= character <= "\u9fff" for character in content) else
+                        "No annotated image was generated. Send it again and I will reply only after the image file exists."
+                    )
+                    event["error"] = "Requested image artifact was not generated"
             if event_status in {"failed", "cancelled", "timed_out"} and not str(event_result or "").strip():
                 event_result = (
                     "Codex \u672a\u80fd\u5b8c\u6210\u8fd9\u6b21\u4efb\u52a1\uff0c\u8bf7\u91cd\u65b0\u53d1\u9001\u4e00\u6b21\u3002"
@@ -1105,6 +1153,12 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                 workspace = task_workspace(task.task_id, agent_id)
                 task_prompt = content_with_attachments(task.task_id, compact_codex_turn_prompt(content))
                 input_paths = sorted((workspace / "downloads" / "input").glob("*"))
+                image_paths = [
+                    str(path.resolve()) for path in input_paths
+                    if path.suffix.lower() in IMAGE_ATTACHMENT_SUFFIXES
+                ]
+                if image_artifact_required:
+                    task_prompt += _returned_image_artifact_contract(workspace / "outputs")
                 agent_task_manager.update(
                     task.task_id, "running", on_event=publish_event,
                     current_step="Preparing task",
@@ -1135,6 +1189,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                     task_prompt,
                     str(workspace),
                     conversation_id=str(payload.get("conversation_id") or ""),
+                    image_paths=image_paths,
                 )
                 add_task_trace("codex_turn_submitted", task.task_id)
             except Exception as exc:

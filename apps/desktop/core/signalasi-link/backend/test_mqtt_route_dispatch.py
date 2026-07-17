@@ -95,6 +95,16 @@ class MqttRouteDispatchTests(unittest.TestCase):
         mark_published.assert_called_once_with("route", "message")
         self.assertNotIn(AlreadyPublishedInfo.mid, mqtt_bridge.pending_outbound_acks)
 
+    def test_returned_image_intent_is_detected_without_matching_plain_grading(self) -> None:
+        self.assertTrue(mqtt_bridge._requests_returned_image("Annotate this and return the image"))
+        self.assertTrue(mqtt_bridge._requests_returned_image("\u6279\u6539\u4f5c\u4e1a\u5e76\u53d1\u56de\u6765\u56fe\u7247"))
+        self.assertFalse(mqtt_bridge._requests_returned_image("\u6279\u6539\u4f5c\u4e1a"))
+
+    def test_returned_image_contract_targets_output_directory(self) -> None:
+        contract = mqtt_bridge._returned_image_artifact_contract(mqtt_bridge.Path("outputs"))
+        self.assertIn("finished annotated image", contract)
+        self.assertIn("outputs", contract)
+
 
 if __name__ == "__main__":
     unittest.main()

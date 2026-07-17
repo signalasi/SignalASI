@@ -29,6 +29,7 @@ import android.text.style.StyleSpan
 import android.text.style.StrikethroughSpan
 import android.text.style.TypefaceSpan
 import android.text.style.URLSpan
+import android.util.Base64
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -346,7 +347,7 @@ class AgentRichContentView(
         }
 
     private fun imageBlock(block: AgentRichBlock): View {
-        if (!isPreviewableUri(block.uri)) return artifactBlock(block)
+        if (block.dataB64.isBlank() && !isPreviewableUri(block.uri)) return artifactBlock(block)
         return LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
         block.title.takeIf(String::isNotBlank)?.let { addView(selectableText(it, 15f).apply {
@@ -374,7 +375,7 @@ class AgentRichContentView(
             ))
             addView(loading, FrameLayout.LayoutParams(dp(32), dp(32), Gravity.CENTER))
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        loadImage(block.uri, image) { success ->
+        loadImage(block, image) { success ->
             loading.visibility = View.GONE
             if (!success) {
                 image.setImageResource(android.R.drawable.ic_menu_report_image)
@@ -1201,7 +1202,7 @@ class AgentRichContentView(
     }
 
     private fun showImageFullscreen(block: AgentRichBlock) {
-        if (!isPreviewableUri(block.uri)) return
+        if (block.dataB64.isBlank() && !isPreviewableUri(block.uri)) return
         val dialog = Dialog(activity, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
         val image = ImageView(activity).apply {
             scaleType = ImageView.ScaleType.FIT_CENTER
@@ -1214,7 +1215,7 @@ class AgentRichContentView(
         }
         dialog.setContentView(viewport)
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.BLACK))
-        dialog.setOnShowListener { loadImage(block.uri, image) }
+        dialog.setOnShowListener { loadImage(block, image) }
         dialog.show()
     }
 
@@ -1266,6 +1267,33 @@ class AgentRichContentView(
         } else {
             AgentRichFormatRegistry.fileName(block)
         }
+
+    private fun loadImage(block: AgentRichBlock, image: ImageView, onResult: (Boolean) -> Unit = {}) {
+        if (block.dataB64.isBlank()) {
+            loadImage(block.uri, image, onResult)
+            return
+        }
+        IMAGE_EXECUTOR.execute {
+            val bytes = runCatching { Base64.decode(block.dataB64, Base64.DEFAULT) }
+                .getOrNull()
+                ?.takeIf { it.size <= MAX_IMAGE_BYTES }
+            val decoded = bytes?.let { runCatching { decodeImageBytes(it) }.getOrNull() }
+            Handler(Looper.getMainLooper()).post {
+                if (!activity.isDestroyed) {
+                    when (decoded) {
+                        is AnimatedImageDrawable -> {
+                            decoded.repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
+                            image.setImageDrawable(decoded)
+                            coordinateAnimatedImage(image, decoded)
+                        }
+                        is android.graphics.drawable.Drawable -> image.setImageDrawable(decoded)
+                        is Bitmap -> image.setImageBitmap(decoded)
+                    }
+                    onResult(decoded != null)
+                }
+            }
+        }
+    }
 
     private fun loadImage(uri: String, image: ImageView, onResult: (Boolean) -> Unit = {}) {
         if (!isPreviewableUri(uri)) {

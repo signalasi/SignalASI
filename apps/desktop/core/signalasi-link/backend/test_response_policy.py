@@ -174,6 +174,13 @@ class ResponsePolicyTest(unittest.TestCase):
             remove_unfulfilled_artifact_claims(response, [{"relative_path": "outputs/marked.jpg"}]),
         )
 
+    def test_image_first_progress_claim_is_removed_without_output(self):
+        response = "\u56fe\u7247\u6b63\u5728\u52a0\u6279\u6ce8\uff0c\u6211\u4f1a\u5b8c\u6210\u540e\u53d1\u56de\u3002"
+        self.assertEqual(
+            "\u6ca1\u6709\u751f\u6210\u53ef\u56de\u4f20\u7684\u6587\u4ef6\u3002",
+            remove_unfulfilled_artifact_claims(response, []),
+        )
+
     def test_input_artifacts_are_identified(self):
         self.assertTrue(is_input_artifact({"relative_path": "downloads/input/01-test.xlsx"}))
         self.assertFalse(is_input_artifact({"relative_path": "outputs/result.xlsx"}))

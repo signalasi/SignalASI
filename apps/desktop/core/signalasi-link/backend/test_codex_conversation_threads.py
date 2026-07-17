@@ -93,6 +93,33 @@ class CodexConversationThreadTests(unittest.TestCase):
             self.assertEqual(server._conversation_threads[conversation_key], "fresh-thread")
             self.assertEqual([method for method, _, _ in calls], ["turn/start", "thread/start", "turn/start"])
 
+    def test_local_images_are_sent_as_native_app_server_input(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            codex_app_server,
+            "CONVERSATION_THREADS_PATH",
+            Path(temporary) / "threads.json",
+        ), patch.object(codex_app_server.threading, "Thread"):
+            image = Path(temporary) / "homework.jpg"
+            image.write_bytes(b"image")
+            server = codex_app_server.CodexAppServer("codex", {}, lambda _task, _event: None)
+            server._ensure_started = lambda: None
+            calls = []
+
+            def request(method, params, timeout):
+                calls.append((method, params, timeout))
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-image"}}
+                return {"turn": {"id": "turn-image"}}
+
+            server._request = request
+            server.start_task("task-image", "grade this", temporary, image_paths=[str(image)])
+
+            turn = next(params for method, params, _ in calls if method == "turn/start")
+            self.assertEqual("text", turn["input"][0]["type"])
+            self.assertEqual("localImage", turn["input"][1]["type"])
+            self.assertEqual(str(image.resolve()), turn["input"][1]["path"])
+            self.assertEqual("original", turn["input"][1]["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,8 @@ SignalASI execution policy:
 - For image review or homework grading, inspect the supplied image and return the findings before offering optional edits.
 - Camera photos may be sideways even when EXIF says normal; orient the content for reading before OCR or grading.
 - Never claim that an image or file is being generated, edited, or returned unless an output file was actually created and is available to SignalASI.
+- When the user requests a returned file, create it inside the task workspace `outputs` directory and verify that it exists before the final response.
+- For requested image annotations, use local image tools or a short script, preserve readable resolution, and save the finished image under `outputs`.
 - If the requested media-editing capability is unavailable, say so briefly and still return every useful textual finding.
 """.strip()
 CODEX_STALL_TIMEOUT_SECONDS = max(30, int(os.environ.get("SIGNALASI_CODEX_STALL_TIMEOUT_SECONDS", "180")))
@@ -85,8 +87,14 @@ class CodexAppServer:
         cwd: str,
         model: str = "gpt-5.6-sol",
         conversation_id: str = "",
+        image_paths: list[str] | None = None,
     ) -> CodexRun:
         self._ensure_started()
+        local_images = [
+            os.path.abspath(path)
+            for path in (image_paths or [])
+            if str(path or "").strip() and os.path.isfile(path)
+        ][:10]
         run = CodexRun(task_id=task_id, prefers_chinese=self._contains_chinese(prompt))
         with self._lock:
             self._runs[task_id] = run
@@ -106,7 +114,7 @@ class CodexAppServer:
             raise RuntimeError("Codex App Server did not return a thread id")
         self.on_event(task_id, {"status": "starting", "thread_id": run.thread_id, "current_step": "Starting Codex turn"})
         try:
-            response = self._start_turn(run.thread_id, prompt, model)
+            response = self._start_turn(run.thread_id, prompt, model, local_images)
         except RuntimeError as exc:
             if not run.thread_id or "thread not found" not in str(exc).lower():
                 run.finished = True
@@ -119,7 +127,7 @@ class CodexAppServer:
                 "status": "starting", "thread_id": run.thread_id,
                 "current_step": "Starting a fresh Codex thread",
             })
-            response = self._start_turn(run.thread_id, prompt, model)
+            response = self._start_turn(run.thread_id, prompt, model, local_images)
         except Exception:
             run.finished = True
             raise
@@ -181,12 +189,19 @@ class CodexAppServer:
         value = str(conversation_id or "").strip()
         return f"{CONVERSATION_THREAD_VERSION}:{value}" if value else ""
 
-    def _start_turn(self, thread_id: str, prompt: str, model: str) -> dict:
+    def _start_turn(self, thread_id: str, prompt: str, model: str, image_paths: list[str] | None = None) -> dict:
         from response_policy import apply_response_policy
         styled_prompt = apply_response_policy(prompt)
+        user_input = [
+            {"type": "text", "text": f"{styled_prompt.rstrip()}\n\n{CODEX_TASK_POLICY}", "text_elements": []}
+        ]
+        user_input.extend(
+            {"type": "localImage", "path": path, "detail": "original"}
+            for path in (image_paths or [])
+        )
         return self._request("turn/start", {
             "threadId": thread_id,
-            "input": [{"type": "text", "text": f"{styled_prompt.rstrip()}\n\n{CODEX_TASK_POLICY}", "text_elements": []}],
+            "input": user_input,
             "model": model, "effort": "low",
         }, timeout=30)
 

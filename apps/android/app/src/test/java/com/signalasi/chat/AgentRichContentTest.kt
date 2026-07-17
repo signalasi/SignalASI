@@ -132,6 +132,22 @@ class AgentRichContentTest {
     }
 
     @Test
+    fun preservesEncryptedInlineImageAcrossCodecRoundTrip() {
+        val encoded = AgentRichContentCodec.encode(listOf(AgentRichBlock(
+            id = "marked-homework",
+            type = AgentRichBlockType.IMAGE,
+            title = "marked.jpg",
+            dataB64 = "aW1hZ2U=",
+            mimeType = "image/jpeg",
+            metadata = mapOf("transport" to "encrypted-inline")
+        )))
+
+        val block = AgentRichContentCodec.decode(encoded).single()
+        assertEquals("aW1hZ2U=", block.dataB64)
+        assertEquals("encrypted-inline", block.metadata["transport"])
+    }
+
+    @Test
     fun malformedOrFutureDocumentsFailClosed() {
         assertTrue(AgentRichContentCodec.decode("not-json").isEmpty())
         assertTrue(AgentRichContentCodec.decode("{\"version\":99,\"blocks\":[]}").isEmpty())
