@@ -24,7 +24,7 @@ object SignalASIMqttClient {
     private const val TAG = "SignalASILink"
     private const val SERVER_URI = "ssl://broker.emqx.io:8883"
     private const val MQTT_QOS = 1
-    private const val MAX_INLINE_ATTACHMENT_BYTES = 190 * 1024
+    private const val MAX_INLINE_ATTACHMENT_BYTES = 320 * 1024
 
     private val connecting = AtomicBoolean(false)
     private val retryHandler = Handler(Looper.getMainLooper())

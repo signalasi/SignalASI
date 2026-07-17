@@ -23,7 +23,16 @@ SignalASI execution policy:
 - If a required source or tool is unavailable, report that failure. Do not synthesize replacement media or data.
 - For current information, verify the date and requested location, prefer primary or authoritative sources, and cite the source concisely.
 - Never expose internal task workspace or attachment download paths. Refer to uploaded inputs by their original filename only.
+- For image review or homework grading, inspect the supplied image and return the findings before offering optional edits.
+- Camera photos may be sideways even when EXIF says normal; orient the content for reading before OCR or grading.
+- Never claim that an image or file is being generated, edited, or returned unless an output file was actually created and is available to SignalASI.
+- If the requested media-editing capability is unavailable, say so briefly and still return every useful textual finding.
 """.strip()
+CODEX_STALL_TIMEOUT_SECONDS = max(30, int(os.environ.get("SIGNALASI_CODEX_STALL_TIMEOUT_SECONDS", "180")))
+CODEX_MAX_TASK_SECONDS = max(
+    CODEX_STALL_TIMEOUT_SECONDS,
+    int(os.environ.get("SIGNALASI_CODEX_MAX_TASK_SECONDS", "900")),
+)
 
 
 @dataclass
@@ -33,6 +42,10 @@ class CodexRun:
     turn_id: str = ""
     final_text: str = ""
     pending_requests: dict[int, dict] = field(default_factory=dict)
+    started_monotonic: float = field(default_factory=time.monotonic)
+    last_event_monotonic: float = field(default_factory=time.monotonic)
+    finished: bool = False
+    prefers_chinese: bool = False
 
 
 class CodexAppServer:
@@ -74,19 +87,29 @@ class CodexAppServer:
         conversation_id: str = "",
     ) -> CodexRun:
         self._ensure_started()
-        run = CodexRun(task_id=task_id)
-        self._runs[task_id] = run
-        conversation_key = self._conversation_key(conversation_id)
-        run.thread_id = self._conversation_threads.get(conversation_key, "") if conversation_key else ""
+        run = CodexRun(task_id=task_id, prefers_chinese=self._contains_chinese(prompt))
+        with self._lock:
+            self._runs[task_id] = run
+            conversation_key = self._conversation_key(conversation_id)
+            run.thread_id = self._conversation_threads.get(conversation_key, "") if conversation_key else ""
+            thread_is_busy = bool(run.thread_id) and any(
+                existing.task_id != task_id and existing.thread_id == run.thread_id and not existing.finished
+                for existing in self._runs.values()
+            )
+            if not run.thread_id or thread_is_busy:
+                # Codex App Server accepts one active turn per thread. A concurrent
+                # mobile request gets a fresh branch; its compact phone context keeps
+                # the conversation useful without waiting behind a stalled turn.
+                run.thread_id = self._start_thread(cwd, model, conversation_id)
         if not run.thread_id:
-            run.thread_id = self._start_thread(cwd, model, conversation_id)
-        if not run.thread_id:
+            run.finished = True
             raise RuntimeError("Codex App Server did not return a thread id")
         self.on_event(task_id, {"status": "starting", "thread_id": run.thread_id, "current_step": "Starting Codex turn"})
         try:
             response = self._start_turn(run.thread_id, prompt, model)
         except RuntimeError as exc:
             if not run.thread_id or "thread not found" not in str(exc).lower():
+                run.finished = True
                 raise
             if conversation_id:
                 self._conversation_threads.pop(conversation_key, None)
@@ -97,10 +120,50 @@ class CodexAppServer:
                 "current_step": "Starting a fresh Codex thread",
             })
             response = self._start_turn(run.thread_id, prompt, model)
+        except Exception:
+            run.finished = True
+            raise
         run.turn_id = str((response.get("turn") or {}).get("id") or "")
         if run.turn_id:
             self._turn_tasks[run.turn_id] = task_id
+        threading.Thread(
+            target=self._watch_run,
+            args=(task_id,),
+            daemon=True,
+            name=f"codex-watch-{task_id[:8]}",
+        ).start()
         return run
+
+    def _watch_run(self, task_id: str) -> None:
+        while True:
+            time.sleep(1)
+            run = self._runs.get(task_id)
+            if run is None or run.finished:
+                return
+            now = time.monotonic()
+            stalled = now - run.last_event_monotonic >= CODEX_STALL_TIMEOUT_SECONDS
+            exceeded = now - run.started_monotonic >= CODEX_MAX_TASK_SECONDS
+            if not stalled and not exceeded:
+                continue
+            run.finished = True
+            message = (
+                "Codex \u957f\u65f6\u95f4\u6ca1\u6709\u65b0\u8fdb\u5c55\uff0c\u4efb\u52a1\u5df2\u505c\u6b62\uff0c\u907f\u514d\u7ee7\u7eed\u963b\u585e\u540e\u7eed\u8bf7\u6c42\u3002\u8bf7\u91cd\u65b0\u53d1\u9001\u4e00\u6b21\u3002"
+                if run.prefers_chinese else
+                "Codex made no progress for too long, so the task was stopped instead of blocking later requests. Please send it again."
+            )
+            self.on_event(task_id, {
+                "thread_id": run.thread_id,
+                "turn_id": run.turn_id,
+                "status": "timed_out",
+                "current_step": "",
+                "result": message,
+                "error": "Codex task stalled",
+            })
+            try:
+                self.interrupt(task_id)
+            except Exception:
+                pass
+            return
 
     def _start_thread(self, cwd: str, model: str, conversation_id: str) -> str:
         response = self._request("thread/start", {
@@ -259,10 +322,14 @@ class CodexAppServer:
         task_id = self._turn_tasks.get(turn_id, "")
         if not task_id:
             thread_id = str(params.get("threadId") or "")
-            task_id = next((key for key, run in self._runs.items() if run.thread_id == thread_id), "")
+            task_id = next((
+                key for key, run in reversed(list(self._runs.items()))
+                if run.thread_id == thread_id and not run.finished
+            ), "")
         if not task_id:
             return
         run = self._runs[task_id]
+        run.last_event_monotonic = time.monotonic()
         common = {"thread_id": run.thread_id, "turn_id": turn_id or run.turn_id}
         if "id" in message:
             run.pending_requests[int(message["id"])] = message
@@ -281,6 +348,9 @@ class CodexAppServer:
         elif method == "turn/completed":
             status = str((params.get("turn") or {}).get("status") or "completed")
             mapped = {"completed": "completed", "failed": "failed", "interrupted": "cancelled"}.get(status, status)
+            run.finished = True
+            if turn_id:
+                self._turn_tasks.pop(turn_id, None)
             self.on_event(task_id, {**common, "status": mapped, "current_step": "", "result": run.final_text})
         elif method == "thread/status/changed":
             status = params.get("status") or {}
@@ -306,6 +376,10 @@ class CodexAppServer:
     @staticmethod
     def _request_label(method: str) -> str:
         return "Waiting for approval" if "approval" in method.lower() else "Waiting for user input"
+
+    @staticmethod
+    def _contains_chinese(value: str) -> bool:
+        return any("\u4e00" <= character <= "\u9fff" for character in str(value or ""))
 
     def _drain_stderr(self) -> None:
         process = self.process

@@ -29,6 +29,29 @@ class AgentTaskConversationTests(unittest.TestCase):
             self.assertIsNone(manager.get("task-1"))
             self.assertIsNotNone(manager.get("task-2"))
 
+    def test_restart_replays_only_tasks_that_were_interrupted(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            agent_task_manager, "TASKS_PATH", Path(temporary) / "tasks.json"
+        ):
+            manager = agent_task_manager.AgentTaskManager()
+            manager.create_external(
+                "codex", "codex-contact", "1", "finished", lambda _: None,
+                task_id="finished-task", client_route_id="client-1",
+            )
+            manager.update("finished-task", "completed", result="done")
+            manager.create_external(
+                "codex", "codex-contact", "2", "running", lambda _: None,
+                task_id="running-task", client_route_id="client-1",
+            )
+            manager.update("running-task", "running")
+
+            restored = agent_task_manager.AgentTaskManager()
+            recovered = restored.drain_recovered()
+
+            self.assertEqual(["running-task"], [item["task_id"] for item in recovered])
+            self.assertEqual("failed", recovered[0]["status"])
+            self.assertEqual([], restored.drain_recovered())
+
 
 if __name__ == "__main__":
     unittest.main()

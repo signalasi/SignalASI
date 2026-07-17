@@ -10,6 +10,7 @@ from response_policy import (
     attachment_clarification,
     compact_codex_turn_prompt,
     is_input_artifact,
+    remove_unfulfilled_artifact_claims,
     response_language,
     sanitize_assistant_response,
 )
@@ -158,6 +159,20 @@ class ResponsePolicyTest(unittest.TestCase):
         internal = r"C:\Users\agent\SignalASIWorkspace\tasks\abc\downloads\input\01-test.xlsx"
         raw = f"Received [test.xlsx]({internal})."
         self.assertEqual("Received test.xlsx.", sanitize_assistant_response(raw, [internal]))
+
+    def test_unfulfilled_artifact_claim_is_removed_without_output_file(self):
+        response = "\u5df2\u786e\u8ba4\uff1a4 \u9053\u6b63\u786e\u3002\u6b63\u5728\u751f\u6210\u5e26\u7ea2\u7b14\u6279\u6ce8\u7684\u539f\u56fe\u7248\u672c\u3002"
+        self.assertEqual(
+            "\u5df2\u786e\u8ba4\uff1a4 \u9053\u6b63\u786e\u3002",
+            remove_unfulfilled_artifact_claims(response, []),
+        )
+
+    def test_artifact_claim_is_kept_when_output_exists(self):
+        response = "\u5df2\u751f\u6210\u6279\u6ce8\u56fe\u3002"
+        self.assertEqual(
+            response,
+            remove_unfulfilled_artifact_claims(response, [{"relative_path": "outputs/marked.jpg"}]),
+        )
 
     def test_input_artifacts_are_identified(self):
         self.assertTrue(is_input_artifact({"relative_path": "downloads/input/01-test.xlsx"}))

@@ -11,8 +11,8 @@ android {
         applicationId = "com.signalasi.chat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 53
-        versionName = "0.1.52"
+        versionCode = 54
+        versionName = "0.1.53"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {

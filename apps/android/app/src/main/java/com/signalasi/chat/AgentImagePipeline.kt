@@ -27,9 +27,9 @@ internal data class AgentTransportImage(
 }
 
 internal object AgentImagePipeline {
-    const val TARGET_TRANSPORT_BYTES = 100 * 1024
+    const val TARGET_TRANSPORT_BYTES = 300 * 1024
 
-    private const val MAX_TRANSPORT_DIMENSION = 1_600
+    private const val MAX_TRANSPORT_DIMENSION = 2_400
     private const val MIN_TRANSPORT_DIMENSION = 240
     private const val MIN_TRANSPORT_BUDGET = 12 * 1024
     private const val MIN_JPEG_QUALITY = 35

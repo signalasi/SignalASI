@@ -41,7 +41,38 @@ def _connect() -> sqlite3.Connection:
             PRIMARY KEY (client_route_id, message_id)
         )"""
     )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS delivery_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )"""
+    )
     return db
+
+
+def ensure_transport_epoch(epoch: str) -> bool:
+    """Clear obsolete broker-bound outbox entries once when the MQTT session epoch changes."""
+    normalized = str(epoch or "").strip()
+    if not normalized:
+        raise ValueError("transport epoch is required")
+    with _lock:
+        db = _connect()
+        try:
+            row = db.execute(
+                "SELECT value FROM delivery_metadata WHERE key='transport_epoch'"
+            ).fetchone()
+            if row and str(row[0]) == normalized:
+                return False
+            db.execute("DELETE FROM outbound_messages")
+            db.execute(
+                """INSERT INTO delivery_metadata(key,value) VALUES('transport_epoch',?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                (normalized,),
+            )
+            db.commit()
+            return True
+        finally:
+            db.close()
 
 
 def claim_message(client_route_id: str, message_id: str) -> bool:

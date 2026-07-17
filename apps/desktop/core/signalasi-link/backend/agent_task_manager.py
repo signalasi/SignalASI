@@ -139,7 +139,7 @@ class AgentTaskManager:
     ) -> AgentTask | None:
         with self._lock:
             task = self._tasks.get(task_id)
-            if task is None or (task.status in TERMINAL_STATES and status not in TERMINAL_STATES):
+            if task is None or task.status in TERMINAL_STATES:
                 return task
             now = int(time.time() * 1000)
             task.status = status
@@ -357,7 +357,8 @@ class AgentTaskManager:
             rows = json.loads(TASKS_PATH.read_text(encoding="utf-8"))
             for row in rows if isinstance(rows, list) else []:
                 status = str(row.get("status") or "failed")
-                if status not in TERMINAL_STATES:
+                interrupted = status not in TERMINAL_STATES
+                if interrupted:
                     status = "failed"
                     row["error"] = "Desktop restarted while task was running"
                     recovered_at = int(time.time() * 1000)
@@ -387,7 +388,8 @@ class AgentTaskManager:
                     output_files=list(row.get("output_files") or [])[:100],
                 )
                 self._tasks[task.task_id] = task
-                self._recovered_task_ids.add(task.task_id)
+                if interrupted:
+                    self._recovered_task_ids.add(task.task_id)
         except Exception:
             return
 

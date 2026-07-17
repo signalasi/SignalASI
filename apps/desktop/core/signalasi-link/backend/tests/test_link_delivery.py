@@ -23,6 +23,18 @@ class LinkDeliveryTest(unittest.TestCase):
                 link_delivery.acknowledge_outbound("client", "message")
                 self.assertIsNone(link_delivery.outbound_status("client", "message"))
 
+    def test_transport_epoch_clears_obsolete_outbox_only_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "delivery.db"
+            with patch.object(link_delivery, "DB_PATH", database):
+                link_delivery.queue_outbound("client", "old", "topic", "wire")
+                self.assertTrue(link_delivery.ensure_transport_epoch("v2"))
+                self.assertEqual([], link_delivery.pending_outbound())
+
+                link_delivery.queue_outbound("client", "current", "topic", "wire")
+                self.assertFalse(link_delivery.ensure_transport_epoch("v2"))
+                self.assertEqual("current", link_delivery.pending_outbound()[0]["message_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

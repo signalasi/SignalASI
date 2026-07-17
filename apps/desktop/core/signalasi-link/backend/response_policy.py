@@ -112,6 +112,32 @@ def sanitize_assistant_response(response: str, hidden_input_paths: list[str] | N
     return text[:32_000]
 
 
+def remove_unfulfilled_artifact_claims(response: str, output_files: list[dict] | None = None) -> str:
+    """Remove future-tense artifact promises when no artifact actually exists."""
+    text = str(response or "").strip()
+    if not text or output_files:
+        return text
+    original = text
+    patterns = (
+        r"(?:\u6b63\u5728|\u63a5\u4e0b\u6765(?:\u4f1a)?|\u5c06(?:\u4f1a)?)[^\u3002\uff01\uff1f\n]{0,24}"
+        r"(?:\u751f\u6210|\u5236\u4f5c|\u521b\u5efa|\u5bfc\u51fa|\u4fdd\u5b58|\u5b8c\u6210|\u7f16\u8f91)"
+        r"[^\u3002\uff01\uff1f\n]{0,80}(?:\u56fe\u7247|\u56fe\u50cf|\u6279\u6ce8\u56fe|\u6587\u4ef6|\u539f\u56fe\u7248\u672c|\u4ea7\u7269)[\u3002\uff01\uff1f]?",
+        r"(?:I(?:'m| am)|we are|currently)\s+(?:generating|creating|editing|exporting|saving)"
+        r"[^.!?\n]{0,100}(?:image|file|artifact|annotated version)[.!?]?",
+    )
+    for pattern in patterns:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip(" \t\r\n,;\uff0c\uff1b")
+    if text:
+        return text
+    return (
+        "\u6ca1\u6709\u751f\u6210\u53ef\u56de\u4f20\u7684\u6587\u4ef6\u3002"
+        if any("\u4e00" <= character <= "\u9fff" for character in original) else
+        "No output file was generated."
+    )
+
+
 def attachment_clarification(names: list[str], chinese: bool = True) -> str:
     unique = list(dict.fromkeys(str(name).strip() for name in names if str(name).strip()))[:10]
     target = ("\u3001" if chinese else ", ").join(unique) or ("\u9644\u4ef6" if chinese else "the attachment")
