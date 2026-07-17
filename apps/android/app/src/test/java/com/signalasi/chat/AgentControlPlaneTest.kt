@@ -1,5 +1,8 @@
 package com.signalasi.chat
 
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -87,4 +90,132 @@ class AgentControlPlaneTest {
         assertEquals(listOf("patch"), handoff.artifactIds)
         assertEquals(12, handoff.checkpoint["sequence"])
     }
+
+    @Test
+    fun observedContextExpiresAtItsConfiguredBoundary() {
+        val item = AgentObservedContext(
+            targetId = "codex",
+            text = "Review this context later",
+            createdAtMillis = 1_000L,
+            expiresAtMillis = 2_000L
+        )
+
+        assertTrue(!item.isExpired(1_999L))
+        assertTrue(item.isExpired(2_000L))
+    }
+
+    @Test
+    fun transportAdapterNegotiatesFeaturesAndNeverDeliversIgnoreMessages() = runBlocking {
+        val registration = testRegistration()
+        val transport = FakeAgentTransport(
+            registration = registration,
+            remoteProtocol = registration.protocol.copy(features = setOf("run.cancel", "run.recover"))
+        )
+        val adapter = TransportBackedAgentAdapter(registration, transport)
+
+        val agreement = adapter.connect()
+        adapter.sendMessage("run", AgentControlMessage("message", "user", "ignored", deliveryMode = AgentDeliveryMode.IGNORE))
+
+        assertEquals(setOf("run.cancel", "run.recover"), agreement.features)
+        assertEquals(0, transport.sentMessages)
+        val observationFailure = runCatching {
+            adapter.startRun(
+                AgentRunRequest(
+                    conversationId = "conversation",
+                    messageId = "message",
+                    taskId = "task",
+                    goal = "observe",
+                    deliveryMode = AgentDeliveryMode.OBSERVE
+                )
+            )
+        }.exceptionOrNull()
+        assertTrue(observationFailure is IllegalArgumentException)
+    }
+
+    @Test
+    fun recoveryPolicyReconnectsOnlyDurableDesktopRuns() {
+        val event = AgentRunControlEvent(
+            conversationId = "conversation",
+            messageId = "message",
+            taskId = "task",
+            runId = "run",
+            agentId = "codex",
+            deviceId = "desktop",
+            type = AgentRunControlEventType.WAITING_FOR_DEVICE,
+            sequence = 4L
+        )
+        val snapshot = AgentRunControlSnapshot(
+            runId = "run",
+            taskId = "task",
+            state = AgentRunControlState.WAITING_FOR_DEVICE,
+            agentId = "codex",
+            deviceId = "desktop",
+            lastSequence = 4L,
+            lastEvent = event
+        )
+        val recorded = AgentRecordedRun(
+            runId = "run",
+            conversationId = "conversation",
+            taskThreadId = "task",
+            originalRequest = "Continue the task"
+        )
+
+        assertEquals(
+            AgentRunRecoveryDisposition.RECONNECT_DURABLE_REMOTE,
+            AgentRunRecoveryPolicy.decide(snapshot, recorded, testRegistration()).disposition
+        )
+        assertEquals(
+            AgentRunRecoveryDisposition.FAIL_NON_REPLAYABLE,
+            AgentRunRecoveryPolicy.decide(
+                snapshot,
+                recorded,
+                testRegistration().copy(location = AgentResourceLocation.CLOUD, connectionKind = AgentConnectionKind.HTTP)
+            ).disposition
+        )
+    }
+
+    private fun testRegistration(): AgentRegistration = AgentRegistration(
+        agentId = "codex",
+        installationId = "installation",
+        deviceId = "desktop",
+        providerId = "desktop-provider",
+        displayName = "Codex",
+        kind = AgentConnectorKind.AGENT,
+        location = AgentResourceLocation.TRUSTED_DESKTOP,
+        status = AgentEndpointStatus.ONLINE,
+        capabilities = setOf(AgentCapability.CODE),
+        protocol = AgentProtocolRange(
+            preferred = "1.1",
+            minimum = "1.0",
+            maximum = "1.1",
+            features = setOf("run.cancel", "run.recover", "message.observe")
+        ),
+        connectionKind = AgentConnectionKind.SIGNALASI_LINK,
+        trust = AgentResourceTrust.VERIFIED_PAIRED
+    )
+}
+
+private class FakeAgentTransport(
+    private val registration: AgentRegistration,
+    private val remoteProtocol: AgentProtocolRange
+) : AgentAdapterTransport {
+    var sentMessages: Int = 0
+        private set
+
+    override suspend fun open(): AgentProtocolRange = remoteProtocol
+    override suspend fun close() = Unit
+    override suspend fun status(): AgentRegistration = registration
+    override suspend fun startRun(request: AgentRunRequest): AgentRunHandle = AgentRunHandle(
+        runId = request.runId,
+        taskId = request.taskId,
+        agentId = registration.agentId
+    )
+
+    override suspend fun sendMessage(runId: String, message: AgentControlMessage) {
+        sentMessages += 1
+    }
+
+    override suspend fun cancelRun(runId: String) = Unit
+    override fun observeEvents(runId: String): Flow<AgentRunControlEvent> = emptyFlow()
+    override suspend fun recoverRuns(): List<AgentRecoverableRun> = emptyList()
 }

@@ -54,6 +54,7 @@ data class AgentResourceDescriptor(
     val contextWindowTokens: Int = 8_192,
     val supportsStreaming: Boolean = false,
     val supportsBackground: Boolean = false,
+    val activeTasks: Int = 0,
     val maxParallelTasks: Int = 1,
     val failureDomain: String = ""
 )
@@ -469,8 +470,10 @@ class AgentResourceRouter(context: Context) {
         val environment = AgentRuntimeEnvironmentProbe.probe(appContext)
         val hasPairedDesktop = SignalASILinkProtocol.allServerLinks(appContext).any { it.paired }
         val preferredTargets = preferredTargetOrder(requirements, hasPairedDesktop)
+        val registrations = EncryptedAgentRegistry(appContext).list()
         val candidates = AgentResourceCatalog.build(targets, tools)
             .asSequence()
+            .map { resource -> projectRegistration(resource, registrations) }
             .filter { it.targetId.isNotBlank() }
             .distinctBy { resource -> "${canonicalTargetId(resource.targetId)}|${resource.failureDomain}" }
             .map { resource ->
@@ -493,6 +496,39 @@ class AgentResourceRouter(context: Context) {
             )
             .take(fallbackLimit)
         return AgentRoutingDecision(requirements, primary, fallbacks, environment)
+    }
+
+    private fun projectRegistration(
+        resource: AgentResourceDescriptor,
+        registrations: List<AgentRegistration>
+    ): AgentResourceDescriptor {
+        val exact = registrations.firstOrNull { it.agentId == resource.targetId }
+        val canonical = canonicalTargetId(resource.targetId)
+        val registration = exact ?: registrations.firstOrNull { candidate ->
+            canonicalTargetId(candidate.agentId) == canonical &&
+                (resource.failureDomain.isBlank() || candidate.failureDomain.isBlank() ||
+                    candidate.failureDomain == resource.failureDomain)
+        } ?: return resource
+        val projectedStatus = when (registration.status) {
+            AgentEndpointStatus.ONLINE,
+            AgentEndpointStatus.IDLE,
+            AgentEndpointStatus.BUSY -> AgentConnectorStatus.AVAILABLE
+            AgentEndpointStatus.PERMISSION_REQUIRED,
+            AgentEndpointStatus.UPDATING -> AgentConnectorStatus.NEEDS_SETUP
+            AgentEndpointStatus.OFFLINE,
+            AgentEndpointStatus.DEGRADED,
+            AgentEndpointStatus.UNREACHABLE -> AgentConnectorStatus.DISCONNECTED
+        }
+        return resource.copy(
+            status = projectedStatus,
+            capabilities = registration.capabilities,
+            cost = registration.cost,
+            latency = registration.latency,
+            trust = registration.trust,
+            activeTasks = registration.activeRuns,
+            maxParallelTasks = registration.maxParallelRuns,
+            failureDomain = registration.failureDomain.ifBlank { resource.failureDomain }
+        )
     }
 
     private fun preferredTargetOrder(
@@ -550,6 +586,9 @@ class AgentResourceRouter(context: Context) {
         val reasons = mutableListOf<String>()
         if (resource.status != AgentConnectorStatus.AVAILABLE) {
             return AgentResourceCandidate(resource, -10_000, listOf("unavailable"))
+        }
+        if (resource.activeTasks >= resource.maxParallelTasks.coerceAtLeast(1)) {
+            return AgentResourceCandidate(resource, -9_500, listOf("at_capacity"))
         }
         val health = healthStore.snapshot(resource.id)
         if (health.circuitOpen) return AgentResourceCandidate(resource, -9_000, listOf("circuit_open"))

@@ -57,6 +57,23 @@ stable control model around them:
   states without frequent MQTT polling;
 - structured handoffs carry the target agent, reason, artifacts, checkpoint, and return path.
 
+Concrete adapters bind to a transport boundary rather than embedding vendor runtimes. The adapter
+negotiates the common protocol range before a run starts, preserves agent and installation
+identity for the lifetime of the connection, suppresses `IGNORE`, rejects unsupported
+`OBSERVE`/cancel operations, and only requests recovery when the negotiated feature set permits
+it. Providers use the same boundary while exposing multiple independently addressable agents.
+
+`OBSERVE` is deliberately non-interactive. On Android it is stored as encrypted, target-scoped,
+short-lived context and is consumed by the next `RESPOND` request to that target. It is never sent
+through a legacy transport that could accidentally turn the observation into a reply. The context
+is acknowledged only after the response request has been accepted successfully.
+
+Registry heartbeats and advertised concurrency are projected into resource routing. A busy agent
+remains visible, but an agent at its declared parallel-run limit is not selected for new work.
+After process restart, the recovery policy reconnects durable paired-Desktop runs and restores
+user-waiting checkpoints. Non-replayable phone actions and one-shot HTTP model calls fail closed
+instead of being repeated and potentially causing duplicate side effects.
+
 Adapters expose connect, status, capabilities, start, steer, cancel, event streaming, and run
 recovery. Codex, Claude Code, OpenClaw, cloud providers, paired Desktop agents, Android in-process
 agents, and local models implement the same contract while retaining their native execution

@@ -137,6 +137,23 @@ class AgentRunRecorder(context: Context) {
         .asReversed()
 
     @Synchronized
+    fun runningRuns(): List<AgentRecordedRun> = allRuns()
+        .filter { it.status == AgentRecordedRunStatus.RUNNING }
+        .sortedBy { it.createdAtMillis }
+
+    @Synchronized
+    fun markInterrupted(runId: String, reason: String): AgentRecordedRun? = update(runId) { current ->
+        if (current.status != AgentRecordedRunStatus.RUNNING) current else current.copy(
+            finalOutputJson = JSONObject()
+                .put("error", reason.trim().take(1_024))
+                .put("recoverable", false)
+                .toString(),
+            status = AgentRecordedRunStatus.FAILED,
+            completedAtMillis = System.currentTimeMillis()
+        )
+    }
+
+    @Synchronized
     fun context(conversationId: String): AgentTaskThreadContext? = contexts()
         .firstOrNull { it.conversationId == conversationId }
 

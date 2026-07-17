@@ -2,6 +2,8 @@ package com.signalasi.chat
 
 import android.content.Context
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -209,6 +211,149 @@ interface AgentProvider {
     suspend fun recoverRuns(): List<AgentRecoverableRun>
 }
 
+/**
+ * Transport boundary used by concrete Codex, Claude Code, OpenClaw, cloud, and
+ * device connectors. The transport owns bytes and authentication; the adapter
+ * owns stable identity, protocol negotiation, and capability-safe behavior.
+ */
+interface AgentAdapterTransport {
+    suspend fun open(): AgentProtocolRange
+    suspend fun close()
+    suspend fun status(): AgentRegistration
+    suspend fun startRun(request: AgentRunRequest): AgentRunHandle
+    suspend fun sendMessage(runId: String, message: AgentControlMessage)
+    suspend fun cancelRun(runId: String)
+    fun observeEvents(runId: String): Flow<AgentRunControlEvent>
+    suspend fun recoverRuns(): List<AgentRecoverableRun>
+}
+
+class TransportBackedAgentAdapter(
+    initialRegistration: AgentRegistration,
+    private val transport: AgentAdapterTransport,
+    private val localProtocol: AgentProtocolRange = initialRegistration.protocol
+) : AgentAdapter {
+    private val connectionMutex = Mutex()
+    @Volatile private var currentRegistration = initialRegistration
+    @Volatile private var agreement: AgentProtocolAgreement? = null
+
+    override val registration: AgentRegistration
+        get() = currentRegistration
+
+    override suspend fun connect(): AgentProtocolAgreement = connectionMutex.withLock {
+        agreement?.let { return@withLock it }
+        val remoteProtocol = transport.open()
+        val negotiated = AgentProtocolNegotiator.negotiate(localProtocol, remoteProtocol)
+        if (negotiated == null) {
+            runCatching { transport.close() }
+            throw IllegalStateException("No compatible SignalASI Agent protocol version")
+        }
+        agreement = negotiated
+        negotiated
+    }
+
+    override suspend fun disconnect() = connectionMutex.withLock {
+        runCatching { transport.close() }
+        agreement = null
+    }
+
+    override suspend fun status(): AgentRegistration {
+        ensureConnected()
+        val remote = transport.status()
+        require(remote.agentId == currentRegistration.agentId) { "Agent identity changed during a connection" }
+        require(remote.installationId == currentRegistration.installationId) {
+            "Agent installation identity changed during a connection"
+        }
+        currentRegistration = remote
+        return remote
+    }
+
+    override suspend fun startRun(request: AgentRunRequest): AgentRunHandle {
+        val negotiated = ensureConnected()
+        if (request.deliveryMode == AgentDeliveryMode.OBSERVE) {
+            requireFeature(negotiated, "message.observe")
+        }
+        return transport.startRun(request)
+    }
+
+    override suspend fun sendMessage(runId: String, message: AgentControlMessage) {
+        val negotiated = ensureConnected()
+        if (message.deliveryMode == AgentDeliveryMode.OBSERVE) {
+            requireFeature(negotiated, "message.observe")
+        }
+        if (message.deliveryMode != AgentDeliveryMode.IGNORE) transport.sendMessage(runId, message)
+    }
+
+    override suspend fun cancelRun(runId: String) {
+        requireFeature(ensureConnected(), "run.cancel")
+        transport.cancelRun(runId)
+    }
+
+    override fun observeEvents(runId: String): Flow<AgentRunControlEvent> = transport.observeEvents(runId)
+
+    override suspend fun recoverRuns(): List<AgentRecoverableRun> {
+        val negotiated = ensureConnected()
+        return if ("run.recover" in negotiated.features) transport.recoverRuns() else emptyList()
+    }
+
+    private suspend fun ensureConnected(): AgentProtocolAgreement = agreement ?: connect()
+
+    private fun requireFeature(negotiated: AgentProtocolAgreement, feature: String) {
+        require(feature in negotiated.features) { "Agent does not support $feature" }
+    }
+}
+
+interface AgentProviderTransport {
+    suspend fun open(): AgentProtocolRange
+    suspend fun close()
+    suspend fun registrations(): List<AgentRegistration>
+    suspend fun adapterTransport(agentId: String): Pair<AgentRegistration, AgentAdapterTransport>?
+    suspend fun recoverRuns(): List<AgentRecoverableRun>
+}
+
+class TransportBackedAgentProvider(
+    override val providerId: String,
+    private val transport: AgentProviderTransport,
+    private val localProtocol: AgentProtocolRange
+) : AgentProvider {
+    private val connectionMutex = Mutex()
+    @Volatile private var agreement: AgentProtocolAgreement? = null
+
+    override suspend fun connect(): AgentProtocolAgreement = connectionMutex.withLock {
+        agreement?.let { return@withLock it }
+        val negotiated = AgentProtocolNegotiator.negotiate(localProtocol, transport.open())
+        if (negotiated == null) {
+            runCatching { transport.close() }
+            throw IllegalStateException("No compatible SignalASI Provider protocol version")
+        }
+        agreement = negotiated
+        negotiated
+    }
+
+    override suspend fun disconnect() = connectionMutex.withLock {
+        runCatching { transport.close() }
+        agreement = null
+    }
+
+    override suspend fun registrations(): List<AgentRegistration> {
+        ensureConnected()
+        return transport.registrations().filter { it.providerId == providerId }
+    }
+
+    override suspend fun adapter(agentId: String): AgentAdapter? {
+        ensureConnected()
+        val (registration, adapterTransport) = transport.adapterTransport(agentId) ?: return null
+        require(registration.providerId == providerId) { "Agent belongs to a different provider" }
+        return TransportBackedAgentAdapter(registration, adapterTransport, localProtocol)
+    }
+
+    override suspend fun recoverRuns(): List<AgentRecoverableRun> {
+        val negotiated = ensureConnected()
+        return if ("run.recover" in negotiated.features) transport.recoverRuns() else emptyList()
+    }
+
+    private suspend fun ensureConnected(): AgentProtocolAgreement = agreement ?: connect()
+}
+
 class AgentAdapterDirectory {
     private val adapters = ConcurrentHashMap<String, AgentAdapter>()
     private val providers = ConcurrentHashMap<String, AgentProvider>()
@@ -268,6 +413,52 @@ object AgentProtocolNegotiator {
 
     private fun compareProtocol(left: Pair<Int, Int>, right: Pair<Int, Int>): Int =
         if (left.first != right.first) left.first.compareTo(right.first) else left.second.compareTo(right.second)
+}
+
+enum class AgentRunRecoveryDisposition {
+    RESTORE_LOCAL_WAIT,
+    RECONNECT_DURABLE_REMOTE,
+    FAIL_NON_REPLAYABLE,
+    IGNORE_TERMINAL
+}
+
+data class AgentRunRecoveryDecision(
+    val disposition: AgentRunRecoveryDisposition,
+    val reason: String
+)
+
+object AgentRunRecoveryPolicy {
+    fun decide(
+        snapshot: AgentRunControlSnapshot,
+        recordedRun: AgentRecordedRun?,
+        registration: AgentRegistration?
+    ): AgentRunRecoveryDecision {
+        if (recordedRun?.status != AgentRecordedRunStatus.RUNNING) {
+            return AgentRunRecoveryDecision(AgentRunRecoveryDisposition.IGNORE_TERMINAL, "recorded_run_is_terminal")
+        }
+        if (snapshot.state == AgentRunControlState.WAITING_FOR_USER ||
+            snapshot.state == AgentRunControlState.PAUSED
+        ) {
+            return AgentRunRecoveryDecision(AgentRunRecoveryDisposition.RESTORE_LOCAL_WAIT, "user_resumable_checkpoint")
+        }
+        val durableRemote = registration?.location == AgentResourceLocation.TRUSTED_DESKTOP &&
+            registration.connectionKind in setOf(
+                AgentConnectionKind.SIGNALASI_LINK,
+                AgentConnectionKind.WEBSOCKET,
+                AgentConnectionKind.CLI_JSON,
+                AgentConnectionKind.STDIO
+            )
+        if (durableRemote) {
+            return AgentRunRecoveryDecision(
+                AgentRunRecoveryDisposition.RECONNECT_DURABLE_REMOTE,
+                "durable_remote_run_can_reconnect"
+            )
+        }
+        return AgentRunRecoveryDecision(
+            AgentRunRecoveryDisposition.FAIL_NON_REPLAYABLE,
+            "interrupted_run_cannot_be_replayed_safely"
+        )
+    }
 }
 
 class EncryptedAgentRegistry(context: Context) {

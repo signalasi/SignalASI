@@ -135,6 +135,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val CAPABILITY_KIND_SKILL = "skill"
         private const val MAX_AGENT_ATTACHMENTS = 10
         private const val MAX_AGENT_ATTACHMENT_BYTES = 20L * 1024L * 1024L
+        private const val AGENT_REGISTRY_SYNC_INTERVAL_MILLIS = 5_000L
         private const val UI_PREFS = "signalasi_ui_preferences"
         private const val DEBUG_AGENT_PREFS = "signalasi_debug_agent"
         private const val HISTORY_PREFS = "signalasi_chat_history"
@@ -293,6 +294,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentLearningEngine: AgentLearningEngine
     private lateinit var agentRunEventStore: AgentRunEventStore
     private lateinit var encryptedAgentRegistry: EncryptedAgentRegistry
+    private var lastAgentRegistrySyncAtMillis = 0L
     private lateinit var agentMcpRegistry: AgentMcpRegistry
     private lateinit var agentMcpPackageRepository: AgentMcpPackageRepository
     private val agentRunIdsByTurn = ConcurrentHashMap<String, String>()
@@ -421,7 +423,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentRunRecorder = AgentRunRecorder(this)
         agentRunEventStore = AgentRunEventStore(this)
         encryptedAgentRegistry = EncryptedAgentRegistry(this)
-        mobileNativeAgent.agentRegistrySnapshot().forEach(encryptedAgentRegistry::upsert)
+        syncAgentRegistrySnapshot(force = true)
+        reconcileRecoverableAgentRuns()
         agentSkillRuntime = AgentSkillRuntime(
             store = EncryptedAgentSkillStore(this),
             availableNativeToolIds = mobileNativeAgent.nativeToolCatalog().map { it.id } + AGENT_ORCHESTRATION_TOOL_ID
@@ -639,6 +642,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         AgentConnectorResponseBus.addListener(agentConnectorResponseListener)
         ScreenPerceptionState.addVisualListener(agentVisualScreenListener)
         val reloadedAgentState = mobileNativeAgent.reloadSession()
+        syncAgentRegistrySnapshot()
         val restoredAgentState = if (
             reloadedAgentState.runningTaskCount == 0 && ScreenPerceptionState.hasRecentVisualCapture()
         ) {
@@ -1055,6 +1059,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (sourceMessageId in supersededConnectorSourceIds) return true
         val status = envelope.optString("task_status")
         val taskId = envelope.optString("task_id")
+        updateAgentRegistryTaskHeartbeat(contactId, status)
         if (taskId in completedConnectorTaskIds && status !in setOf("completed", "failed", "cancelled", "timed_out")) {
             return true
         }
@@ -1211,6 +1216,159 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun markDesktopDomainAvailableById(desktopId: String) {
         AgentResourceHealthStore(this).markAvailable("domain:$desktopId")
+    }
+
+    private fun syncAgentRegistrySnapshot(force: Boolean = false) {
+        if (!::encryptedAgentRegistry.isInitialized || !::mobileNativeAgent.isInitialized) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastAgentRegistrySyncAtMillis < AGENT_REGISTRY_SYNC_INTERVAL_MILLIS) return
+        val existing = encryptedAgentRegistry.list(now).associateBy(AgentRegistration::agentId)
+        mobileNativeAgent.agentRegistrySnapshot().forEach { candidate ->
+            val previous = existing[candidate.agentId]
+            if (previous == null || agentRegistrationMetadataChanged(previous, candidate)) {
+                encryptedAgentRegistry.upsert(candidate)
+            } else if (candidate.lastHeartbeatMillis > previous.lastHeartbeatMillis ||
+                candidate.status != previous.status || candidate.activeRuns != previous.activeRuns
+            ) {
+                encryptedAgentRegistry.heartbeat(
+                    agentId = candidate.agentId,
+                    status = candidate.status,
+                    activeRuns = candidate.activeRuns,
+                    capabilitiesHash = candidate.capabilitiesHash,
+                    timestampMillis = candidate.lastHeartbeatMillis.takeIf { it > 0L } ?: now
+                )
+            }
+        }
+        lastAgentRegistrySyncAtMillis = now
+    }
+
+    private fun agentRegistrationMetadataChanged(
+        previous: AgentRegistration,
+        candidate: AgentRegistration
+    ): Boolean = previous.providerId != candidate.providerId ||
+        previous.displayName != candidate.displayName ||
+        previous.kind != candidate.kind ||
+        previous.location != candidate.location ||
+        previous.capabilities != candidate.capabilities ||
+        previous.toolIds != candidate.toolIds ||
+        previous.permissionScopes != candidate.permissionScopes ||
+        previous.protocol != candidate.protocol ||
+        previous.connectionKind != candidate.connectionKind ||
+        previous.cost != candidate.cost ||
+        previous.latency != candidate.latency ||
+        previous.trust != candidate.trust ||
+        previous.maxParallelRuns != candidate.maxParallelRuns ||
+        previous.capabilitiesHash != candidate.capabilitiesHash ||
+        previous.failureDomain != candidate.failureDomain
+
+    private fun updateAgentRegistryTaskHeartbeat(contactId: String, taskStatus: String) {
+        if (contactId.isBlank() || !::encryptedAgentRegistry.isInitialized) return
+        syncAgentRegistrySnapshot(force = true)
+        val registrations = encryptedAgentRegistry.list()
+        val registration = registrations.firstOrNull { it.agentId == contactId }
+            ?: registrations.firstOrNull { it.deviceId == contactId }
+            ?: registrations.firstOrNull { it.agentId.endsWith(":$contactId") || contactId.endsWith(":${it.agentId}") }
+            ?: return
+        val endpointStatus = when (taskStatus) {
+            "accepted", "queued", "starting", "running", "waiting_input", "waiting_approval" -> AgentEndpointStatus.BUSY
+            "timed_out" -> AgentEndpointStatus.DEGRADED
+            "completed", "failed", "cancelled", "not_found" -> AgentEndpointStatus.IDLE
+            else -> registration.status
+        }
+        val activeRuns = if (endpointStatus == AgentEndpointStatus.BUSY) {
+            registration.activeRuns.coerceAtLeast(1)
+        } else {
+            0
+        }
+        encryptedAgentRegistry.heartbeat(
+            agentId = registration.agentId,
+            status = endpointStatus,
+            activeRuns = activeRuns,
+            timestampMillis = System.currentTimeMillis()
+        )
+    }
+
+    private fun reconcileRecoverableAgentRuns() {
+        if (!::agentRunEventStore.isInitialized || !::agentRunRecorder.isInitialized) return
+        val registrations = encryptedAgentRegistry.list()
+        agentRunEventStore.recoverableRuns().forEach { snapshot ->
+            val run = agentRunRecorder.run(snapshot.runId)
+            val registration = registrations.firstOrNull { it.agentId == snapshot.agentId }
+                ?: registrations.firstOrNull { it.deviceId == snapshot.deviceId }
+            val decision = AgentRunRecoveryPolicy.decide(snapshot, run, registration)
+            when (decision.disposition) {
+                AgentRunRecoveryDisposition.RESTORE_LOCAL_WAIT,
+                AgentRunRecoveryDisposition.RECONNECT_DURABLE_REMOTE -> {
+                    if (run == null) return@forEach
+                    snapshot.lastEvent.messageId.takeIf(String::isNotBlank)?.let { messageId ->
+                        agentRunIdsByTurn[messageId] = run.runId
+                    }
+                    appendRunControlEvent(
+                        run = run,
+                        messageId = snapshot.lastEvent.messageId,
+                        taskId = snapshot.taskId,
+                        agentId = snapshot.agentId,
+                        type = AgentRunControlEventType.RUN_RECOVERED,
+                        payload = mapOf(
+                            "recovery" to decision.disposition.name.lowercase(Locale.ROOT),
+                            "reason" to decision.reason,
+                            "last_sequence" to snapshot.lastSequence
+                        ),
+                        stepId = snapshot.lastEvent.stepId,
+                        toolCallId = snapshot.lastEvent.toolCallId
+                    )
+                }
+                AgentRunRecoveryDisposition.FAIL_NON_REPLAYABLE -> {
+                    run?.let { interrupted ->
+                        agentRunRecorder.markInterrupted(interrupted.runId, decision.reason)
+                        appendRunControlEvent(
+                            run = interrupted,
+                            messageId = snapshot.lastEvent.messageId,
+                            taskId = snapshot.taskId,
+                            agentId = snapshot.agentId,
+                            type = AgentRunControlEventType.RUN_FAILED,
+                            payload = mapOf("reason" to decision.reason, "replay_safe" to false)
+                        )
+                    } ?: agentRunEventStore.appendNext(
+                        snapshot.lastEvent.copy(
+                            eventId = UUID.randomUUID().toString(),
+                            type = AgentRunControlEventType.RUN_FAILED,
+                            sequence = 0L,
+                            timestampMillis = System.currentTimeMillis(),
+                            payload = mapOf("reason" to "missing_recorded_run", "replay_safe" to false)
+                        )
+                    )
+                }
+                AgentRunRecoveryDisposition.IGNORE_TERMINAL -> {
+                    val terminalType = when (run?.status) {
+                        AgentRecordedRunStatus.COMPLETED -> AgentRunControlEventType.RUN_COMPLETED
+                        AgentRecordedRunStatus.CANCELLED -> AgentRunControlEventType.RUN_CANCELLED
+                        AgentRecordedRunStatus.FAILED, null -> AgentRunControlEventType.RUN_FAILED
+                        AgentRecordedRunStatus.RUNNING -> return@forEach
+                    }
+                    if (run != null) {
+                        appendRunControlEvent(
+                            run = run,
+                            messageId = snapshot.lastEvent.messageId,
+                            taskId = snapshot.taskId,
+                            agentId = snapshot.agentId,
+                            type = terminalType,
+                            payload = mapOf("reason" to decision.reason)
+                        )
+                    } else {
+                        agentRunEventStore.appendNext(
+                            snapshot.lastEvent.copy(
+                                eventId = UUID.randomUUID().toString(),
+                                type = terminalType,
+                                sequence = 0L,
+                                timestampMillis = System.currentTimeMillis(),
+                                payload = mapOf("reason" to "missing_recorded_run")
+                            )
+                        )
+                    }
+                }
+            }
+        }
     }
 
     override fun onPcInfo(ip: String, port: Int) {
@@ -10144,6 +10302,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (json?.optString("type") == "capability_manifest") {
             json.optJSONArray("connector_agents")?.let { agents ->
                 AppStore.updateConnectorAgentStatuses(this, agents)
+                syncAgentRegistrySnapshot(force = true)
                 refreshContactList()
                 refreshDirectoryContacts()
             }
@@ -10158,6 +10317,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 AppStore.deleteContact(this, "hermes", deleteMessages = false)
             }
             SignalASIMqttClient.forgetSecureChannel()
+            syncAgentRegistrySnapshot(force = true)
             refreshContactList()
             refreshDirectoryContacts()
             val content = json.optString("content")
@@ -10167,6 +10327,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (json?.optString("type") == "pairing_confirmed" || json?.optString("type") == "connector_status") {
             json.optJSONArray("connector_agents")?.let { agents ->
                 AppStore.updateConnectorAgentStatuses(this, agents)
+                syncAgentRegistrySnapshot(force = true)
                 refreshContactList()
                 refreshDirectoryContacts()
             }
