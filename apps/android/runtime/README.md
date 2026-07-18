@@ -32,8 +32,11 @@ Entrypoints must be relocatable files or wrappers whose dependencies remain insi
 or the matching `linux-base`. Absolute symlinks, setuid/setgid files, world-writable files, device
 nodes, and escaping symlinks are rejected by the image builder.
 
-The Android APK must not report this runtime as ready unless the native QEMU engine, a verified
-`linux-base` image, and the authenticated Guest health handshake are all present.
+The standard Android APK bundles the native QEMU engine plus signed `linux-base` and `python-uv`
+archives. On first launch, the app verifies and installs both default packs into private storage.
+It must not report the runtime as ready unless the engine, verified base image, Python/uv pack, and
+authenticated Guest health handshake are all present. Other language and media packs remain
+independently downloadable.
 
 Build the native engine on Linux with Docker, `dpkg-deb`, `patchelf`, and LLVM tools:
 

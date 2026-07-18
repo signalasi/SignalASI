@@ -5258,7 +5258,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun scheduleRuntimeLifecycleStartup() {
         thread(name = "signalasi-runtime-autostart") {
+            runCatching { AgentEmbeddedRuntimeBootstrap.ensureInstalled(this) }
             runCatching { AgentOnDeviceRuntimeLifecycle.ensureRunning(this) }
+            runOnUiThread {
+                if (controlCenterDestination?.route == ControlCenterRoute.ON_DEVICE_RUNTIME) {
+                    renderControlCenterRuntimePage()
+                }
+            }
         }
     }
 

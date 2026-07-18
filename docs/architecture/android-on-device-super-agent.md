@@ -205,7 +205,9 @@ manifest-only runtime as ready.
 
 ## Runtime packs
 
-The base APK remains small. Runtime components are signed, versioned, and independently removable:
+The standard APK includes the QEMU engine, `linux-base`, and `python-uv` so Shell and Python work
+without an initial network download. Optional runtime components remain signed, versioned, and
+independently removable:
 
 - `linux-base`: minimal AArch64 userspace and guest agent;
 - `python-uv`: Python and uv-managed isolated environments;
@@ -288,7 +290,7 @@ access to the user's shared storage.
 | Android QEMU process controller, reproducible ARM64 engine build/bundle pipeline, persistent multiplexed bridge, Linux guest broker, per-task native sandbox launcher, and pinned `linux-base` build recipe | Source complete |
 | Control Center pages for memory, learning proposals, runtime packs, and execution receipts | Host complete |
 | Mixed-script OCR and local PDF/DOCX/XLSX/PPTX/image/source ingestion | Host complete |
-| Signed Android QEMU executable and built, signed `linux-base` release image | Not shipped |
+| Reproducible workflow for an APK-bundled signed Android QEMU executable, `linux-base`, and `python-uv` | Complete; release artifact produced by Linux CI |
 | Reproducible Python/uv, Node/TypeScript, Go, Rust, C/C++, Java, and FFmpeg/ffprobe pack recipes | Source complete; release images not shipped |
 | Extended OCR runtime pack beyond the Android-native multi-script OCR engine | Not shipped |
 | Handwriting, equation, complex-table, and local visual-model understanding | Planned |

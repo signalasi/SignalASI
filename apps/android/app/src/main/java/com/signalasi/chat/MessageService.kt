@@ -34,6 +34,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         SignalASIMqttClient.addListener(this)
         SignalASIMqttClient.connect(this)
         thread(name = "signalasi-runtime-service-autostart") {
+            runCatching { AgentEmbeddedRuntimeBootstrap.ensureInstalled(this@MessageService) }
             runCatching { AgentOnDeviceRuntimeLifecycle.ensureRunning(this@MessageService) }
         }
     }

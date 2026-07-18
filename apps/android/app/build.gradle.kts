@@ -3,6 +3,12 @@ plugins {
     kotlin("android")
 }
 
+val runtimeJniRoot = rootProject.file("../../build/runtime/android-jni-libs")
+val runtimeAssetRoot = rootProject.file("../../build/runtime/android-assets")
+val requireEmbeddedRuntime = providers.gradleProperty("signalasi.requireEmbeddedRuntime")
+    .map(String::toBoolean)
+    .orElse(false)
+
 android {
     namespace = "com.signalasi.chat"
     compileSdk = 36
@@ -11,8 +17,8 @@ android {
         applicationId = "com.signalasi.chat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 64
-        versionName = "0.1.63"
+        versionCode = 65
+        versionName = "0.1.64"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
@@ -34,13 +40,13 @@ android {
     }
 
     androidResources {
-        noCompress += "bin"
+        noCompress += listOf("bin", "img", "sarpack")
     }
 
     sourceSets {
         getByName("main") {
-            jniLibs.srcDir(rootProject.file("../../build/runtime/android-jni-libs"))
-            assets.srcDir(rootProject.file("../../build/runtime/android-assets"))
+            jniLibs.srcDir(runtimeJniRoot)
+            assets.srcDir(runtimeAssetRoot)
         }
     }
 
@@ -70,6 +76,23 @@ android {
             )
         }
     }
+}
+
+val verifyEmbeddedRuntimeBundle = tasks.register<Exec>("verifyEmbeddedRuntimeBundle") {
+    group = "verification"
+    description = "Verifies the QEMU engine and bundled Linux/Python runtime packs."
+    commandLine(
+        "node",
+        rootProject.file("../../tools/runtime/verify-android-default-runtime.mjs"),
+        "--asset-root", runtimeAssetRoot,
+        "--jni-root", runtimeJniRoot
+    )
+}
+
+tasks.matching { task ->
+    task.name == "preReleaseBuild" || (requireEmbeddedRuntime.get() && task.name == "preDebugBuild")
+}.configureEach {
+    dependsOn(verifyEmbeddedRuntimeBundle)
 }
 
 dependencies {

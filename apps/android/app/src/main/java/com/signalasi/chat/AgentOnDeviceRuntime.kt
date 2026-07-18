@@ -126,31 +126,41 @@ class AndroidRuntimePayloadVerifier(context: Context) {
     }
 
     private fun trustedCertificates(): List<ByteArray> {
-        val embedded = runCatching {
-            val root = JSONObject(
-                appContext.resources.openRawResource(R.raw.signalasi_runtime_trust_anchors)
-                    .bufferedReader(Charsets.UTF_8)
-                    .use { it.readText() }
-            )
-            require(root.optInt("format_version") == 1)
-            val values = root.optJSONArray("certificates") ?: JSONArray()
-            buildList {
-                for (index in 0 until minOf(values.length(), MAX_TRUST_ANCHORS)) {
-                    val encoded = values.optString(index)
-                    if (encoded.isBlank()) continue
-                    val decoded = Base64.decode(encoded, Base64.DEFAULT)
-                    require(decoded.size in 1..MAX_CERTIFICATE_BYTES)
-                    add(decoded)
-                }
-            }
-        }.getOrDefault(emptyList())
+        val embedded = decodeTrustAnchors(runCatching {
+            appContext.resources.openRawResource(R.raw.signalasi_runtime_trust_anchors)
+                .bufferedReader(Charsets.UTF_8)
+                .use { it.readText() }
+        }.getOrNull())
+        val bundled = decodeTrustAnchors(runCatching {
+            appContext.assets.open(BUNDLED_TRUST_ANCHORS)
+                .bufferedReader(Charsets.UTF_8)
+                .use { it.readText() }
+        }.getOrNull())
         val debugSigningCertificates = if (
             appContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
         ) signingCertificates() else emptyList()
-        return (embedded + debugSigningCertificates).distinctBy { certificate ->
+        return (embedded + bundled + debugSigningCertificates).distinctBy { certificate ->
             MessageDigest.getInstance("SHA-256").digest(certificate).joinToString("") { "%02x".format(it) }
-        }
+        }.take(MAX_TRUST_ANCHORS)
     }
+
+    private fun decodeTrustAnchors(raw: String?): List<ByteArray> = runCatching {
+        if (raw == null || raw.toByteArray(Charsets.UTF_8).size !in 1..MAX_TRUST_ANCHOR_DOCUMENT_BYTES) {
+            return@runCatching emptyList()
+        }
+        val root = JSONObject(raw)
+        require(root.optInt("format_version") == 1)
+        val values = root.optJSONArray("certificates") ?: JSONArray()
+        buildList {
+            for (index in 0 until minOf(values.length(), MAX_TRUST_ANCHORS)) {
+                val encoded = values.optString(index)
+                if (encoded.isBlank()) continue
+                val decoded = Base64.decode(encoded, Base64.DEFAULT)
+                require(decoded.size in 1..MAX_CERTIFICATE_BYTES)
+                add(decoded)
+            }
+        }
+    }.getOrDefault(emptyList())
 
     @Suppress("DEPRECATION")
     private fun signingCertificates(): List<ByteArray> {
@@ -171,8 +181,10 @@ class AndroidRuntimePayloadVerifier(context: Context) {
     }
 
     companion object {
+        private const val BUNDLED_TRUST_ANCHORS = "runtime/bootstrap/trust-anchors.json"
         private const val MAX_TRUST_ANCHORS = 8
         private const val MAX_CERTIFICATE_BYTES = 32 * 1024
+        private const val MAX_TRUST_ANCHOR_DOCUMENT_BYTES = 256 * 1024
     }
 }
 

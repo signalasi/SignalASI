@@ -102,6 +102,28 @@ Generated binaries stay ignored. A release pipeline must retain corresponding so
 patches, license texts, manifest, and SBOM; boot the exact APK engine against `linux-base`; finish
 the authenticated Guest handshake; and pass cancellation, concurrency, quota, and artifact tests.
 
+The standard SignalASI Android distribution bundles this QEMU engine and the signed `linux-base`
+and `python-uv` packs. Prepare those APK inputs after building and signing the two packs:
+
+```bash
+npm run runtime:prepare-android-defaults -- \
+  --asset-root build/runtime/android-assets \
+  --jni-root build/runtime/android-jni-libs \
+  --certificate /secure/runtime-signing-cert.pem \
+  --pack release/linux-base-1.0.0-arm64-v8a.sarpack \
+  --pack release/python-uv-0.11.29-arm64-v8a.sarpack
+
+cd apps/android
+./gradlew :app:assembleRelease -Psignalasi.requireEmbeddedRuntime=true
+```
+
+The APK signature protects the bundled archive index and trust-anchor asset. Each `.sarpack` still
+passes its normal X.509 signature, digest, dependency, architecture, protocol, and size checks on
+first-launch installation. A release build and a bundled debug build fail when the engine or either
+default pack is absent. `.github/workflows/android-runtime-apk.yml` performs the complete Linux
+build; development runs may use an ephemeral certificate, while production requires the persistent
+runtime signing certificate from repository secrets.
+
 ### Build a toolchain image
 
 For a language, compiler, or FFmpeg pack, first prepare its fixed-ABI source root and build a
