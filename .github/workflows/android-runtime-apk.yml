@@ -62,7 +62,17 @@ jobs:
           node tools/runtime/print-runtime-trust-anchor.mjs \
             --certificate build/runtime/signing/runtime-cert.pem
 
+      - name: Restore Android QEMU engine cache
+        id: qemu-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/runtime/android-jni-libs
+            build/runtime/android-assets/runtime/qemu
+          key: android-qemu-${{ runner.os }}-${{ hashFiles('tools/runtime/build-android-qemu.sh', 'apps/android/runtime/qemu/**') }}
+
       - name: Build Android QEMU engine
+        if: steps.qemu-cache.outputs.cache-hit != 'true'
         run: npm run runtime:build-android-qemu
 
       - name: Build default Linux and Python images
@@ -84,7 +94,7 @@ jobs:
             dependencies: [],
             installed_size_bytes: statSync(path).size + 1024 * 1024,
             license: 'GPL-2.0-only AND GPL-2.0-or-later AND LGPL-2.1-or-later',
-            minimum_host_version_code: 66,
+            minimum_host_version_code: 67,
             guest_api_version: 1,
             release_notes: 'Bundled SignalASI Linux base environment'
           }, null, 2)}\n`);

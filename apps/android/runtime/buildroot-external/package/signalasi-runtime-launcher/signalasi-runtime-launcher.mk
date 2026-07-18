@@ -11,7 +11,7 @@ SIGNALASI_RUNTIME_LAUNCHER_LICENSE = Apache-2.0
 
 define SIGNALASI_RUNTIME_LAUNCHER_BUILD_CMDS
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
-		-Wall -Wextra -Werror -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
+		-Wall -Wextra -Werror -fstack-protector-strong \
 		-o $(@D)/signalasi-runtime-launcher $(@D)/signalasi-runtime-launcher.c
 endef
 
