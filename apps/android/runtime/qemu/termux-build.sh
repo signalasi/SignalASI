@@ -16,8 +16,10 @@ termux_step_pre_configure() {
 	for source_file in "$TERMUX_PKG_BUILDER_DIR"/setjmp-aarch64/{setjmp.S,private-*.h}; do
 		local target_file
 		target_file="$(basename "$source_file")"
-		cp "$source_file" "${target_file/-/}"
+		cp "$source_file" "${target_file/-//}"
 	done
+	test -f private/bionic_asm.h
+	test -f private/bionic_constants.h
 	"$CC" $CFLAGS $CPPFLAGS -I. setjmp.S -c
 	"$AR" cru "$TERMUX_PKG_BUILDDIR/_lib/libandroid-setjmp.a" setjmp.o
 	popd >/dev/null

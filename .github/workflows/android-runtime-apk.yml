@@ -84,7 +84,7 @@ jobs:
             dependencies: [],
             installed_size_bytes: statSync(path).size + 1024 * 1024,
             license: 'GPL-2.0-only AND GPL-2.0-or-later AND LGPL-2.1-or-later',
-            minimum_host_version_code: 65,
+            minimum_host_version_code: 66,
             guest_api_version: 1,
             release_notes: 'Bundled SignalASI Linux base environment'
           }, null, 2)}\n`);
@@ -138,4 +138,3 @@ jobs:
             build/runtime/release/*.sarpack.metadata.json
             build/runtime/android-jni-libs/signalasi-qemu-bundle.json
             build/runtime/android-assets/runtime/bootstrap/index.json
-
