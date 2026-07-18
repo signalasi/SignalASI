@@ -70,6 +70,8 @@ jobs:
             build/runtime/android-jni-libs
             build/runtime/android-assets/runtime/qemu
           key: android-qemu-${{ runner.os }}-${{ hashFiles('tools/runtime/build-android-qemu.sh', 'apps/android/runtime/qemu/**') }}
+          restore-keys: |
+            android-qemu-${{ runner.os }}-
 
       - name: Build Android QEMU engine
         if: steps.qemu-cache.outputs.cache-hit != 'true'
