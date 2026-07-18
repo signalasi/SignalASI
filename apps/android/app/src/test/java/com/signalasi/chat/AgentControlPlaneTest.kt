@@ -62,6 +62,7 @@ class AgentControlPlaneTest {
         assertEquals(AgentResourceTrust.VERIFIED_PAIRED, codex.trust)
         assertTrue(AgentCapability.CODE in codex.capabilities)
         assertTrue("message.observe" in codex.protocol.features)
+        assertEquals(64, codex.capabilitiesHash.length)
     }
 
     @Test
@@ -133,6 +134,71 @@ class AgentControlPlaneTest {
     }
 
     @Test
+    fun ignoredAndRetriedRunsNeverDuplicateRemoteExecution() = runBlocking {
+        val registration = testRegistration()
+        val transport = FakeAgentTransport(registration, registration.protocol)
+        val adapter = TransportBackedAgentAdapter(registration, transport)
+        val ignored = AgentRunRequest(
+            conversationId = "conversation",
+            messageId = "message-ignore",
+            taskId = "task-ignore",
+            goal = "do not deliver",
+            deliveryMode = AgentDeliveryMode.IGNORE,
+            idempotencyKey = "ignore-key"
+        )
+        val executable = ignored.copy(
+            messageId = "message-run",
+            taskId = "task-run",
+            runId = "run-1",
+            goal = "run once",
+            deliveryMode = AgentDeliveryMode.RESPOND,
+            idempotencyKey = "run-key"
+        )
+
+        val ignoredHandle = adapter.startRun(ignored)
+        val first = adapter.startRun(executable)
+        val replay = adapter.startRun(executable.copy(runId = "run-2"))
+
+        assertEquals("", ignoredHandle.remoteRunId)
+        assertEquals(1, transport.startedRuns)
+        assertEquals(first, replay)
+    }
+
+    @Test
+    fun teamCoordinatorStartsOneResponderAndObservationMembers() = runBlocking {
+        val primaryRegistration = testRegistration()
+        val observerRegistration = testRegistration().copy(
+            agentId = "tester",
+            installationId = "tester-installation",
+            displayName = "Tester",
+            capabilities = setOf(AgentCapability.RESEARCH)
+        )
+        val primaryTransport = FakeAgentTransport(primaryRegistration, primaryRegistration.protocol)
+        val observerTransport = FakeAgentTransport(observerRegistration, observerRegistration.protocol)
+        val directory = AgentAdapterDirectory().apply {
+            register(TransportBackedAgentAdapter(primaryRegistration, primaryTransport))
+            register(TransportBackedAgentAdapter(observerRegistration, observerTransport))
+        }
+        val result = AgentTeamCoordinator(directory).start(
+            AgentTeamDefinition(
+                primaryAgentId = "codex",
+                members = listOf(
+                    AgentTeamMember("codex", AgentDeliveryMode.RESPOND, setOf(AgentCapability.CODE)),
+                    AgentTeamMember("tester", AgentDeliveryMode.OBSERVE, setOf(AgentCapability.RESEARCH)),
+                    AgentTeamMember("ignored", AgentDeliveryMode.IGNORE)
+                ),
+                visibilityMode = AgentTeamVisibilityMode.VISIBLE
+            ),
+            AgentRunRequest("conversation", "message", "task", goal = "Implement and review")
+        )
+
+        assertEquals(setOf("codex", "tester"), result.memberRuns.keys)
+        assertEquals(1, primaryTransport.startedRuns)
+        assertEquals(1, observerTransport.startedRuns)
+        assertEquals(AgentTeamVisibilityMode.VISIBLE, result.visibilityMode)
+    }
+
+    @Test
     fun recoveryPolicyReconnectsOnlyDurableDesktopRuns() {
         val event = AgentRunControlEvent(
             conversationId = "conversation",
@@ -201,15 +267,20 @@ private class FakeAgentTransport(
 ) : AgentAdapterTransport {
     var sentMessages: Int = 0
         private set
+    var startedRuns: Int = 0
+        private set
 
     override suspend fun open(): AgentProtocolRange = remoteProtocol
     override suspend fun close() = Unit
     override suspend fun status(): AgentRegistration = registration
-    override suspend fun startRun(request: AgentRunRequest): AgentRunHandle = AgentRunHandle(
-        runId = request.runId,
-        taskId = request.taskId,
-        agentId = registration.agentId
-    )
+    override suspend fun startRun(request: AgentRunRequest): AgentRunHandle {
+        startedRuns += 1
+        return AgentRunHandle(
+            runId = request.runId,
+            taskId = request.taskId,
+            agentId = registration.agentId
+        )
+    }
 
     override suspend fun sendMessage(runId: String, message: AgentControlMessage) {
         sentMessages += 1

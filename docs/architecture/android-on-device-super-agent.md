@@ -61,7 +61,15 @@ Concrete adapters bind to a transport boundary rather than embedding vendor runt
 negotiates the common protocol range before a run starts, preserves agent and installation
 identity for the lifetime of the connection, suppresses `IGNORE`, rejects unsupported
 `OBSERVE`/cancel operations, and only requests recovery when the negotiated feature set permits
-it. Providers use the same boundary while exposing multiple independently addressable agents.
+it. A bounded idempotency ledger returns the original run handle when a start request is retried,
+and an `IGNORE` run never opens or invokes the remote transport. Providers use the same boundary
+while exposing multiple independently addressable agents.
+
+Team orchestration has one explicit `RESPOND` primary and any number of `OBSERVE` members. Ignored
+members receive nothing. Each participating Agent gets a distinct run under the same task, with
+the primary run as the parent for observer runs. A team can remain background-only or expose its
+member activity in the Run UI; unavailable and capability-mismatched members are reported without
+silently replacing the primary.
 
 `OBSERVE` is deliberately non-interactive. On Android it is stored as encrypted, target-scoped,
 short-lived context and is consumed by the next `RESPOND` request to that target. It is never sent
@@ -111,6 +119,11 @@ Learning is evidence-driven and reversible:
    code or high-impact behavior.
 7. Run manifest validation and regression cases before installation.
 8. Preserve version history, provenance, disable, rollback, export, and deletion.
+
+Android Linux runtime runs are eligible evidence only when the completed tool record contains a
+matching execution receipt with a successful exit code, bounded timestamps, and valid source,
+stdout, and stderr SHA-256 values. Missing or malformed receipts cannot strengthen workflow
+memory, generate a Skill, or upgrade one.
 
 ## Skill Workshop
 
@@ -179,7 +192,9 @@ Each request receives an app-private workspace and an encrypted execution receip
 source digest, runtime-pack versions, resource limits, network scope, terminal state, output
 digests, exit code, and verified artifact hashes. Only explicitly requested relative artifacts
 are collected. Workspaces expire after a bounded retention period and cannot escape their task
-root.
+root. Runtime start, progress, and completion callbacks are projected into the unified Run event
+stream with distinct step and tool-call identifiers. The durable Run stores sanitized receipt
+evidence and artifact references while excluding app-private host paths from learning evidence.
 
 The QEMU controller, guest broker, sandbox launcher, pinned glibc-based Buildroot `linux-base`
 recipe, and reproducible Android ARM64 QEMU build and ELF-bundling pipeline are implemented. These
@@ -268,6 +283,7 @@ access to the user's shared storage.
 | --- | --- |
 | Encrypted memory metadata, ranking, conflict handling, and no-migration storage | Host complete |
 | Evidence-based learning, repeated-failure lessons, and reviewed Skill proposals/upgrades | Host complete |
+| Unified Agent adapters/providers, delivery modes, idempotent starts, team orchestration, registry heartbeats, and Run events | Host complete |
 | Runtime capability, signed-pack catalog/download/install policy, lifecycle supervision, guest protocol, workspace, cancellation, and receipt contracts | Host complete |
 | Android QEMU process controller, reproducible ARM64 engine build/bundle pipeline, persistent multiplexed bridge, Linux guest broker, per-task native sandbox launcher, and pinned `linux-base` build recipe | Source complete |
 | Control Center pages for memory, learning proposals, runtime packs, and execution receipts | Host complete |

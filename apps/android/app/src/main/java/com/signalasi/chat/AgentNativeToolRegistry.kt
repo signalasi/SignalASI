@@ -541,7 +541,8 @@ class AgentNativeToolInvocation internal constructor(
     val context: AgentNativeToolInvocationContext,
     val deadlineEpochMillis: Long,
     val cancellationToken: AgentNativeToolCancellationToken,
-    private val clock: AgentNativeClock
+    private val clock: AgentNativeClock,
+    private val progressReporter: (AgentNativeToolInvocation, AgentNativeToolProgressUpdate) -> Unit
 ) {
     val remainingTimeMillis: Long
         get() = (deadlineEpochMillis - clock.nowEpochMillis()).coerceAtLeast(0L)
@@ -553,7 +554,40 @@ class AgentNativeToolInvocation internal constructor(
         if (isCancellationRequested) throw AgentNativeToolCancelledException()
         if (isTimedOut) throw AgentNativeToolTimeoutException()
     }
+
+    fun reportProgress(
+        stage: String,
+        message: String = "",
+        percent: Int? = null,
+        sequence: Long = 0L,
+        timestampEpochMillis: Long = clock.nowEpochMillis()
+    ) {
+        checkpoint()
+        progressReporter(
+            this,
+            AgentNativeToolProgressUpdate(
+                sequence = sequence.coerceAtLeast(0L),
+                stage = stage.trim().take(MAX_PROGRESS_STAGE_CHARS),
+                message = message.take(MAX_PROGRESS_MESSAGE_CHARS),
+                percent = percent?.coerceIn(0, 100),
+                timestampEpochMillis = timestampEpochMillis.coerceAtLeast(0L)
+            )
+        )
+    }
+
+    companion object {
+        private const val MAX_PROGRESS_STAGE_CHARS = 80
+        private const val MAX_PROGRESS_MESSAGE_CHARS = 2_000
+    }
 }
+
+data class AgentNativeToolProgressUpdate(
+    val sequence: Long,
+    val stage: String,
+    val message: String,
+    val percent: Int? = null,
+    val timestampEpochMillis: Long
+)
 
 data class AgentNativeToolError(
     val code: String,
@@ -709,6 +743,7 @@ data class AgentNativeToolResult(
 class AgentNativeToolInvocationHooks(
     val cancellationToken: AgentNativeToolCancellationToken = AgentNativeToolCancellationToken.NONE,
     val onStarted: (AgentNativeToolInvocation) -> Unit = {},
+    val onProgress: (AgentNativeToolInvocation, AgentNativeToolProgressUpdate) -> Unit = { _, _ -> },
     val onCancelled: (AgentNativeToolInvocation) -> Unit = {},
     val onTimeout: (AgentNativeToolInvocation) -> Unit = {},
     val onFinished: (AgentNativeToolResult) -> Unit = {}
@@ -820,7 +855,10 @@ class AgentNativeToolRegistry(
             context = context,
             deadlineEpochMillis = deadline,
             cancellationToken = hooks.cancellationToken,
-            clock = clock
+            clock = clock,
+            progressReporter = { activeInvocation, progress ->
+                runHook { hooks.onProgress(activeInvocation, progress) }
+            }
         )
         val completed = AtomicBoolean(false)
         val cancellationNotified = AtomicBoolean(false)

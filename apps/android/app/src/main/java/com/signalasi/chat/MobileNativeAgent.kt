@@ -25,6 +25,7 @@ import android.provider.ContactsContract
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.Date
 import java.text.SimpleDateFormat
@@ -95,6 +96,31 @@ internal fun renderPackageUnavailable(packageName: String, zh: Boolean): String 
     }
 }
 
+enum class AgentNativeToolLifecycleStage { STARTED, PROGRESS, FINISHED }
+
+data class AgentNativeToolLifecycleEvent(
+    val stage: AgentNativeToolLifecycleStage,
+    val toolId: String,
+    val invocationId: String,
+    val stepId: String,
+    val conversationId: String,
+    val turnId: String,
+    val status: AgentNativeToolResultStatus? = null,
+    val progressStage: String = "",
+    val message: String = "",
+    val percent: Int? = null,
+    val sequence: Long = 0L,
+    val timestampMillis: Long = System.currentTimeMillis()
+)
+
+fun interface AgentNativeToolEventSink {
+    fun onEvent(event: AgentNativeToolLifecycleEvent)
+
+    companion object {
+        val NONE = AgentNativeToolEventSink { }
+    }
+}
+
 /**
  * Phone-native Agent runtime scaffold.
  *
@@ -126,7 +152,8 @@ class MobileNativeAgent(
     private val workflowTriggerStore: AgentWorkflowTriggerStore = AgentWorkflowTriggerStore(context),
     private val workflowExecutionHistoryStore: AgentWorkflowExecutionHistoryStore = AgentWorkflowExecutionHistoryStore(context),
     private val connectorRegistry: AgentConnectorRegistry = AppStoreAgentConnectorRegistry(context),
-    private val sessionStore: AgentSessionStore = SharedPreferencesAgentSessionStore(context)
+    private val sessionStore: AgentSessionStore = SharedPreferencesAgentSessionStore(context),
+    private val nativeToolEventSink: AgentNativeToolEventSink = AgentNativeToolEventSink.NONE
 ) {
     private val appContext = context.applicationContext
     private var sessionId: String = UUID.randomUUID().toString()
@@ -236,11 +263,21 @@ class MobileNativeAgent(
 
     fun nativeToolCatalog(): List<AgentNativeToolDescriptor> = nativeToolRegistry.descriptors()
 
-    fun executeDirectAction(action: AgentAction): AgentActionResult {
+    fun executeDirectAction(
+        action: AgentAction,
+        conversationId: String = "",
+        turnId: String = ""
+    ): AgentActionResult {
         require(AgentConfirmationPolicy.tier(action) == AgentConfirmationTier.DIRECT) {
             "Only direct-tier actions may bypass the Agent planning loop"
         }
-        return executeAction(action, currentScreen, userConfirmed = true)
+        return executeAction(
+            action,
+            currentScreen,
+            userConfirmed = true,
+            conversationIdOverride = conversationId,
+            turnIdOverride = turnId
+        )
     }
 
     fun invokeNativeTool(
@@ -248,25 +285,32 @@ class MobileNativeAgent(
         input: AgentNativeJsonObject,
         grantedPermissions: Set<String> = emptySet(),
         grantedConsents: Set<String> = emptySet(),
-        cancellationToken: AgentNativeToolCancellationToken = AgentNativeToolCancellationToken.NONE
-    ): AgentNativeToolResult = nativeToolRegistry.invoke(
-        id = toolId,
-        input = input,
-        context = AgentNativeToolInvocationContext(
+        cancellationToken: AgentNativeToolCancellationToken = AgentNativeToolCancellationToken.NONE,
+        conversationId: String = "",
+        turnId: String = ""
+    ): AgentNativeToolResult {
+        val invocationContext = AgentNativeToolInvocationContext(
             sessionId = sessionId,
-            conversationId = activeConversationContext.conversationId,
-            turnId = activeConversationTurnId,
+            conversationId = conversationId.ifBlank { activeConversationContext.conversationId },
+            turnId = turnId.ifBlank { activeConversationTurnId },
             grantedPermissions = grantedPermissions,
             grantedConsents = grantedConsents,
             attributes = mapOf("execution_authority" to "signalasi-phone")
-        ),
-        hooks = AgentNativeToolInvocationHooks(cancellationToken = cancellationToken)
-    )
+        )
+        return nativeToolRegistry.invoke(
+            id = toolId,
+            input = input,
+            context = invocationContext,
+            hooks = nativeToolHooks(toolId, invocationContext, cancellationToken)
+        )
+    }
 
     private fun executeAction(
         action: AgentAction,
         screen: ScreenContext,
-        userConfirmed: Boolean = false
+        userConfirmed: Boolean = false,
+        conversationIdOverride: String = "",
+        turnIdOverride: String = ""
     ): AgentActionResult {
         if (action.kind != AgentActionKind.CALL_NATIVE_TOOL) return actionExecutor.execute(action, screen)
         val toolId = action.parameters["tool_id"].orEmpty()
@@ -284,24 +328,27 @@ class MobileNativeAgent(
         } else {
             emptySet()
         }
+        val invocationContext = AgentNativeToolInvocationContext(
+            sessionId = sessionId,
+            conversationId = conversationIdOverride.ifBlank { activeConversationContext.conversationId },
+            turnId = turnIdOverride.ifBlank { activeConversationTurnId },
+            callerId = "signalasi.mobile_agent.plan",
+            idempotencyKey = if (descriptor.idempotency == AgentNativeToolIdempotency.IDEMPOTENCY_KEY_REQUIRED) {
+                action.id
+            } else null,
+            grantedPermissions = descriptor.requiredPermissions.mapTo(linkedSetOf()) { it.id },
+            grantedConsents = grantedConsents,
+            attributes = mapOf(
+                "execution_authority" to "signalasi-phone",
+                "confirmation_id" to action.id,
+                "step_id" to action.id
+            )
+        )
         val result = nativeToolRegistry.invoke(
             id = toolId,
             input = input,
-            context = AgentNativeToolInvocationContext(
-                sessionId = sessionId,
-                conversationId = activeConversationContext.conversationId,
-                turnId = activeConversationTurnId,
-                callerId = "signalasi.mobile_agent.plan",
-                idempotencyKey = if (descriptor.idempotency == AgentNativeToolIdempotency.IDEMPOTENCY_KEY_REQUIRED) {
-                    action.id
-                } else null,
-                grantedPermissions = descriptor.requiredPermissions.mapTo(linkedSetOf()) { it.id },
-                grantedConsents = grantedConsents,
-                attributes = mapOf(
-                    "execution_authority" to "signalasi-phone",
-                    "confirmation_id" to action.id
-                )
-            )
+            context = invocationContext,
+            hooks = nativeToolHooks(toolId, invocationContext)
         )
         val renderedOutput = AgentNativeJsonCodec.stringify(result.output).take(8_000)
         val nativeMessage = result.message.ifBlank { result.error?.message.orEmpty() }
@@ -318,9 +365,68 @@ class MobileNativeAgent(
                 "native_tool_status" to result.status.wireValue,
                 "native_tool_output" to renderedOutput,
                 "invocation_id" to result.receipt.invocationId,
+                "started_at_millis" to result.receipt.startedAtEpochMillis.toString(),
+                "completed_at_millis" to result.receipt.finishedAtEpochMillis.toString(),
                 "provenance" to result.provenance.executorId
             )
         )
+    }
+
+    private fun nativeToolHooks(
+        toolId: String,
+        context: AgentNativeToolInvocationContext,
+        cancellationToken: AgentNativeToolCancellationToken = AgentNativeToolCancellationToken.NONE
+    ) = AgentNativeToolInvocationHooks(
+        cancellationToken = cancellationToken,
+        onStarted = {
+            emitNativeToolEvent(
+                AgentNativeToolLifecycleEvent(
+                    stage = AgentNativeToolLifecycleStage.STARTED,
+                    toolId = toolId,
+                    invocationId = context.invocationId,
+                    stepId = context.attributes["step_id"].orEmpty().ifBlank { context.invocationId },
+                    conversationId = context.conversationId,
+                    turnId = context.turnId,
+                    timestampMillis = System.currentTimeMillis()
+                )
+            )
+        },
+        onProgress = { _, progress ->
+            emitNativeToolEvent(
+                AgentNativeToolLifecycleEvent(
+                    stage = AgentNativeToolLifecycleStage.PROGRESS,
+                    toolId = toolId,
+                    invocationId = context.invocationId,
+                    stepId = context.attributes["step_id"].orEmpty().ifBlank { context.invocationId },
+                    conversationId = context.conversationId,
+                    turnId = context.turnId,
+                    progressStage = progress.stage,
+                    message = progress.message,
+                    percent = progress.percent,
+                    sequence = progress.sequence,
+                    timestampMillis = progress.timestampEpochMillis
+                )
+            )
+        },
+        onFinished = { result ->
+            emitNativeToolEvent(
+                AgentNativeToolLifecycleEvent(
+                    stage = AgentNativeToolLifecycleStage.FINISHED,
+                    toolId = toolId,
+                    invocationId = context.invocationId,
+                    stepId = context.attributes["step_id"].orEmpty().ifBlank { context.invocationId },
+                    conversationId = context.conversationId,
+                    turnId = context.turnId,
+                    status = result.status,
+                    message = result.message.ifBlank { result.error?.message.orEmpty() }.take(2_000),
+                    timestampMillis = result.receipt.finishedAtEpochMillis
+                )
+            )
+        }
+    )
+
+    private fun emitNativeToolEvent(event: AgentNativeToolLifecycleEvent) {
+        runCatching { nativeToolEventSink.onEvent(event) }
     }
 
     private fun renderAndroidSystemToolResult(message: String, output: AgentNativeJsonObject): String {
@@ -8422,6 +8528,7 @@ interface AgentConnectorRegistry {
             target.kind == AgentConnectorKind.DEVICE -> AgentResourceLocation.PRIVATE_NETWORK
             else -> AgentResourceLocation.CLOUD
         }
+        val capabilities = target.capabilities.toSet()
         AgentRegistration(
             agentId = target.id,
             installationId = target.failureDomain.ifBlank { "installation:${target.id}" },
@@ -8435,7 +8542,7 @@ interface AgentConnectorRegistry {
                 AgentConnectorStatus.DISCONNECTED -> AgentEndpointStatus.OFFLINE
                 AgentConnectorStatus.NEEDS_SETUP -> AgentEndpointStatus.PERMISSION_REQUIRED
             },
-            capabilities = target.capabilities.toSet(),
+            capabilities = capabilities,
             protocol = AgentProtocolRange(
                 preferred = "1.0",
                 minimum = "1.0",
@@ -8460,6 +8567,9 @@ interface AgentConnectorRegistry {
                 AgentResourceLocation.PRIVATE_NETWORK -> AgentResourceTrust.PRIVATE_CONFIGURED
                 AgentResourceLocation.CLOUD -> AgentResourceTrust.CLOUD_CONFIGURED
             },
+            capabilitiesHash = MessageDigest.getInstance("SHA-256")
+                .digest(capabilities.map { it.name }.sorted().joinToString("\n").toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) },
             failureDomain = target.failureDomain
         )
     }

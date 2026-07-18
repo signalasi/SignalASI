@@ -144,6 +144,7 @@ class AgentNativeToolRegistryTest {
     fun returnsReceiptProvenanceAndVerification() {
         val clock = MutableClock(1_000L)
         val started = AtomicInteger()
+        val progress = mutableListOf<AgentNativeToolProgressUpdate>()
         val finished = AtomicInteger()
         val descriptor = descriptor(outputSchema = AgentNativeJsonSchema.objectSchema(
             properties = mapOf("value" to AgentNativeJsonSchema.string()),
@@ -153,7 +154,8 @@ class AgentNativeToolRegistryTest {
         val registry = AgentNativeToolRegistry(clock).register(
             AgentNativeToolDefinition(
                 descriptor = descriptor,
-                executor = AgentNativeToolExecutor {
+                executor = AgentNativeToolExecutor { invocation ->
+                    invocation.reportProgress("working", "Preparing output", 40, sequence = 3)
                     clock.now += 7
                     AgentNativeToolExecutionResult.success(
                         output = mapOf("value" to "done"),
@@ -178,6 +180,7 @@ class AgentNativeToolRegistryTest {
             AgentNativeToolInvocationContext(invocationId = "invoke-7"),
             AgentNativeToolInvocationHooks(
                 onStarted = { started.incrementAndGet() },
+                onProgress = { _, update -> progress += update },
                 onFinished = { finished.incrementAndGet() }
             )
         )
@@ -190,6 +193,9 @@ class AgentNativeToolRegistryTest {
         assertEquals("test.executor", result.provenance.executorId)
         assertEquals("1.0.0", result.provenance.toolVersion)
         assertEquals(1, started.get())
+        assertEquals("working", progress.single().stage)
+        assertEquals(40, progress.single().percent)
+        assertEquals(3L, progress.single().sequence)
         assertEquals(1, finished.get())
         assertTrue(result.toJson().contains("\"invocation_id\":\"invoke-7\""))
     }

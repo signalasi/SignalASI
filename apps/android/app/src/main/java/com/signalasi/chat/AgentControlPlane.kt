@@ -128,6 +128,28 @@ data class AgentHandoffRequest(
 
 enum class AgentTeamVisibilityMode { BACKGROUND, VISIBLE }
 
+data class AgentTeamMember(
+    val agentId: String,
+    val deliveryMode: AgentDeliveryMode,
+    val requiredCapabilities: Set<AgentCapability> = emptySet()
+)
+
+data class AgentTeamDefinition(
+    val teamId: String = UUID.randomUUID().toString(),
+    val primaryAgentId: String,
+    val members: List<AgentTeamMember>,
+    val visibilityMode: AgentTeamVisibilityMode = AgentTeamVisibilityMode.BACKGROUND
+)
+
+data class AgentTeamRun(
+    val teamId: String,
+    val taskId: String,
+    val primaryRun: AgentRunHandle,
+    val memberRuns: Map<String, AgentRunHandle>,
+    val unavailableMembers: Map<String, String>,
+    val visibilityMode: AgentTeamVisibilityMode
+)
+
 enum class AgentRunControlEventType {
     RUN_CREATED,
     RUN_QUEUED,
@@ -233,6 +255,8 @@ class TransportBackedAgentAdapter(
     private val localProtocol: AgentProtocolRange = initialRegistration.protocol
 ) : AgentAdapter {
     private val connectionMutex = Mutex()
+    private val runStartMutex = Mutex()
+    private val runHandlesByIdempotencyKey = linkedMapOf<String, AgentRunHandle>()
     @Volatile private var currentRegistration = initialRegistration
     @Volatile private var agreement: AgentProtocolAgreement? = null
 
@@ -267,12 +291,28 @@ class TransportBackedAgentAdapter(
         return remote
     }
 
-    override suspend fun startRun(request: AgentRunRequest): AgentRunHandle {
-        val negotiated = ensureConnected()
-        if (request.deliveryMode == AgentDeliveryMode.OBSERVE) {
-            requireFeature(negotiated, "message.observe")
+    override suspend fun startRun(request: AgentRunRequest): AgentRunHandle = runStartMutex.withLock {
+        require(request.idempotencyKey.isNotBlank()) { "Run idempotency key must not be blank" }
+        runHandlesByIdempotencyKey[request.idempotencyKey]?.let { return@withLock it }
+        val handle = if (request.deliveryMode == AgentDeliveryMode.IGNORE) {
+            AgentRunHandle(
+                runId = request.runId,
+                taskId = request.taskId,
+                agentId = currentRegistration.agentId,
+                remoteRunId = ""
+            )
+        } else {
+            val negotiated = ensureConnected()
+            if (request.deliveryMode == AgentDeliveryMode.OBSERVE) {
+                requireFeature(negotiated, "message.observe")
+            }
+            transport.startRun(request)
         }
-        return transport.startRun(request)
+        runHandlesByIdempotencyKey[request.idempotencyKey] = handle
+        while (runHandlesByIdempotencyKey.size > MAX_IDEMPOTENCY_HANDLES) {
+            runHandlesByIdempotencyKey.remove(runHandlesByIdempotencyKey.keys.first())
+        }
+        handle
     }
 
     override suspend fun sendMessage(runId: String, message: AgentControlMessage) {
@@ -299,6 +339,10 @@ class TransportBackedAgentAdapter(
 
     private fun requireFeature(negotiated: AgentProtocolAgreement, feature: String) {
         require(feature in negotiated.features) { "Agent does not support $feature" }
+    }
+
+    companion object {
+        private const val MAX_IDEMPOTENCY_HANDLES = 1_024
     }
 }
 
@@ -372,6 +416,22 @@ class AgentAdapterDirectory {
 
     fun provider(providerId: String): AgentProvider? = providers[providerId]
 
+    suspend fun resolveAdapter(agentId: String): AgentAdapter? {
+        adapters[agentId]?.let { return it }
+        providers.values.forEach { provider ->
+            provider.adapter(agentId)?.let { resolved ->
+                adapters.putIfAbsent(agentId, resolved)
+                return adapters[agentId]
+            }
+        }
+        return null
+    }
+
+    suspend fun registrations(): List<AgentRegistration> {
+        val remote = providers.values.flatMap { provider -> provider.registrations() }
+        return (localRegistrations() + remote).distinctBy { it.agentId }.sortedBy { it.displayName }
+    }
+
     fun localRegistrations(): List<AgentRegistration> = adapters.values
         .map(AgentAdapter::registration)
         .sortedBy(AgentRegistration::displayName)
@@ -383,6 +443,60 @@ class AgentAdapterDirectory {
     fun clear() {
         adapters.clear()
         providers.clear()
+    }
+}
+
+class AgentTeamCoordinator(private val directory: AgentAdapterDirectory) {
+    suspend fun start(definition: AgentTeamDefinition, request: AgentRunRequest): AgentTeamRun {
+        val members = definition.members.distinctBy { it.agentId }
+        require(definition.teamId.isNotBlank()) { "Team id must not be blank" }
+        require(members.any { it.agentId == definition.primaryAgentId && it.deliveryMode == AgentDeliveryMode.RESPOND }) {
+            "The primary Agent must be a responding team member"
+        }
+        val primaryMember = members.first { it.agentId == definition.primaryAgentId }
+        val primaryAdapter = requireNotNull(directory.resolveAdapter(primaryMember.agentId)) {
+            "Primary Agent is unavailable: ${primaryMember.agentId}"
+        }
+        require(primaryAdapter.registration.capabilities.containsAll(primaryMember.requiredCapabilities)) {
+            "Primary Agent lacks required capabilities"
+        }
+        val primaryRun = primaryAdapter.startRun(
+            request.copy(
+                deliveryMode = AgentDeliveryMode.RESPOND,
+                requiredCapabilities = request.requiredCapabilities + primaryMember.requiredCapabilities
+            )
+        )
+        val runs = linkedMapOf(primaryMember.agentId to primaryRun)
+        val unavailable = linkedMapOf<String, String>()
+        members.filterNot { it.agentId == primaryMember.agentId || it.deliveryMode == AgentDeliveryMode.IGNORE }
+            .forEach { member ->
+                val adapter = directory.resolveAdapter(member.agentId)
+                when {
+                    adapter == null -> unavailable[member.agentId] = "agent_unavailable"
+                    !adapter.registration.capabilities.containsAll(member.requiredCapabilities) ->
+                        unavailable[member.agentId] = "capability_mismatch"
+                    else -> runCatching {
+                        adapter.startRun(
+                            request.copy(
+                                runId = UUID.randomUUID().toString(),
+                                parentRunId = primaryRun.runId,
+                                deliveryMode = member.deliveryMode,
+                                requiredCapabilities = request.requiredCapabilities + member.requiredCapabilities,
+                                idempotencyKey = "${request.idempotencyKey}:${member.agentId}"
+                            )
+                        )
+                    }.onSuccess { runs[member.agentId] = it }
+                        .onFailure { unavailable[member.agentId] = it.message.orEmpty().ifBlank { "start_failed" } }
+                }
+            }
+        return AgentTeamRun(
+            teamId = definition.teamId,
+            taskId = request.taskId,
+            primaryRun = primaryRun,
+            memberRuns = runs,
+            unavailableMembers = unavailable,
+            visibilityMode = definition.visibilityMode
+        )
     }
 }
 

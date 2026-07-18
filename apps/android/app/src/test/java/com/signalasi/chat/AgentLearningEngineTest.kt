@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.json.JSONObject
 
 class AgentLearningEngineTest {
     @Test
@@ -139,6 +140,83 @@ class AgentLearningEngineTest {
         assertFalse(AgentLearningAnalyzer.hasUnboundTaskValue(
             mapOf("request" to "{{parameters.request}}", "recursive" to true, "limit" to 10)
         ))
+    }
+
+    @Test
+    fun runtimeLearningRequiresACompletedHashedExecutionReceipt() {
+        val missingReceipt = AgentToolCallRecord(
+            id = "runtime-missing",
+            toolName = AgentOnDeviceRuntimeTools.EXECUTE,
+            status = AgentToolCallStatus.SUCCEEDED,
+            resultJson = "{\"exit_code\":0}"
+        )
+        val trustedReceipt = missingReceipt.copy(
+            id = "runtime-trusted",
+            resultJson = JSONObject()
+                .put("execution_receipt", JSONObject()
+                    .put("request_id", "request-1")
+                    .put("status", "completed")
+                    .put("exit_code", 0)
+                    .put("source_sha256", "a".repeat(64))
+                    .put("stdout_sha256", "b".repeat(64))
+                    .put("stderr_sha256", "c".repeat(64))
+                    .put("created_at_millis", 1_000L)
+                    .put("completed_at_millis", 1_100L))
+                .toString()
+        )
+
+        assertFalse(AgentLearningAnalyzer.hasTrustedExecutionEvidence(missingReceipt))
+        assertTrue(AgentLearningAnalyzer.hasTrustedExecutionEvidence(trustedReceipt))
+        assertFalse(AgentLearningAnalyzer.hasTrustedExecutionEvidence(
+            trustedReceipt.copy(resultJson = JSONObject(trustedReceipt.resultJson)
+                .apply { getJSONObject("execution_receipt").put("exit_code", 7) }
+                .toString())
+        ))
+    }
+
+    @Test
+    fun runtimeReceiptEvidenceDoesNotExposeHostArtifactPaths() {
+        val evidence = AgentRuntimeExecutionReceipt(
+            requestId = "request-1",
+            workspaceId = "workspace",
+            language = AgentRuntimeLanguage.PYTHON,
+            sourceSha256 = "a".repeat(64),
+            packVersions = mapOf("python-uv" to "1.0.0"),
+            networkEnabled = false,
+            allowedNetworkDomains = emptyList(),
+            limits = AgentRuntimeResourceLimits(),
+            status = AgentRuntimeReceiptStatus.COMPLETED,
+            exitCode = 0,
+            stdoutSha256 = "b".repeat(64),
+            stderrSha256 = "c".repeat(64),
+            artifacts = listOf(mapOf(
+                "relative_path" to "result.json",
+                "size_bytes" to 42L,
+                "sha256" to "d".repeat(64),
+                "host_path" to "C:/private/result.json"
+            )),
+            createdAtMillis = 1_000L,
+            completedAtMillis = 1_100L
+        ).toEvidenceMap()
+
+        assertFalse(AgentNativeJsonCodec.stringify(evidence).contains("host_path"))
+        assertFalse(AgentNativeJsonCodec.stringify(evidence).contains("C:/private"))
+    }
+
+    @Test
+    fun runtimeToolTreatsNonzeroExitAsFailureWithoutDiscardingOutput() {
+        val successful = AgentOnDeviceRuntimeTools.runtimeExecutionResult(
+            AgentRuntimeExecutionResponse(0, "done", "", 10L)
+        )
+        val failed = AgentOnDeviceRuntimeTools.runtimeExecutionResult(
+            AgentRuntimeExecutionResponse(7, "partial", "compile failed", 20L)
+        )
+
+        assertTrue(successful.isSuccess)
+        assertFalse(failed.isSuccess)
+        assertEquals(7, failed.output["exit_code"])
+        assertEquals("partial", failed.output["stdout"])
+        assertEquals("on_device_runtime_nonzero_exit", failed.error?.code)
     }
 
     @Test

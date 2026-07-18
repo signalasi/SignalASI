@@ -646,7 +646,11 @@ class AgentSkillExecutionEngine(
     private val runtime: AgentSkillRuntime,
     private val mobileAgent: MobileNativeAgent
 ) {
-    fun execute(match: AgentSkillMatch): AgentSkillExecutionResult {
+    fun execute(
+        match: AgentSkillMatch,
+        conversationId: String = "",
+        turnId: String = ""
+    ): AgentSkillExecutionResult {
         val expansion = runtime.expand(match.installation.id, match.installation.version, match.parameters)
         val catalog = mobileAgent.nativeToolCatalog().associateBy { it.id }
         val results = mutableListOf<AgentNativeToolResult>()
@@ -662,7 +666,9 @@ class AgentSkillExecutionEngine(
             val result = mobileAgent.invokeNativeTool(
                 toolId = step.toolId,
                 input = step.input,
-                grantedPermissions = descriptor.requiredPermissions.filter { it.required }.mapTo(linkedSetOf()) { it.id }
+                grantedPermissions = descriptor.requiredPermissions.filter { it.required }.mapTo(linkedSetOf()) { it.id },
+                conversationId = conversationId,
+                turnId = turnId
             )
             results += result
             if (!result.isSuccess) return fallback(match, result.message, results)

@@ -238,7 +238,8 @@ data class AgentRuntimeExecutionResponse(
     val stderr: String,
     val durationMillis: Long,
     val artifacts: List<Map<String, Any?>> = emptyList(),
-    val requestId: String = ""
+    val requestId: String = "",
+    val executionReceipt: AgentRuntimeExecutionReceipt? = null
 )
 
 fun interface AgentOnDeviceRuntimeBridge {
@@ -366,12 +367,12 @@ class AgentOnDeviceRuntimeManager(
                 artifacts = artifacts,
                 requestId = normalizedRequest.requestId
             ).bounded()
-            receiptStore.complete(normalizedRequest.requestId, response, artifacts)
+            val receipt = receiptStore.complete(normalizedRequest.requestId, response, artifacts)
             workspaceManager.markFinished(
                 prepared,
                 if (response.exitCode == 0) AgentRuntimeReceiptStatus.COMPLETED else AgentRuntimeReceiptStatus.FAILED
             )
-            response
+            response.copy(executionReceipt = receipt)
         } catch (error: Throwable) {
             receiptStore.fail(normalizedRequest.requestId, error)
             workspaceManager.markFinished(
@@ -385,6 +386,8 @@ class AgentOnDeviceRuntimeManager(
             throw error
         }
     }
+
+    fun receipt(requestId: String): AgentRuntimeExecutionReceipt? = receiptStore.find(requestId)
 
     private fun qemuEngineFile(): File = File(appContext.applicationInfo.nativeLibraryDir, QEMU_ENGINE_FILE)
 
@@ -717,22 +720,31 @@ object AgentOnDeviceRuntimeTools {
                             .ifBlank { invocation.context.conversationId }
                             .ifBlank { invocation.context.invocationId },
                         requestId = invocation.context.invocationId,
-                        cancellationToken = invocation.cancellationToken
+                        cancellationToken = invocation.cancellationToken,
+                        progressListener = { progress ->
+                            invocation.reportProgress(
+                                stage = progress.stage,
+                                message = progress.message,
+                                percent = progress.percent,
+                                sequence = progress.sequence,
+                                timestampEpochMillis = progress.timestampMillis
+                            )
+                        }
                     )
                     runCatching { manager.execute(request) }.fold(
-                        onSuccess = { response -> AgentNativeToolExecutionResult.success(
-                            output = mapOf(
-                                "exit_code" to response.exitCode,
-                                "stdout" to response.stdout,
-                                "stderr" to response.stderr,
-                                "duration_ms" to response.durationMillis,
-                                "artifacts" to response.artifacts
-                            ),
-                            message = if (response.exitCode == 0) "On-device runtime completed" else "On-device runtime exited with ${response.exitCode}"
-                        ) },
-                        onFailure = { error -> AgentNativeToolExecutionResult.failure(
-                            "on_device_runtime_failed", error.message ?: "On-device runtime failed", retryable = false
-                        ) }
+                        onSuccess = ::runtimeExecutionResult,
+                        onFailure = { error ->
+                            val evidence = manager.receipt(request.requestId)?.toEvidenceMap()
+                            AgentNativeToolExecutionResult(
+                                output = evidence?.let { mapOf("execution_receipt" to it) }.orEmpty(),
+                                error = AgentNativeToolError(
+                                    code = "on_device_runtime_failed",
+                                    message = error.message ?: "On-device runtime failed",
+                                    retryable = false,
+                                    details = evidence.orEmpty()
+                                )
+                            )
+                        }
                     )
                 },
                 executorId = "signalasi.android_runtime_broker",
@@ -744,6 +756,32 @@ object AgentOnDeviceRuntimeTools {
                 availabilityProvider = AgentNativeToolAvailabilityProvider { executionAvailability(manager) }
             )
         )
+    }
+
+    internal fun runtimeExecutionResult(response: AgentRuntimeExecutionResponse): AgentNativeToolExecutionResult {
+        val output = runtimeExecutionOutput(response)
+        if (response.exitCode == 0) {
+            return AgentNativeToolExecutionResult.success(output, "On-device runtime completed")
+        }
+        return AgentNativeToolExecutionResult(
+            output = output,
+            message = "On-device runtime exited with ${response.exitCode}",
+            error = AgentNativeToolError(
+                code = "on_device_runtime_nonzero_exit",
+                message = "On-device runtime exited with ${response.exitCode}",
+                retryable = false,
+                details = response.executionReceipt?.toEvidenceMap().orEmpty()
+            )
+        )
+    }
+
+    private fun runtimeExecutionOutput(response: AgentRuntimeExecutionResponse): AgentNativeJsonObject = buildMap {
+        put("exit_code", response.exitCode)
+        put("stdout", response.stdout)
+        put("stderr", response.stderr)
+        put("duration_ms", response.durationMillis)
+        put("artifacts", response.artifacts)
+        response.executionReceipt?.let { put("execution_receipt", it.toEvidenceMap()) }
     }
 
     private fun descriptor(

@@ -135,6 +135,26 @@ object AgentLearningAnalyzer {
         else -> false
     }
 
+    internal fun hasTrustedExecutionEvidence(call: AgentToolCallRecord): Boolean {
+        if (call.status != AgentToolCallStatus.SUCCEEDED) return false
+        if (call.toolName != AgentOnDeviceRuntimeTools.EXECUTE) return true
+        val receipt = runCatching { JSONObject(call.resultJson).optJSONObject("execution_receipt") }
+            .getOrNull() ?: return false
+        val createdAt = receipt.optLong("created_at_millis")
+        val completedAt = receipt.optLong("completed_at_millis")
+        return receipt.optString("request_id").isNotBlank() &&
+            receipt.optString("status") == AgentRuntimeReceiptStatus.COMPLETED.name.lowercase(Locale.ROOT) &&
+            receipt.optInt("exit_code", Int.MIN_VALUE) == 0 &&
+            SHA256_PATTERN.matches(receipt.optString("source_sha256")) &&
+            SHA256_PATTERN.matches(receipt.optString("stdout_sha256")) &&
+            SHA256_PATTERN.matches(receipt.optString("stderr_sha256")) &&
+            createdAt > 0L && completedAt >= createdAt
+    }
+
+    internal fun runExecutionEvidenceTrusted(run: AgentRecordedRun): Boolean =
+        run.toolCalls.filter { it.toolName == AgentOnDeviceRuntimeTools.EXECUTE }
+            .all(::hasTrustedExecutionEvidence)
+
     private fun similarityTokens(value: String): Set<String> {
         val words = value.split(Regex("[^\\p{L}\\p{N}<>]+"))
             .filter { it.length >= 2 }
@@ -152,6 +172,7 @@ object AgentLearningAnalyzer {
     private const val MAX_FAMILY_CHARS = 320
     private const val MAX_MEMORY_CHARS = 1_000
     private const val MIN_MEMORY_CHARS = 2
+    private val SHA256_PATTERN = Regex("[0-9a-f]{64}")
 }
 
 class AgentLearningEngine(
@@ -197,7 +218,8 @@ class AgentLearningEngine(
                 val family = AgentLearningAnalyzer.taskFamily(run.originalRequest)
                 val matchingSuccesses = recentRuns.count { candidate ->
                     candidate.status == AgentRecordedRunStatus.COMPLETED &&
-                        candidate.toolCalls.any { it.status == AgentToolCallStatus.SUCCEEDED } &&
+                        candidate.toolCalls.any(AgentLearningAnalyzer::hasTrustedExecutionEvidence) &&
+                        AgentLearningAnalyzer.runExecutionEvidenceTrusted(candidate) &&
                         AgentLearningAnalyzer.sameTaskFamily(candidate.originalRequest, family)
                 }
                 if (family.isNotBlank() && matchingSuccesses >= MIN_WORKFLOW_MEMORY_RUNS &&
@@ -211,7 +233,7 @@ class AgentLearningEngine(
                             key = "workflow:${AgentLearningAnalyzer.stableKey(family)}",
                             scope = AgentMemoryScope.GLOBAL,
                             confidence = 0.74,
-                            evidenceCount = 1,
+                            evidenceCount = matchingSuccesses,
                             autoLearned = true,
                             expiresAtMillis = System.currentTimeMillis() + WORKFLOW_MEMORY_TTL_MILLIS
                         )
@@ -240,7 +262,9 @@ class AgentLearningEngine(
                     proposal.status == AgentLearningProposalStatus.PENDING
             }) return null
         val improvedRuns = recentRuns.filter { candidate ->
-            candidate.activeSkillId == run.activeSkillId && candidate.userFeedback.isNotEmpty()
+            candidate.activeSkillId == run.activeSkillId &&
+                candidate.userFeedback.isNotEmpty() &&
+                AgentLearningAnalyzer.runExecutionEvidenceTrusted(candidate)
         }.takeLast(MAX_EVIDENCE_RUNS).ifEmpty { listOf(run) }
         val manifest = runCatching { AgentSkillVersionManager(skillRuntime).buildUpgrade(base, improvedRuns) }
             .getOrNull() ?: return null
@@ -289,6 +313,7 @@ class AgentLearningEngine(
             .filter { candidate ->
                 candidate.status == AgentRecordedRunStatus.COMPLETED &&
                     candidate.activeSkillId.isBlank() &&
+                    AgentLearningAnalyzer.runExecutionEvidenceTrusted(candidate) &&
                     AgentLearningAnalyzer.sameTaskFamily(candidate.originalRequest, run.originalRequest)
             }
             .distinctBy { it.runId }

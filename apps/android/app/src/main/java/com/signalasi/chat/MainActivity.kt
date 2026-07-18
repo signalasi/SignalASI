@@ -419,7 +419,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         configureSystemBars()
         setContentView(R.layout.activity_main)
         AppStore.ensureInitialized(this)
-        mobileNativeAgent = MobileNativeAgent(this)
+        mobileNativeAgent = MobileNativeAgent(
+            this,
+            nativeToolEventSink = AgentNativeToolEventSink(::recordNativeToolLifecycleEvent)
+        )
         agentTranscriptStore = AgentTranscriptStore(this)
         agentRunRecorder = AgentRunRecorder(this)
         agentRunEventStore = AgentRunEventStore(this)
@@ -906,7 +909,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (cleanTurnId.isNotBlank()) {
             val restored = MobileNativeAgent(
                 this,
-                sessionStore = SharedPreferencesAgentSessionStore(this, "task:$cleanTurnId")
+                sessionStore = SharedPreferencesAgentSessionStore(this, "task:$cleanTurnId"),
+                nativeToolEventSink = AgentNativeToolEventSink(::recordNativeToolLifecycleEvent)
             )
             if (restored.canAcceptConnectorResponse(sourceMessageId, contactId)) {
                 activeAgentTasks[sourceMessageId] = restored
@@ -2046,7 +2050,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             )
                     }
                 } ?: GuardedModelAgentPlanner(this@MainActivity),
-                sessionStore = SharedPreferencesAgentSessionStore(this@MainActivity, "task:$turnId")
+                sessionStore = SharedPreferencesAgentSessionStore(this@MainActivity, "task:$turnId"),
+                nativeToolEventSink = AgentNativeToolEventSink(::recordNativeToolLifecycleEvent)
             )
             provisionalAgentTasks.add(runtime)
             agentRuntimeConversationIds[runtime] = conversationId
@@ -2213,7 +2218,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 if (action.kind == AgentActionKind.CALL_NATIVE_TOOL) {
                     val notifications = AgentActionNotificationCenter(this@MainActivity)
                     notifications.showRunning(action)
-                    mobileNativeAgent.executeDirectAction(action).also { result ->
+                    mobileNativeAgent.executeDirectAction(action, conversationId, turnId).also { result ->
                         notifications.showResult(action, result)
                     }
                 } else {
@@ -2313,7 +2318,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         thread(name = "signalasi-agent-skill") {
             val result = runCatching {
-                AgentSkillExecutionEngine(agentSkillRuntime, mobileNativeAgent).execute(match)
+                AgentSkillExecutionEngine(agentSkillRuntime, mobileNativeAgent).execute(match, conversationId, turnId)
             }.getOrElse { error ->
                 AgentSkillExecutionResult(false, match.installation.id, match.installation.version, error.message ?: "Skill failed")
             }
@@ -2353,27 +2358,19 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun recordDirectAgentRun(turnId: String, action: AgentAction, result: AgentActionResult) {
         val runId = agentRunIdsByTurn.remove(turnId) ?: return
-        val run = agentRunRecorder.run(runId) ?: return
+        agentRunRecorder.run(runId) ?: return
         val toolName = action.parameters["tool_id"].orEmpty().ifBlank { "android.${action.kind.name.lowercase()}" }
+        val nativeResultJson = result.metadata["native_tool_output"].orEmpty()
+        val invocationId = result.metadata["invocation_id"].orEmpty().ifBlank { action.id }
         val call = AgentToolCallRecord(
-            id = action.id,
+            id = invocationId,
             toolName = toolName,
             status = if (result.success) AgentToolCallStatus.SUCCEEDED else AgentToolCallStatus.FAILED,
             argumentsJson = action.parameters["input_json"].orEmpty().ifBlank { JSONObject(action.parameters).toString() },
-            resultJson = JSONObject(result.metadata).put("message", result.message).toString(),
+            resultJson = nativeResultJson.ifBlank { JSONObject(result.metadata).put("message", result.message).toString() },
             errorMessage = if (result.success) "" else result.message,
-            startedAtMillis = System.currentTimeMillis(),
-            completedAtMillis = System.currentTimeMillis()
-        )
-        appendRunControlEvent(
-            run = run,
-            messageId = turnId,
-            taskId = turnId,
-            agentId = "signalasi-mobile",
-            type = AgentRunControlEventType.TOOL_COMPLETED,
-            payload = mapOf("tool_id" to toolName, "success" to result.success),
-            stepId = action.id,
-            toolCallId = call.id
+            startedAtMillis = result.metadata["started_at_millis"]?.toLongOrNull() ?: System.currentTimeMillis(),
+            completedAtMillis = result.metadata["completed_at_millis"]?.toLongOrNull() ?: System.currentTimeMillis()
         )
         agentRunRecorder.complete(
             runId = runId,
@@ -2382,14 +2379,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             sourcesJson = "[]",
             finalOutputJson = JSONObject().put("text", result.message).toString(),
             renderSpecJson = "{}",
-            artifacts = emptyList(),
+            artifacts = runtimeArtifactsFromResult(nativeResultJson),
             success = result.success
         )?.let(::observeCompletedAgentRun)
     }
 
     private fun recordSkillAgentRun(turnId: String, result: AgentSkillExecutionResult) {
         val runId = agentRunIdsByTurn.remove(turnId) ?: return
-        val run = agentRunRecorder.run(runId) ?: return
+        agentRunRecorder.run(runId) ?: return
         val toolIds = agentSkillRuntime.get(result.skillId, result.version)?.manifest?.steps.orEmpty().map { it.toolId }
         val calls = result.toolResults.mapIndexed { index, toolResult ->
             AgentToolCallRecord(
@@ -2397,24 +2394,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 toolName = toolIds.getOrElse(index) { "unknown" },
                 status = if (toolResult.isSuccess) AgentToolCallStatus.SUCCEEDED else AgentToolCallStatus.FAILED,
                 resultJson = AgentNativeJsonCodec.stringify(toolResult.output),
-                errorMessage = if (toolResult.isSuccess) "" else toolResult.message
-            )
-        }
-        calls.forEachIndexed { index, call ->
-            appendRunControlEvent(
-                run = run,
-                messageId = turnId,
-                taskId = turnId,
-                agentId = "signalasi-mobile",
-                type = AgentRunControlEventType.TOOL_COMPLETED,
-                payload = mapOf("tool_id" to call.toolName, "success" to (call.status == AgentToolCallStatus.SUCCEEDED)),
-                stepId = "skill-step-${index + 1}",
-                toolCallId = call.id
+                errorMessage = if (toolResult.isSuccess) "" else toolResult.message,
+                startedAtMillis = toolResult.receipt.startedAtEpochMillis,
+                completedAtMillis = toolResult.receipt.finishedAtEpochMillis
             )
         }
         agentRunRecorder.complete(
             runId, "[]", calls, "[]",
-            JSONObject().put("text", result.message).toString(), "{}", emptyList(), result.success
+            JSONObject().put("text", result.message).toString(),
+            "{}",
+            result.toolResults.flatMap { runtimeArtifactsFromResult(AgentNativeJsonCodec.stringify(it.output)) }
+                .distinctBy { it.id },
+            result.success
         )?.let(::observeCompletedAgentRun)
     }
 
@@ -2430,14 +2421,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             val isLast = result?.actionId == action.id
             val succeeded = action.status == AgentActionStatus.COMPLETED || (isLast && result?.success == true)
             AgentToolCallRecord(
-                id = action.id,
+                id = if (isLast) result?.metadata?.get("invocation_id").orEmpty().ifBlank { action.id } else action.id,
                 toolName = action.parameters["tool_id"].orEmpty(),
                 status = if (succeeded) AgentToolCallStatus.SUCCEEDED else AgentToolCallStatus.FAILED,
                 argumentsJson = action.parameters["input_json"].orEmpty().ifBlank { "{}" },
                 resultJson = if (isLast) result?.metadata?.get("native_tool_output").orEmpty().ifBlank {
                     JSONObject().put("message", action.result).toString()
                 } else JSONObject().put("message", action.result).toString(),
-                errorMessage = if (succeeded) "" else action.result
+                errorMessage = if (succeeded) "" else action.result,
+                startedAtMillis = if (isLast) result?.metadata?.get("started_at_millis")?.toLongOrNull() ?: 0L else 0L,
+                completedAtMillis = if (isLast) result?.metadata?.get("completed_at_millis")?.toLongOrNull() ?: 0L else 0L
             )
         }
         val routeTarget = state.plan?.route?.targetId.orEmpty()
@@ -2457,18 +2450,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 )
             )
         }
-        calls.forEachIndexed { index, call ->
-            appendRunControlEvent(
-                run = run,
-                messageId = turnId,
-                taskId = turnId,
-                agentId = routeTarget.ifBlank { "signalasi-mobile" },
-                type = AgentRunControlEventType.TOOL_COMPLETED,
-                payload = mapOf("tool_id" to call.toolName, "success" to (call.status == AgentToolCallStatus.SUCCEEDED)),
-                stepId = nativeActions.getOrNull(index)?.id.orEmpty(),
-                toolCallId = call.id
-            )
-        }
         val planJson = JSONArray().apply {
             state.plan?.actions.orEmpty().forEach { item ->
                 put(JSONObject().put("id", item.id).put("kind", item.kind.name).put("target", item.target))
@@ -2481,7 +2462,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             sourcesJson = "[]",
             finalOutputJson = JSONObject().put("text", result?.message.orEmpty()).toString(),
             renderSpecJson = "{}",
-            artifacts = emptyList(),
+            artifacts = runtimeArtifactsFromResult(result?.metadata?.get("native_tool_output").orEmpty()),
             success = state.phase == AgentPhase.COMPLETED,
             finalStatus = when (state.phase) {
                 AgentPhase.COMPLETED -> AgentRecordedRunStatus.COMPLETED
@@ -2512,6 +2493,65 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             memoryCaptureEnabled = mobileNativeAgent.safetySettings().memoryCapture
         )
     }
+
+    private fun recordNativeToolLifecycleEvent(event: AgentNativeToolLifecycleEvent) {
+        val runId = agentRunIdsByTurn[event.turnId] ?: return
+        val run = agentRunRecorder.run(runId) ?: return
+        val type = when (event.stage) {
+            AgentNativeToolLifecycleStage.STARTED -> AgentRunControlEventType.TOOL_STARTED
+            AgentNativeToolLifecycleStage.PROGRESS -> AgentRunControlEventType.TOOL_PROGRESS
+            AgentNativeToolLifecycleStage.FINISHED -> AgentRunControlEventType.TOOL_COMPLETED
+        }
+        appendRunControlEvent(
+            run = run,
+            messageId = event.turnId.ifBlank { event.invocationId },
+            taskId = event.turnId.ifBlank { run.taskThreadId },
+            agentId = "signalasi-mobile",
+            type = type,
+            payload = buildMap {
+                put("tool_id", event.toolId)
+                event.status?.let { put("status", it.wireValue) }
+                if (event.progressStage.isNotBlank()) put("progress_stage", event.progressStage)
+                if (event.message.isNotBlank()) put("message", event.message)
+                event.percent?.let { put("percent", it) }
+                if (event.sequence > 0L) put("progress_sequence", event.sequence)
+                put("timestamp_millis", event.timestampMillis)
+            },
+            stepId = event.stepId,
+            toolCallId = event.invocationId
+        )
+    }
+
+    private fun runtimeArtifactsFromResult(resultJson: String): List<AgentArtifactReference> = runCatching {
+        if (resultJson.isBlank()) return@runCatching emptyList()
+        val root = JSONObject(resultJson)
+        val receiptId = root.optJSONObject("execution_receipt")?.optString("request_id").orEmpty()
+        val artifacts = root.optJSONArray("artifacts") ?: return@runCatching emptyList()
+        buildList {
+            for (index in 0 until artifacts.length()) {
+                val item = artifacts.optJSONObject(index) ?: continue
+                val hostPath = item.optString("host_path")
+                val relativePath = item.optString("relative_path")
+                val sha256 = item.optString("sha256")
+                if (hostPath.isBlank() || relativePath.isBlank() || sha256.isBlank()) continue
+                val metadata = JSONObject()
+                    .put("runtime_request_id", receiptId)
+                    .put("relative_path", relativePath)
+                    .put("size_bytes", item.optLong("size_bytes"))
+                    .put("sha256", sha256)
+                    .toString()
+                add(
+                    AgentArtifactReference(
+                        id = "runtime-${receiptId.ifBlank { sha256 }.take(48)}-$index",
+                        uri = File(hostPath).toURI().toString(),
+                        name = File(relativePath).name,
+                        metadataJson = metadata,
+                        createdAtMillis = System.currentTimeMillis()
+                    )
+                )
+            }
+        }
+    }.getOrDefault(emptyList())
 
     private fun appendRunControlEvent(
         run: AgentRecordedRun,

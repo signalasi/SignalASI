@@ -28,6 +28,39 @@ data class AgentRuntimeExecutionReceipt(
     val completedAtMillis: Long = 0L
 )
 
+fun AgentRuntimeExecutionReceipt.toEvidenceMap(): AgentNativeJsonObject = linkedMapOf(
+    "request_id" to requestId,
+    "workspace_id" to workspaceId,
+    "language" to language.wireValue,
+    "source_sha256" to sourceSha256,
+    "pack_versions" to packVersions.toSortedMap(),
+    "network_enabled" to networkEnabled,
+    "allowed_network_domains" to allowedNetworkDomains.sorted(),
+    "limits" to linkedMapOf(
+        "wall_clock_ms" to limits.wallClockMillis,
+        "cpu_ms" to limits.cpuMillis,
+        "memory_bytes" to limits.memoryBytes,
+        "disk_bytes" to limits.diskBytes,
+        "max_processes" to limits.maxProcesses,
+        "max_output_bytes" to limits.maxOutputBytes,
+        "max_artifact_bytes" to limits.maxArtifactBytes
+    ),
+    "status" to status.name.lowercase(Locale.ROOT),
+    "exit_code" to exitCode,
+    "stdout_sha256" to stdoutSha256,
+    "stderr_sha256" to stderrSha256,
+    "artifacts" to artifacts.map { artifact ->
+        linkedMapOf(
+            "relative_path" to artifact["relative_path"],
+            "size_bytes" to artifact["size_bytes"],
+            "sha256" to artifact["sha256"]
+        )
+    },
+    "error" to error,
+    "created_at_millis" to createdAtMillis,
+    "completed_at_millis" to completedAtMillis
+)
+
 class AgentRuntimeExecutionReceiptStore(context: Context) {
     private val database = AgentEncryptedDatabase(
         context.applicationContext,
