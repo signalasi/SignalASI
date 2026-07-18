@@ -21,6 +21,13 @@ jobs:
       - run: cc -fsyntax-only -Wall -Wextra -Werror apps/android/runtime/buildroot-external/package/signalasi-runtime-launcher/src/signalasi-runtime-launcher.c
       - run: |
           bash -n tools/runtime/build-linux-base.sh
+          bash -n tools/runtime/build-python-uv-image.sh
+          bash -n tools/runtime/build-node-js-image.sh
+          bash -n tools/runtime/build-go-image.sh
+          bash -n tools/runtime/build-rust-image.sh
+          bash -n tools/runtime/build-cpp-image.sh
+          bash -n tools/runtime/build-java-image.sh
+          bash -n tools/runtime/build-ffmpeg-image.sh
           bash -n apps/android/runtime/buildroot-external/board/signalasi/aarch64/post-build.sh
           bash -n apps/android/runtime/buildroot-external/board/signalasi/aarch64/rootfs-overlay/etc/init.d/S99signalasi
 

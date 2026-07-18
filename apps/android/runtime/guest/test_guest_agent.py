@@ -84,6 +84,52 @@ class GuestProtocolTest(unittest.TestCase):
             plan[plan.index("--") + 1 :],
         )
 
+    def test_command_plan_resolves_executables_from_mounted_pack_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pack_root = Path(directory) / "python-uv"
+            pack_bin = pack_root / "bin"
+            pack_bin.mkdir(parents=True)
+            uv = pack_bin / "uv"
+            uv.touch(mode=0o755)
+            uv.chmod(0o755)
+            with mock.patch.object(guest, "PACK_ROOT", Path(directory)):
+                environment = guest.runtime_environment()
+                plan = guest.command_plan("uv", Path("/work"), [], environment["PATH"])
+
+        self.assertEqual(str(uv), plan[0][0])
+        self.assertEqual(["run", "--offline", str(Path("/work") / "main.py")], plan[0][1:])
+
+    def test_command_plan_exposes_ffprobe_as_a_separate_read_only_operation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pack_bin = Path(directory) / "ffmpeg" / "bin"
+            pack_bin.mkdir(parents=True)
+            ffprobe = pack_bin / "ffprobe"
+            ffprobe.touch(mode=0o755)
+            ffprobe.chmod(0o755)
+            with mock.patch.object(guest, "PACK_ROOT", Path(directory)):
+                environment = guest.runtime_environment()
+                plan = guest.command_plan(
+                    "ffprobe",
+                    Path("/work"),
+                    ["-show_format", "input.mp4"],
+                    environment["PATH"],
+                )
+
+        self.assertEqual(
+            [[str(ffprobe), "-show_format", "input.mp4"]],
+            plan,
+        )
+
+    def test_runtime_environment_keeps_mutable_language_caches_in_workspace(self):
+        environment = guest.runtime_environment()
+        self.assertEqual("true", environment["CARGO_NET_OFFLINE"])
+        self.assertEqual(str(guest.ISOLATED_WORKSPACE_ROOT / ".cargo"), environment["CARGO_HOME"])
+        self.assertEqual(
+            str(guest.ISOLATED_WORKSPACE_ROOT / ".zig-global-cache"),
+            environment["ZIG_GLOBAL_CACHE_DIR"],
+        )
+        self.assertEqual(str(guest.PACK_ROOT / "java"), environment["JAVA_HOME"])
+
     def test_runtime_readiness_requires_launcher_and_workspace_identity(self):
         with mock.patch.object(guest, "LAUNCHER_PATH", Path(sys.executable)):
             self.assertEqual(
@@ -133,6 +179,30 @@ class GuestProtocolTest(unittest.TestCase):
                     class_root=class_root,
                     device_root=device_root,
                 )
+
+    def test_mounted_pack_requires_matching_descriptor_capabilities_and_entrypoints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            (target / "bin").mkdir()
+            for executable_name in ("python3", "uv"):
+                executable_path = target / "bin" / executable_name
+                executable_path.touch()
+                executable_path.chmod(0o755)
+            descriptor = {
+                "format_version": 1,
+                "id": "python-uv",
+                "version": "1.2.3",
+                "capabilities": ["python.execute", "uv.sync"],
+            }
+            (target / guest.PACK_DESCRIPTOR_NAME).write_text(
+                guest.canonical_json(descriptor), encoding="utf-8"
+            )
+
+            guest.validate_mounted_pack(target, descriptor)
+
+            descriptor["capabilities"] = ["python.execute"]
+            with self.assertRaises(ValueError):
+                guest.validate_mounted_pack(target, descriptor)
 
     def test_resource_limits_reject_invalid_disk_and_artifact_bounds(self):
         with self.assertRaises(ValueError):

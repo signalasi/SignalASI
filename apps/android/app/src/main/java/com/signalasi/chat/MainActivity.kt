@@ -5116,6 +5116,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         AgentRuntimeLanguage.CPP -> "C++"
         AgentRuntimeLanguage.JAVA -> "Java"
         AgentRuntimeLanguage.FFMPEG -> "FFmpeg"
+        AgentRuntimeLanguage.FFPROBE -> "ffprobe"
     }
 
     private fun runtimeReceiptStatus(status: AgentRuntimeReceiptStatus): String = getString(

@@ -120,3 +120,32 @@ test('pack and catalog builders produce mutually verified release artifacts', {
     rmSync(temporary, { recursive: true, force: true });
   }
 });
+
+test('pack builder rejects a signed metadata plan with missing runtime capabilities', () => {
+  const temporary = mkdtempSync(join(tmpdir(), 'signalasi-runtime-capability-test-'));
+  try {
+    writeFileSync(join(temporary, 'ffmpeg.img'), Buffer.alloc(32));
+    const config = join(temporary, 'ffmpeg.json');
+    writeFileSync(config, JSON.stringify({
+      id: 'ffmpeg',
+      version: '1.0.0',
+      architecture: 'arm64-v8a',
+      image: './ffmpeg.img',
+      capabilities: [],
+      dependencies: ['linux-base'],
+      license: 'GPL-2.0-or-later',
+    }));
+    const result = spawnSync(process.execPath, [
+      join(root, 'tools/runtime/build-runtime-pack.mjs'),
+      '--config', config,
+      '--output', join(temporary, 'ffmpeg.sarpack'),
+      '--certificate', join(temporary, 'unused-cert.pem'),
+      '--key', join(temporary, 'unused-key.pem'),
+    ], { cwd: root, encoding: 'utf8' });
+
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stderr}${result.stdout}`, /capabilities are incomplete/);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});

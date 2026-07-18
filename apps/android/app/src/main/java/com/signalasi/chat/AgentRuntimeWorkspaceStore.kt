@@ -342,6 +342,7 @@ class AgentRuntimeWorkspaceManager(context: Context) {
         AgentRuntimeLanguage.CPP -> "main.cpp"
         AgentRuntimeLanguage.JAVA -> "Main.java"
         AgentRuntimeLanguage.FFMPEG -> "main.ffmpeg.json"
+        AgentRuntimeLanguage.FFPROBE -> "main.ffprobe.json"
     }
 
     companion object {

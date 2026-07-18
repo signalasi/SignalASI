@@ -27,18 +27,23 @@ enum class AgentRuntimePackState(val wireValue: String) {
     INCOMPATIBLE("incompatible")
 }
 
-enum class AgentRuntimeLanguage(val wireValue: String, val requiredPack: String) {
-    SHELL("shell", "linux-base"),
-    PYTHON("python", "python-uv"),
-    UV("uv", "python-uv"),
-    JAVASCRIPT("javascript", "node-js"),
-    TYPESCRIPT("typescript", "node-js"),
-    GO("go", "go"),
-    RUST("rust", "rust"),
-    C("c", "cpp"),
-    CPP("cpp", "cpp"),
-    JAVA("java", "java"),
-    FFMPEG("ffmpeg", "ffmpeg")
+enum class AgentRuntimeLanguage(
+    val wireValue: String,
+    val requiredPack: String,
+    val requiredCapability: String
+) {
+    SHELL("shell", "linux-base", "shell.execute"),
+    PYTHON("python", "python-uv", "python.execute"),
+    UV("uv", "python-uv", "uv.sync"),
+    JAVASCRIPT("javascript", "node-js", "javascript.execute"),
+    TYPESCRIPT("typescript", "node-js", "typescript.execute"),
+    GO("go", "go", "go.execute"),
+    RUST("rust", "rust", "rust.execute"),
+    C("c", "cpp", "c.execute"),
+    CPP("cpp", "cpp", "cpp.execute"),
+    JAVA("java", "java", "java.execute"),
+    FFMPEG("ffmpeg", "ffmpeg", "ffmpeg.execute"),
+    FFPROBE("ffprobe", "ffmpeg", "ffprobe.inspect")
 }
 
 data class AgentRuntimePackManifest(
@@ -191,8 +196,10 @@ data class AgentOnDeviceRuntimeStatus(
     val lifecycleFailures: Int = 0,
     val lifecycleNextAttemptAtMillis: Long = 0L
 ) {
-    fun languageReady(language: AgentRuntimeLanguage): Boolean = backendReady && packs.any {
-        it.id == language.requiredPack && it.state == AgentRuntimePackState.READY
+    fun languageReady(language: AgentRuntimeLanguage): Boolean = backendReady && packs.any { pack ->
+        pack.id == language.requiredPack &&
+            pack.state == AgentRuntimePackState.READY &&
+            language.requiredCapability in pack.manifest?.capabilities.orEmpty()
     }
 }
 
@@ -412,6 +419,7 @@ class AgentOnDeviceRuntimeManager(
                 AgentRuntimePackAttachment(
                     packId = manifest.id,
                     version = manifest.version,
+                    capabilities = manifest.capabilities.toSet(),
                     imageFile = image
                 )
             }
@@ -465,6 +473,15 @@ class AgentOnDeviceRuntimeManager(
             manifest.dependencies.any { it !in REQUIRED_PACKS || it == manifest.id }
         ) {
             return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INVALID, "Runtime pack metadata is incomplete", manifest)
+        }
+        val missingCapabilities = REQUIRED_PACK_CAPABILITIES[manifest.id].orEmpty() - manifest.capabilities.toSet()
+        if (missingCapabilities.isNotEmpty()) {
+            return AgentRuntimePackStatus(
+                manifest.id,
+                AgentRuntimePackState.INVALID,
+                "Runtime pack capabilities are incomplete: ${missingCapabilities.sorted().joinToString()}",
+                manifest
+            )
         }
         if (manifest.signature.isBlank() || !SHA256_PATTERN.matches(manifest.signatureKeyId)) {
             return AgentRuntimePackStatus(manifest.id, AgentRuntimePackState.INVALID, "Runtime pack signature is missing", manifest)
@@ -592,6 +609,11 @@ class AgentOnDeviceRuntimeManager(
 
     companion object {
         val REQUIRED_PACKS = listOf("linux-base", "python-uv", "node-js", "go", "rust", "cpp", "java", "ffmpeg")
+        val REQUIRED_PACK_CAPABILITIES: Map<String, Set<String>> = AgentRuntimeLanguage.entries
+            .groupBy(AgentRuntimeLanguage::requiredPack)
+            .mapValues { (_, languages) ->
+                languages.mapTo(linkedSetOf(), AgentRuntimeLanguage::requiredCapability)
+            }
         private const val RUNTIME_DIRECTORY = "agent-runtime"
         private const val PACKS_DIRECTORY = "packs"
         private const val MANIFEST_FILE = "manifest.json"
@@ -790,6 +812,7 @@ object AgentOnDeviceRuntimeTools {
             mapOf(
                 "id" to language.wireValue,
                 "required_pack" to language.requiredPack,
+                "required_capability" to language.requiredCapability,
                 "ready" to status.languageReady(language)
             )
         }

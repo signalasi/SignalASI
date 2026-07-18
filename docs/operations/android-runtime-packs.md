@@ -71,6 +71,81 @@ release pipeline must boot the resulting image with the exact Android QEMU engin
 authenticated health handshake, execute concurrency/cancellation/quota tests, generate an SBOM,
 and only then sign and publish the pack.
 
+### Build a toolchain image
+
+For a language, compiler, or FFmpeg pack, first prepare its fixed-ABI source root and build a
+reproducible SquashFS image on Linux. For example:
+
+```bash
+npm run runtime:build-image -- \
+  --pack-id ffmpeg \
+  --version 8.0.1 \
+  --source build/runtime/ffmpeg-root \
+  --output release/ffmpeg.img \
+  --license GPL-2.0-or-later
+```
+
+The builder validates required executable entrypoints, filesystem safety, bounded source size, and
+required capabilities. It normalizes timestamps, writes `signalasi-pack.json`, and emits
+`ffmpeg.img.config.json` for the signing step. It deliberately does not download an unpinned
+toolchain or accept arbitrary executable layouts.
+
+The first pinned toolchain recipe builds the Python/uv pack from Astral's official ARM64 musl
+release. It verifies the release archive and both upstream license files before packaging:
+
+```bash
+npm run runtime:build-python-uv -- release/python-uv-0.11.29-arm64-v8a.img
+```
+
+The Guest uses the Python interpreter from the matching `linux-base`, disables uv self-modification
+and Python downloads, and runs uv offline unless a future host-mediated package-fetch tool places
+verified wheels into the task workspace.
+
+The Node.js pack uses the official Node.js 24 LTS ARM64 release on the glibc-based Guest. Its `tsx`
+entrypoint delegates to Node's built-in stable TypeScript type stripping, so the base pack does not
+silently install mutable npm dependencies:
+
+```bash
+npm run runtime:build-node-js -- release/node-js-24.18.0-arm64-v8a.img
+```
+
+The Go pack preserves the official relocatable toolchain tree, including its standard library,
+compiler, linker, and BSD license. It therefore resolves `GOROOT` from the mounted pack without
+depending on a compiler in `linux-base`:
+
+```bash
+npm run runtime:build-go -- release/go-1.26.5-arm64-v8a.img
+```
+
+The Rust pack uses the official offline standalone installer and excludes only the documentation.
+It declares the `cpp` pack as a dependency because native Rust executables require a linker:
+
+```bash
+npm run runtime:build-rust -- release/rust-1.97.1-arm64-v8a.img
+```
+
+The C/C++ pack uses the official Zig ARM64 distribution as a self-contained Clang/LLD toolchain
+and exposes conventional `cc` and `c++` drivers. Compiler caches remain in the isolated task
+workspace:
+
+```bash
+npm run runtime:build-cpp -- release/cpp-zig-0.16.0-arm64-v8a.img
+```
+
+The Java pack uses the Eclipse Temurin 25 LTS ARM64 JDK, including both `java` and `javac`:
+
+```bash
+npm run runtime:build-java -- release/java-25.0.3_9-arm64-v8a.img
+```
+
+The FFmpeg recipe cross-compiles an offline, static ARM64 `ffmpeg` and `ffprobe` pair. Network
+protocols and unpinned external codec libraries are disabled; media must enter the workspace
+through a host-mediated SignalASI tool:
+
+```bash
+npm run runtime:build-ffmpeg -- release/ffmpeg-8.1.2-arm64-v8a.img
+```
+
 ### Sign the image
 
 The builder requires JDK 17 `jar`, the signing certificate, and its matching unencrypted or
@@ -78,8 +153,8 @@ passphrase-supported PEM private key:
 
 ```bash
 npm run runtime:build-pack -- \
-  --config release/linux-base.json \
-  --output release/linux-base-1.0.0-arm64-v8a.sarpack \
+  --config release/ffmpeg.img.config.json \
+  --output release/ffmpeg-8.0.1-arm64-v8a.sarpack \
   --certificate /secure/runtime-signing-cert.pem \
   --key /secure/runtime-signing-key.pem
 ```

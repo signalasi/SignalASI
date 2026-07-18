@@ -171,6 +171,7 @@ class AgentRuntimeEngineLaunchSpec internal constructor(
 data class AgentRuntimePackAttachment(
     val packId: String,
     val version: String,
+    val capabilities: Set<String> = emptySet(),
     val imageFile: File
 )
 

@@ -18,8 +18,18 @@ class AgentQemuRuntimeEngineTest {
             workspacesDirectory = File(root, "workspaces"),
             architecture = "arm64-v8a",
             packAttachments = listOf(
-                AgentRuntimePackAttachment("python-uv", "1.0.0", File(root, "python.img")),
-                AgentRuntimePackAttachment("ffmpeg", "1.0.0", File(root, "ffmpeg.img"))
+                AgentRuntimePackAttachment(
+                    "python-uv",
+                    "1.0.0",
+                    setOf("python.execute", "uv.sync"),
+                    File(root, "python.img")
+                ),
+                AgentRuntimePackAttachment(
+                    "ffmpeg",
+                    "1.0.0",
+                    setOf("ffmpeg.execute", "ffprobe.inspect"),
+                    File(root, "ffmpeg.img")
+                )
             ),
             sessionKey = ByteArray(32) { 0x5a }
         )

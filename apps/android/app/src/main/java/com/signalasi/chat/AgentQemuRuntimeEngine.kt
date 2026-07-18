@@ -222,6 +222,7 @@ class AgentQemuRuntimeEngineController(
                 put(JSONObject()
                     .put("id", pack.packId)
                     .put("version", pack.version)
+                    .put("capabilities", JSONArray(pack.capabilities.sorted()))
                     .put("serial", AgentQemuLaunchPlanBuilder.packSerial(pack.packId))
                     .put("read_only", true)
                     .put("device_index", index))

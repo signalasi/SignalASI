@@ -9,6 +9,7 @@ import {
   MAX_ARCHIVE_BYTES,
   MAX_INSTALLED_BYTES,
   PACK_IDS,
+  PACK_REQUIRED_CAPABILITIES,
   VERSION_PATTERN,
   manifestSigningPayload,
   requireInteger,
@@ -53,6 +54,11 @@ const capabilities = Array.isArray(config.capabilities) ? [...new Set(config.cap
 const dependencies = Array.isArray(config.dependencies) ? [...new Set(config.dependencies)] : [];
 if (capabilities.some((value) => typeof value !== 'string' || !CAPABILITY_PATTERN.test(value))) {
   throw new Error('capabilities are invalid');
+}
+const missingCapabilities = (PACK_REQUIRED_CAPABILITIES.get(packId) || [])
+  .filter((value) => !capabilities.includes(value));
+if (missingCapabilities.length > 0) {
+  throw new Error(`capabilities are incomplete: ${missingCapabilities.sort().join(', ')}`);
 }
 if (dependencies.some((value) => !PACK_IDS.has(value) || value === packId)) {
   throw new Error('dependencies are invalid');

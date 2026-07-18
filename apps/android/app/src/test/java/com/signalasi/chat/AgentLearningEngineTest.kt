@@ -87,7 +87,11 @@ class AgentLearningEngineTest {
     fun runtimeStatusRequiresBackendAndMatchingPack() {
         val readyPack = AgentRuntimePackStatus(
             id = "python-uv",
-            state = AgentRuntimePackState.READY
+            state = AgentRuntimePackState.READY,
+            manifest = runtimeManifest(
+                capabilities = listOf("python.execute", "uv.sync"),
+                dependencies = listOf("linux-base")
+            )
         )
         val status = AgentOnDeviceRuntimeStatus(
             backend = AgentOnDeviceRuntimeBackend.QEMU_TCG,
@@ -100,7 +104,33 @@ class AgentLearningEngineTest {
         )
 
         assertTrue(status.languageReady(AgentRuntimeLanguage.PYTHON))
+        assertTrue(status.languageReady(AgentRuntimeLanguage.UV))
         assertFalse(status.languageReady(AgentRuntimeLanguage.RUST))
+    }
+
+    @Test
+    fun runtimeStatusRejectsPackWithoutTheRequestedCapability() {
+        val status = AgentOnDeviceRuntimeStatus(
+            backend = AgentOnDeviceRuntimeBackend.QEMU_TCG,
+            backendReady = true,
+            reason = "ready",
+            architecture = "arm64-v8a",
+            enginePath = "/native/libsignalasi_qemu.so",
+            avfAdvertised = false,
+            packs = listOf(
+                AgentRuntimePackStatus(
+                    id = "python-uv",
+                    state = AgentRuntimePackState.READY,
+                    manifest = runtimeManifest(
+                        capabilities = listOf("python.execute"),
+                        dependencies = listOf("linux-base")
+                    )
+                )
+            )
+        )
+
+        assertTrue(status.languageReady(AgentRuntimeLanguage.PYTHON))
+        assertFalse(status.languageReady(AgentRuntimeLanguage.UV))
     }
 
     @Test

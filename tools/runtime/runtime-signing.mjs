@@ -108,6 +108,16 @@ export function requireInteger(value, name, minimum, maximum) {
 export const PACK_IDS = new Set([
   'linux-base', 'python-uv', 'node-js', 'go', 'rust', 'cpp', 'java', 'ffmpeg',
 ]);
+export const PACK_REQUIRED_CAPABILITIES = new Map([
+  ['linux-base', ['shell.execute']],
+  ['python-uv', ['python.execute', 'uv.sync']],
+  ['node-js', ['javascript.execute', 'typescript.execute']],
+  ['go', ['go.execute']],
+  ['rust', ['rust.execute']],
+  ['cpp', ['c.execute', 'cpp.execute']],
+  ['java', ['java.execute']],
+  ['ffmpeg', ['ffmpeg.execute', 'ffprobe.inspect']],
+]);
 export const VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?$/;
 export const ARCHITECTURE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export const CAPABILITY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;

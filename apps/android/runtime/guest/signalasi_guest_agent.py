@@ -33,10 +33,29 @@ CONFIG_PATH = Path("/sys/firmware/qemu_fw_cfg/by_name/opt/com.signalasi/runtime-
 WORKSPACE_ROOT = Path("/workspace")
 ISOLATED_WORKSPACE_ROOT = Path("/work")
 PACK_ROOT = Path("/opt/signalasi/packs")
+PACK_DESCRIPTOR_NAME = "signalasi-pack.json"
 LAUNCHER_PATH = Path("/usr/libexec/signalasi-runtime-launcher")
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_SEQUENCE_WINDOWS = 8192
 MAX_CONCURRENT_EXECUTIONS = 16
+PACK_ENTRYPOINTS = {
+    "python-uv": ("bin/python3", "bin/uv"),
+    "node-js": ("bin/node", "bin/tsx"),
+    "go": ("bin/go",),
+    "rust": ("bin/rustc",),
+    "cpp": ("bin/cc", "bin/c++"),
+    "java": ("bin/java", "bin/javac"),
+    "ffmpeg": ("bin/ffmpeg", "bin/ffprobe"),
+}
+PACK_REQUIRED_CAPABILITIES = {
+    "python-uv": {"python.execute", "uv.sync"},
+    "node-js": {"javascript.execute", "typescript.execute"},
+    "go": {"go.execute"},
+    "rust": {"rust.execute"},
+    "cpp": {"c.execute", "cpp.execute"},
+    "java": {"java.execute"},
+    "ffmpeg": {"ffmpeg.execute", "ffprobe.inspect"},
+}
 
 
 def canonical_json(value: Any) -> str:
@@ -192,45 +211,61 @@ def resolve_workspace(raw_path: str) -> Path:
     return resolved
 
 
-def executable(name: str) -> str:
-    for directory in os.environ.get("PATH", "").split(os.pathsep):
+def executable(name: str, search_path: str | None = None) -> str:
+    for directory in (search_path if search_path is not None else os.environ.get("PATH", "")).split(os.pathsep):
+        if not directory:
+            continue
         candidate = Path(directory) / name
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     raise FileNotFoundError(f"Runtime executable is unavailable: {name}")
 
 
-def command_plan(language: str, workspace: Path, arguments: list[str]) -> list[list[str]]:
+def command_plan(
+    language: str,
+    workspace: Path,
+    arguments: list[str],
+    search_path: str | None = None,
+) -> list[list[str]]:
     if any("\x00" in item or len(item.encode("utf-8")) > 8192 for item in arguments):
         raise ValueError("Runtime argument is invalid")
-    plans: dict[str, list[list[str]]] = {
-        "shell": [[executable("sh"), str(workspace / "main.sh"), *arguments]],
-        "python": [[executable("python3"), str(workspace / "main.py"), *arguments]],
-        "uv": [[executable("uv"), "run", "--offline", str(workspace / "main.py"), *arguments]],
-        "javascript": [[executable("node"), str(workspace / "main.js"), *arguments]],
-        "typescript": [[executable("tsx"), str(workspace / "main.ts"), *arguments]],
-        "go": [[executable("go"), "run", str(workspace / "main.go"), *arguments]],
-        "rust": [
-            [executable("rustc"), str(workspace / "main.rs"), "-o", str(workspace / ".signalasi-main")],
+    if language == "shell":
+        return [[executable("sh", search_path), str(workspace / "main.sh"), *arguments]]
+    if language == "python":
+        return [[executable("python3", search_path), str(workspace / "main.py"), *arguments]]
+    if language == "uv":
+        return [[executable("uv", search_path), "run", "--offline", str(workspace / "main.py"), *arguments]]
+    if language == "javascript":
+        return [[executable("node", search_path), str(workspace / "main.js"), *arguments]]
+    if language == "typescript":
+        return [[executable("tsx", search_path), str(workspace / "main.ts"), *arguments]]
+    if language == "go":
+        return [[executable("go", search_path), "run", str(workspace / "main.go"), *arguments]]
+    if language == "rust":
+        return [
+            [executable("rustc", search_path), str(workspace / "main.rs"), "-o", str(workspace / ".signalasi-main")],
             [str(workspace / ".signalasi-main"), *arguments],
-        ],
-        "c": [
-            [executable("cc"), str(workspace / "main.c"), "-O2", "-o", str(workspace / ".signalasi-main")],
+        ]
+    if language == "c":
+        return [
+            [executable("cc", search_path), str(workspace / "main.c"), "-O2", "-o", str(workspace / ".signalasi-main")],
             [str(workspace / ".signalasi-main"), *arguments],
-        ],
-        "cpp": [
-            [executable("c++"), str(workspace / "main.cpp"), "-O2", "-o", str(workspace / ".signalasi-main")],
+        ]
+    if language == "cpp":
+        return [
+            [executable("c++", search_path), str(workspace / "main.cpp"), "-O2", "-o", str(workspace / ".signalasi-main")],
             [str(workspace / ".signalasi-main"), *arguments],
-        ],
-        "java": [
-            [executable("javac"), str(workspace / "Main.java")],
-            [executable("java"), "-cp", str(workspace), "Main", *arguments],
-        ],
-        "ffmpeg": [[executable("ffmpeg"), "-nostdin", *arguments]],
-    }
-    if language not in plans:
-        raise ValueError("Runtime language is invalid")
-    return plans[language]
+        ]
+    if language == "java":
+        return [
+            [executable("javac", search_path), str(workspace / "Main.java")],
+            [executable("java", search_path), "-cp", str(workspace), "Main", *arguments],
+        ]
+    if language == "ffmpeg":
+        return [[executable("ffmpeg", search_path), "-nostdin", *arguments]]
+    if language == "ffprobe":
+        return [[executable("ffprobe", search_path), *arguments]]
+    raise ValueError("Runtime language is invalid")
 
 
 def positive_config_id(config: dict[str, Any], name: str) -> int:
@@ -440,7 +475,13 @@ class GuestService:
             network = payload.get("network") or {}
             if bool(network.get("enabled")):
                 raise ValueError("Guest networking must use the host-mediated network tool")
-            commands = command_plan(language, ISOLATED_WORKSPACE_ROOT, [str(value) for value in arguments])
+            environment = runtime_environment()
+            commands = command_plan(
+                language,
+                ISOLATED_WORKSPACE_ROOT,
+                [str(value) for value in arguments],
+                environment["PATH"],
+            )
             stdout_path = workspace / ".signalasi-stdout"
             stderr_path = workspace / ".signalasi-stderr"
             prepare_private_directory(workspace / ".tmp")
@@ -457,7 +498,7 @@ class GuestService:
                         stdin=subprocess.DEVNULL,
                         stdout=stdout,
                         stderr=stderr,
-                        env=runtime_environment(),
+                        env=environment,
                         start_new_session=True,
                         umask=0o077,
                     )
@@ -518,6 +559,15 @@ def runtime_environment() -> dict[str, str]:
         "LC_ALL": "C.UTF-8",
         "PYTHONNOUSERSITE": "1",
         "UV_NO_MODIFY_PATH": "1",
+        "UV_PYTHON": "/usr/bin/python3",
+        "UV_PYTHON_DOWNLOADS": "never",
+        "UV_OFFLINE": "1",
+        "UV_CACHE_DIR": str(ISOLATED_WORKSPACE_ROOT / ".uv-cache"),
+        "CARGO_HOME": str(ISOLATED_WORKSPACE_ROOT / ".cargo"),
+        "CARGO_NET_OFFLINE": "true",
+        "ZIG_GLOBAL_CACHE_DIR": str(ISOLATED_WORKSPACE_ROOT / ".zig-global-cache"),
+        "ZIG_LOCAL_CACHE_DIR": str(ISOLATED_WORKSPACE_ROOT / ".zig-local-cache"),
+        "JAVA_HOME": str(PACK_ROOT / "java"),
     }
 
 
@@ -548,9 +598,48 @@ def mount_runtime(config: dict[str, Any]) -> None:
         target = PACK_ROOT / pack_id
         target.mkdir(parents=True, exist_ok=True)
         if os.path.ismount(target):
+            validate_mounted_pack(target, pack)
             continue
         device = wait_for_block_device(serial)
         subprocess.run(["mount", "-t", "squashfs", "-o", "ro,nodev,nosuid", str(device), str(target)], check=True)
+        validate_mounted_pack(target, pack)
+
+
+def validate_mounted_pack(target: Path, pack: dict[str, Any]) -> None:
+    pack_id = str(pack.get("id", ""))
+    version = str(pack.get("version", ""))
+    capabilities_value = pack.get("capabilities") or []
+    if not isinstance(capabilities_value, list) or any(not isinstance(value, str) for value in capabilities_value):
+        raise ValueError(f"Runtime pack capabilities are invalid: {pack_id}")
+    capabilities = set(capabilities_value)
+    if len(capabilities) != len(capabilities_value):
+        raise ValueError(f"Runtime pack capabilities are duplicated: {pack_id}")
+    missing_capabilities = PACK_REQUIRED_CAPABILITIES.get(pack_id, set()) - capabilities
+    if pack_id not in PACK_ENTRYPOINTS or missing_capabilities:
+        raise ValueError(f"Runtime pack capabilities are incomplete: {pack_id}")
+
+    descriptor_path = target / PACK_DESCRIPTOR_NAME
+    if not descriptor_path.is_file() or descriptor_path.stat().st_size > 64 * 1024:
+        raise ValueError(f"Runtime pack descriptor is unavailable: {pack_id}")
+    descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+    if (
+        int(descriptor.get("format_version", 0)) != 1
+        or descriptor.get("id") != pack_id
+        or descriptor.get("version") != version
+        or set(descriptor.get("capabilities") or []) != capabilities
+    ):
+        raise ValueError(f"Runtime pack descriptor does not match its signed manifest: {pack_id}")
+
+    resolved_target = target.resolve()
+    for relative in PACK_ENTRYPOINTS[pack_id]:
+        executable_path = target / relative
+        resolved_executable = executable_path.resolve()
+        if (
+            resolved_target not in resolved_executable.parents
+            or not resolved_executable.is_file()
+            or not os.access(resolved_executable, os.X_OK)
+        ):
+            raise ValueError(f"Runtime pack entrypoint is unavailable: {pack_id}/{relative}")
 
 
 def wait_for_block_device(serial: str, timeout_seconds: float = 10.0) -> Path:

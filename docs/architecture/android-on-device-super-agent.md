@@ -181,7 +181,7 @@ digests, exit code, and verified artifact hashes. Only explicitly requested rela
 are collected. Workspaces expire after a bounded retention period and cannot escape their task
 root.
 
-The QEMU controller, guest broker, sandbox launcher, and pinned Buildroot `linux-base` source recipe
+The QEMU controller, guest broker, sandbox launcher, and pinned glibc-based Buildroot `linux-base` source recipe
 are implemented. They do not by themselves make Linux execution available in a release APK. The
 runtime remains unavailable until a trusted Android QEMU engine and a built, signed `linux-base`
 image are installed and complete the health handshake. SignalASI never reports a placeholder,
@@ -272,5 +272,6 @@ access to the user's shared storage.
 | Control Center pages for memory, learning proposals, runtime packs, and execution receipts | Host complete |
 | Mixed-script OCR and local PDF/DOCX/XLSX/PPTX/image/source ingestion | Host complete |
 | Signed Android QEMU executable and built, signed `linux-base` release image | Not shipped |
-| Python/uv, Node, Go, Rust, C/C++, Java, FFmpeg, and extended OCR runtime packs | Not shipped |
+| Reproducible Python/uv, Node/TypeScript, Go, Rust, C/C++, Java, and FFmpeg/ffprobe pack recipes | Source complete; release images not shipped |
+| Extended OCR runtime pack beyond the Android-native multi-script OCR engine | Not shipped |
 | Handwriting, equation, complex-table, and local visual-model understanding | Planned |
