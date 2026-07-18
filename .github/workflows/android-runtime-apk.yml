@@ -21,6 +21,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: android-runtime-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-runtime-apk:
     runs-on: ubuntu-latest
@@ -82,8 +86,19 @@ jobs:
           restore-keys: |
             android-qemu-${{ runner.os }}-
 
+      - name: Inspect restored Android QEMU engine
+        id: qemu-state
+        run: |
+          if [[ -f build/runtime/android-jni-libs/signalasi-qemu-bundle.json && \
+                -f build/runtime/android-jni-libs/arm64-v8a/libsignalasi_qemu.so && \
+                -f build/runtime/android-assets/runtime/qemu/bundle.json ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build Android QEMU engine
-        if: steps.qemu-cache.outputs.cache-hit != 'true'
+        if: steps.qemu-state.outputs.ready != 'true'
         run: npm run runtime:build-android-qemu
 
       - name: Normalize Android QEMU APK libraries
