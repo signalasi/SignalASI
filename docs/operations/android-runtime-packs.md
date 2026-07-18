@@ -240,8 +240,16 @@ npm run runtime:build-catalog -- \
 The catalog builder rehashes every archive rather than trusting metadata, rejects duplicate packs,
 missing dependencies, dependency cycles, invalid notes, and non-HTTPS destinations, then signs the
 canonical catalog. Upload the catalog under the exact asset name
-`android-runtime-catalog-v1.json`; the app's default catalog URL resolves that asset from the latest
-GitHub release.
+`android-runtime-catalog-v1.json`; the app resolves it from the stable `android-runtime-v1` GitHub
+release tag. English installations use the official GitHub Release URL. Simplified Chinese
+installations may try configured GitHub acceleration endpoints first, but the signed catalog,
+archive digest, and pack signature remain mandatory and the official URL remains the final fallback.
+
+The control center separates the immutable base environment from downloadable software. QEMU,
+`linux-base`, and the default Python/uv layer form the runtime foundation. Node.js, Go, Rust,
+C/C++, Java, FFmpeg, and future compatible signed packs appear in the Software Center and install
+with one tap. The Buildroot guest intentionally has no mutable `apt` or `apk` package manager;
+arbitrary software must first be built as an audited, reproducible, signed runtime pack.
 
 ## Verification gates
 

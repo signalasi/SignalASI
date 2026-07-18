@@ -7,6 +7,8 @@ on:
     paths:
       - .github/workflows/android-runtime-apk.yml
       - apps/android/app/build.gradle.kts
+      - apps/android/app/src/main/java/com/signalasi/chat/AgentRuntimePackCatalog.kt
+      - apps/android/app/src/main/res/raw/signalasi_runtime_trust_anchors.json
       - apps/android/runtime/**
       - tools/runtime/**
       - package.json
@@ -17,9 +19,14 @@ on:
         required: true
         type: boolean
         default: false
+      publish_catalog:
+        description: Publish the signed software catalog and packs to GitHub Release
+        required: true
+        type: boolean
+        default: false
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: android-runtime-apk-${{ github.ref }}
@@ -28,10 +35,11 @@ concurrency:
 jobs:
   build-runtime-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 300
     env:
       RUNTIME_SIGNING_CERTIFICATE: ${{ secrets.RUNTIME_SIGNING_CERTIFICATE }}
       RUNTIME_SIGNING_PRIVATE_KEY: ${{ secrets.RUNTIME_SIGNING_PRIVATE_KEY }}
+      RUNTIME_RELEASE_TAG: android-runtime-v1
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,13 +66,14 @@ jobs:
       - name: Prepare runtime signing identity
         env:
           REQUIRE_PRODUCTION: ${{ inputs.production }}
+          PUBLISH_CATALOG: ${{ inputs.publish_catalog }}
         run: |
           mkdir -p build/runtime/signing
           if [[ -n "$RUNTIME_SIGNING_CERTIFICATE" && -n "$RUNTIME_SIGNING_PRIVATE_KEY" ]]; then
             printf '%s\n' "$RUNTIME_SIGNING_CERTIFICATE" > build/runtime/signing/runtime-cert.pem
             printf '%s\n' "$RUNTIME_SIGNING_PRIVATE_KEY" > build/runtime/signing/runtime-key.pem
-          elif [[ "$REQUIRE_PRODUCTION" == "true" ]]; then
-            echo "Production runtime signing secrets are required." >&2
+          elif [[ "$REQUIRE_PRODUCTION" == "true" || "$PUBLISH_CATALOG" == "true" ]]; then
+            echo "Persistent runtime signing secrets are required for production or catalog publication." >&2
             exit 2
           else
             openssl req -x509 -newkey rsa:3072 -nodes -days 7 \
@@ -149,18 +158,39 @@ jobs:
           }, null, 2)}\n`);
           NODE
 
-      - name: Sign default runtime packs
+      - name: Restore optional runtime download cache
+        uses: actions/cache@v4
+        with:
+          path: build/runtime/downloads
+          key: android-runtime-inputs-v1-${{ runner.os }}-${{ hashFiles('tools/runtime/build-*-image.sh') }}
+          restore-keys: |
+            android-runtime-inputs-v1-${{ runner.os }}-
+
+      - name: Build optional software images
         run: |
-          npm run runtime:build-pack -- \
-            --config build/runtime/release/linux-base-1.0.0-arm64-v8a.img.config.json \
-            --output build/runtime/release/linux-base-1.0.0-arm64-v8a.sarpack \
-            --certificate build/runtime/signing/runtime-cert.pem \
-            --key build/runtime/signing/runtime-key.pem
-          npm run runtime:build-pack -- \
-            --config build/runtime/release/python-uv-0.11.29-arm64-v8a.img.config.json \
-            --output build/runtime/release/python-uv-0.11.29-arm64-v8a.sarpack \
-            --certificate build/runtime/signing/runtime-cert.pem \
-            --key build/runtime/signing/runtime-key.pem
+          npm run runtime:build-node-js
+          npm run runtime:build-go
+          npm run runtime:build-cpp
+          npm run runtime:build-rust
+          npm run runtime:build-java
+          npm run runtime:build-ffmpeg
+
+      - name: Sign all runtime and software packs
+        run: |
+          shopt -s nullglob
+          configs=(build/runtime/release/*.img.config.json)
+          if [[ ${#configs[@]} -ne 8 ]]; then
+            echo "Expected exactly eight runtime image configurations; found ${#configs[@]}." >&2
+            exit 2
+          fi
+          for config in "${configs[@]}"; do
+            output="${config%.img.config.json}.sarpack"
+            npm run runtime:build-pack -- \
+              --config "$config" \
+              --output "$output" \
+              --certificate build/runtime/signing/runtime-cert.pem \
+              --key build/runtime/signing/runtime-key.pem
+          done
 
       - name: Prepare APK default runtime assets
         run: |
@@ -170,6 +200,40 @@ jobs:
             --certificate build/runtime/signing/runtime-cert.pem \
             --pack build/runtime/release/linux-base-1.0.0-arm64-v8a.sarpack \
             --pack build/runtime/release/python-uv-0.11.29-arm64-v8a.sarpack
+
+      - name: Build signed software catalog
+        run: |
+          npm run runtime:build-catalog -- \
+            --entries build/runtime/release \
+            --output build/runtime/release/android-runtime-catalog-v1.json \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RUNTIME_RELEASE_TAG}/" \
+            --version 1.0.0 \
+            --expires-days 365 \
+            --certificate build/runtime/signing/runtime-cert.pem \
+            --key build/runtime/signing/runtime-key.pem \
+            --trust-anchors build/runtime/android-assets/runtime/bootstrap/trust-anchors.json
+
+      - name: Publish signed software catalog
+        if: >-
+          (github.event_name == 'workflow_dispatch' && inputs.publish_catalog) ||
+          (github.event_name == 'push' && env.RUNTIME_SIGNING_CERTIFICATE != '' && env.RUNTIME_SIGNING_PRIVATE_KEY != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RUNTIME_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RUNTIME_RELEASE_TAG" \
+              build/runtime/release/android-runtime-catalog-v1.json \
+              build/runtime/release/*.sarpack \
+              --clobber \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RUNTIME_RELEASE_TAG" \
+              build/runtime/release/android-runtime-catalog-v1.json \
+              build/runtime/release/*.sarpack \
+              --title "SignalASI Android Runtime v1" \
+              --notes "Signed Android runtime and software catalog." \
+              --repo "$GITHUB_REPOSITORY"
+          fi
 
       - name: Build bundled APK
         working-directory: apps/android
@@ -203,6 +267,8 @@ jobs:
           if-no-files-found: error
           path: |
             apps/android/app/build/outputs/apk/debug/app-debug.apk
+            build/runtime/release/android-runtime-catalog-v1.json
+            build/runtime/release/*.sarpack
             build/runtime/release/*.sarpack.metadata.json
             build/runtime/android-jni-libs/signalasi-qemu-bundle.json
             build/runtime/android-assets/runtime/bootstrap/index.json

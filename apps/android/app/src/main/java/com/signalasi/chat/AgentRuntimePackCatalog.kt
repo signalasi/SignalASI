@@ -17,6 +17,32 @@ import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
+internal object AgentRuntimeDistributionSources {
+    const val GITHUB_CATALOG_URL =
+        "https://github.com/signalasi/SignalASI/releases/download/android-runtime-v1/android-runtime-catalog-v1.json"
+
+    fun catalogCandidates(language: String): List<String> = downloadCandidates(GITHUB_CATALOG_URL, language)
+
+    fun downloadCandidates(url: String, language: String): List<String> {
+        if (language != AppLanguage.ZH_CN || !isSignalAsiGitHubReleaseUrl(url)) return listOf(url)
+        return (CHINA_ACCELERATOR_PREFIXES.map { prefix -> "$prefix$url" } + url).distinct()
+    }
+
+    private fun isSignalAsiGitHubReleaseUrl(value: String): Boolean = runCatching {
+        val uri = URI(value)
+        uri.scheme.equals("https", ignoreCase = true) &&
+            uri.host.equals("github.com", ignoreCase = true) &&
+            uri.path.startsWith(SIGNALASI_RELEASE_PATH)
+    }.getOrDefault(false)
+
+    private const val SIGNALASI_RELEASE_PATH = "/signalasi/SignalASI/releases/download/"
+    private val CHINA_ACCELERATOR_PREFIXES = listOf(
+        "https://ghfast.top/",
+        "https://ghproxy.net/",
+        "https://gh-proxy.com/"
+    )
+}
+
 data class AgentRuntimePackCatalogEntry(
     val packId: String,
     val version: String,
@@ -290,14 +316,48 @@ internal class AgentRuntimePackDownloader(
         .callTimeout(60, TimeUnit.MINUTES)
         .build(),
     private val resolver: AgentHostResolver = AgentSystemHostResolver,
-    private val allowInsecureLoopbackForTests: Boolean = false
+    private val allowInsecureLoopbackForTests: Boolean = false,
+    private val sourceCandidates: (String) -> List<String> = { listOf(it) }
 ) {
-    constructor(context: Context) : this(File(context.applicationContext.filesDir, "agent-runtime/downloads"))
+    constructor(context: Context) : this(
+        root = File(context.applicationContext.filesDir, "agent-runtime/downloads"),
+        sourceCandidates = { url ->
+            AgentRuntimeDistributionSources.downloadCandidates(
+                url,
+                AppLanguage.current(context.applicationContext)
+            )
+        }
+    )
 
     fun download(
         entry: AgentRuntimePackCatalogEntry,
         cancellationToken: AgentNativeToolCancellationToken = AgentNativeToolCancellationToken.NONE,
         onProgress: (AgentRuntimePackDownloadProgress) -> Unit = {}
+    ): AgentRuntimePackDownloadResult {
+        val candidates = sourceCandidates(entry.downloadUrl).filter(String::isNotBlank).distinct()
+        require(candidates.isNotEmpty()) { "Runtime pack has no download source" }
+        var lastError: Throwable? = null
+        candidates.forEach { sourceUrl ->
+            try {
+                return downloadFrom(entry, sourceUrl, cancellationToken, onProgress)
+            } catch (error: AgentNativeToolCancelledException) {
+                throw error
+            } catch (error: Throwable) {
+                if (cancellationToken.isCancellationRequested) throw AgentNativeToolCancelledException()
+                lastError = error
+            }
+        }
+        throw IllegalStateException(
+            lastError?.message ?: "Runtime pack is unavailable from configured sources",
+            lastError
+        )
+    }
+
+    private fun downloadFrom(
+        entry: AgentRuntimePackCatalogEntry,
+        sourceUrl: String,
+        cancellationToken: AgentNativeToolCancellationToken,
+        onProgress: (AgentRuntimePackDownloadProgress) -> Unit
     ): AgentRuntimePackDownloadResult {
         require(entry.archiveSizeBytes > 0L && entry.archiveSha256.matches(SHA256_PATTERN)) {
             "Runtime pack download metadata is invalid"
@@ -314,7 +374,7 @@ internal class AgentRuntimePackDownloader(
         }
         completed.delete()
         val saved = readResumeMetadata(metadata)
-        if (saved == null || saved.url != entry.downloadUrl ||
+        if (saved == null || saved.url != sourceUrl ||
             !saved.sha256.equals(entry.archiveSha256, ignoreCase = true) || saved.totalBytes != entry.archiveSizeBytes
         ) {
             partial.delete()
@@ -329,7 +389,7 @@ internal class AgentRuntimePackDownloader(
         while (true) {
             cancellationToken.checkpoint()
             var retryFreshRequest = false
-            val response = openResponse(entry.downloadUrl, offset, resumeEtag, cancellationToken)
+            val response = openResponse(sourceUrl, offset, resumeEtag, cancellationToken)
             response.use { active ->
                 if (active.code == 416) {
                     if (offset == entry.archiveSizeBytes && sha256(partial).equals(entry.archiveSha256, ignoreCase = true)) {
@@ -379,7 +439,7 @@ internal class AgentRuntimePackDownloader(
                     return@use
                 }
                 resumeEtag = etag
-                writeResumeMetadata(metadata, ResumeMetadata(entry.downloadUrl, entry.archiveSha256, entry.archiveSizeBytes, etag))
+                writeResumeMetadata(metadata, ResumeMetadata(sourceUrl, entry.archiveSha256, entry.archiveSizeBytes, etag))
                 val append = active.code == 206 && offset > 0L
                 val cancellationRegistration = cancellationToken.invokeOnCancellation(active::close)
                 try {
@@ -611,25 +671,44 @@ class AgentRuntimePackCatalogManager(
     private val appContext = context.applicationContext
 
     fun refresh(
-        url: String = DEFAULT_CATALOG_URL,
+        url: String? = null,
         cancellationToken: AgentNativeToolCancellationToken = AgentNativeToolCancellationToken.NONE
     ): AgentRuntimePackCatalog {
-        val resource = web.fetch(
-            url,
-            AgentRuntimePackCatalogCodec.MAX_CATALOG_BYTES.toLong(),
-            web.policy.maxTimeoutMillis,
-            cancellationToken
-        )
-        val catalog = AgentRuntimePackCatalogCodec.decode(resource.body.toString(Charsets.UTF_8))
-        AgentRuntimePackCatalogPolicy.validate(catalog, verifier)
         val previous = store.load()?.let { cached ->
             runCatching {
                 AgentRuntimePackCatalogPolicy.validate(cached, verifier, cached.generatedAtMillis)
             }.getOrNull()
         }
-        AgentRuntimePackCatalogPolicy.validateReplacement(previous, catalog)
-        store.save(catalog)
-        return catalog
+        val candidates = if (url == null) {
+            AgentRuntimeDistributionSources.catalogCandidates(AppLanguage.current(appContext))
+        } else {
+            listOf(url)
+        }
+        var lastError: Throwable? = null
+        candidates.distinct().forEach { candidate ->
+            try {
+                val resource = web.fetch(
+                    candidate,
+                    AgentRuntimePackCatalogCodec.MAX_CATALOG_BYTES.toLong(),
+                    minOf(web.policy.maxTimeoutMillis, CATALOG_SOURCE_TIMEOUT_MILLIS),
+                    cancellationToken
+                )
+                val catalog = AgentRuntimePackCatalogCodec.decode(resource.body.toString(Charsets.UTF_8))
+                AgentRuntimePackCatalogPolicy.validate(catalog, verifier)
+                AgentRuntimePackCatalogPolicy.validateReplacement(previous, catalog)
+                store.save(catalog)
+                return catalog
+            } catch (error: AgentNativeToolCancelledException) {
+                throw error
+            } catch (error: Throwable) {
+                if (cancellationToken.isCancellationRequested) throw AgentNativeToolCancelledException()
+                lastError = error
+            }
+        }
+        throw IllegalStateException(
+            lastError?.message ?: "Runtime catalog is unavailable from configured sources",
+            lastError
+        )
     }
 
     fun cachedCompatible(): List<AgentRuntimePackCatalogEntry> {
@@ -694,7 +773,7 @@ class AgentRuntimePackCatalogManager(
         .let { info -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else info.versionCode.toLong() }
 
     companion object {
-        const val DEFAULT_CATALOG_URL =
-            "https://github.com/signalasi/SignalASI/releases/latest/download/android-runtime-catalog-v1.json"
+        const val DEFAULT_CATALOG_URL = AgentRuntimeDistributionSources.GITHUB_CATALOG_URL
+        private const val CATALOG_SOURCE_TIMEOUT_MILLIS = 8_000L
     }
 }

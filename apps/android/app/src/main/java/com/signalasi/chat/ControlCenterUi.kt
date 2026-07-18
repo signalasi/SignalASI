@@ -38,6 +38,7 @@ enum class ControlCenterRoute(val wireValue: String) {
     TASKS("tasks"),
     PHONE_CAPABILITIES("phone_capabilities"),
     ON_DEVICE_RUNTIME("on_device_runtime"),
+    SOFTWARE_CENTER("software_center"),
     APP_TOOLS("app_tools"),
     SMART_SPACES("smart_spaces"),
     NODES("nodes"),

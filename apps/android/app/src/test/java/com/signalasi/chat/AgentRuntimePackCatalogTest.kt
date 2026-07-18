@@ -150,6 +150,25 @@ class AgentRuntimePackCatalogTest {
     }
 
     @Test
+    fun `distribution sources use GitHub for English and verified accelerators for Chinese`() {
+        val official = AgentRuntimeDistributionSources.GITHUB_CATALOG_URL
+
+        assertEquals(listOf(official), AgentRuntimeDistributionSources.catalogCandidates(AppLanguage.EN))
+
+        val chinese = AgentRuntimeDistributionSources.catalogCandidates(AppLanguage.ZH_CN)
+        assertEquals(4, chinese.size)
+        assertEquals(official, chinese.last())
+        assertTrue(chinese.take(3).all { it.endsWith(official) })
+        assertEquals(
+            listOf("https://downloads.example.com/tool.sarpack"),
+            AgentRuntimeDistributionSources.downloadCandidates(
+                "https://downloads.example.com/tool.sarpack",
+                AppLanguage.ZH_CN
+            )
+        )
+    }
+
+    @Test
     fun `download resumes a cancelled archive and verifies its signed digest`() {
         val payload = ByteArray(768 * 1024) { index -> (index % 251).toByte() }
         val expectedDigest = sha256(payload)
@@ -196,6 +215,31 @@ class AgentRuntimePackCatalogTest {
         assertArrayEquals(payload, result.archive.readBytes())
         assertTrue(result.archive.isFile)
         assertTrue(downloadRoot.listFiles().orEmpty().none { it.name.endsWith(".partial") })
+    }
+
+    @Test
+    fun `download falls back to the official source when an accelerator fails`() {
+        val payload = ByteArray(64 * 1024) { index -> (index % 241).toByte() }
+        val officialUrl = server.url("/official/node-js.sarpack").toString()
+        val mirrorUrl = server.url("/mirror/node-js.sarpack").toString()
+        val downloadEntry = entry("node-js", "arm64-v8a").copy(
+            downloadUrl = officialUrl,
+            archiveSha256 = sha256(payload),
+            archiveSizeBytes = payload.size.toLong()
+        )
+        val downloader = AgentRuntimePackDownloader(
+            root = downloadRoot,
+            allowInsecureLoopbackForTests = true,
+            sourceCandidates = { listOf(mirrorUrl, it) }
+        )
+        server.enqueue(MockResponse().setResponseCode(503))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(Buffer().write(payload)))
+
+        val result = downloader.download(downloadEntry)
+
+        assertEquals("/mirror/node-js.sarpack", server.takeRequest().path)
+        assertEquals("/official/node-js.sarpack", server.takeRequest().path)
+        assertArrayEquals(payload, result.archive.readBytes())
     }
 
     private fun catalog(now: Long, entries: List<AgentRuntimePackCatalogEntry>) = AgentRuntimePackCatalog(
