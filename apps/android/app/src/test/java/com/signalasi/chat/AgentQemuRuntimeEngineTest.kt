@@ -53,6 +53,8 @@ class AgentQemuRuntimeEngineTest {
         assertFalse(command.contains("5a5a5a"))
         assertTrue(command.indexOf("ffmpeg.img") < command.indexOf("python.img"))
         assertEquals("C", plan.environment["LC_ALL"])
+        assertEquals(spec.engineFile.parentFile?.absolutePath, plan.environment["LD_LIBRARY_PATH"])
+        assertFalse(plan.environment.containsKey("PATH"))
     }
 
     @Test

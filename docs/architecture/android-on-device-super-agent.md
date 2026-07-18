@@ -181,11 +181,12 @@ digests, exit code, and verified artifact hashes. Only explicitly requested rela
 are collected. Workspaces expire after a bounded retention period and cannot escape their task
 root.
 
-The QEMU controller, guest broker, sandbox launcher, and pinned glibc-based Buildroot `linux-base` source recipe
-are implemented. They do not by themselves make Linux execution available in a release APK. The
-runtime remains unavailable until a trusted Android QEMU engine and a built, signed `linux-base`
-image are installed and complete the health handshake. SignalASI never reports a placeholder,
-source recipe, or manifest-only runtime as ready.
+The QEMU controller, guest broker, sandbox launcher, pinned glibc-based Buildroot `linux-base`
+recipe, and reproducible Android ARM64 QEMU build and ELF-bundling pipeline are implemented. These
+sources do not by themselves make Linux execution available in a release APK. The runtime remains
+unavailable until the generated native engine and a built, signed `linux-base` image are installed
+and complete the health handshake. SignalASI never reports a placeholder, source recipe, or
+manifest-only runtime as ready.
 
 ## Runtime packs
 
@@ -268,7 +269,7 @@ access to the user's shared storage.
 | Encrypted memory metadata, ranking, conflict handling, and no-migration storage | Host complete |
 | Evidence-based learning, repeated-failure lessons, and reviewed Skill proposals/upgrades | Host complete |
 | Runtime capability, signed-pack catalog/download/install policy, lifecycle supervision, guest protocol, workspace, cancellation, and receipt contracts | Host complete |
-| Android QEMU process controller, persistent multiplexed bridge, Linux guest broker, per-task native sandbox launcher, and pinned `linux-base` build recipe | Source complete |
+| Android QEMU process controller, reproducible ARM64 engine build/bundle pipeline, persistent multiplexed bridge, Linux guest broker, per-task native sandbox launcher, and pinned `linux-base` build recipe | Source complete |
 | Control Center pages for memory, learning proposals, runtime packs, and execution receipts | Host complete |
 | Mixed-script OCR and local PDF/DOCX/XLSX/PPTX/image/source ingestion | Host complete |
 | Signed Android QEMU executable and built, signed `linux-base` release image | Not shipped |

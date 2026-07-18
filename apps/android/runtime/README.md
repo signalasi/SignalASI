@@ -5,6 +5,8 @@ It does not contain release binaries, private signing keys, downloaded toolchain
 
 - `guest/` implements the authenticated Guest broker.
 - `buildroot-external/` defines the AArch64 Linux base image and native task launcher.
+- `qemu/` defines the minimal QEMU 10.2.1 Android cross-build and redistribution notice. The
+  Termux package builder is a pinned build-time framework only; the app does not require Termux.
 - Toolchain images use a fixed read-only ABI: self-contained executable wrappers live in `bin/`,
   the image includes `signalasi-pack.json`, and every declared capability has a required entrypoint.
 - Runtime images are built under ignored `build/` paths, signed as `.sarpack` release artifacts,
@@ -32,3 +34,14 @@ nodes, and escaping symlinks are rejected by the image builder.
 
 The Android APK must not report this runtime as ready unless the native QEMU engine, a verified
 `linux-base` image, and the authenticated Guest health handshake are all present.
+
+Build the native engine on Linux with Docker, `dpkg-deb`, `patchelf`, and LLVM tools:
+
+```bash
+npm run runtime:build-android-qemu
+```
+
+The command verifies the pinned package-builder archive, builds QEMU and its dependency graph from
+source for Android ARM64, follows the exact ELF dependency closure, and emits ignored generated JNI
+and notice directories under `build/runtime`. Gradle consumes those directories when present. A
+source recipe without those generated files does not add a placeholder engine to the APK.

@@ -11,8 +11,8 @@ android {
         applicationId = "com.signalasi.chat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 62
-        versionName = "0.1.61"
+        versionCode = 63
+        versionName = "0.1.62"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
@@ -37,6 +37,13 @@ android {
         noCompress += "bin"
     }
 
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDir(rootProject.file("../../build/runtime/android-jni-libs"))
+            assets.srcDir(rootProject.file("../../build/runtime/android-assets"))
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -49,6 +56,7 @@ android {
 
     packaging {
         jniLibs {
+            useLegacyPackaging = true
             excludes += setOf(
                 "**/libsignal_jni_testing.so"
             )

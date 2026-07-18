@@ -84,11 +84,15 @@ internal object AgentQemuLaunchPlanBuilder {
         }
         require(command.size <= MAX_COMMAND_ARGUMENTS) { "Runtime launch command is too large" }
         val runtimeDirectory = requireNotNull(spec.socketFile.parentFile) { "Runtime socket directory is unavailable" }
+        val nativeLibraryDirectory = requireNotNull(spec.engineFile.parentFile) {
+            "Native runtime directory is unavailable"
+        }
         return AgentQemuLaunchPlan(
             command = command,
             environment = mapOf(
                 "HOME" to runtimeDirectory.absolutePath,
                 "TMPDIR" to runtimeDirectory.absolutePath,
+                "LD_LIBRARY_PATH" to nativeLibraryDirectory.absolutePath,
                 "LC_ALL" to "C",
                 "LANG" to "C"
             ),

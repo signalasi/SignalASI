@@ -71,6 +71,37 @@ release pipeline must boot the resulting image with the exact Android QEMU engin
 authenticated health handshake, execute concurrency/cancellation/quota tests, generate an SBOM,
 and only then sign and publish the pack.
 
+### Build the Android QEMU engine
+
+The native engine is built separately from runtime packs. On a Linux host with Docker, Debian
+package tools, `patchelf`, LLVM tools, Node.js, and standard archive utilities, run:
+
+```bash
+npm run runtime:build-android-qemu
+```
+
+The builder verifies a fixed Termux package-builder source snapshot, replaces its package namespace
+with the SignalASI Android application id, and cross-compiles a minimal QEMU 10.2.1 AArch64 system
+emulator and all required libraries from source. Termux is a build framework here, not an app or
+runtime dependency.
+
+The release bundle is generated under:
+
+```text
+build/runtime/android-jni-libs/arm64-v8a/
+build/runtime/android-assets/runtime/qemu/
+```
+
+The ELF collector rejects non-AArch64 inputs, unsafe dependency names, escaping symbolic links,
+missing dependencies, and search paths other than `$ORIGIN`. It renames the executable to
+`libsignalasi_qemu.so`, records the complete hashed dependency closure, and adds the build notice
+and provenance manifest as generated assets. Android uses extracted native-library packaging so
+the process controller can launch this executable from the application native-library directory.
+
+Generated binaries stay ignored. A release pipeline must retain corresponding source archives,
+patches, license texts, manifest, and SBOM; boot the exact APK engine against `linux-base`; finish
+the authenticated Guest handshake; and pass cancellation, concurrency, quota, and artifact tests.
+
 ### Build a toolchain image
 
 For a language, compiler, or FFmpeg pack, first prepare its fixed-ABI source root and build a
@@ -79,7 +110,7 @@ reproducible SquashFS image on Linux. For example:
 ```bash
 npm run runtime:build-image -- \
   --pack-id ffmpeg \
-  --version 8.0.1 \
+  --version 8.1.2 \
   --source build/runtime/ffmpeg-root \
   --output release/ffmpeg.img \
   --license GPL-2.0-or-later
@@ -154,7 +185,7 @@ passphrase-supported PEM private key:
 ```bash
 npm run runtime:build-pack -- \
   --config release/ffmpeg.img.config.json \
-  --output release/ffmpeg-8.0.1-arm64-v8a.sarpack \
+  --output release/ffmpeg-8.1.2-arm64-v8a.sarpack \
   --certificate /secure/runtime-signing-cert.pem \
   --key /secure/runtime-signing-key.pem
 ```
@@ -163,8 +194,8 @@ The command creates the `.sarpack` archive and a neighboring `.sarpack.metadata.
 streams image hashing, signs an unambiguous length-prefixed manifest payload, verifies the private
 key against the certificate, and removes staging data even when packaging fails.
 
-This command signs and packages an existing image. It does not build the Android QEMU executable or
-language toolchains. Those inputs must come from separately audited, reproducible pipelines with
+This command signs and packages an existing image. It does not invoke the separate Android QEMU or
+language-toolchain builders. Those inputs must come from their audited, reproducible pipelines with
 source, license, and SBOM records.
 
 ## Build the release catalog
