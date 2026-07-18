@@ -82,9 +82,9 @@ jobs:
           path: |
             build/runtime/android-jni-libs
             build/runtime/android-assets/runtime/qemu
-          key: android-qemu-${{ runner.os }}-${{ hashFiles('tools/runtime/build-android-qemu.sh', 'apps/android/runtime/qemu/**') }}
+          key: android-qemu-v2-${{ runner.os }}-${{ hashFiles('tools/runtime/build-android-qemu.sh', 'tools/runtime/android-elf-*.mjs', 'tools/runtime/collect-android-elf-bundle.mjs', 'tools/runtime/normalize-android-elf-bundle.mjs', 'apps/android/runtime/qemu/**') }}
           restore-keys: |
-            android-qemu-${{ runner.os }}-
+            android-qemu-v2-${{ runner.os }}-
 
       - name: Inspect restored Android QEMU engine
         id: qemu-state
@@ -126,7 +126,7 @@ jobs:
             dependencies: [],
             installed_size_bytes: statSync(path).size + 1024 * 1024,
             license: 'GPL-2.0-only AND GPL-2.0-or-later AND LGPL-2.1-or-later',
-            minimum_host_version_code: 68,
+            minimum_host_version_code: 69,
             guest_api_version: 1,
             release_notes: 'Bundled SignalASI Linux base environment'
           }, null, 2)}\n`);

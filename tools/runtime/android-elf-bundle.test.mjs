@@ -7,12 +7,18 @@ import {
   collectAndroidElfBundle,
   parseDynamicSection,
   validateAarch64ElfHeader,
+  validateAndroidProgramHeaders,
 } from './android-elf-bundle.mjs';
 
 const HEADER = `
   Class:                             ELF64
   Type:                              DYN (Position-Independent Executable file)
   Machine:                           AArch64
+`;
+
+const PROGRAM_HEADERS = `
+  LOAD 0x000000 0x0000000000000000 0x0000000000000000 0xd11b00 0xd11b00 R E 0x4000
+  LOAD 0xd11b00 0x0000000000d15b00 0x0000000000d15b00 0xe5db88 0xe5e500 RW 0x4000
 `;
 
 test('dynamic section parser extracts dependencies and search paths', () => {
@@ -26,6 +32,13 @@ test('dynamic section parser extracts dependencies and search paths', () => {
   });
   assert.doesNotThrow(() => validateAarch64ElfHeader(HEADER));
   assert.throws(() => validateAarch64ElfHeader(HEADER.replace('AArch64', 'X86-64')), /AArch64/);
+  assert.doesNotThrow(() => validateAndroidProgramHeaders(PROGRAM_HEADERS));
+  assert.throws(
+    () => validateAndroidProgramHeaders(
+      'LOAD 0x1c6cdd0 0x0000000001cc0000 0x0000000001cc0000 0x40e0 0x40e0 RW 0x10000',
+    ),
+    /misaligned/,
+  );
 });
 
 test('bundle collector follows non-system dependencies exactly once', () => {
@@ -40,6 +53,7 @@ test('bundle collector follows non-system dependencies exactly once', () => {
   const commandRunner = (command, arguments_) => {
     if (command === 'patchelf') return '';
     if (arguments_[0] === '--file-header') return HEADER;
+    if (arguments_[0] === '--program-headers') return PROGRAM_HEADERS;
     const name = arguments_.at(-1).split(/[\\/]/).at(-1);
     return name === 'libsignalasi_qemu.so'
       ? '(NEEDED) Shared library: [libglib-2.0.so]\n(NEEDED) Shared library: [libc.so]\n(RUNPATH) Library runpath: [$ORIGIN]\n'
@@ -86,6 +100,7 @@ test('bundle collector rejects a dependency symlink that escapes its root', (con
       commandRunner: (command, arguments_) => {
         if (command === 'patchelf') return '';
         if (arguments_[0] === '--file-header') return HEADER;
+        if (arguments_[0] === '--program-headers') return PROGRAM_HEADERS;
         return '(NEEDED) Shared library: [libescape.so]\n(RUNPATH) Library runpath: [$ORIGIN]\n';
       },
     }), /escapes its library root/);

@@ -20,6 +20,8 @@ export const ANDROID_SYSTEM_LIBRARIES = new Set([
   'libm.so',
 ]);
 
+export const ANDROID_ELF_PAGE_SIZE = 16_384;
+
 const LIBRARY_NAME_PATTERN = /^[A-Za-z0-9_+.-]+\.so(?:\.[0-9]+)*$/;
 
 export function parseDynamicSection(value) {
@@ -42,6 +44,24 @@ export function validateAarch64ElfHeader(value) {
   if (!/Class:\s+ELF64/.test(header)) throw new Error('runtime ELF is not 64-bit');
   if (!/Machine:\s+AArch64/.test(header)) throw new Error('runtime ELF is not AArch64');
   if (!/Type:\s+(?:DYN|EXEC)/.test(header)) throw new Error('runtime ELF is not executable');
+}
+
+export function validateAndroidProgramHeaders(value) {
+  const loads = String(value).split(/\r?\n/).flatMap((line) => {
+    const match = line.match(
+      /^\s*LOAD\s+(0x[0-9a-f]+)\s+(0x[0-9a-f]+)\s+0x[0-9a-f]+\s+0x[0-9a-f]+\s+0x[0-9a-f]+\s+.+?\s+(0x[0-9a-f]+)\s*$/i,
+    );
+    return match ? [{ offset: BigInt(match[1]), virtualAddress: BigInt(match[2]), alignment: BigInt(match[3]) }] : [];
+  });
+  if (loads.length === 0) throw new Error('runtime ELF has no loadable segments');
+  for (const load of loads) {
+    if (load.alignment < BigInt(ANDROID_ELF_PAGE_SIZE)) {
+      throw new Error('runtime ELF load alignment is smaller than the Android 16 KB page size');
+    }
+    if (load.offset % load.alignment !== load.virtualAddress % load.alignment) {
+      throw new Error('runtime ELF load segment offset and virtual address are misaligned');
+    }
+  }
 }
 
 export function collectAndroidElfBundle({
@@ -72,8 +92,15 @@ export function collectAndroidElfBundle({
     const destination = join(output, current.name);
     copyFileSync(current.source, destination);
     chmodSync(destination, 0o755);
-    commandRunner(patchelf, ['--set-rpath', '$ORIGIN', destination]);
+    const initialDynamic = parseDynamicSection(commandRunner(readelf, ['--dynamic', '--wide', destination]));
+    if (initialDynamic.searchPaths.length !== 1 || initialDynamic.searchPaths[0] !== '$ORIGIN') {
+      commandRunner(patchelf, [
+        '--page-size', String(ANDROID_ELF_PAGE_SIZE),
+        '--set-rpath', '$ORIGIN', destination,
+      ]);
+    }
     validateAarch64ElfHeader(commandRunner(readelf, ['--file-header', destination]));
+    validateAndroidProgramHeaders(commandRunner(readelf, ['--program-headers', '--wide', destination]));
     const dynamic = parseDynamicSection(commandRunner(readelf, ['--dynamic', '--wide', destination]));
     if (dynamic.searchPaths.some((path) => path !== '$ORIGIN')) {
       throw new Error(`runtime ELF contains an unsafe search path: ${current.name}`);

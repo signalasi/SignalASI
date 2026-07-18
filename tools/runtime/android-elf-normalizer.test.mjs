@@ -14,6 +14,11 @@ const HEADER = `
   Machine:                           AArch64
 `;
 
+const PROGRAM_HEADERS = `
+  LOAD 0x000000 0x0000000000000000 0x0000000000000000 0xd11b00 0xd11b00 R E 0x4000
+  LOAD 0xd11b00 0x0000000000d15b00 0x0000000000d15b00 0xe5db88 0xe5e500 RW 0x4000
+`;
+
 test('Android APK library names preserve identity without version suffixes', () => {
   assert.equal(androidApkLibraryName('libz.so.1'), 'libz_1.so');
   assert.equal(androidApkLibraryName('libglib-2.0.so.0'), 'libglib-2.0_0.so');
@@ -35,13 +40,15 @@ test('normalizer rewrites versioned dependencies into APK-packaged libraries', (
   const commandRunner = (command, arguments_) => {
     calls.push([command, ...arguments_]);
     const name = arguments_.at(-1).split(/[\\/]/).at(-1);
-    if (command === 'patchelf' && arguments_[0] === '--replace-needed') {
+    const replaceIndex = arguments_.indexOf('--replace-needed');
+    if (command === 'patchelf' && replaceIndex >= 0) {
       dependencies.set(name, dependencies.get(name).map((value) =>
-        value === arguments_[1] ? arguments_[2] : value));
+        value === arguments_[replaceIndex + 1] ? arguments_[replaceIndex + 2] : value));
       return '';
     }
     if (command === 'patchelf') return '';
     if (arguments_[0] === '--file-header') return HEADER;
+    if (arguments_[0] === '--program-headers') return PROGRAM_HEADERS;
     return `${dependencies.get(name).map((value) =>
       `(NEEDED) Shared library: [${value}]`).join('\n')}\n(RUNPATH) Library runpath: [$ORIGIN]\n`;
   };
@@ -68,7 +75,12 @@ test('normalizer rewrites versioned dependencies into APK-packaged libraries', (
       ['libc.so', 'libz_1.so'],
     );
     assert.equal(readFileSync(join(libraries, 'libz_1.so'), 'utf8'), 'zlib');
-    assert.ok(calls.some((call) => call[1] === '--set-soname' && call[2] === 'libz_1.so'));
+    assert.ok(calls.some((call) => {
+      const index = call.indexOf('--set-soname');
+      return index >= 0 && call[index + 1] === 'libz_1.so';
+    }));
+    assert.ok(calls.filter((call) => call[0] === 'patchelf').every((call) =>
+      call[1] === '--page-size' && call[2] === '16384'));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -8,7 +8,12 @@ import {
 } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { parseDynamicSection, validateAarch64ElfHeader } from './android-elf-bundle.mjs';
+import {
+  ANDROID_ELF_PAGE_SIZE,
+  parseDynamicSection,
+  validateAarch64ElfHeader,
+  validateAndroidProgramHeaders,
+} from './android-elf-bundle.mjs';
 
 const APK_LIBRARY_PATTERN = /^lib[A-Za-z0-9_+.-]+\.so$/;
 const VERSIONED_LIBRARY_PATTERN = /^(lib[A-Za-z0-9_+.-]+?)\.so((?:\.[0-9]+)+)$/;
@@ -54,20 +59,33 @@ export function normalizeAndroidElfBundle({
     const packagedName = names.get(file.name);
     const path = join(directory, packagedName);
     chmodSync(path, 0o755);
-    commandRunner(patchelf, ['--set-rpath', '$ORIGIN', path]);
-    const before = parseDynamicSection(commandRunner(readelf, ['--dynamic', '--wide', path]));
+    let before = parseDynamicSection(commandRunner(readelf, ['--dynamic', '--wide', path]));
+    if (before.searchPaths.length !== 1 || before.searchPaths[0] !== '$ORIGIN') {
+      commandRunner(patchelf, [
+        '--page-size', String(ANDROID_ELF_PAGE_SIZE),
+        '--set-rpath', '$ORIGIN', path,
+      ]);
+      before = parseDynamicSection(commandRunner(readelf, ['--dynamic', '--wide', path]));
+    }
     for (const dependency of before.needed) {
       if (!VERSIONED_LIBRARY_PATTERN.test(dependency)) continue;
       const packagedDependency = names.get(dependency);
       if (!packagedDependency) {
         throw new Error(`Versioned Android ELF dependency is not bundled: ${dependency}`);
       }
-      commandRunner(patchelf, ['--replace-needed', dependency, packagedDependency, path]);
+      commandRunner(patchelf, [
+        '--page-size', String(ANDROID_ELF_PAGE_SIZE),
+        '--replace-needed', dependency, packagedDependency, path,
+      ]);
     }
     if (file.name !== packagedName) {
-      commandRunner(patchelf, ['--set-soname', packagedName, path]);
+      commandRunner(patchelf, [
+        '--page-size', String(ANDROID_ELF_PAGE_SIZE),
+        '--set-soname', packagedName, path,
+      ]);
     }
     validateAarch64ElfHeader(commandRunner(readelf, ['--file-header', path]));
+    validateAndroidProgramHeaders(commandRunner(readelf, ['--program-headers', '--wide', path]));
     const dynamic = parseDynamicSection(commandRunner(readelf, ['--dynamic', '--wide', path]));
     if (dynamic.searchPaths.some((value) => value !== '$ORIGIN')) {
       throw new Error(`runtime ELF contains an unsafe search path: ${packagedName}`);
