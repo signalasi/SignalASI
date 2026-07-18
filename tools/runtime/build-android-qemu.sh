@@ -159,5 +159,11 @@ reset_generated_directory "$asset_directory" "$asset_root"
 install -m 0644 "$repository_root/apps/android/runtime/qemu/NOTICE.md" "$asset_directory/NOTICE.md"
 install -m 0644 "$bundle_manifest" "$asset_directory/bundle.json"
 
+node "$repository_root/tools/runtime/normalize-android-elf-bundle.mjs" \
+  --jni-root "$jni_root" \
+  --asset-root "$asset_root" \
+  --readelf llvm-readelf \
+  --patchelf patchelf
+
 sha256sum "$jni_directory/libsignalasi_qemu.so"
 printf 'Android JNI bundle: %s\nRuntime assets: %s\n' "$jni_root" "$asset_root"

@@ -75,6 +75,12 @@ jobs:
         if: steps.qemu-cache.outputs.cache-hit != 'true'
         run: npm run runtime:build-android-qemu
 
+      - name: Normalize Android QEMU APK libraries
+        run: |
+          npm run runtime:normalize-android-qemu -- \
+            --jni-root build/runtime/android-jni-libs \
+            --asset-root build/runtime/android-assets
+
       - name: Build default Linux and Python images
         run: |
           mkdir -p build/runtime/release
@@ -94,7 +100,7 @@ jobs:
             dependencies: [],
             installed_size_bytes: statSync(path).size + 1024 * 1024,
             license: 'GPL-2.0-only AND GPL-2.0-or-later AND LGPL-2.1-or-later',
-            minimum_host_version_code: 67,
+            minimum_host_version_code: 68,
             guest_api_version: 1,
             release_notes: 'Bundled SignalASI Linux base environment'
           }, null, 2)}\n`);

@@ -18,6 +18,7 @@ export const DEFAULT_RUNTIME_TRUST_ANCHORS = 'runtime/bootstrap/trust-anchors.js
 const GENERATED_MARKER = '.signalasi-generated';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?$/;
+const APK_LIBRARY_PATTERN = /^lib[A-Za-z0-9_+.-]+\.so$/;
 
 export async function prepareAndroidDefaultRuntime({
   assetRoot,
@@ -169,6 +170,10 @@ function verifyQemuBundle(jniRoot, assetRoot) {
   }
   const libraryDirectory = join(jniRoot, 'arm64-v8a');
   for (const file of manifest.files) {
+    if (!APK_LIBRARY_PATTERN.test(file.name) ||
+        file.dependencies?.some((dependency) => /\.so\.[0-9]/.test(dependency))) {
+      throw new Error(`SignalASI QEMU library cannot be packaged by Android: ${file.name}`);
+    }
     const path = join(libraryDirectory, file.name);
     if (!existsSync(path) || statSync(path).size !== file.size_bytes) {
       throw new Error(`SignalASI QEMU library is missing or changed: ${file.name}`);
