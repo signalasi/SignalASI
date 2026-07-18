@@ -42,6 +42,7 @@
     "runtime:normalize-android-qemu": "node tools/runtime/normalize-android-elf-bundle.mjs",
     "runtime:prepare-android-defaults": "node tools/runtime/prepare-android-default-runtime.mjs",
     "runtime:verify-android-defaults": "node tools/runtime/verify-android-default-runtime.mjs",
+    "runtime:verify-android-qemu-elf": "node tools/runtime/verify-android-qemu-elf.mjs",
     "runtime:build-python-uv": "bash tools/runtime/build-python-uv-image.sh",
     "runtime:build-node-js": "bash tools/runtime/build-node-js-image.sh",
     "runtime:build-go": "bash tools/runtime/build-go-image.sh",

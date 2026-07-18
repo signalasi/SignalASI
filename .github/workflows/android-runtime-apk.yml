@@ -107,6 +107,23 @@ jobs:
             --jni-root build/runtime/android-jni-libs \
             --asset-root build/runtime/android-assets
 
+      - name: Verify normalized Android QEMU ELF bundle
+        run: |
+          npm run runtime:verify-android-qemu-elf -- \
+            --jni-root build/runtime/android-jni-libs \
+            --readelf llvm-readelf
+
+      - name: Upload normalized Android QEMU bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: SignalASI-Android-qemu-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            build/runtime/android-jni-libs
+            build/runtime/android-assets/runtime/qemu
+
       - name: Build default Linux and Python images
         run: |
           mkdir -p build/runtime/release
@@ -164,9 +181,18 @@ jobs:
 
       - name: Verify APK runtime contents
         run: |
+          rm -rf build/runtime/apk-audit
+          mkdir -p build/runtime/apk-audit
+          unzip -q apps/android/app/build/outputs/apk/debug/app-debug.apk \
+            -d build/runtime/apk-audit
+          cp build/runtime/android-jni-libs/signalasi-qemu-bundle.json \
+            build/runtime/apk-audit/lib/signalasi-qemu-bundle.json
           npm run runtime:verify-android-defaults -- \
-            --asset-root build/runtime/android-assets \
-            --jni-root build/runtime/android-jni-libs
+            --asset-root build/runtime/apk-audit/assets \
+            --jni-root build/runtime/apk-audit/lib
+          npm run runtime:verify-android-qemu-elf -- \
+            --jni-root build/runtime/apk-audit/lib \
+            --readelf llvm-readelf
           unzip -l apps/android/app/build/outputs/apk/debug/app-debug.apk | \
             grep -E 'libsignalasi_qemu.so|runtime/bootstrap/.+\.sarpack|runtime/bootstrap/index.json'
 
