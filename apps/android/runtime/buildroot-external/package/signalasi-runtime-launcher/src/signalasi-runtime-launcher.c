@@ -21,6 +21,7 @@
 
 #define WORKSPACE_PREFIX "/workspace/"
 #define ISOLATED_WORKSPACE "/work"
+#define ISOLATED_TMP ISOLATED_WORKSPACE "/.tmp"
 #define EMPTY_MOUNT "/run/signalasi-empty"
 
 struct launcher_options {
@@ -141,11 +142,34 @@ static void mask_directory(const char *target)
         fail("cannot mask privileged runtime files");
 }
 
-static void isolate_workspace(const char *workspace)
+static void mount_private_task_temp(const struct launcher_options *options)
+{
+    char mount_options[160];
+    unsigned long long size_bytes = (unsigned long long)options->memory_bytes / 2;
+
+    if (size_bytes < 16ULL * 1024ULL * 1024ULL)
+        size_bytes = 16ULL * 1024ULL * 1024ULL;
+    if (size_bytes > 256ULL * 1024ULL * 1024ULL)
+        size_bytes = 256ULL * 1024ULL * 1024ULL;
+    if (snprintf(mount_options, sizeof(mount_options),
+                 "mode=0700,uid=%u,gid=%u,size=%llu,nr_inodes=16384",
+                 (unsigned int)options->uid, (unsigned int)options->gid, size_bytes) >=
+        (int)sizeof(mount_options)) {
+        errno = EINVAL;
+        fail("cannot configure private task temporary storage");
+    }
+    ensure_directory(ISOLATED_TMP, 0700);
+    if (mount("tmpfs", ISOLATED_TMP, "tmpfs", MS_NOSUID | MS_NODEV, mount_options) != 0)
+        fail("cannot mount private task temporary storage");
+    if (chown(ISOLATED_TMP, options->uid, options->gid) != 0 || chmod(ISOLATED_TMP, 0700) != 0)
+        fail("cannot secure private task temporary storage");
+}
+
+static void isolate_workspace(const struct launcher_options *options)
 {
     char resolved[PATH_MAX];
 
-    if (realpath(workspace, resolved) == NULL)
+    if (realpath(options->workspace, resolved) == NULL)
         fail("cannot resolve workspace");
     if (strncmp(resolved, WORKSPACE_PREFIX, strlen(WORKSPACE_PREFIX)) != 0)
         invalid("workspace is outside the shared root");
@@ -161,6 +185,7 @@ static void isolate_workspace(const char *workspace)
     if (mount(NULL, ISOLATED_WORKSPACE, NULL,
               MS_BIND | MS_REMOUNT | MS_NOSUID | MS_NODEV, NULL) != 0)
         fail("cannot secure task workspace");
+    mount_private_task_temp(options);
 
     mask_directory("/sys/firmware/qemu_fw_cfg");
     mask_directory("/dev/virtio-ports");
@@ -230,7 +255,7 @@ int main(int argc, char **argv)
     pid_t task;
 
     umask(0077);
-    isolate_workspace(options.workspace);
+    isolate_workspace(&options);
     task = fork();
     if (task < 0)
         fail("cannot create PID-isolated task");

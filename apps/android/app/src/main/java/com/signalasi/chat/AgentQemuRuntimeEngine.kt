@@ -215,6 +215,7 @@ class AgentQemuRuntimeEngineController(
     private fun runtimeConfig(spec: AgentRuntimeEngineLaunchSpec): JSONObject = JSONObject()
         .put("format_version", 1)
         .put("guest_api_version", AgentRuntimeGuestProtocol.VERSION)
+        .put("host_epoch_millis", System.currentTimeMillis())
         .put("architecture", spec.architecture)
         .put("api_channel", "org.signalasi.runtime")
         .put("workspace_mount_tag", "signalasi_workspaces")

@@ -33,11 +33,14 @@ CONFIG_PATH = Path("/sys/firmware/qemu_fw_cfg/by_name/opt/com.signalasi/runtime-
 WORKSPACE_ROOT = Path("/workspace")
 ISOLATED_WORKSPACE_ROOT = Path("/work")
 PACK_ROOT = Path("/opt/signalasi/packs")
+PACK_NAMESPACE_ROOT = PACK_ROOT.parent
 PACK_DESCRIPTOR_NAME = "signalasi-pack.json"
 LAUNCHER_PATH = Path("/usr/libexec/signalasi-runtime-launcher")
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_SEQUENCE_WINDOWS = 8192
 MAX_CONCURRENT_EXECUTIONS = 16
+MIN_TRUSTED_EPOCH_MILLIS = 1_577_836_800_000
+MAX_TRUSTED_EPOCH_MILLIS = 4_102_444_800_000
 PACK_ENTRYPOINTS = {
     "python-uv": ("bin/python3", "bin/uv"),
     "node-js": ("bin/node", "bin/tsx"),
@@ -234,7 +237,7 @@ def command_plan(
     if language == "python":
         return [[executable("python3", search_path), str(workspace / "main.py"), *arguments]]
     if language == "uv":
-        return [[executable("uv", search_path), "run", "--offline", str(workspace / "main.py"), *arguments]]
+        return [[executable("uv", search_path), "run", "--no-cache", "--offline", str(workspace / "main.py"), *arguments]]
     if language == "javascript":
         return [[executable("node", search_path), str(workspace / "main.js"), *arguments]]
     if language == "typescript":
@@ -551,22 +554,24 @@ class GuestService:
 
 def runtime_environment() -> dict[str, str]:
     pack_bins = [str(path) for path in sorted(PACK_ROOT.glob("*/bin")) if path.is_dir()]
+    task_temp = ISOLATED_WORKSPACE_ROOT / ".tmp"
     return {
         "HOME": str(ISOLATED_WORKSPACE_ROOT),
-        "TMPDIR": str(ISOLATED_WORKSPACE_ROOT / ".tmp"),
+        "TMPDIR": str(task_temp),
         "PATH": os.pathsep.join(pack_bins + ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"]),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PYTHONNOUSERSITE": "1",
         "UV_NO_MODIFY_PATH": "1",
+        "UV_NO_CACHE": "1",
         "UV_PYTHON": "/usr/bin/python3",
         "UV_PYTHON_DOWNLOADS": "never",
         "UV_OFFLINE": "1",
-        "UV_CACHE_DIR": str(ISOLATED_WORKSPACE_ROOT / ".uv-cache"),
-        "CARGO_HOME": str(ISOLATED_WORKSPACE_ROOT / ".cargo"),
+        "UV_CACHE_DIR": str(task_temp / "uv-cache"),
+        "CARGO_HOME": str(task_temp / "cargo"),
         "CARGO_NET_OFFLINE": "true",
-        "ZIG_GLOBAL_CACHE_DIR": str(ISOLATED_WORKSPACE_ROOT / ".zig-global-cache"),
-        "ZIG_LOCAL_CACHE_DIR": str(ISOLATED_WORKSPACE_ROOT / ".zig-local-cache"),
+        "ZIG_GLOBAL_CACHE_DIR": str(task_temp / "zig-global-cache"),
+        "ZIG_LOCAL_CACHE_DIR": str(task_temp / "zig-local-cache"),
         "JAVA_HOME": str(PACK_ROOT / "java"),
     }
 
@@ -589,14 +594,17 @@ def mount_runtime(config: dict[str, Any]) -> None:
             ["mount", "-t", "9p", "-o", "trans=virtio,version=9p2000.L,msize=262144", "signalasi_workspaces", str(WORKSPACE_ROOT)],
             check=True,
         )
-    PACK_ROOT.mkdir(parents=True, exist_ok=True)
+    PACK_NAMESPACE_ROOT.mkdir(mode=0o755, parents=True, exist_ok=True)
+    PACK_NAMESPACE_ROOT.chmod(0o755)
+    PACK_ROOT.mkdir(mode=0o755, parents=True, exist_ok=True)
+    PACK_ROOT.chmod(0o755)
     for pack in config.get("packs") or []:
         pack_id = str(pack.get("id", ""))
         serial = str(pack.get("serial", ""))
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,79}", pack_id):
             raise ValueError("Runtime pack id is invalid")
         target = PACK_ROOT / pack_id
-        target.mkdir(parents=True, exist_ok=True)
+        target.mkdir(mode=0o755, parents=True, exist_ok=True)
         if os.path.ismount(target):
             validate_mounted_pack(target, pack)
             continue
@@ -692,6 +700,20 @@ def wait_for_runtime_channel(
     raise FileNotFoundError(f"Runtime API channel is unavailable: {CHANNEL_NAME}")
 
 
+def synchronize_guest_clock(config: dict[str, Any]) -> None:
+    host_epoch_millis = int(config.get("host_epoch_millis", 0))
+    if not MIN_TRUSTED_EPOCH_MILLIS <= host_epoch_millis <= MAX_TRUSTED_EPOCH_MILLIS:
+        raise ValueError("Runtime host clock is invalid")
+    current_epoch_millis = int(time.time() * 1000)
+    if abs(current_epoch_millis - host_epoch_millis) > MAX_CLOCK_SKEW_MILLIS:
+        try:
+            time.clock_settime(time.CLOCK_REALTIME, host_epoch_millis / 1000)
+        except (AttributeError, OSError) as error:
+            raise RuntimeError("Runtime guest clock synchronization failed") from error
+    if abs(int(time.time() * 1000) - host_epoch_millis) > MAX_CLOCK_SKEW_MILLIS:
+        raise RuntimeError("Runtime guest clock remains outside the trusted window")
+
+
 def run_service() -> None:
     session_key = SESSION_PATH.read_bytes()
     if len(session_key) < 32:
@@ -699,6 +721,7 @@ def run_service() -> None:
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     if int(config.get("guest_api_version", 0)) != PROTOCOL_VERSION:
         raise ValueError("Runtime guest API is incompatible")
+    synchronize_guest_clock(config)
     mount_runtime(config)
     while True:
         try:

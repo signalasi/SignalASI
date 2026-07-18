@@ -13,6 +13,7 @@ case "$1" in
     mkdir -p /run /var/log /workspace /work /run/signalasi-empty /opt/signalasi/packs
     chmod 0700 /work
     chmod 0000 /run/signalasi-empty
+    chmod 0755 /opt/signalasi /opt/signalasi/packs
     if [ ! -x /usr/libexec/signalasi-runtime-launcher ]; then
       echo "SignalASI runtime launcher is unavailable" >&2
       exit 1

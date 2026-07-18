@@ -97,7 +97,7 @@ class GuestProtocolTest(unittest.TestCase):
                 plan = guest.command_plan("uv", Path("/work"), [], environment["PATH"])
 
         self.assertEqual(str(uv), plan[0][0])
-        self.assertEqual(["run", "--offline", str(Path("/work") / "main.py")], plan[0][1:])
+        self.assertEqual(["run", "--no-cache", "--offline", str(Path("/work") / "main.py")], plan[0][1:])
 
     def test_command_plan_exposes_ffprobe_as_a_separate_read_only_operation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -120,15 +120,33 @@ class GuestProtocolTest(unittest.TestCase):
             plan,
         )
 
-    def test_runtime_environment_keeps_mutable_language_caches_in_workspace(self):
+    def test_runtime_environment_keeps_mutable_language_caches_in_private_task_temp(self):
         environment = guest.runtime_environment()
+        task_temp = guest.ISOLATED_WORKSPACE_ROOT / ".tmp"
         self.assertEqual("true", environment["CARGO_NET_OFFLINE"])
-        self.assertEqual(str(guest.ISOLATED_WORKSPACE_ROOT / ".cargo"), environment["CARGO_HOME"])
+        self.assertEqual("1", environment["UV_NO_CACHE"])
+        self.assertEqual(str(task_temp / "uv-cache"), environment["UV_CACHE_DIR"])
+        self.assertEqual(str(task_temp / "cargo"), environment["CARGO_HOME"])
         self.assertEqual(
-            str(guest.ISOLATED_WORKSPACE_ROOT / ".zig-global-cache"),
+            str(task_temp / "zig-global-cache"),
             environment["ZIG_GLOBAL_CACHE_DIR"],
         )
         self.assertEqual(str(guest.PACK_ROOT / "java"), environment["JAVA_HOME"])
+
+    def test_guest_clock_bootstraps_from_trusted_host_epoch(self):
+        host_epoch_millis = 1_784_385_257_000
+        with (
+            mock.patch.object(guest.time, "time", side_effect=[10.0, host_epoch_millis / 1000]),
+            mock.patch.object(guest.time, "CLOCK_REALTIME", 0, create=True),
+            mock.patch.object(guest.time, "clock_settime", create=True) as set_clock,
+        ):
+            guest.synchronize_guest_clock({"host_epoch_millis": host_epoch_millis})
+
+        set_clock.assert_called_once_with(0, host_epoch_millis / 1000)
+
+    def test_guest_clock_rejects_untrusted_host_epoch(self):
+        with self.assertRaises(ValueError):
+            guest.synchronize_guest_clock({"host_epoch_millis": 0})
 
     def test_runtime_readiness_requires_launcher_and_workspace_identity(self):
         with mock.patch.object(guest, "LAUNCHER_PATH", Path(sys.executable)):
