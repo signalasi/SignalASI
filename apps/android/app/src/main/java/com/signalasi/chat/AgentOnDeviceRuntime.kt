@@ -202,7 +202,8 @@ internal data class AgentRuntimeBootstrapFiles(
     val socketFile: File,
     val packsDirectory: File,
     val workspacesDirectory: File,
-    val architecture: String
+    val architecture: String,
+    val packAttachments: List<AgentRuntimePackAttachment>
 )
 
 data class AgentRuntimeExecutionRequest(
@@ -221,7 +222,7 @@ data class AgentRuntimeExecutionRequest(
     ),
     val cancellationToken: AgentNativeToolCancellationToken = AgentNativeToolCancellationToken.NONE,
     val progressListener: (AgentRuntimeProgress) -> Unit = {},
-    val hostWorkspacePath: String = ""
+    val guestWorkspacePath: String = ""
 )
 
 data class AgentRuntimeExecutionResponse(
@@ -346,7 +347,7 @@ class AgentOnDeviceRuntimeManager(
             ?: AgentOnDeviceRuntimeSupervisor.discover(appContext)
             ?: error("The on-device guest bridge is not connected")
         val prepared = workspaceManager.prepare(request)
-        val normalizedRequest = request.copy(hostWorkspacePath = prepared.directory.absolutePath)
+        val normalizedRequest = request.copy(guestWorkspacePath = prepared.guestPath)
         val packVersions = current.packs.mapNotNull { pack ->
             pack.manifest?.version?.takeIf(String::isNotBlank)?.let { version -> pack.id to version }
         }.toMap()
@@ -401,13 +402,28 @@ class AgentOnDeviceRuntimeManager(
         val workspaces = File(runtimeRoot, "workspaces")
         check(runtimeRoot.mkdirs() || runtimeRoot.isDirectory) { "Runtime storage is unavailable" }
         check(workspaces.mkdirs() || workspaces.isDirectory) { "Runtime workspace storage is unavailable" }
+        val packAttachments = REQUIRED_PACKS.asSequence()
+            .filterNot { it == "linux-base" }
+            .map(::packStatus)
+            .filter { it.state == AgentRuntimePackState.READY && it.manifest != null }
+            .map { status ->
+                val manifest = requireNotNull(status.manifest)
+                val image = requireNotNull(safeChild(File(packsRoot, manifest.id), manifest.imageFile))
+                AgentRuntimePackAttachment(
+                    packId = manifest.id,
+                    version = manifest.version,
+                    imageFile = image
+                )
+            }
+            .toList()
         return AgentRuntimeBootstrapFiles(
             engineFile = engine,
             baseImageFile = image,
             socketFile = runtimeSocketFile(),
             packsDirectory = packsRoot,
             workspacesDirectory = workspaces,
-            architecture = Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
+            architecture = Build.SUPPORTED_ABIS.firstOrNull().orEmpty(),
+            packAttachments = packAttachments
         )
     }
 

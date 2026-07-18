@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_SIGNALASI_PATH/package/signalasi-runtime-launcher/Config.in"

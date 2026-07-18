@@ -36,6 +36,8 @@
     "test:release:local": "node tools/dev/run-release-local-gates.js",
     "test:release:device": "node tools/dev/run-release-device-gates.js",
     "test:runtime-tools": "node --test tools/runtime/runtime-signing.test.mjs tools/runtime/runtime-build.integration.test.mjs",
+    "test:guest-runtime": "python -m unittest discover -s apps/android/runtime/guest -p \"test_*.py\"",
+    "runtime:build-linux-base": "bash tools/runtime/build-linux-base.sh",
     "runtime:build-pack": "node tools/runtime/build-runtime-pack.mjs",
     "runtime:build-catalog": "node tools/runtime/build-runtime-catalog.mjs",
     "runtime:print-trust-anchor": "node tools/runtime/print-runtime-trust-anchor.mjs"

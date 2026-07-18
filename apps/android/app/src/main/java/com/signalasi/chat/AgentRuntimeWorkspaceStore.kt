@@ -215,7 +215,8 @@ data class AgentRuntimePreparedWorkspace(
     val requestId: String,
     val workspaceId: String,
     val directory: File,
-    val sourceFile: File
+    val sourceFile: File,
+    val guestPath: String
 )
 
 class AgentRuntimeWorkspaceManager(context: Context) {
@@ -244,7 +245,7 @@ class AgentRuntimeWorkspaceManager(context: Context) {
             ?: error("Runtime request path is invalid")
         check(!runDirectory.exists()) { "Runtime request workspace already exists" }
         check(runDirectory.mkdirs()) { "Runtime request workspace could not be created" }
-        val sourceFile = File(runDirectory, "main.${sourceExtension(request.language)}")
+        val sourceFile = File(runDirectory, sourceFileName(request.language))
         sourceFile.writeText(request.source, Charsets.UTF_8)
         File(runDirectory, "request.json").writeText(
             JSONObject()
@@ -256,7 +257,13 @@ class AgentRuntimeWorkspaceManager(context: Context) {
                 .toString(),
             Charsets.UTF_8
         )
-        return AgentRuntimePreparedWorkspace(request.requestId, request.workspaceId, runDirectory, sourceFile)
+        return AgentRuntimePreparedWorkspace(
+            requestId = request.requestId,
+            workspaceId = request.workspaceId,
+            directory = runDirectory,
+            sourceFile = sourceFile,
+            guestPath = "/workspace/${workspaceDirectory.name}/${runDirectory.name}"
+        )
     }
 
     @Synchronized
@@ -324,17 +331,17 @@ class AgentRuntimeWorkspaceManager(context: Context) {
         require(DOMAIN_PATTERN.matches(value.lowercase(Locale.ROOT))) { "Runtime network domain is invalid" }
     }
 
-    private fun sourceExtension(language: AgentRuntimeLanguage): String = when (language) {
-        AgentRuntimeLanguage.SHELL -> "sh"
-        AgentRuntimeLanguage.PYTHON, AgentRuntimeLanguage.UV -> "py"
-        AgentRuntimeLanguage.JAVASCRIPT -> "js"
-        AgentRuntimeLanguage.TYPESCRIPT -> "ts"
-        AgentRuntimeLanguage.GO -> "go"
-        AgentRuntimeLanguage.RUST -> "rs"
-        AgentRuntimeLanguage.C -> "c"
-        AgentRuntimeLanguage.CPP -> "cpp"
-        AgentRuntimeLanguage.JAVA -> "java"
-        AgentRuntimeLanguage.FFMPEG -> "ffmpeg.json"
+    private fun sourceFileName(language: AgentRuntimeLanguage): String = when (language) {
+        AgentRuntimeLanguage.SHELL -> "main.sh"
+        AgentRuntimeLanguage.PYTHON, AgentRuntimeLanguage.UV -> "main.py"
+        AgentRuntimeLanguage.JAVASCRIPT -> "main.js"
+        AgentRuntimeLanguage.TYPESCRIPT -> "main.ts"
+        AgentRuntimeLanguage.GO -> "main.go"
+        AgentRuntimeLanguage.RUST -> "main.rs"
+        AgentRuntimeLanguage.C -> "main.c"
+        AgentRuntimeLanguage.CPP -> "main.cpp"
+        AgentRuntimeLanguage.JAVA -> "Main.java"
+        AgentRuntimeLanguage.FFMPEG -> "main.ffmpeg.json"
     }
 
     companion object {

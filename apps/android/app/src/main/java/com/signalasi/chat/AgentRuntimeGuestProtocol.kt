@@ -16,6 +16,11 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.UUID
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -107,7 +112,8 @@ object AgentRuntimeGuestProtocol {
             envelope.messageId.isBlank() || envelope.requestId.isBlank() || envelope.sequence < 1L
         ) return false
         if (kotlin.math.abs(nowMillis - envelope.timestampMillis) > MAX_CLOCK_SKEW_MILLIS) return false
-        val expected = hmac(unsignedPayload(envelope.copy(mac = "")), sessionKey)
+        val expected = runCatching { hmac(unsignedPayload(envelope.copy(mac = "")), sessionKey) }
+            .getOrElse { return false }
         return MessageDigest.isEqual(
             expected.toByteArray(Charsets.US_ASCII),
             envelope.mac.toByteArray(Charsets.US_ASCII)
@@ -163,20 +169,48 @@ object AgentRuntimeGuestProtocol {
 
     internal fun canonicalJson(value: Any?): String = when (value) {
         null -> "null"
-        is String -> JSONObject.quote(value)
+        is String -> canonicalJsonString(value)
         is Boolean, is Byte, is Short, is Int, is Long -> value.toString()
-        is Float -> if (value.isFinite()) value.toString() else error("Non-finite JSON number")
-        is Double -> if (value.isFinite()) value.toString() else error("Non-finite JSON number")
-        is Number -> value.toString()
+        is Number -> error("Runtime payload numbers must be signed 64-bit integers")
         is Map<*, *> -> value.entries
             .map { entry -> (entry.key as? String ?: error("Runtime payload key must be a string")) to entry.value }
             .sortedBy { it.first }
-            .joinToString(prefix = "{", postfix = "}") { (key, item) ->
-                "${JSONObject.quote(key)}:${canonicalJson(item)}"
+            .joinToString(separator = ",", prefix = "{", postfix = "}") { (key, item) ->
+                "${canonicalJsonString(key)}:${canonicalJson(item)}"
             }
-        is Iterable<*> -> value.joinToString(prefix = "[", postfix = "]") { canonicalJson(it) }
-        is Array<*> -> value.joinToString(prefix = "[", postfix = "]") { canonicalJson(it) }
+        is Iterable<*> -> value.joinToString(separator = ",", prefix = "[", postfix = "]") { canonicalJson(it) }
+        is Array<*> -> value.joinToString(separator = ",", prefix = "[", postfix = "]") { canonicalJson(it) }
         else -> error("Unsupported runtime payload value: ${value::class.java.simpleName}")
+    }
+
+    private fun canonicalJsonString(value: String): String = buildString(value.length + 2) {
+        append('"')
+        var index = 0
+        while (index < value.length) {
+            val character = value[index]
+            when (character) {
+                '"' -> append("\\\"")
+                '\\' -> append("\\\\")
+                '\b' -> append("\\b")
+                '\u000c' -> append("\\f")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> when {
+                    character.code < 0x20 -> append("\\u").append(character.code.toString(16).padStart(4, '0'))
+                    character.isHighSurrogate() -> {
+                        check(index + 1 < value.length && value[index + 1].isLowSurrogate()) {
+                            "Runtime payload contains an invalid Unicode surrogate"
+                        }
+                        append(character).append(value[++index])
+                    }
+                    character.isLowSurrogate() -> error("Runtime payload contains an invalid Unicode surrogate")
+                    else -> append(character)
+                }
+            }
+            index++
+        }
+        append('"')
     }
 
     private fun JSONObject?.toNativeMap(): AgentNativeJsonObject {
@@ -267,16 +301,37 @@ class LocalSocketAgentRuntimeGuestChannelFactory(private val socketPath: String)
 class AgentRuntimeGuestBridge(
     private val channelFactory: AgentRuntimeGuestChannelFactory,
     private val sessionKeyProvider: () -> ByteArray
-) : AgentOnDeviceRuntimeBridge {
+) : AgentOnDeviceRuntimeBridge, Closeable {
     @Volatile private var cachedHealth: AgentRuntimeBridgeHealth? = null
     @Volatile private var cachedHealthAtMillis: Long = 0L
+    @Volatile private var activeConnection: Connection? = null
+    private val connectionLock = Any()
 
     override fun health(): AgentRuntimeBridgeHealth {
         val now = System.currentTimeMillis()
-        cachedHealth?.takeIf { now - cachedHealthAtMillis < HEALTH_CACHE_MILLIS }?.let { return it }
+        cachedHealth?.takeIf {
+            activeConnection?.isActive == true && now - cachedHealthAtMillis < HEALTH_CACHE_MILLIS
+        }?.let { return it }
         val health = runCatching {
-            channelFactory.open().use { channel -> handshake(channel, "health-${UUID.randomUUID()}").health }
+            val connection = connection()
+            val requestId = "health-${UUID.randomUUID()}"
+            val pending = connection.register(requestId)
+            try {
+                connection.send(requestId, AgentRuntimeGuestMessageType.HEARTBEAT)
+                val response = pending.receive(HANDSHAKE_TIMEOUT_MILLIS)
+                check(response.type == AgentRuntimeGuestMessageType.HEARTBEAT_ACK && response.sequence == 1L) {
+                    "Guest runtime returned an invalid heartbeat"
+                }
+                check(response.payload["ready"] as? Boolean == true) {
+                    response.payload["reason"]?.toString().orEmpty()
+                        .ifBlank { "Guest runtime reported an unhealthy state" }
+                }
+                connection.health
+            } finally {
+                connection.unregister(requestId)
+            }
         }.getOrElse { error ->
+            activeConnection?.shutdown(error)
             AgentRuntimeBridgeHealth(false, reason = error.message ?: "Guest runtime is unavailable")
         }
         cachedHealth = health
@@ -285,131 +340,163 @@ class AgentRuntimeGuestBridge(
     }
 
     override fun execute(request: AgentRuntimeExecutionRequest): AgentRuntimeExecutionResponse {
-        val key = sessionKeyProvider()
         val startedAt = System.currentTimeMillis()
-        channelFactory.open().use { channel ->
-            val handshake = handshake(channel, request.requestId)
-            check(handshake.health.ready) {
-                handshake.health.reason.ifBlank { "Guest runtime handshake failed" }
-            }
-            var lastReceivedSequence = handshake.responseSequence
-            val sequence = AtomicLong(2L)
-            if (request.cancellationToken.isCancellationRequested) throw AgentNativeToolCancelledException()
-            channel.send(executeEnvelope(request, sequence.getAndIncrement()), key)
-            val registration = request.cancellationToken.invokeOnCancellation {
-                runCatching {
-                    channel.send(
-                        AgentRuntimeGuestEnvelope(
+        val connection = connection()
+        check(connection.health.ready) {
+            connection.health.reason.ifBlank { "Guest runtime handshake failed" }
+        }
+        val pending = connection.register(request.requestId)
+        var lastReceivedSequence = 0L
+        if (request.cancellationToken.isCancellationRequested) {
+            connection.unregister(request.requestId)
+            throw AgentNativeToolCancelledException()
+        }
+        connection.send(request.requestId, AgentRuntimeGuestMessageType.EXECUTE, executePayload(request))
+        val registration = request.cancellationToken.invokeOnCancellation {
+            runCatching { connection.send(request.requestId, AgentRuntimeGuestMessageType.CANCEL) }
+        }
+        try {
+            val deadline = startedAt + request.timeoutMillis
+            while (true) {
+                if (request.cancellationToken.isCancellationRequested) throw AgentNativeToolCancelledException()
+                val remaining = deadline - System.currentTimeMillis()
+                if (remaining <= 0L) {
+                    runCatching { connection.send(request.requestId, AgentRuntimeGuestMessageType.CANCEL) }
+                    throw AgentNativeToolTimeoutException()
+                }
+                val envelope = try {
+                    pending.receive(remaining)
+                } catch (_: SocketTimeoutException) {
+                    runCatching { connection.send(request.requestId, AgentRuntimeGuestMessageType.CANCEL) }
+                    throw AgentNativeToolTimeoutException()
+                }
+                check(envelope.sequence > lastReceivedSequence) {
+                    "Guest runtime returned a replayed or out-of-order frame"
+                }
+                lastReceivedSequence = envelope.sequence
+                when (envelope.type) {
+                    AgentRuntimeGuestMessageType.PROGRESS -> request.progressListener(
+                        AgentRuntimeProgress(
                             requestId = request.requestId,
-                            type = AgentRuntimeGuestMessageType.CANCEL,
-                            sequence = sequence.getAndIncrement()
-                        ),
-                        key
+                            sequence = envelope.sequence,
+                            stage = envelope.payload["stage"]?.toString().orEmpty(),
+                            message = envelope.payload["message"]?.toString().orEmpty(),
+                            percent = (envelope.payload["percent"] as? Number)?.toInt()?.coerceIn(0, 100),
+                            timestampMillis = envelope.timestampMillis
+                        )
                     )
+                    AgentRuntimeGuestMessageType.RESULT -> return responseFrom(envelope, startedAt)
+                    AgentRuntimeGuestMessageType.CANCELLED -> throw AgentNativeToolCancelledException()
+                    AgentRuntimeGuestMessageType.ERROR -> error(
+                        envelope.payload["message"]?.toString().orEmpty().ifBlank { "Guest runtime failed" }
+                    )
+                    else -> Unit
                 }
             }
-            try {
-                val deadline = startedAt + request.timeoutMillis
-                while (true) {
-                    if (request.cancellationToken.isCancellationRequested) throw AgentNativeToolCancelledException()
-                    val remaining = deadline - System.currentTimeMillis()
-                    if (remaining <= 0L) throw AgentNativeToolTimeoutException()
-                    val envelope = try {
-                        channel.receive(remaining, key)
-                    } catch (_: SocketTimeoutException) {
-                        throw AgentNativeToolTimeoutException()
-                    }
-                    if (envelope.requestId != request.requestId) continue
-                    check(envelope.sequence > lastReceivedSequence) {
-                        "Guest runtime returned a replayed or out-of-order frame"
-                    }
-                    lastReceivedSequence = envelope.sequence
-                    when (envelope.type) {
-                        AgentRuntimeGuestMessageType.PROGRESS -> request.progressListener(
-                            AgentRuntimeProgress(
-                                requestId = request.requestId,
-                                sequence = envelope.sequence,
-                                stage = envelope.payload["stage"]?.toString().orEmpty(),
-                                message = envelope.payload["message"]?.toString().orEmpty(),
-                                percent = (envelope.payload["percent"] as? Number)?.toInt()?.coerceIn(0, 100),
-                                timestampMillis = envelope.timestampMillis
-                            )
-                        )
-                        AgentRuntimeGuestMessageType.RESULT -> return responseFrom(envelope, startedAt)
-                        AgentRuntimeGuestMessageType.CANCELLED -> throw AgentNativeToolCancelledException()
-                        AgentRuntimeGuestMessageType.ERROR -> error(
-                            envelope.payload["message"]?.toString().orEmpty().ifBlank { "Guest runtime failed" }
-                        )
-                        else -> Unit
-                    }
-                }
-            } finally {
-                registration.dispose()
-            }
+        } finally {
+            registration.dispose()
+            connection.unregister(request.requestId)
         }
     }
 
-    private fun handshake(channel: AgentRuntimeGuestChannel, requestId: String): HandshakeResult {
-        val key = sessionKeyProvider()
-        channel.send(
-            AgentRuntimeGuestEnvelope(
-                requestId = requestId,
-                type = AgentRuntimeGuestMessageType.HELLO,
-                sequence = 1L,
-                payload = mapOf(
-                    "host_api_version" to AgentRuntimeGuestProtocol.VERSION,
-                    "nonce" to UUID.randomUUID().toString()
-                )
-            ),
-            key
-        )
-        val response = channel.receive(HANDSHAKE_TIMEOUT_MILLIS, key)
-        check(response.requestId == requestId && response.type == AgentRuntimeGuestMessageType.HELLO_ACK) {
-            "Guest runtime returned an invalid handshake"
+    override fun cancel(requestId: String): Boolean {
+        val connection = activeConnection?.takeIf(Connection::isActive) ?: return false
+        if (!connection.hasPending(requestId)) return false
+        return runCatching {
+            connection.send(requestId, AgentRuntimeGuestMessageType.CANCEL)
+            true
+        }.getOrDefault(false)
+    }
+
+    override fun close() {
+        synchronized(connectionLock) {
+            activeConnection?.shutdown(IllegalStateException("Guest runtime connection closed"))
+            activeConnection = null
+            cachedHealth = null
+            cachedHealthAtMillis = 0L
         }
-        val guestApi = (response.payload["guest_api_version"] as? Number)?.toInt() ?: 0
-        val capabilities = (response.payload["capabilities"] as? Iterable<*>)
-            ?.mapNotNull { it?.toString()?.takeIf(String::isNotBlank) }
-            ?.toSet()
-            .orEmpty()
-        return HandshakeResult(
-            health = AgentRuntimeBridgeHealth(
-                ready = guestApi == AgentRuntimeGuestProtocol.VERSION,
+    }
+
+    private fun connection(): Connection = synchronized(connectionLock) {
+        activeConnection?.takeIf(Connection::isActive)?.let { return@synchronized it }
+        val channel = channelFactory.open()
+        val key = sessionKeyProvider()
+        try {
+            val requestId = "connect-${UUID.randomUUID()}"
+            channel.send(
+                AgentRuntimeGuestEnvelope(
+                    requestId = requestId,
+                    type = AgentRuntimeGuestMessageType.HELLO,
+                    sequence = 1L,
+                    payload = mapOf(
+                        "host_api_version" to AgentRuntimeGuestProtocol.VERSION,
+                        "nonce" to UUID.randomUUID().toString()
+                    )
+                ),
+                key
+            )
+            val response = channel.receive(HANDSHAKE_TIMEOUT_MILLIS, key)
+            check(
+                response.requestId == requestId && response.type == AgentRuntimeGuestMessageType.HELLO_ACK &&
+                    response.sequence == 1L
+            ) {
+                "Guest runtime returned an invalid handshake"
+            }
+            val guestApi = (response.payload["guest_api_version"] as? Number)?.toInt() ?: 0
+            val guestReady = response.payload["ready"] as? Boolean ?: false
+            val capabilities = (response.payload["capabilities"] as? Iterable<*>)
+                ?.mapNotNull { it?.toString()?.takeIf(String::isNotBlank) }
+                ?.toSet()
+                .orEmpty()
+            val missingCapabilities = REQUIRED_GUEST_CAPABILITIES - capabilities
+            val health = AgentRuntimeBridgeHealth(
+                ready = guestApi == AgentRuntimeGuestProtocol.VERSION && guestReady && missingCapabilities.isEmpty(),
                 guestApiVersion = guestApi,
                 guestVersion = response.payload["guest_version"]?.toString().orEmpty(),
                 capabilities = capabilities,
-                reason = if (guestApi == AgentRuntimeGuestProtocol.VERSION) "" else "Guest API version is incompatible"
-            ),
-            responseSequence = response.sequence
-        )
+                reason = when {
+                    guestApi != AgentRuntimeGuestProtocol.VERSION -> "Guest API version is incompatible"
+                    !guestReady -> response.payload["reason"]?.toString().orEmpty()
+                        .ifBlank { "Guest runtime prerequisites are unavailable" }
+                    missingCapabilities.isNotEmpty() ->
+                        "Guest runtime capabilities are incomplete: ${missingCapabilities.sorted().joinToString()}"
+                    else -> ""
+                }
+            )
+            check(health.ready) { health.reason }
+            Connection(channel, key, health).also { connection ->
+                activeConnection = connection
+                cachedHealth = health
+                cachedHealthAtMillis = System.currentTimeMillis()
+                connection.startReader()
+            }
+        } catch (error: Throwable) {
+            key.fill(0)
+            runCatching(channel::close)
+            throw error
+        }
     }
 
-    private fun executeEnvelope(request: AgentRuntimeExecutionRequest, sequence: Long): AgentRuntimeGuestEnvelope {
+    private fun executePayload(request: AgentRuntimeExecutionRequest): AgentNativeJsonObject {
         val limits = request.resourceLimits.validated()
-        return AgentRuntimeGuestEnvelope(
-            requestId = request.requestId,
-            type = AgentRuntimeGuestMessageType.EXECUTE,
-            sequence = sequence,
-            payload = mapOf(
-                "language" to request.language.wireValue,
-                "source" to request.source,
-                "arguments" to request.arguments,
-                "workspace_id" to request.workspaceId,
-                "host_workspace_path" to request.hostWorkspacePath,
-                "artifact_paths" to request.artifactPaths,
-                "network" to mapOf(
-                    "enabled" to request.networkEnabled,
-                    "allowed_domains" to request.allowedNetworkDomains
-                ),
-                "limits" to mapOf(
-                    "wall_clock_ms" to limits.wallClockMillis,
-                    "cpu_ms" to limits.cpuMillis,
-                    "memory_bytes" to limits.memoryBytes,
-                    "disk_bytes" to limits.diskBytes,
-                    "max_processes" to limits.maxProcesses,
-                    "max_output_bytes" to limits.maxOutputBytes,
-                    "max_artifact_bytes" to limits.maxArtifactBytes
-                )
+        return mapOf(
+            "language" to request.language.wireValue,
+            "arguments" to request.arguments,
+            "workspace_id" to request.workspaceId,
+            "workspace_path" to request.guestWorkspacePath,
+            "artifact_paths" to request.artifactPaths,
+            "network" to mapOf(
+                "enabled" to request.networkEnabled,
+                "allowed_domains" to request.allowedNetworkDomains
+            ),
+            "limits" to mapOf(
+                "wall_clock_ms" to limits.wallClockMillis,
+                "cpu_ms" to limits.cpuMillis,
+                "memory_bytes" to limits.memoryBytes,
+                "disk_bytes" to limits.diskBytes,
+                "max_processes" to limits.maxProcesses,
+                "max_output_bytes" to limits.maxOutputBytes,
+                "max_artifact_bytes" to limits.maxArtifactBytes
             )
         )
     }
@@ -431,11 +518,127 @@ class AgentRuntimeGuestBridge(
     companion object {
         private const val HANDSHAKE_TIMEOUT_MILLIS = 2_000L
         private const val HEALTH_CACHE_MILLIS = 5_000L
+        private const val READER_POLL_MILLIS = 30_000L
+        private const val MAX_PENDING_REQUESTS = 64
+        private const val MAX_PENDING_FRAMES = 256
+        private val REQUIRED_GUEST_CAPABILITIES = setOf(
+            "runtime.execute",
+            "runtime.cancel",
+            "runtime.progress",
+            "runtime.concurrent"
+        )
     }
 
-    private data class HandshakeResult(
-        val health: AgentRuntimeBridgeHealth,
-        val responseSequence: Long
+    private inner class Connection(
+        private val channel: AgentRuntimeGuestChannel,
+        private val sessionKey: ByteArray,
+        val health: AgentRuntimeBridgeHealth
+    ) {
+        private val active = AtomicBoolean(true)
+        private val pending = ConcurrentHashMap<String, PendingResponse>()
+        private val outboundSequences = ConcurrentHashMap<String, AtomicLong>()
+        private val registrationSlots = Semaphore(MAX_PENDING_REQUESTS, true)
+        val isActive: Boolean get() = active.get()
+
+        fun register(requestId: String): PendingResponse {
+            check(registrationSlots.tryAcquire()) { "Runtime request concurrency limit reached" }
+            val response = PendingResponse()
+            if (pending.putIfAbsent(requestId, response) != null) {
+                registrationSlots.release()
+                error("Runtime request is already active")
+            }
+            return response
+        }
+
+        fun unregister(requestId: String) {
+            if (pending.remove(requestId) != null) registrationSlots.release()
+            outboundSequences.remove(requestId)
+        }
+
+        fun hasPending(requestId: String): Boolean = pending.containsKey(requestId)
+
+        fun send(
+            requestId: String,
+            type: AgentRuntimeGuestMessageType,
+            payload: AgentNativeJsonObject = emptyMap()
+        ) {
+            check(isActive) { "Guest runtime connection is unavailable" }
+            val sequence = outboundSequences.computeIfAbsent(requestId) { AtomicLong(0L) }.incrementAndGet()
+            runCatching {
+                channel.send(
+                    AgentRuntimeGuestEnvelope(
+                        requestId = requestId,
+                        type = type,
+                        sequence = sequence,
+                        payload = payload
+                    ),
+                    sessionKey
+                )
+            }.getOrElse { error ->
+                shutdown(error)
+                throw error
+            }
+        }
+
+        fun startReader() {
+            Thread({
+                while (isActive) {
+                    val envelope = try {
+                        channel.receive(READER_POLL_MILLIS, sessionKey)
+                    } catch (_: SocketTimeoutException) {
+                        continue
+                    } catch (error: Throwable) {
+                        shutdown(error)
+                        break
+                    }
+                    val accepted = pending[envelope.requestId]?.offer(envelope) ?: true
+                    if (!accepted) {
+                        shutdown(IllegalStateException("Guest runtime response queue overflowed"))
+                        break
+                    }
+                }
+            }, "signalasi-guest-reader").apply {
+                isDaemon = true
+                start()
+            }
+        }
+
+        fun shutdown(error: Throwable) {
+            if (!active.compareAndSet(true, false)) return
+            pending.values.forEach { it.fail(error) }
+            pending.clear()
+            outboundSequences.clear()
+            runCatching(channel::close)
+            sessionKey.fill(0)
+            synchronized(connectionLock) {
+                if (activeConnection === this) activeConnection = null
+                cachedHealth = null
+                cachedHealthAtMillis = 0L
+            }
+        }
+    }
+
+    private class PendingResponse {
+        private val frames = ArrayBlockingQueue<PendingFrame>(MAX_PENDING_FRAMES)
+
+        fun offer(envelope: AgentRuntimeGuestEnvelope): Boolean = frames.offer(PendingFrame(envelope = envelope))
+
+        fun fail(error: Throwable) {
+            frames.clear()
+            frames.offer(PendingFrame(error = error))
+        }
+
+        fun receive(timeoutMillis: Long): AgentRuntimeGuestEnvelope {
+            val frame = frames.poll(timeoutMillis.coerceAtLeast(1L), TimeUnit.MILLISECONDS)
+                ?: throw SocketTimeoutException("Guest runtime response timed out")
+            frame.error?.let { throw IllegalStateException(it.message ?: "Guest runtime connection failed", it) }
+            return requireNotNull(frame.envelope)
+        }
+    }
+
+    private data class PendingFrame(
+        val envelope: AgentRuntimeGuestEnvelope? = null,
+        val error: Throwable? = null
     )
 }
 
@@ -491,7 +694,10 @@ object AgentOnDeviceRuntimeSupervisor {
 
     @Synchronized
     fun reset() {
-        registeredBridge?.let(AgentOnDeviceRuntimeBridgeRegistry::unregister)
+        registeredBridge?.let { bridge ->
+            bridge.close()
+            AgentOnDeviceRuntimeBridgeRegistry.unregister(bridge)
+        }
         registeredBridge = null
     }
 }

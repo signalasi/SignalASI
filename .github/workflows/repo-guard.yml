@@ -12,7 +12,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - run: npm run check
+      - run: npm run test:runtime-tools
+      - run: npm run test:guest-runtime
+      - run: cc -fsyntax-only -Wall -Wextra -Werror apps/android/runtime/buildroot-external/package/signalasi-runtime-launcher/src/signalasi-runtime-launcher.c
+      - run: |
+          bash -n tools/runtime/build-linux-base.sh
+          bash -n apps/android/runtime/buildroot-external/board/signalasi/aarch64/post-build.sh
+          bash -n apps/android/runtime/buildroot-external/board/signalasi/aarch64/rootfs-overlay/etc/init.d/S99signalasi
 
   android-build:
     runs-on: ubuntu-latest

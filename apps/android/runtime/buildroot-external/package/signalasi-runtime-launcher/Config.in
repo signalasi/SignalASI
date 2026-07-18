@@ -1,0 +1,5 @@
+config BR2_PACKAGE_SIGNALASI_RUNTIME_LAUNCHER
+	bool "signalasi-runtime-launcher"
+	help
+	  Installs the privileged launcher that creates an isolated namespace,
+	  applies resource limits, drops privileges, and starts one Agent task.

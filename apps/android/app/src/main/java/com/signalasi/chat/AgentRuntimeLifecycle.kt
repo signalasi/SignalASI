@@ -159,6 +159,7 @@ class AgentRuntimeEngineLaunchSpec internal constructor(
     val packsDirectory: File,
     val workspacesDirectory: File,
     val architecture: String,
+    val packAttachments: List<AgentRuntimePackAttachment> = emptyList(),
     internal val sessionKey: ByteArray
 ) {
     override fun toString(): String =
@@ -166,6 +167,12 @@ class AgentRuntimeEngineLaunchSpec internal constructor(
 
     internal fun clearSecrets() = sessionKey.fill(0)
 }
+
+data class AgentRuntimePackAttachment(
+    val packId: String,
+    val version: String,
+    val imageFile: File
+)
 
 interface AgentRuntimeEngineController {
     val controllerId: String
@@ -188,6 +195,10 @@ object AgentRuntimeEngineControllerRegistry {
     }
 
     fun current(): AgentRuntimeEngineController? = active
+
+    @Synchronized
+    fun currentOrInstall(context: Context): AgentRuntimeEngineController = active
+        ?: AgentQemuRuntimeEngineController(context.applicationContext).also { active = it }
 }
 
 private class AgentRuntimeLifecycleStore(context: Context) {
@@ -263,7 +274,7 @@ object AgentOnDeviceRuntimeLifecycle {
     ): AgentRuntimeLifecycleSnapshot {
         val appContext = context.applicationContext
         val state = machine(appContext)
-        val controller = AgentRuntimeEngineControllerRegistry.current()
+        val controller = AgentRuntimeEngineControllerRegistry.currentOrInstall(appContext)
         val bridgeReady = if (bridgeProbeCompleted) {
             knownBridgeReady
         } else {
@@ -279,9 +290,6 @@ object AgentOnDeviceRuntimeLifecycle {
                 appContext,
                 state.blocked(prerequisite.exceptionOrNull()?.message ?: "Runtime prerequisites are unavailable")
             )
-        }
-        if (controller == null) {
-            return persist(appContext, state.blocked("The native QEMU runtime controller is not packaged"))
         }
         val running = runCatching(controller::isRunning).getOrDefault(false)
         val current = state.snapshot()
@@ -303,11 +311,7 @@ object AgentOnDeviceRuntimeLifecycle {
         return startLock.withLock {
             val appContext = context.applicationContext
             inspect(appContext).takeIf { it.phase == AgentRuntimeLifecyclePhase.READY }?.let { return@withLock it }
-            val controller = AgentRuntimeEngineControllerRegistry.current()
-                ?: return@withLock persist(
-                    appContext,
-                    machine(appContext).blocked("The native QEMU runtime controller is not packaged")
-                )
+            val controller = AgentRuntimeEngineControllerRegistry.currentOrInstall(appContext)
             val files = runCatching { AgentOnDeviceRuntimeManager(appContext).runtimeBootstrapFiles() }
                 .getOrElse { error ->
                     return@withLock persist(
@@ -330,6 +334,7 @@ object AgentOnDeviceRuntimeLifecycle {
                 packsDirectory = files.packsDirectory,
                 workspacesDirectory = files.workspacesDirectory,
                 architecture = files.architecture,
+                packAttachments = files.packAttachments,
                 sessionKey = AgentRuntimeSessionKeyStore(appContext).getOrCreate()
             )
             val launch = runCatching {

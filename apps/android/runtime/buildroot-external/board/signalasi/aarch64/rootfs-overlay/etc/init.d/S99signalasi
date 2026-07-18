@@ -1,0 +1,33 @@
+#!/bin/sh
+
+umask 077
+
+pid_file=/run/signalasi-guest.pid
+log_file=/var/log/signalasi-guest.log
+
+case "$1" in
+  start)
+    if [ -s "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+      exit 0
+    fi
+    mkdir -p /run /var/log /workspace /work /run/signalasi-empty /opt/signalasi/packs
+    chmod 0700 /work
+    chmod 0000 /run/signalasi-empty
+    if [ ! -x /usr/libexec/signalasi-runtime-launcher ]; then
+      echo "SignalASI runtime launcher is unavailable" >&2
+      exit 1
+    fi
+    /usr/bin/python3 /usr/libexec/signalasi_guest_agent.py >>"$log_file" 2>&1 &
+    echo "$!" >"$pid_file"
+    ;;
+  stop)
+    if [ -s "$pid_file" ]; then
+      kill "$(cat "$pid_file")" 2>/dev/null || true
+      rm -f "$pid_file"
+    fi
+    ;;
+  restart)
+    "$0" stop
+    "$0" start
+    ;;
+esac

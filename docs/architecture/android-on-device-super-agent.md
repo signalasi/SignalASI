@@ -152,6 +152,19 @@ request id, monotonic sequence, timestamp, and HMAC-SHA256 authentication; overs
 tampered, and incompatible frames fail closed. Execution supports progress, cancellation,
 timeouts, bounded results, explicit network-domain allowlists, and health probes.
 
+The host keeps one authenticated channel open and multiplexes concurrent requests by request id.
+The Android QEMU controller builds an argument-only launch plan, keeps credentials out of process
+arguments and logs, disables guest networking, mounts only app-private task workspaces, attaches
+signed tool packs read-only, rotates bounded logs, cleans stale sockets, and removes ephemeral
+bootstrap material after shutdown. It does not silently fall back to a host shell.
+
+Inside the guest, a root-owned broker authenticates the host and delegates each command to a small
+native launcher. The launcher creates private mount, PID, network, IPC, and UTS namespaces; bind-mounts
+only that request's workspace; hides peer workspaces, fw_cfg secrets, and the host channel; applies
+CPU, address-space, process, file-size, descriptor, and core-dump limits; enables `no_new_privs`;
+drops supplementary groups and root identity; and only then executes an exact argument vector.
+The Python broker never uses shell concatenation or a multithreaded `preexec_fn`.
+
 A persistent lifecycle supervisor separates pack presence from process health. It records blocked,
 stopped, starting, ready, degraded, backing-off, and stopping states in encrypted app storage;
 starts only through a registered native engine controller; waits for the authenticated guest
@@ -168,10 +181,11 @@ digests, exit code, and verified artifact hashes. Only explicitly requested rela
 are collected. Workspaces expire after a bounded retention period and cannot escape their task
 root.
 
-This host-side protocol and policy layer does not by itself make Linux execution available. The
-runtime remains unavailable until a trusted native QEMU engine, `linux-base` image, and compatible
-guest agent are installed and complete the health handshake. SignalASI never reports a placeholder
-or manifest-only runtime as ready.
+The QEMU controller, guest broker, sandbox launcher, and pinned Buildroot `linux-base` source recipe
+are implemented. They do not by themselves make Linux execution available in a release APK. The
+runtime remains unavailable until a trusted Android QEMU engine and a built, signed `linux-base`
+image are installed and complete the health handshake. SignalASI never reports a placeholder,
+source recipe, or manifest-only runtime as ready.
 
 ## Runtime packs
 
@@ -254,8 +268,9 @@ access to the user's shared storage.
 | Encrypted memory metadata, ranking, conflict handling, and no-migration storage | Host complete |
 | Evidence-based learning, repeated-failure lessons, and reviewed Skill proposals/upgrades | Host complete |
 | Runtime capability, signed-pack catalog/download/install policy, lifecycle supervision, guest protocol, workspace, cancellation, and receipt contracts | Host complete |
+| Android QEMU process controller, persistent multiplexed bridge, Linux guest broker, per-task native sandbox launcher, and pinned `linux-base` build recipe | Source complete |
 | Control Center pages for memory, learning proposals, runtime packs, and execution receipts | Host complete |
 | Mixed-script OCR and local PDF/DOCX/XLSX/PPTX/image/source ingestion | Host complete |
-| Signed QEMU engine and compatible `linux-base` guest image | Not shipped |
+| Signed Android QEMU executable and built, signed `linux-base` release image | Not shipped |
 | Python/uv, Node, Go, Rust, C/C++, Java, FFmpeg, and extended OCR runtime packs | Not shipped |
 | Handwriting, equation, complex-table, and local visual-model understanding | Planned |

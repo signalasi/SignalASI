@@ -52,6 +52,27 @@ the exact final archive size and SHA-256.
 
 ## Build a pack
 
+### Build `linux-base`
+
+The repository contains a pinned Buildroot external tree, kernel configuration, guest broker, and
+native sandbox launcher. Build it on a Linux filesystem with the required host compiler tools:
+
+```bash
+npm run runtime:build-linux-base -- release/linux-base.img
+```
+
+The script verifies the Buildroot 2026.05.1 source archive, uses Linux 6.18.7, builds an AArch64
+`virt` kernel with an embedded initramfs, and emits a SHA-256 for the image. The guest has no direct
+network interface. Its root broker communicates through virtio-serial, while each untrusted task
+runs under the per-task namespace and privilege boundary described in the architecture document.
+
+Windows syntax checks and unit tests are useful but are not a substitute for this Linux build. A
+release pipeline must boot the resulting image with the exact Android QEMU engine, complete the
+authenticated health handshake, execute concurrency/cancellation/quota tests, generate an SBOM,
+and only then sign and publish the pack.
+
+### Sign the image
+
 The builder requires JDK 17 `jar`, the signing certificate, and its matching unencrypted or
 passphrase-supported PEM private key:
 
@@ -67,8 +88,9 @@ The command creates the `.sarpack` archive and a neighboring `.sarpack.metadata.
 streams image hashing, signs an unambiguous length-prefixed manifest payload, verifies the private
 key against the certificate, and removes staging data even when packaging fails.
 
-This command does not build QEMU, Linux, a guest agent, or a language toolchain. Those inputs must
-come from a separately audited, reproducible build pipeline with source, license, and SBOM records.
+This command signs and packages an existing image. It does not build the Android QEMU executable or
+language toolchains. Those inputs must come from separately audited, reproducible pipelines with
+source, license, and SBOM records.
 
 ## Build the release catalog
 
@@ -99,6 +121,7 @@ Run both host and Android checks before publishing:
 
 ```bash
 npm run test:runtime-tools
+npm run test:guest-runtime
 npm run check
 cd apps/android
 ./gradlew :app:testDebugUnitTest
