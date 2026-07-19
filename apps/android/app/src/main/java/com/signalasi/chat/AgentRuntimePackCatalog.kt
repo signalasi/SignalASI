@@ -648,6 +648,9 @@ class AgentRuntimePackCatalogStore(context: Context) {
     @Synchronized
     fun clear() = database.clear()
 
+    @Synchronized
+    fun close() = database.close()
+
     companion object {
         private const val DATABASE = "signalasi_runtime_catalog_v1"
         private const val UNUSED_LEGACY_PREFERENCES = "signalasi_runtime_catalog_v1_no_legacy"
@@ -687,7 +690,7 @@ class AgentRuntimePackCatalogManager(
         var lastError: Throwable? = null
         candidates.distinct().forEach { candidate ->
             try {
-                val resource = web.fetch(
+                val resource = web.download(
                     candidate,
                     AgentRuntimePackCatalogCodec.MAX_CATALOG_BYTES.toLong(),
                     minOf(web.policy.maxTimeoutMillis, CATALOG_SOURCE_TIMEOUT_MILLIS),
@@ -718,6 +721,8 @@ class AgentRuntimePackCatalogManager(
             hostVersionCode = installedVersionCode()
         )
     }
+
+    fun close() = store.close()
 
     fun cachedVerified(): AgentRuntimePackCatalog? {
         val catalog = store.load() ?: return null

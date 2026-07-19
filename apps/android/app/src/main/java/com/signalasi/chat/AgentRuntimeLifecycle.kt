@@ -249,6 +249,7 @@ private class AgentRuntimeLifecycleStore(context: Context) {
 
 object AgentOnDeviceRuntimeLifecycle {
     @Volatile private var machine: AgentRuntimeLifecycleStateMachine? = null
+    @Volatile private var stateStore: AgentRuntimeLifecycleStore? = null
     private val startLock = ReentrantLock()
     private val operationGeneration = AtomicLong(0L)
 
@@ -426,16 +427,20 @@ object AgentOnDeviceRuntimeLifecycle {
 
     @Synchronized
     private fun machine(context: Context): AgentRuntimeLifecycleStateMachine = machine
-        ?: AgentRuntimeLifecycleStateMachine(initial = AgentRuntimeLifecycleStore(context).load()
+        ?: AgentRuntimeLifecycleStateMachine(initial = store(context).load()
             ?: AgentRuntimeLifecycleSnapshot(
                 phase = AgentRuntimeLifecyclePhase.STOPPED,
                 reason = "Runtime has not been started"
             )).also { machine = it }
 
     private fun persist(context: Context, snapshot: AgentRuntimeLifecycleSnapshot): AgentRuntimeLifecycleSnapshot {
-        AgentRuntimeLifecycleStore(context).save(snapshot)
+        store(context).save(snapshot)
         return snapshot
     }
+
+    @Synchronized
+    private fun store(context: Context): AgentRuntimeLifecycleStore = stateStore
+        ?: AgentRuntimeLifecycleStore(context.applicationContext).also { stateStore = it }
 
     private const val STARTUP_TIMEOUT_MILLIS = 30_000L
     private const val HEALTH_POLL_MILLIS = 200L

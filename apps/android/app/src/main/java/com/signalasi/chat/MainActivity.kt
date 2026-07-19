@@ -281,6 +281,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var pendingVoiceEnableFromControlCenter = false
     @Volatile private var runtimeCatalogRefreshInProgress = false
     @Volatile private var pendingRuntimeCatalogPackId: String? = null
+    @Volatile private var runtimePackInstallInProgressId: String? = null
 
     // State
     private val handler = Handler(Looper.getMainLooper())
@@ -299,6 +300,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var lastAgentRegistrySyncAtMillis = 0L
     private lateinit var agentMcpRegistry: AgentMcpRegistry
     private lateinit var agentMcpPackageRepository: AgentMcpPackageRepository
+    private lateinit var agentRuntimePackCatalogManager: AgentRuntimePackCatalogManager
     private val agentRunIdsByTurn = ConcurrentHashMap<String, String>()
     private var agentSessionsDialog: android.app.Dialog? = null
     private val agentConnectorResponseListener = AgentConnectorResponseListener { response ->
@@ -446,6 +448,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         )
         agentMcpRegistry = AgentMcpRegistry(EncryptedAgentMcpStore(this))
         agentMcpPackageRepository = AgentMcpPackageRepository(this)
+        agentRuntimePackCatalogManager = AgentRuntimePackCatalogManager(this)
         agentTranscriptStore.removeExactText("Create a safe local task plan")
         agentTranscriptStore.removeExactText("Task plan confirmed")
         agentTranscriptStore.removeObsoletePlannerProcessEntries()
@@ -634,6 +637,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         saveChatHistory(sync = true)
         SignalASIMqttClient.removeListener(this)
         ScreenPerceptionState.removeVisualListener(agentVisualScreenListener)
+        if (::agentRuntimePackCatalogManager.isInitialized) agentRuntimePackCatalogManager.close()
         historyExecutor.shutdown()
         super.onDestroy()
     }
@@ -4934,7 +4938,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun renderControlCenterRuntimePage() {
         val status = AgentOnDeviceRuntimeManager(this).status()
-        val catalogManager = AgentRuntimePackCatalogManager(this)
+        val catalogManager = agentRuntimePackCatalogManager
         val catalog = catalogManager.cachedVerified()
         val catalogEntries = catalogManager.cachedCompatible()
         val catalogById = catalogEntries.associateBy(AgentRuntimePackCatalogEntry::packId)
@@ -5124,11 +5128,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun renderControlCenterSoftwareCenterPage(query: String = "") {
-        val status = AgentOnDeviceRuntimeManager(this).status()
-        val catalogManager = AgentRuntimePackCatalogManager(this)
+        val runtimeManager = AgentOnDeviceRuntimeManager(this)
+        val packStatuses = runtimeManager.packStatuses()
+        val catalogManager = agentRuntimePackCatalogManager
         val catalog = catalogManager.cachedVerified()
         val catalogById = catalogManager.cachedCompatible().associateBy(AgentRuntimePackCatalogEntry::packId)
-        val installedById = status.packs.associateBy(AgentRuntimePackStatus::id)
+        val installedById = packStatuses.associateBy(AgentRuntimePackStatus::id)
         val softwareIds = AgentOnDeviceRuntimeManager.REQUIRED_PACKS.filterNot {
             it == "linux-base" || it == "python-uv"
         }
@@ -5156,7 +5161,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 val ready = installed?.state == AgentRuntimePackState.READY
                 val sameVersion = ready && entry != null && installed?.manifest?.version == entry.version
                 val update = ready && entry != null && !sameVersion
-                val preparing = runtimeCatalogRefreshInProgress && pendingRuntimeCatalogPackId == packId
+                val preparing = !ready && (
+                    runtimePackInstallInProgressId == packId ||
+                        (runtimeCatalogRefreshInProgress && pendingRuntimeCatalogPackId == packId)
+                    )
                 val actionId = if (preparing) {
                     ""
                 } else if (ready && !update) {
@@ -5203,7 +5211,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 )
             }
         }
-        val readyCount = status.packs.count {
+        val readyCount = packStatuses.count {
             it.id in softwareIds && it.state == AgentRuntimePackState.READY
         }
         showControlCenterFeature(
@@ -5224,7 +5232,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             getString(R.string.cc_runtime_software_verified_badge),
                             ControlCenterTone.GREEN
                         ),
-                        ControlCenterBadgeSpec(status.architecture.ifBlank { "unknown" }, ControlCenterTone.BLUE)
+                        ControlCenterBadgeSpec(runtimeManager.architecture().ifBlank { "unknown" }, ControlCenterTone.BLUE)
                     ),
                     metrics = listOf(
                         ControlCenterMetricSpec(readyCount.toString(), getString(R.string.cc_runtime_software_metric_installed)),
@@ -5486,7 +5494,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         runtimeCatalogRefreshInProgress = true
         renderRuntimeControlCenterIfVisible()
         thread(name = "signalasi-runtime-catalog-refresh") {
-            val outcome = runCatching { AgentRuntimePackCatalogManager(this).refresh() }
+            val outcome = runCatching { agentRuntimePackCatalogManager.refresh() }
             runOnUiThread {
                 runtimeCatalogRefreshInProgress = false
                 val requestedPackId = pendingRuntimeCatalogPackId
@@ -5494,7 +5502,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 outcome.fold(
                     onSuccess = { catalog ->
                         val requestedEntry = requestedPackId?.let { packId ->
-                            AgentRuntimePackCatalogManager(this).cachedCompatible()
+                            agentRuntimePackCatalogManager.cachedCompatible()
                                 .firstOrNull { it.packId == packId }
                         }
                         when {
@@ -5539,7 +5547,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ).show()
             return
         }
-        val entry = AgentRuntimePackCatalogManager(this).cachedCompatible()
+        val entry = agentRuntimePackCatalogManager.cachedCompatible()
             .firstOrNull { it.packId == packId }
         if (entry != null) {
             installRuntimeCatalogPack(entry)
@@ -5565,7 +5573,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun showRuntimeCatalogPackDialog(packId: String) {
-        val entry = AgentRuntimePackCatalogManager(this).cachedCompatible()
+        val entry = agentRuntimePackCatalogManager.cachedCompatible()
             .firstOrNull { it.packId == packId } ?: return
         val installed = AgentOnDeviceRuntimeManager(this).status().packs.firstOrNull { it.id == packId }
         val sameVersion = installed?.state == AgentRuntimePackState.READY &&
@@ -5593,7 +5601,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun installRuntimeCatalogPack(entry: AgentRuntimePackCatalogEntry) {
-        val manager = AgentRuntimePackCatalogManager(this)
+        if (runtimePackInstallInProgressId != null) return
+        val manager = agentRuntimePackCatalogManager
         val plan = runCatching { manager.installationPlan(entry) }.getOrElse { error ->
             Toast.makeText(
                 this,
@@ -5602,7 +5611,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ).show()
             return
         }
-        val installedById = AgentOnDeviceRuntimeManager(this).status().packs.associateBy(AgentRuntimePackStatus::id)
+        runtimeCatalogRefreshInProgress = false
+        pendingRuntimeCatalogPackId = null
+        runtimePackInstallInProgressId = entry.packId
+        val installedById = AgentOnDeviceRuntimeManager(this).packStatuses().associateBy(AgentRuntimePackStatus::id)
         val pending = plan.filter { item ->
             item.packId == entry.packId || installedById[item.packId]?.let { installed ->
                 installed.state != AgentRuntimePackState.READY || installed.manifest?.version != item.version
@@ -5624,7 +5636,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         progressDialog.setOnCancelListener { cancellation.cancel() }
         progressDialog.show()
 
+        var lastProgressKey = ""
         fun updateProgress(pack: AgentRuntimePackCatalogEntry, index: Int, stage: String, percent: Int) {
+            val boundedPercent = percent.coerceIn(0, 100)
+            val progressKey = "${pack.packId}:$index:$stage:$boundedPercent"
+            if (progressKey == lastProgressKey) return
+            lastProgressKey = progressKey
             runOnUiThread {
                 if (progressDialog.isShowing) {
                     progressText.text = getString(
@@ -5633,7 +5650,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         index + 1,
                         pending.size,
                         stage,
-                        percent.coerceIn(0, 100)
+                        boundedPercent
                     )
                 }
             }
@@ -5681,9 +5698,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             runOnUiThread {
                 if (progressDialog.isShowing) progressDialog.dismiss()
+                runtimePackInstallInProgressId = null
+                runtimeCatalogRefreshInProgress = false
+                pendingRuntimeCatalogPackId = null
+                val installedSuccessfully = outcome.isSuccess
                 val message = outcome.fold(
                     onSuccess = {
-                        scheduleRuntimeLifecycleStartup()
                         getString(R.string.cc_runtime_install_success, runtimePackTitle(entry.packId), entry.version)
                     },
                     onFailure = { error ->
@@ -5699,6 +5719,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 )
                 Toast.makeText(this, message, Toast.LENGTH_LONG).show()
                 renderRuntimeControlCenterIfVisible()
+                if (installedSuccessfully) scheduleRuntimeLifecycleStartup()
             }
         }
     }

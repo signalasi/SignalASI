@@ -287,6 +287,10 @@ class AgentOnDeviceRuntimeManager(
     private val workspaceManager = AgentRuntimeWorkspaceManager(appContext)
     private val receiptStore = AgentRuntimeExecutionReceiptStore(appContext)
 
+    fun packStatuses(): List<AgentRuntimePackStatus> = REQUIRED_PACKS.map(::packStatus)
+
+    fun architecture(): String = Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
+
     fun status(): AgentOnDeviceRuntimeStatus {
         val engine = qemuEngineFile()
         val avf = appContext.packageManager.hasSystemFeature(AVF_FEATURE)
@@ -327,10 +331,10 @@ class AgentOnDeviceRuntimeManager(
             backend = backend,
             backendReady = backend != AgentOnDeviceRuntimeBackend.NONE && bridgeHealth?.ready == true,
             reason = reason,
-            architecture = Build.SUPPORTED_ABIS.firstOrNull().orEmpty(),
+            architecture = architecture(),
             enginePath = engine.absolutePath,
             avfAdvertised = avf,
-            packs = REQUIRED_PACKS.map(::packStatus),
+            packs = packStatuses(),
             lifecyclePhase = lifecycle.phase,
             lifecycleReason = lifecycle.reason,
             lifecycleFailures = lifecycle.consecutiveFailures,
