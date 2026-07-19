@@ -107,9 +107,9 @@ class AgentRichContentView(
         AgentRichBlockType.HEADING -> selectableText(
             block.text.ifBlank { block.title },
             when (block.metadata["level"]?.toIntOrNull() ?: 2) {
-                1 -> 23f
-                2 -> 20f
-                else -> 17f
+                1 -> 20f
+                2 -> 18f
+                else -> 16f
             }
         ).apply {
             setTypeface(typeface, Typeface.BOLD)
@@ -145,19 +145,19 @@ class AgentRichContentView(
     }
 
     private fun blockSpacing(block: AgentRichBlock): Int = when (block.type) {
-        AgentRichBlockType.HEADING -> 18
-        AgentRichBlockType.DIVIDER -> 14
-        AgentRichBlockType.TEXT, AgentRichBlockType.LIST, AgentRichBlockType.QUOTE -> 8
-        else -> 12
+        AgentRichBlockType.HEADING -> 12
+        AgentRichBlockType.DIVIDER -> 10
+        AgentRichBlockType.TEXT, AgentRichBlockType.LIST, AgentRichBlockType.QUOTE -> 6
+        else -> 10
     }
 
     private fun quoteBlock(block: AgentRichBlock): View = LinearLayout(activity).apply {
         orientation = LinearLayout.HORIZONTAL
-        addView(View(activity).apply { setBackgroundColor(Color.parseColor("#8EA0B1")) },
-            LinearLayout.LayoutParams(dp(3), ViewGroup.LayoutParams.MATCH_PARENT))
+        addView(View(activity).apply { setBackgroundColor(Color.parseColor("#A5A9AF")) },
+            LinearLayout.LayoutParams(dp(2), ViewGroup.LayoutParams.MATCH_PARENT))
         addView(selectableText(block.text, 15f).apply {
-            setTextColor(Color.parseColor("#53606E"))
-            setPadding(dp(12), dp(4), 0, dp(4))
+            setTextColor(Color.parseColor("#5F6368"))
+            setPadding(dp(10), dp(3), 0, dp(3))
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     }
 
@@ -180,17 +180,17 @@ class AgentRichContentView(
                     gravity = Gravity.END
                     setTextColor(Color.parseColor(if (marker == "checked") "#0A9480" else "#53606E"))
                     setPadding(0, dp(1), dp(8), 0)
-                }, LinearLayout.LayoutParams(dp(30), ViewGroup.LayoutParams.WRAP_CONTENT))
+                }, LinearLayout.LayoutParams(dp(24), ViewGroup.LayoutParams.WRAP_CONTENT))
                 addView(selectableText(row.getOrNull(1).orEmpty(), 16f),
                     LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                if (index > 0) topMargin = dp(5)
+                if (index > 0) topMargin = dp(4)
             })
         }
     }
 
     private fun dividerBlock(): View = View(activity).apply {
-        setBackgroundColor(Color.parseColor("#E4E9ED"))
+        setBackgroundColor(Color.parseColor("#E8EAED"))
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
     }.also { it.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)) }
 
@@ -225,34 +225,34 @@ class AgentRichContentView(
         val lineCount = source.count { it == '\n' } + 1
         val container = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            background = roundedBackground("#F5F7F9", 7f, "#DDE3E8")
+            background = roundedBackground("#F7F7F8", 8f, "#EAEBED")
         }
         val header = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(6), dp(6), dp(5))
+            setPadding(dp(12), dp(6), dp(6), dp(3))
             addView(TextView(activity).apply {
                 text = block.title.ifBlank {
                     block.language.uppercase(Locale.ROOT).ifBlank {
                         formatLabel(AgentRichFormatRegistry.describe(block))
                     }
                 }
+                text = text.toString().lowercase(Locale.ROOT)
                 textSize = 11f
-                setTextColor(Color.parseColor("#66717D"))
-                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(Color.parseColor("#777C84"))
                 maxLines = 1
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(iconButton(
                 R.drawable.ic_rich_copy,
                 activity.getString(R.string.rich_output_copy)
-            ) { copyText(source) }, LinearLayout.LayoutParams(dp(36), dp(34)))
+            ) { copyText(source) }, LinearLayout.LayoutParams(dp(34), dp(32)))
         }
         container.addView(header)
-        val codeText = selectableText(source, 13.5f).apply {
+        val codeText = selectableText(source, 14f).apply {
             text = codeSpannable(source, block.language)
             typeface = Typeface.MONOSPACE
             setTextColor(Color.parseColor("#14202B"))
-            setPadding(dp(12), dp(7), dp(12), dp(11))
+            setPadding(dp(12), dp(6), dp(12), dp(12))
             maxLines = if (lineCount > MAX_COLLAPSED_CODE_LINES) MAX_COLLAPSED_CODE_LINES else Int.MAX_VALUE
         }
         container.addView(HorizontalScrollView(activity).apply {
@@ -266,8 +266,8 @@ class AgentRichContentView(
                 textSize = 12f
                 gravity = Gravity.CENTER
                 setTextColor(Color.parseColor("#087F69"))
-                setPadding(dp(12), dp(8), dp(12), dp(9))
-                background = topBorderBackground("#F5F7F9")
+                setPadding(dp(12), dp(7), dp(12), dp(8))
+                background = topBorderBackground("#F7F7F8")
                 setOnClickListener {
                     val expand = codeText.maxLines != Int.MAX_VALUE
                     codeText.maxLines = if (expand) Int.MAX_VALUE else MAX_COLLAPSED_CODE_LINES
@@ -288,7 +288,7 @@ class AgentRichContentView(
         }
         val table = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            background = roundedBackground("#FFFFFF", 6f, "#DDE3E8")
+            background = roundedBackground("#FFFFFF", 7f, "#E1E3E6")
         }
         val scroll = HorizontalScrollView(activity).apply {
             isHorizontalScrollBarEnabled = true
@@ -335,12 +335,12 @@ class AgentRichContentView(
         LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(
-                Color.parseColor(if (header) "#EDF2F6" else if (rowIndex % 2 == 0) "#FFFFFF" else "#F8FAFB")
+                Color.parseColor(if (header) "#F1F2F4" else if (rowIndex % 2 == 0) "#FFFFFF" else "#FAFAFB")
             )
             values.forEach { value ->
                 addView(selectableText(value, if (header) 13f else 14f).apply {
                     gravity = Gravity.CENTER_VERTICAL or if (!header && isNumeric(value)) Gravity.END else Gravity.START
-                    setPadding(dp(10), dp(9), dp(10), dp(9))
+                    setPadding(dp(10), dp(8), dp(10), dp(8))
                     if (header) setTypeface(typeface, Typeface.BOLD)
                 }, LinearLayout.LayoutParams(tableColumnWidth(columnCount), ViewGroup.LayoutParams.WRAP_CONTENT))
             }
@@ -815,8 +815,9 @@ class AgentRichContentView(
         return LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(11), dp(10), dp(7), dp(10))
-            background = roundedBackground("#F7F9FA", 7f, "#DDE3E8")
+            minimumHeight = dp(58)
+            setPadding(dp(10), dp(8), dp(7), dp(8))
+            background = roundedBackground("#F7F7F8", 8f, "#EAEBED")
             addView(TextView(activity).apply {
                 val badge = formatBadge(descriptor)
                 text = badge
@@ -826,12 +827,12 @@ class AgentRichContentView(
                 setTypeface(typeface, Typeface.BOLD)
                 background = roundedBackground(formatColor(descriptor.family), 6f, formatColor(descriptor.family))
                 contentDescription = formatLabel(descriptor)
-            }, LinearLayout.LayoutParams(dp(44), dp(44)))
+            }, LinearLayout.LayoutParams(dp(40), dp(40)))
             addView(LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL
                 addView(TextView(activity).apply {
                     text = displayFileName(block)
-                    textSize = 14f
+                    textSize = 15f
                     setTextColor(Color.parseColor("#14202B"))
                     setTypeface(typeface, Typeface.BOLD)
                     maxLines = 1
@@ -842,12 +843,12 @@ class AgentRichContentView(
                 if (detail.isNotBlank()) addView(TextView(activity).apply {
                     text = detail
                     textSize = 11f
-                    setTextColor(Color.parseColor("#66717D"))
+                    setTextColor(Color.parseColor("#777C84"))
                     maxLines = 2
                     setPadding(0, dp(3), 0, 0)
                 })
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = dp(10)
+                marginStart = dp(9)
             })
             if (canOpen) addView(iconButton(
                 R.drawable.ic_rich_open,
@@ -950,19 +951,33 @@ class AgentRichContentView(
         }
     }
 
-    private fun statusBlock(block: AgentRichBlock): View = TextView(activity).apply {
-        text = listOf(block.title, block.text).filter(String::isNotBlank).joinToString(" · ")
-        textSize = 13f
-        setTextColor(Color.parseColor("#087F69"))
-        setPadding(dp(11), dp(8), dp(11), dp(8))
-        background = roundedBackground("#EAF8F4", 6f, "#BFE7DB")
-        onTextViewReady(this)
+    private fun statusBlock(block: AgentRichBlock): View = LinearLayout(activity).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = dp(30)
+        addView(ImageView(activity).apply {
+            setImageResource(R.drawable.ic_process_terminal)
+            imageTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#7A7F87"))
+            contentDescription = null
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(8) })
+        addView(TextView(activity).apply {
+            text = listOf(block.title, block.text).filter(String::isNotBlank).joinToString(" · ")
+            textSize = 13f
+            includeFontPadding = false
+            setTextColor(Color.parseColor("#777C84"))
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            onTextViewReady(this)
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     }
 
     private fun progressBlock(block: AgentRichBlock): View = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
         val label = listOf(block.title, block.text).filter(String::isNotBlank).joinToString(" · ")
-        if (label.isNotBlank()) addView(selectableText(label, 13f))
+        if (label.isNotBlank()) addView(selectableText(label, 13f).apply {
+            setTextColor(Color.parseColor("#777C84"))
+        })
         addView(ProgressBar(activity, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = block.maximum.coerceAtLeast(1)
             progress = block.value.coerceIn(0, max)
@@ -1125,6 +1140,7 @@ class AgentRichContentView(
     private fun selectableText(value: String, sizeSp: Float): TextView = TextView(activity).apply {
         text = inlineMarkdown(value)
         textSize = sizeSp
+        includeFontPadding = false
         setTextColor(Color.parseColor("#14202B"))
         setLinkTextColor(Color.parseColor("#087F69"))
         setLineSpacing(dp(4).toFloat(), 1f)

@@ -13,6 +13,134 @@ object AgentTranscriptLifecyclePolicy {
         role == AgentTranscriptRole.PROCESS && dedupeKey.startsWith("pending:")
 }
 
+object AgentTranscriptPresentationPolicy {
+    enum class ProcessVisualKind { ANALYSIS, COMMAND, FILE, IMAGE, NETWORK, GENERIC }
+    enum class ProcessContentKind { NARRATION, TOOL_ACTIVITY }
+
+    data class ProcessSegment(
+        val kind: ProcessContentKind,
+        val entries: List<AgentTranscriptEntry>
+    )
+
+    fun processGroupKey(entry: AgentTranscriptEntry): String = when {
+        entry.turnId.isNotBlank() -> "turn:${entry.conversationId}:${entry.turnId}"
+        entry.taskId.isNotBlank() -> "task:${entry.conversationId}:${entry.taskId}"
+        else -> "entry:${entry.id}"
+    }
+
+    fun collapseProcessGroups(entries: List<AgentTranscriptEntry>): List<AgentTranscriptEntry> {
+        val retainedEntries = entries.filterNot { entry ->
+            isRedundantConnectorCompletion(entry) || isInternalRuntimeHandoff(entry)
+        }
+        val localUserTurnIds = retainedEntries.asSequence()
+            .filter { it.role == AgentTranscriptRole.USER && it.turnId.isNotBlank() }
+            .map(AgentTranscriptEntry::turnId)
+            .toSet()
+        val normalizedEntries = retainedEntries.map { entry ->
+            if (entry.role != AgentTranscriptRole.PROCESS || entry.turnId in localUserTurnIds) return@map entry
+            val inferredTurn = retainedEntries.asSequence()
+                .filter { candidate ->
+                    candidate.role == AgentTranscriptRole.USER &&
+                        candidate.conversationId == entry.conversationId &&
+                        candidate.turnId.isNotBlank() &&
+                        candidate.timestampMillis <= entry.timestampMillis
+                }
+                .maxByOrNull(AgentTranscriptEntry::timestampMillis)
+                ?: retainedEntries.lastOrNull { candidate ->
+                    candidate.role == AgentTranscriptRole.USER &&
+                        candidate.conversationId == entry.conversationId &&
+                        candidate.turnId.isNotBlank()
+                }
+            inferredTurn?.let { entry.copy(turnId = it.turnId) } ?: entry
+        }
+        val representatives = linkedMapOf<String, AgentTranscriptEntry>()
+        normalizedEntries.asSequence()
+            .filter { it.role == AgentTranscriptRole.PROCESS }
+            .forEach { representatives[processGroupKey(it)] = it }
+        val emitted = mutableSetOf<String>()
+        return buildList {
+            normalizedEntries.forEach { entry ->
+                if (entry.role == AgentTranscriptRole.PROCESS) return@forEach
+                val key = processGroupKey(entry)
+                when (entry.role) {
+                    AgentTranscriptRole.USER -> {
+                        add(entry)
+                        representatives[key]?.takeIf { emitted.add(key) }?.let(::add)
+                    }
+                    AgentTranscriptRole.ASSISTANT -> {
+                        representatives[key]?.takeIf { emitted.add(key) }?.let(::add)
+                        add(entry)
+                    }
+                    AgentTranscriptRole.PROCESS -> Unit
+                }
+            }
+            representatives.forEach { (key, process) ->
+                if (emitted.add(key)) add(process)
+            }
+        }
+    }
+
+    fun processVisualKind(value: String): ProcessVisualKind {
+        val text = value.trim().lowercase()
+        return when {
+            listOf("image", "photo", "screenshot", "ocr", "\u56fe\u7247", "\u56fe\u50cf", "\u622a\u56fe", "\u62cd\u7167").any(text::contains) ->
+                ProcessVisualKind.IMAGE
+            listOf("file", "write", "edit", "save", "archive", "zip", "\u6587\u4ef6", "\u7f16\u8f91", "\u5199\u5165", "\u4fdd\u5b58", "\u6253\u5305").any(text::contains) ->
+                ProcessVisualKind.FILE
+            listOf("web", "http", "search", "fetch", "network", "\u7f51\u9875", "\u641c\u7d22", "\u7f51\u7edc", "\u8054\u7f51").any(text::contains) ->
+                ProcessVisualKind.NETWORK
+            listOf("run", "execute", "command", "terminal", "linux", "codex", "tool", "\u8fd0\u884c", "\u6267\u884c", "\u547d\u4ee4", "\u5de5\u5177").any(text::contains) ->
+                ProcessVisualKind.COMMAND
+            listOf("analy", "reason", "plan", "inspect", "\u5206\u6790", "\u601d\u8003", "\u8ba1\u5212", "\u68c0\u67e5").any(text::contains) ->
+                ProcessVisualKind.ANALYSIS
+            else -> ProcessVisualKind.GENERIC
+        }
+    }
+
+    fun processExpanded(
+        completed: Boolean,
+        manuallyExpanded: Boolean,
+        manuallyCollapsedWhileActive: Boolean
+    ): Boolean = if (completed) manuallyExpanded else !manuallyCollapsedWhileActive
+
+    fun processContentKind(entry: AgentTranscriptEntry): ProcessContentKind {
+        val text = entry.text.trim().lowercase()
+        val genericAnalysis = text.startsWith("analyzed the request") ||
+            text.startsWith("\u5df2\u5206\u6790\u8bf7\u6c42")
+        val explicitReasoning = entry.dedupeKey.contains(":REASONING_SUMMARY:") && !genericAnalysis
+        val plannedNarration = entry.dedupeKey.startsWith("pending:")
+        return if (explicitReasoning || plannedNarration) {
+            ProcessContentKind.NARRATION
+        } else {
+            ProcessContentKind.TOOL_ACTIVITY
+        }
+    }
+
+    fun processSegments(entries: List<AgentTranscriptEntry>): List<ProcessSegment> = buildList {
+        entries.forEach { entry ->
+            val kind = processContentKind(entry)
+            val previous = lastOrNull()
+            if (previous?.kind == kind) {
+                set(lastIndex, previous.copy(entries = previous.entries + entry))
+            } else {
+                add(ProcessSegment(kind, listOf(entry)))
+            }
+        }
+    }
+
+    fun isRedundantConnectorCompletion(entry: AgentTranscriptEntry): Boolean =
+        entry.role == AgentTranscriptRole.PROCESS && entry.dedupeKey.startsWith("connector-task:")
+
+    fun isInternalRuntimeHandoff(entry: AgentTranscriptEntry): Boolean {
+        if (entry.role != AgentTranscriptRole.PROCESS || !entry.dedupeKey.startsWith("pending:")) return false
+        val text = entry.text.trim().lowercase()
+        return (
+            ("phone linux" in text || "on-device linux" in text) &&
+                ("run and verify" in text || "execute and verify" in text)
+            ) || ("\u624b\u673a\u672c\u5730 linux" in text && "\u6267\u884c\u5e76\u9a8c\u8bc1" in text)
+    }
+}
+
 data class AgentTranscriptEntry(
     val id: String,
     val role: AgentTranscriptRole,

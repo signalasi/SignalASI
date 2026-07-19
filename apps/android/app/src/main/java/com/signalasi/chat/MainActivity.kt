@@ -130,6 +130,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_IMPORT_MCP_PACKAGE = 2017
         private const val REQUEST_IMPORT_RUNTIME_PACK = 2018
         private const val REQUEST_EXPORT_RUNTIME_ARTIFACT = 2019
+        private const val MAX_VISIBLE_AGENT_PROCESS_STEPS = 20
         private const val EXTRA_REOPEN_CONTROL_CENTER_CHILD = "signalasi_reopen_control_center_child"
         private const val CONTROL_CENTER_CHILD_TEXT_SIZE = "text_size"
         private const val CAPABILITY_KIND_MCP = "mcp"
@@ -345,6 +346,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var lastRenderedAgentState: AgentUiState? = null
     private var agentTranscriptAutoFollow = true
     private val renderedAgentTranscriptIds = linkedSetOf<String>()
+    private val expandedAgentProcessGroups = linkedSetOf<String>()
+    private val collapsedActiveAgentProcessGroups = linkedSetOf<String>()
+    private val expandedAgentToolSegments = linkedSetOf<String>()
     private val directoryContacts = mutableListOf<Contact>()
     private var pendingExportPassword: String? = null
     private var pendingExportSkill: Pair<String, String>? = null
@@ -1022,20 +1026,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             if (supersededResponse) supersededConnectorSourceIds.remove(sourceMessageId)
             if (responseTaskId.isNotBlank()) {
                 completedConnectorTaskIds.add(responseTaskId)
-                connectorConversationId(
-                    responseConversationId,
-                    matchingAgentRuntime,
-                    responseTurnId
-                )?.let { processConversationId ->
-                    agentTranscriptStore.upsert(
-                        AgentTranscriptRole.PROCESS,
-                        "${contactById(msg.contact.id).name} · ${getString(R.string.agent_task_status_completed)}",
-                        dedupeKey = "connector-task:$responseTaskId",
-                        conversationId = processConversationId,
-                        turnId = responseTurnId,
-                        taskId = responseTaskId
-                    )
-                }
             }
             publishAgentConnectorResponse(envelope, msg)
             if (!nativeAgentResponse && responseConversationId.isNotBlank() &&
@@ -2667,7 +2657,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentSessionTitle.text = agentConversationDisplayTitle(conversation)
         val baseSubtitle = getString(
             R.string.agent_session_context_count,
-            conversation.selectedModelOrAgent,
+            agentConversationSourceLabel(conversation),
             contextCount
         )
         agentSubtitleText.text = if (conversation.summary.isNotBlank()) {
@@ -2677,6 +2667,27 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun agentConversationDisplayTitle(conversation: AgentConversation): String =
         if (conversation.title == "New session") getString(R.string.agent_session_new) else conversation.title
+
+    private fun agentConversationSourceLabel(conversation: AgentConversation): String {
+        val selected = conversation.selectedModelOrAgent
+        if (!selected.equals("Multiple Executors", ignoreCase = true)) {
+            return agentTraceTargetLabel(selected)
+        }
+        val entries = agentTranscriptStore.list(conversation.id)
+        val latestTurnId = entries.lastOrNull { it.role == AgentTranscriptRole.USER }?.turnId.orEmpty()
+        val latestProcess = entries.asSequence()
+            .filter { entry ->
+                entry.role == AgentTranscriptRole.PROCESS &&
+                    (latestTurnId.isBlank() || entry.turnId == latestTurnId)
+            }
+            .joinToString("\n", transform = AgentTranscriptEntry::text)
+            .lowercase(Locale.US)
+        return if ("codex" in latestProcess) {
+            connectorAgentDisplayName("codex", "Codex")
+        } else {
+            selected
+        }
+    }
 
     private fun createAgentConversation() {
         agentInputAttachments.clear()
@@ -7162,7 +7173,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun syncAgentTranscript(state: AgentUiState, conversationId: String, turnId: String) {
         state.plan?.selectedAgentOrModel?.takeIf { it.isNotBlank() }?.let {
-            agentTranscriptStore.setSelectedModelOrAgent(conversationId, it)
+            agentTranscriptStore.setSelectedModelOrAgent(conversationId, agentTraceTargetLabel(it))
         }
         val planId = state.plan?.planId.orEmpty().ifBlank {
             "${state.sessionId}:${state.currentGoal.hashCode()}"
@@ -7181,6 +7192,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         state.pendingAction?.takeIf { it.kind != AgentActionKind.CALL_CONNECTOR }?.let { pending ->
             val description = pending.description.trim()
+            val processDescription = localizedAgentProcessText(description)
             if (state.phase == AgentPhase.WAITING_CONFIRMATION &&
                 description.isNotBlank()
             ) {
@@ -7215,11 +7227,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 )
             } else if (description.isNotBlank() &&
                 description != "Create a safe local task plan" &&
-                !description.contains(':')
+                !description.contains(':') &&
+                !pending.isPhoneDevelopmentRuntimeHandoff()
             ) {
                 agentTranscriptStore.append(
                     AgentTranscriptRole.PROCESS,
-                    description,
+                    processDescription,
                     dedupeKey = "pending:$planId:${pending.id}:${description.hashCode()}",
                     conversationId = conversationId,
                     turnId = turnId,
@@ -7307,15 +7320,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             if (staleApproval) agentTranscriptStore.deleteEntry(entry.id)
             staleApproval
         }
-        val visibleEntries = buildList<AgentTranscriptEntry> {
-            filteredEntries.forEach { entry ->
-                if (entry.role == AgentTranscriptRole.PROCESS && lastOrNull()?.role == AgentTranscriptRole.PROCESS) {
-                    set(lastIndex, entry)
-                } else {
-                    add(entry)
-                }
-            }
-        }
+        val visibleEntries = AgentTranscriptPresentationPolicy.collapseProcessGroups(filteredEntries)
         val incomingIds = visibleEntries.map(AgentTranscriptEntry::id)
         val renderedIds = renderedAgentTranscriptIds.toList()
         val canAppend = renderedIds.size <= incomingIds.size &&
@@ -7383,37 +7388,228 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             onTextViewReady = { textView -> attachAgentTranscriptActions(textView, entry) },
             onAction = { action -> handleAgentRichAction(entry, action) },
             onFormSubmit = { block, values -> handleAgentRichForm(entry, block, values) }
-        ).create(entry)
-        AgentTranscriptRole.PROCESS -> TextView(this).apply {
-            text = if (entry.taskId.isNotBlank()) "${entry.text}  ›" else entry.text
-            setTextColor(getColorCompat(R.color.text_secondary))
-            textSize = 13f
-            setLineSpacing(dp(3).toFloat(), 1f)
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            attachAgentTranscriptActions(this, entry)
-            if (entry.taskId.isNotBlank()) {
-                isClickable = true
-                isFocusable = true
-                setPadding(0, dp(6), 0, dp(6))
-                setOnClickListener {
-                    SharedPreferencesAgentTaskStore(this@MainActivity).find(entry.taskId)
-                        ?.let(::showAgentTaskDetails)
-                        ?: Toast.makeText(
-                            this@MainActivity,
-                            getString(R.string.agent_task_detail_unavailable),
-                            Toast.LENGTH_SHORT
-                        ).show()
-                }
+        ).create(entry.copy(
+            text = CodexStyleResponsePolicy.sanitizeAssistantText(entry.text),
+            richOutputJson = CodexStyleResponsePolicy.filterAssistantRichOutput(entry.richOutputJson)
+        ))
+        AgentTranscriptRole.PROCESS -> agentProcessTranscriptRow(entry)
+    }
+
+    private fun agentProcessTranscriptRow(entry: AgentTranscriptEntry): View {
+        val groupKey = AgentTranscriptPresentationPolicy.processGroupKey(entry)
+        val turnEntries = agentTranscriptStore.list(entry.conversationId)
+        val processEntries = turnEntries
+            .filter { candidate ->
+                candidate.role == AgentTranscriptRole.PROCESS &&
+                    !AgentTranscriptPresentationPolicy.isRedundantConnectorCompletion(candidate) &&
+                    !AgentTranscriptPresentationPolicy.isInternalRuntimeHandoff(candidate) &&
+                    when {
+                        entry.turnId.isNotBlank() -> candidate.turnId == entry.turnId ||
+                            candidate.id == entry.id ||
+                            (candidate.turnId.isBlank() && candidate.taskId == entry.taskId)
+                        entry.taskId.isNotBlank() -> candidate.taskId == entry.taskId
+                        else -> candidate.id == entry.id
+                    }
             }
+            .sortedBy(AgentTranscriptEntry::timestampMillis)
+            .distinctBy { it.text.trim() }
+            .takeLast(MAX_VISIBLE_AGENT_PROCESS_STEPS)
+        val startedAt = processEntries.firstOrNull()?.timestampMillis ?: entry.timestampMillis
+        val finishedAt = processEntries.lastOrNull()?.timestampMillis ?: entry.timestampMillis
+        val elapsed = (finishedAt - startedAt).coerceAtLeast(0L)
+        val completed = turnEntries.any { candidate ->
+            candidate.role == AgentTranscriptRole.ASSISTANT &&
+                candidate.turnId == entry.turnId &&
+                !isAgentApprovalEntry(candidate)
+        }
+        val expanded = AgentTranscriptPresentationPolicy.processExpanded(
+            completed = completed,
+            manuallyExpanded = groupKey in expandedAgentProcessGroups,
+            manuallyCollapsedWhileActive = groupKey in collapsedActiveAgentProcessGroups
+        )
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                topMargin = dp(12)
-                marginEnd = dp(32)
+                topMargin = dp(10)
+            }
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                isClickable = true
+                isFocusable = true
+                minimumHeight = dp(34)
+                setPadding(0, dp(5), 0, dp(5))
+                addView(TextView(this@MainActivity).apply {
+                    text = getString(
+                        if (completed) R.string.agent_trace_processed else R.string.agent_trace_processing,
+                        agentTraceDuration(elapsed),
+                        ""
+                    ).trimEnd()
+                    setTextColor(getColorCompat(R.color.text_secondary))
+                    textSize = 14f
+                    includeFontPadding = false
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                })
+                addView(ImageView(this@MainActivity).apply {
+                    setImageResource(R.drawable.ic_chevron_down)
+                    imageTintList = android.content.res.ColorStateList.valueOf(
+                        getColorCompat(R.color.text_secondary)
+                    )
+                    rotation = if (expanded) 180f else 0f
+                    contentDescription = getString(R.string.agent_trace_processed_details)
+                }, LinearLayout.LayoutParams(dp(17), dp(17)).apply {
+                    marginStart = dp(4)
+                })
+                setOnClickListener {
+                    if (completed) {
+                        if (expanded) expandedAgentProcessGroups.remove(groupKey)
+                        else expandedAgentProcessGroups.add(groupKey)
+                    } else {
+                        if (expanded) collapsedActiveAgentProcessGroups.add(groupKey)
+                        else collapsedActiveAgentProcessGroups.remove(groupKey)
+                    }
+                    renderedAgentTranscriptIds.clear()
+                    agentOutputList.removeAllViews()
+                    renderAgentTranscript(agentTranscriptStore.list(entry.conversationId))
+                }
+            })
+            if (expanded) {
+                AgentTranscriptPresentationPolicy.processSegments(processEntries)
+                    .forEachIndexed { index, segment ->
+                        when (segment.kind) {
+                            AgentTranscriptPresentationPolicy.ProcessContentKind.NARRATION ->
+                                segment.entries.forEach { narration ->
+                                    addView(agentProcessNarrationRow(narration))
+                                }
+                            AgentTranscriptPresentationPolicy.ProcessContentKind.TOOL_ACTIVITY -> {
+                                val segmentKey = "$groupKey:tools:$index:${segment.entries.firstOrNull()?.id.orEmpty()}"
+                                addView(agentToolSegmentRow(segmentKey, segment.entries))
+                            }
+                        }
+                    }
+                if (processEntries.isEmpty()) {
+                    addView(agentProcessStepRow(entry))
+                }
+            }
+            addView(View(this@MainActivity).apply {
+                setBackgroundColor(Color.parseColor("#E8EAED"))
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)).apply {
+                topMargin = if (expanded) dp(5) else dp(2)
+            })
+        }
+    }
+
+    private fun agentProcessNarrationRow(entry: AgentTranscriptEntry): View = TextView(this).apply {
+        text = localizedAgentProcessText(entry.text)
+        setTextColor(getColorCompat(R.color.text_primary))
+        textSize = 16f
+        includeFontPadding = false
+        setLineSpacing(dp(4).toFloat(), 1f)
+        setPadding(0, dp(8), 0, dp(8))
+        attachAgentTranscriptActions(this, entry)
+    }
+
+    private fun agentToolSegmentRow(
+        segmentKey: String,
+        entries: List<AgentTranscriptEntry>
+    ): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        val detailsExpanded = segmentKey in expandedAgentToolSegments
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(31)
+            isClickable = true
+            isFocusable = true
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(agentProcessIconResource(entries.firstOrNull()?.text.orEmpty()))
+                imageTintList = android.content.res.ColorStateList.valueOf(
+                    getColorCompat(R.color.text_secondary)
+                )
+                contentDescription = null
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(8) })
+            addView(TextView(this@MainActivity).apply {
+                text = if (entries.size == 1) {
+                    localizedAgentProcessText(entries.single().text)
+                } else {
+                    getString(R.string.agent_trace_tool_group_count, entries.size)
+                }
+                setTextColor(getColorCompat(R.color.text_secondary))
+                textSize = 14f
+                includeFontPadding = false
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(R.drawable.ic_chevron_down)
+                imageTintList = android.content.res.ColorStateList.valueOf(
+                    getColorCompat(R.color.text_secondary)
+                )
+                rotation = if (detailsExpanded) 180f else 0f
+                contentDescription = getString(R.string.agent_trace_tool_group_details)
+            }, LinearLayout.LayoutParams(dp(15), dp(15)).apply { marginStart = dp(4) })
+            setOnClickListener {
+                if (detailsExpanded) expandedAgentToolSegments.remove(segmentKey)
+                else expandedAgentToolSegments.add(segmentKey)
+                renderedAgentTranscriptIds.clear()
+                agentOutputList.removeAllViews()
+                renderAgentTranscript(agentTranscriptStore.list())
+            }
+        })
+        if (detailsExpanded) {
+            val commandEntries = entries.filter { detail ->
+                detail.dedupeKey.contains(":TOOL_STARTED:") &&
+                    (detail.text.startsWith("Phone Linux:", true) || detail.text.startsWith("\u672c\u673a Linux:", true))
+            }
+            (commandEntries.ifEmpty { entries }).forEach { detail ->
+                addView(agentProcessStepRow(detail), LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { marginStart = dp(24) })
             }
         }
+    }
+
+    private fun agentProcessStepRow(entry: AgentTranscriptEntry): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = dp(31)
+        addView(ImageView(this@MainActivity).apply {
+            setImageResource(agentProcessIconResource(entry.text))
+            imageTintList = android.content.res.ColorStateList.valueOf(
+                getColorCompat(R.color.text_secondary)
+            )
+            contentDescription = null
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LinearLayout.LayoutParams(dp(16), dp(16)).apply {
+            marginEnd = dp(8)
+        })
+        addView(TextView(this@MainActivity).apply {
+            text = localizedAgentProcessText(entry.text)
+            setTextColor(getColorCompat(R.color.text_secondary))
+            textSize = 13f
+            includeFontPadding = false
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            attachAgentTranscriptActions(this, entry)
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    }
+
+    private fun agentProcessIconResource(value: String): Int = when (
+        AgentTranscriptPresentationPolicy.processVisualKind(value)
+    ) {
+        AgentTranscriptPresentationPolicy.ProcessVisualKind.ANALYSIS -> R.drawable.ic_process_analysis
+        AgentTranscriptPresentationPolicy.ProcessVisualKind.COMMAND -> R.drawable.ic_process_terminal
+        AgentTranscriptPresentationPolicy.ProcessVisualKind.FILE -> R.drawable.ic_process_file
+        AgentTranscriptPresentationPolicy.ProcessVisualKind.IMAGE -> R.drawable.ic_process_image
+        AgentTranscriptPresentationPolicy.ProcessVisualKind.NETWORK -> R.drawable.ic_process_network
+        AgentTranscriptPresentationPolicy.ProcessVisualKind.GENERIC -> R.drawable.ic_process_terminal
     }
 
     private fun agentUserTranscriptRow(entry: AgentTranscriptEntry): View = LinearLayout(this).apply {
@@ -7818,14 +8014,26 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .ifBlank { getString(R.string.agent_output_on_device) }
         val phoneNativePlan = state.plan?.actions?.any { it.kind == AgentActionKind.CALL_NATIVE_TOOL } == true
         return when (entry.event) {
-            AgentAuditEvent.REASONING_SUMMARY -> auditDetailValue(entry.detail, "summary")
-                .ifBlank { getString(R.string.agent_trace_reasoning_summary, route) }
+            AgentAuditEvent.REASONING_SUMMARY -> when {
+                auditDetailValue(entry.detail, "summary_key") == "phone_development_repair" ->
+                    getString(R.string.agent_trace_phone_development_repair)
+                else -> auditDetailValue(entry.detail, "summary")
+                    .ifBlank { getString(R.string.agent_trace_reasoning_summary, route) }
+            }
             AgentAuditEvent.TOOL_STARTED -> getString(
-                R.string.agent_trace_tool_started,
-                auditDetailValue(entry.detail, "target").ifBlank { route }
+                if (auditDetailValue(entry.detail, "command").isNotBlank()) {
+                    R.string.agent_trace_phone_linux_command
+                } else {
+                    R.string.agent_trace_tool_started
+                },
+                auditDetailValue(entry.detail, "command").ifBlank {
+                    agentTraceTargetLabel(auditDetailValue(entry.detail, "target").ifBlank { route })
+                }
             )
             AgentAuditEvent.TOOL_COMPLETED -> {
-                val target = auditDetailValue(entry.detail, "target").ifBlank { route }
+                val target = agentTraceTargetLabel(
+                    auditDetailValue(entry.detail, "target").ifBlank { route }
+                )
                 val duration = auditDetailValue(entry.detail, "duration_ms").toLongOrNull() ?: 0L
                 val succeeded = auditDetailValue(entry.detail, "success") == "true"
                 getString(
@@ -7874,6 +8082,46 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun agentTraceDuration(durationMillis: Long): String = when {
         durationMillis < 1_000L -> "${durationMillis.coerceAtLeast(0L)} ms"
         else -> String.format(Locale.US, "%.1f s", durationMillis / 1_000.0)
+    }
+
+    private fun agentTraceTargetLabel(target: String): String {
+        val normalized = target.lowercase(Locale.US)
+        return when {
+            normalized == "codex" || normalized == "codex agent" ->
+                connectorAgentDisplayName("codex", "Codex")
+            "on-device linux" in normalized || "phone linux" in normalized ->
+                getString(R.string.agent_trace_phone_linux)
+            "runtime package manager" in normalized ->
+                getString(R.string.agent_trace_runtime_package_manager)
+            else -> target
+        }
+    }
+
+    private fun connectorAgentDisplayName(agentId: String, fallbackName: String): String {
+        val contacts = AppStore.contacts(this)
+        for (index in 0 until contacts.length()) {
+            val contact = contacts.optJSONObject(index) ?: continue
+            if (!contact.optString("agent_id").equals(agentId, ignoreCase = true)) continue
+            val desktopName = contact.optString("desktop_name").trim()
+            if (desktopName.isNotBlank()) return "$fallbackName \u00b7 $desktopName"
+            return contact.optString("name").trim().ifBlank { fallbackName }
+        }
+        return fallbackName
+    }
+
+    private fun localizedAgentProcessText(value: String): String {
+        val replacements = listOf(
+            "Execute in the on-device Linux sandbox",
+            "Run and verify in the phone's on-device Linux runtime",
+            "Run and verify in the phone\u2019s on-device Linux runtime"
+        )
+        return replacements.fold(value) { rendered, internalTitle ->
+            rendered.replace(
+                oldValue = internalTitle,
+                newValue = getString(R.string.agent_trace_phone_linux_verify),
+                ignoreCase = true
+            )
+        }
     }
 
     private fun renderAgentToolbox(state: AgentUiState) {

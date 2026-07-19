@@ -36,22 +36,74 @@ SignalASI response policy:
     }
 
     fun filterAssistantRichOutput(raw: String): String {
-        val filtered = AgentRichContentCodec.decode(raw).filterNot(::isInputAttachmentArtifact)
+        val source = AgentRichContentCodec.decode(raw)
+        val filtered = buildList {
+            var skipVerificationPayload = false
+            source.forEach { block ->
+                if (isRedundantPhoneRuntimeHeading(block)) return@forEach
+                if (isPhoneRuntimeVerificationHeading(block)) {
+                    skipVerificationPayload = true
+                    return@forEach
+                }
+                if (skipVerificationPayload && isPhoneRuntimeVerificationPayload(block)) {
+                    skipVerificationPayload = false
+                    return@forEach
+                }
+                skipVerificationPayload = false
+                if (!isInputAttachmentArtifact(block)) add(block)
+            }
+        }
         return if (filtered.isEmpty()) "" else AgentRichContentCodec.encode(filtered)
     }
 
     fun sanitizeAssistantText(raw: String): String {
         if (raw.isBlank()) return ""
         val lines = raw.replace("\r\n", "\n").lines()
-        val cleaned = lines.filterNot { line ->
+        val cleanedLines = lines.filterNot { line ->
             val value = line.trim()
             value.startsWith("Traceback (most recent call last)") ||
                 value.startsWith("Caused by:") ||
                 value.matches(Regex("^at\\s+[A-Za-z0-9_.$]+\\(.*\\)$")) ||
                 value.matches(Regex("^(preparing|calling|running)\\s+(mcp_|tool[:\\s]).*", RegexOption.IGNORE_CASE)) ||
-                value.startsWith("SYSTEM_PROMPT", ignoreCase = true)
-        }.joinToString("\n").replace(Regex("\n{3,}"), "\n\n").trim()
+                value.startsWith("SYSTEM_PROMPT", ignoreCase = true) ||
+                isRedundantPhoneRuntimeHeading(value)
+        }
+        val verificationIndex = cleanedLines.indexOfFirst { line ->
+            isPhoneRuntimeVerificationHeading(line.trim())
+        }
+        val withoutVerification = if (verificationIndex >= 0 && cleanedLines.drop(verificationIndex).any { line ->
+                isPhoneRuntimeVerificationPayload(line.trim())
+            }) {
+            cleanedLines.take(verificationIndex)
+        } else {
+            cleanedLines
+        }
+        val cleaned = withoutVerification.joinToString("\n").replace(Regex("\n{3,}"), "\n\n").trim()
         return cleaned.take(32_000)
+    }
+
+    private fun isRedundantPhoneRuntimeHeading(block: AgentRichBlock): Boolean =
+        isRedundantPhoneRuntimeHeading(block.text.ifBlank { block.title })
+
+    private fun isRedundantPhoneRuntimeHeading(value: String): Boolean {
+        val normalized = value.trim().trimEnd('。', '.').lowercase()
+        return normalized == "\u5df2\u5199\u597d\u5e76\u5728\u624b\u673a\u672c\u673a linux \u4e2d\u9a8c\u8bc1\u901a\u8fc7" ||
+            normalized == "written and verified in the phone's on-device linux runtime"
+    }
+
+    private fun isPhoneRuntimeVerificationHeading(block: AgentRichBlock): Boolean =
+        isPhoneRuntimeVerificationHeading(block.text.ifBlank { block.title })
+
+    private fun isPhoneRuntimeVerificationHeading(value: String): Boolean =
+        value.trim().trimEnd(':', '\uff1a').equals("verification", true) ||
+            value.trim().trimEnd(':', '\uff1a') == "\u9a8c\u8bc1\u7ed3\u679c"
+
+    private fun isPhoneRuntimeVerificationPayload(block: AgentRichBlock): Boolean =
+        block.type == AgentRichBlockType.CODE && isPhoneRuntimeVerificationPayload(block.text)
+
+    private fun isPhoneRuntimeVerificationPayload(value: String): Boolean {
+        val normalized = value.trim().lowercase()
+        return "exit code" in normalized || "\u9000\u51fa\u7801" in normalized
     }
 
     private fun isInputAttachmentArtifact(block: AgentRichBlock): Boolean {

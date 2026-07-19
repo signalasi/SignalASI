@@ -555,6 +555,26 @@ task_event_publish_queue: queue.Queue[tuple[object, dict, dict, list[dict]] | No
 task_event_publisher_started = threading.Event()
 task_event_publisher_lock = threading.Lock()
 
+PHONE_DEVELOPMENT_MANIFEST_SCHEMAS = {
+    "signalasi.phone-development-manifest.v1",
+    "signalasi.phone-development-manifest.v2",
+}
+
+
+def requires_exact_content_transport(value: str) -> bool:
+    """Protect structured source manifests from whitespace-normalizing transports."""
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        candidate = raw
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.IGNORECASE)
+        schema = str((json.loads(candidate) or {}).get("schema") or "")
+        return schema in PHONE_DEVELOPMENT_MANIFEST_SCHEMAS
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return any(schema in raw for schema in PHONE_DEVELOPMENT_MANIFEST_SCHEMAS)
+
 
 def _trace_event(stage: str, detail: object = "") -> dict:
     return {
@@ -1088,7 +1108,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         if rich_output:
             reply_payload["rich_output"] = rich_output
         raw_result = str(task.get("result") or "")
-        if '"schema":"signalasi.phone-development-manifest.v1"' in raw_result:
+        if requires_exact_content_transport(raw_result):
             reply_payload["exact_content_encoding"] = "base64-utf8"
             reply_payload["exact_content_b64"] = base64.b64encode(raw_result.encode("utf-8")).decode("ascii")
         reply_payload["latency"] = _trace_metrics(reply_payload["delivery_trace"])

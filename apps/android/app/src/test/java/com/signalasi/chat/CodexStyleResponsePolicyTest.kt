@@ -52,4 +52,45 @@ class CodexStyleResponsePolicyTest {
         assertEquals("Useful result", clean)
         assertFalse(clean.contains("mcp_fetch"))
     }
+
+    @Test
+    fun phoneRuntimeOutputKeepsTheRunResultAndDropsDuplicateVerification() {
+        val raw = listOf(
+            "\u5df2\u5199\u597d\u5e76\u5728\u624b\u673a\u672c\u673a Linux \u4e2d\u9a8c\u8bc1\u901a\u8fc7\u3002",
+            "",
+            "\u8fd0\u884c\u7ed3\u679c\uff1a",
+            "",
+            "```text",
+            "5050",
+            "```",
+            "",
+            "\u9a8c\u8bc1\u7ed3\u679c\uff1a",
+            "",
+            "```text",
+            "\u901a\u8fc7\uff08\u9000\u51fa\u7801 0\uff09",
+            "```"
+        ).joinToString("\n")
+
+        val clean = CodexStyleResponsePolicy.sanitizeAssistantText(raw)
+
+        assertTrue(clean.contains("5050"))
+        assertFalse(clean.contains("\u5df2\u5199\u597d"))
+        assertFalse(clean.contains("\u9a8c\u8bc1\u7ed3\u679c"))
+        assertFalse(clean.contains("\u9000\u51fa\u7801"))
+    }
+
+    @Test
+    fun phoneRuntimeRichOutputDropsOnlyTheRedundantSummaryBlocks() {
+        val raw = AgentRichContentCodec.encode(listOf(
+            AgentRichBlock("heading", AgentRichBlockType.TEXT, text = "\u5df2\u5199\u597d\u5e76\u5728\u624b\u673a\u672c\u673a Linux \u4e2d\u9a8c\u8bc1\u901a\u8fc7\u3002"),
+            AgentRichBlock("run-heading", AgentRichBlockType.TEXT, text = "\u8fd0\u884c\u7ed3\u679c\uff1a"),
+            AgentRichBlock("run", AgentRichBlockType.CODE, text = "5050", language = "text"),
+            AgentRichBlock("verify-heading", AgentRichBlockType.TEXT, text = "\u9a8c\u8bc1\u7ed3\u679c\uff1a"),
+            AgentRichBlock("verify", AgentRichBlockType.CODE, text = "\u901a\u8fc7\uff08\u9000\u51fa\u7801 0\uff09", language = "text")
+        ))
+
+        val blocks = AgentRichContentCodec.decode(CodexStyleResponsePolicy.filterAssistantRichOutput(raw))
+
+        assertEquals(listOf("run-heading", "run"), blocks.map(AgentRichBlock::id))
+    }
 }

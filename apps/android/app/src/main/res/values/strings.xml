@@ -1203,6 +1203,16 @@
     <string name="cloud_tool_completed">Completed %1$s · %2$s</string>
     <string name="agent_trace_plan_updated">Updated the plan</string>
     <string name="agent_trace_reasoning_summary">Analyzed the request · %1$s</string>
+    <string name="agent_trace_processed">Worked for %1$s %2$s</string>
+    <string name="agent_trace_processing">Working for %1$s %2$s</string>
+    <string name="agent_trace_processed_details">Show processing details</string>
+    <string name="agent_trace_tool_group_count">Ran %1$d tool steps</string>
+    <string name="agent_trace_tool_group_details">Show tool details</string>
+    <string name="agent_trace_phone_linux_command">Phone Linux: %1$s</string>
+    <string name="agent_trace_phone_development_repair">Verification failed; returning the evidence to the model for revision</string>
+    <string name="agent_trace_phone_linux">Phone Linux</string>
+    <string name="agent_trace_phone_linux_verify">Phone Linux · run and verify</string>
+    <string name="agent_trace_runtime_package_manager">Runtime package manager</string>
     <string name="agent_trace_tool_started">Running %1$s</string>
     <string name="agent_trace_tool_completed">%1$s completed · %2$s</string>
     <string name="agent_trace_tool_failed">%1$s needs revision · %2$s</string>

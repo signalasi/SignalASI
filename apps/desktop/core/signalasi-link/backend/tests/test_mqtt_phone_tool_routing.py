@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 import unittest
@@ -78,6 +79,22 @@ class MqttPhoneToolRoutingTests(unittest.TestCase):
 
         self.first = self._pair_client("first-route", "signalasi:first-phone")
         self.second = self._pair_client("second-route", "signalasi:second-phone")
+
+    def test_phone_development_v2_uses_exact_content_transport(self) -> None:
+        source = "def main():\n    print('ok')\n"
+        manifest = json.dumps(
+            {
+                "schema": "signalasi.phone-development-manifest.v2",
+                "language": "python",
+                "entry_file": "main.py",
+                "files": [{"path": "main.py", "content": source}],
+            },
+            ensure_ascii=False,
+        )
+
+        self.assertTrue(mqtt_bridge.requires_exact_content_transport(manifest))
+        self.assertFalse(mqtt_bridge.requires_exact_content_transport("ordinary assistant reply"))
+        self.assertEqual(source, json.loads(manifest)["files"][0]["content"])
 
     def tearDown(self) -> None:
         with mqtt_bridge.phone_tool_sessions_lock:

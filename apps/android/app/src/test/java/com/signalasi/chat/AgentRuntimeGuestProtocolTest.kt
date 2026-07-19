@@ -211,6 +211,62 @@ class AgentRuntimeGuestProtocolTest {
     }
 
     @Test
+    fun guestBridgeSkipsAuthenticatedFramesLeftByAnOlderConnection() {
+        val responses = LinkedBlockingQueue<AgentRuntimeGuestEnvelope>()
+        val channel = object : AgentRuntimeGuestChannel {
+            override fun send(envelope: AgentRuntimeGuestEnvelope, sessionKey: ByteArray) {
+                when (envelope.type) {
+                    AgentRuntimeGuestMessageType.HELLO -> {
+                        responses.put(
+                            AgentRuntimeGuestEnvelope(
+                                requestId = "health-from-closed-connection",
+                                type = AgentRuntimeGuestMessageType.HEARTBEAT_ACK,
+                                sequence = 1L,
+                                payload = mapOf("ready" to true)
+                            )
+                        )
+                        responses.put(
+                            AgentRuntimeGuestEnvelope(
+                                requestId = envelope.requestId,
+                                type = AgentRuntimeGuestMessageType.HELLO_ACK,
+                                sequence = 1L,
+                                payload = readyGuestPayload()
+                            )
+                        )
+                    }
+                    AgentRuntimeGuestMessageType.EXECUTE -> responses.put(
+                        AgentRuntimeGuestEnvelope(
+                            requestId = envelope.requestId,
+                            type = AgentRuntimeGuestMessageType.RESULT,
+                            sequence = 1L,
+                            payload = mapOf("exit_code" to 0, "stdout" to "done", "stderr" to "")
+                        )
+                    )
+                    else -> Unit
+                }
+            }
+
+            override fun receive(timeoutMillis: Long, sessionKey: ByteArray): AgentRuntimeGuestEnvelope =
+                responses.poll(timeoutMillis, TimeUnit.MILLISECONDS)
+                    ?: throw SocketTimeoutException("No fake Guest response")
+
+            override fun close() = Unit
+        }
+        val bridge = AgentRuntimeGuestBridge(
+            channelFactory = AgentRuntimeGuestChannelFactory { channel },
+            sessionKeyProvider = { key.copyOf() }
+        )
+
+        val response = try {
+            bridge.execute(executionRequest("request-after-reconnect"))
+        } finally {
+            bridge.close()
+        }
+
+        assertEquals("done", response.stdout)
+    }
+
+    @Test
     fun guestBridgeMultiplexesConcurrentExecutionsOverOneConnection() {
         val responses = LinkedBlockingQueue<AgentRuntimeGuestEnvelope>()
         val opens = AtomicInteger(0)

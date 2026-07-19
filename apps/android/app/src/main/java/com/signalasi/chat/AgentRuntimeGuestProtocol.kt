@@ -435,10 +435,9 @@ class AgentRuntimeGuestBridge(
                 ),
                 key
             )
-            val response = channel.receive(HANDSHAKE_TIMEOUT_MILLIS, key)
+            val response = receiveHandshake(channel, key, requestId)
             check(
-                response.requestId == requestId && response.type == AgentRuntimeGuestMessageType.HELLO_ACK &&
-                    response.sequence == 1L
+                response.type == AgentRuntimeGuestMessageType.HELLO_ACK && response.sequence == 1L
             ) {
                 "Guest runtime returned an invalid handshake"
             }
@@ -474,6 +473,25 @@ class AgentRuntimeGuestBridge(
             key.fill(0)
             runCatching(channel::close)
             throw error
+        }
+    }
+
+    private fun receiveHandshake(
+        channel: AgentRuntimeGuestChannel,
+        key: ByteArray,
+        requestId: String
+    ): AgentRuntimeGuestEnvelope {
+        val deadline = System.currentTimeMillis() + HANDSHAKE_TIMEOUT_MILLIS
+        var staleFrames = 0
+        while (true) {
+            val remaining = deadline - System.currentTimeMillis()
+            if (remaining <= 0L) throw SocketTimeoutException("Guest runtime handshake timed out")
+            val response = channel.receive(remaining, key)
+            if (response.requestId == requestId) return response
+            staleFrames++
+            check(staleFrames <= MAX_STALE_HANDSHAKE_FRAMES) {
+                "Guest runtime returned too many stale handshake frames"
+            }
         }
     }
 
@@ -521,6 +539,7 @@ class AgentRuntimeGuestBridge(
         private const val READER_POLL_MILLIS = 30_000L
         private const val MAX_PENDING_REQUESTS = 64
         private const val MAX_PENDING_FRAMES = 256
+        private const val MAX_STALE_HANDSHAKE_FRAMES = 32
         private val REQUIRED_GUEST_CAPABILITIES = setOf(
             "runtime.execute",
             "runtime.cancel",
@@ -640,6 +659,7 @@ class AgentRuntimeGuestBridge(
         val envelope: AgentRuntimeGuestEnvelope? = null,
         val error: Throwable? = null
     )
+
 }
 
 class AgentRuntimeSessionKeyStore(context: Context) {
@@ -676,6 +696,7 @@ object AgentOnDeviceRuntimeSupervisor {
     fun discover(context: Context): AgentOnDeviceRuntimeBridge? {
         registeredBridge?.let { bridge ->
             if (bridge.health().ready) return bridge
+            bridge.close()
             AgentOnDeviceRuntimeBridgeRegistry.unregister(bridge)
             registeredBridge = null
         }
@@ -686,7 +707,10 @@ object AgentOnDeviceRuntimeSupervisor {
             channelFactory = LocalSocketAgentRuntimeGuestChannelFactory(socket.absolutePath),
             sessionKeyProvider = keyStore::getOrCreate
         )
-        if (!candidate.health().ready) return null
+        if (!candidate.health().ready) {
+            candidate.close()
+            return null
+        }
         AgentOnDeviceRuntimeBridgeRegistry.register(candidate)
         registeredBridge = candidate
         return candidate

@@ -1,6 +1,7 @@
 package com.signalasi.chat
 
 import org.json.JSONObject
+import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -51,13 +52,17 @@ class AgentSystemToolPlannerTest {
         val input = JSONObject(materialized.parameters.getValue("input_json"))
 
         assertEquals("python", input.getString("language"))
-        assertTrue(input.getString("source").contains("simple_average.py"))
         val wrappedSource = input.getString("source")
         val encoded = java.util.Base64.getEncoder().encodeToString(generatedSource.toByteArray(Charsets.UTF_8))
-        assertTrue(wrappedSource.contains(encoded))
+        val filesPayload = Regex("""b64decode\(\"([^\"]+)\"\)""")
+            .find(wrappedSource)?.groupValues?.get(1).orEmpty()
+        val files = JSONArray(String(java.util.Base64.getDecoder().decode(filesPayload), Charsets.UTF_8))
+        assertEquals("simple_average.py", files.getJSONObject(0).getString("path"))
+        assertEquals(encoded, files.getJSONObject(0).getString("data"))
         assertFalse(wrappedSource.contains(generatedSource))
         assertEquals("simple_average.py", input.getJSONArray("artifact_paths").getString(0))
         assertEquals("simple_average.py", materialized.parameters[PHONE_DEVELOPMENT_FILE_PARAMETER])
+        assertEquals("python simple_average.py", materialized.phoneDevelopmentDisplayCommand())
     }
 
     @Test
@@ -78,6 +83,8 @@ class AgentSystemToolPlannerTest {
         assertEquals(3, input.getJSONArray("artifact_paths").length())
         assertTrue(input.getString("source").contains("mkdir(parents=True"))
         assertTrue(input.getString("source").contains("runpy.run_path"))
+        assertTrue(input.getString("source").contains("json.loads(base64.b64decode("))
+        assertFalse(input.getString("source").contains("\\/"))
     }
 
     @Test
@@ -117,6 +124,15 @@ class AgentSystemToolPlannerTest {
         assertTrue(prompt.orEmpty().contains("IndentationError"))
         assertTrue(prompt.orEmpty().contains("browser-automation: not installed"))
         assertTrue(prompt.orEmpty().contains("complete replacement JSON object"))
+        val legacyProfilePlan = AgentPlanFactory.actions(
+            request(
+                "Write and verify a Python program",
+                ScreenContext("com.signalasi.chat", pageTitle = "SignalASI"),
+                emptyList()
+            ),
+            listOf(failedExecution.copy(status = AgentActionStatus.PENDING_CONFIRMATION))
+        ).copy(plannerProfile = "rule-based-local")
+        assertTrue(legacyProfilePlan.isPhoneDevelopmentRepairRequest(PHONE_DEVELOPMENT_REPLAN_REASON))
     }
 
     @Test

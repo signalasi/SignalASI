@@ -123,11 +123,14 @@ internal data class AgentPhoneDevelopmentManifest(
                 "data" to Base64.getEncoder().encodeToString(file.content.toByteArray(Charsets.UTF_8))
             )
         }
+        val filesPayload = Base64.getEncoder().encodeToString(
+            JSONArray(encodedFiles).toString().toByteArray(Charsets.UTF_8)
+        )
         val wrappedSource = buildString {
             append("import base64, json, runpy, sys\n")
             append("from pathlib import Path\n")
-            append("_signalasi_files = json.loads(")
-                .append(JSONObject.quote(JSONArray(encodedFiles).toString())).append(")\n")
+            append("_signalasi_files = json.loads(base64.b64decode(")
+                .append(JSONObject.quote(filesPayload)).append(").decode(\"utf-8\"))\n")
             append("for _signalasi_item in _signalasi_files:\n")
             append("    _signalasi_path = Path(_signalasi_item[\"path\"])\n")
             append("    _signalasi_path.parent.mkdir(parents=True, exist_ok=True)\n")
@@ -235,6 +238,16 @@ internal fun AgentAction.isPhoneDevelopmentRuntimeHandoff(): Boolean =
     kind == AgentActionKind.CALL_NATIVE_TOOL &&
         parameters["tool_id"] == AgentOnDeviceRuntimeTools.EXECUTE &&
         parameters[PHONE_DEVELOPMENT_MANIFEST_PARAMETER] == "true"
+
+internal fun AgentAction.phoneDevelopmentDisplayCommand(): String =
+    parameters[PHONE_DEVELOPMENT_FILE_PARAMETER]
+        ?.takeIf { isPhoneDevelopmentRuntimeHandoff() && it.isNotBlank() }
+        ?.let { "python $it" }
+        .orEmpty()
+
+internal fun AgentPlan.isPhoneDevelopmentRepairRequest(reason: String): Boolean =
+    reason == PHONE_DEVELOPMENT_REPLAN_REASON &&
+        actions.any(AgentAction::isPhoneDevelopmentRuntimeHandoff)
 
 internal fun AgentAction.materializePhoneDevelopmentRuntime(sourceResult: String): AgentAction {
     val parsed = AgentPhoneDevelopmentManifestCodec.parse(sourceResult)

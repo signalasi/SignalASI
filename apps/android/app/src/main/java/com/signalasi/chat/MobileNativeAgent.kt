@@ -625,27 +625,12 @@ class MobileNativeAgent(
         val stderr = output["stderr"]?.toString().orEmpty().trim().take(4_000)
         val passed = exitCode == 0
         return buildList {
-            add(
-                when {
-                    passed && zh -> "\u5df2\u5199\u597d\u5e76\u5728\u624b\u673a\u672c\u673a Linux \u4e2d\u9a8c\u8bc1\u901a\u8fc7\u3002"
-                    passed -> "Written and verified in the phone's on-device Linux runtime."
-                    zh -> "\u7a0b\u5e8f\u5df2\u4fdd\u5b58\u5728\u624b\u673a\u672c\u673a\uff0c\u4f46\u9a8c\u8bc1\u6ca1\u6709\u901a\u8fc7\u3002"
-                    else -> "The program was saved on the phone, but verification did not pass."
-                }
-            )
             if (stdout.isNotBlank()) {
                 add((if (zh) "\u8fd0\u884c\u7ed3\u679c\uff1a" else "Run output:") + "\n\n```text\n$stdout\n```")
             }
             if (stderr.isNotBlank()) {
                 add((if (zh) "\u9519\u8bef\u4fe1\u606f\uff1a" else "Error output:") + "\n\n```text\n$stderr\n```")
             }
-            val verification = when {
-                passed && zh -> "\u901a\u8fc7\uff08\u9000\u51fa\u7801 0\uff09"
-                passed -> "Passed (exit code 0)"
-                zh -> "\u672a\u901a\u8fc7\uff08\u9000\u51fa\u7801 ${exitCode ?: "\u672a\u77e5"}\uff09"
-                else -> "Failed (exit code ${exitCode ?: "unknown"})"
-            }
-            add((if (zh) "\u9a8c\u8bc1\u7ed3\u679c\uff1a" else "Verification:") + "\n\n```text\n$verification\n```")
             if (!passed && stderr.isBlank() && message.isNotBlank()) {
                 add((if (zh) "\u4e0b\u4e00\u6b65\uff1a" else "Next step: ") + message.take(1_000))
             }
@@ -1451,6 +1436,7 @@ class MobileNativeAgent(
                 "_signalasi_task_id" to sessionId
             )
         )
+        val displayCommand = executionAction.phoneDevelopmentDisplayCommand()
         if (executionAction.parameters["prompt"] != hardenedAction.parameters["prompt"]) {
             recordAudit(
                 AgentAuditEvent.TOOL_OUTPUT_HANDOFF,
@@ -1460,7 +1446,8 @@ class MobileNativeAgent(
         val toolStartedAt = System.currentTimeMillis()
         recordAudit(
             AgentAuditEvent.TOOL_STARTED,
-            "action=${hardenedAction.id}; kind=${hardenedAction.kind}; target=${hardenedAction.target.take(160)}"
+            "action=${hardenedAction.id}; kind=${hardenedAction.kind}; target=${hardenedAction.target.take(160)}" +
+                displayCommand.takeIf(String::isNotBlank)?.let { "; command=${it.take(200)}" }.orEmpty()
         )
         lastActionResult = executeAction(executionAction, currentScreen, userConfirmed)
         recordAudit(
@@ -2228,8 +2215,7 @@ class MobileNativeAgent(
     ): AgentPlan? {
         val settings = AgentModelPlannerSettingsStore(appContext).load()
         val specializedAdapter = plan.plannerProfile.startsWith("specialized-adapter:")
-        val phoneDevelopmentRepair = plan.plannerProfile == PHONE_DEVELOPMENT_PLANNER_PROFILE &&
-            reason == PHONE_DEVELOPMENT_REPLAN_REASON
+        val phoneDevelopmentRepair = plan.isPhoneDevelopmentRepairRequest(reason)
         if (!specializedAdapter && !phoneDevelopmentRepair &&
             (!settings.enabled || (!settings.dynamicReplanning && !force))) return null
         val maxReplans = when {
@@ -2243,6 +2229,12 @@ class MobileNativeAgent(
                 "revision=${plan.revision}; replans=${plan.replanCount}"
             )
             return null
+        }
+        if (phoneDevelopmentRepair) {
+            recordAudit(
+                AgentAuditEvent.REASONING_SUMMARY,
+                "summary_key=phone_development_repair"
+            )
         }
         val targets = connectorRegistry.availableTargets()
         val memories = memoryStore.recall(currentGoal)
@@ -6723,6 +6715,15 @@ object AgentPlanFactory {
     }
 
     private fun selectedAgentOrModel(actions: List<AgentAction>): String {
+        val connectorTargets = actions.asSequence()
+            .filter { action ->
+                action.kind == AgentActionKind.CALL_CONNECTOR ||
+                    action.kind == AgentActionKind.CONTROL_DEVICE
+            }
+            .map { action -> selectedAgentOrModel(action) }
+            .distinct()
+            .toList()
+        if (connectorTargets.size == 1) return connectorTargets.first()
         val distinctTargets = actions.map { selectedAgentOrModel(it) }.distinct()
         return if (distinctTargets.size == 1) distinctTargets.first() else "Multiple Executors"
     }
