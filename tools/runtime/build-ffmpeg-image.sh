@@ -17,7 +17,7 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   echo "The FFmpeg image must be built on Linux." >&2
   exit 2
 fi
-for command in curl sha256sum tar node realpath mv make nproc install; do
+for command in curl sha256sum tar node realpath mv make nproc install llvm-strip; do
   command -v "$command" >/dev/null || {
     echo "Missing build dependency: $command" >&2
     exit 2
@@ -66,7 +66,7 @@ pushd "$source_tree" >/dev/null
   --cxx="$zig_root/zig c++ -target aarch64-linux-musl" \
   --ar="$zig_root/zig ar" \
   --ranlib="$zig_root/zig ranlib" \
-  --strip="$zig_root/zig strip" \
+  --strip=llvm-strip \
   --pkg-config=false \
   --disable-autodetect \
   --disable-doc \
