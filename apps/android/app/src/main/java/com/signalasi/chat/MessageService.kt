@@ -12,6 +12,8 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Base64
 import org.json.JSONObject
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 class MessageService : Service(), SignalASIMqttClient.Listener {
@@ -20,7 +22,17 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         private const val NOTIFICATION_ID = 1001
         private const val MESSAGE_NOTIFICATION_ID = 1002
         private const val AGENT_SCHEDULE_NOTIFICATION_ID = 1003
+        private const val GLOBAL_AGENT_NOTIFICATION_ID = 1004
+        private const val GLOBAL_AGENT_INTERVAL_SECONDS = 45L
         const val ACTION_REFRESH_LANGUAGE = "com.signalasi.chat.action.REFRESH_NOTIFICATION_LANGUAGE"
+        const val ACTION_PROCESS_GLOBAL_AGENT = "com.signalasi.chat.action.PROCESS_GLOBAL_AGENT"
+    }
+
+    private val globalAgentExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "signalasi-global-agent-service").apply { isDaemon = true }
+    }
+    private val globalResearchExecutor = Executors.newFixedThreadPool(2) { runnable ->
+        Thread(runnable, "signalasi-global-research").apply { isDaemon = true }
     }
 
     override fun attachBaseContext(newBase: Context) {
@@ -37,6 +49,12 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
             runCatching { AgentEmbeddedRuntimeBootstrap.ensureInstalled(this@MessageService) }
             runCatching { AgentOnDeviceRuntimeLifecycle.ensureRunning(this@MessageService) }
         }
+        globalAgentExecutor.scheduleWithFixedDelay(
+            ::processGlobalAgentEvents,
+            0L,
+            GLOBAL_AGENT_INTERVAL_SECONDS,
+            TimeUnit.SECONDS
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -47,6 +65,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         }
         handleDebugIncoming(intent)
         when (intent?.action) {
+            ACTION_PROCESS_GLOBAL_AGENT -> globalAgentExecutor.execute(::processGlobalAgentEvents)
             AgentWorkflowScheduler.ACTION_RUN_SCHEDULE -> executeScheduledWorkflow(
                 intent.getStringExtra(AgentWorkflowScheduler.EXTRA_SCHEDULE_ID).orEmpty()
             )
@@ -60,6 +79,8 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
 
     override fun onDestroy() {
         SignalASIMqttClient.removeListener(this)
+        globalAgentExecutor.shutdownNow()
+        globalResearchExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -74,18 +95,21 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
             val sourceMessageId = envelope?.optString("source_message_id")?.toLongOrNull()
                 ?: envelope?.optLong("source_message_id", 0L)?.takeIf { it > 0L }
             if (sourceMessageId != null) {
-                AgentConnectorResponseBus.publish(
-                    this,
-                    AgentConnectorResponse(
-                        sourceMessageId = sourceMessageId,
-                        contactId = envelope?.optString("contact_id").orEmpty().ifBlank { stored.contactId },
-                        content = stored.content,
-                        conversationId = envelope?.optString("conversation_id").orEmpty(),
-                        turnId = envelope?.optString("turn_id").orEmpty(),
-                        taskId = envelope?.optString("task_id").orEmpty(),
-                        richOutputJson = AgentRichContentCodec.fromEnvelope(envelope)
-                    )
+                val response = AgentConnectorResponse(
+                    sourceMessageId = sourceMessageId,
+                    contactId = envelope?.optString("contact_id").orEmpty().ifBlank { stored.contactId },
+                    content = stored.content,
+                    conversationId = envelope?.optString("conversation_id").orEmpty(),
+                    turnId = envelope?.optString("turn_id").orEmpty(),
+                    taskId = envelope?.optString("task_id").orEmpty(),
+                    richOutputJson = AgentRichContentCodec.fromEnvelope(envelope)
                 )
+                val globalRuntime = GlobalSuperAgentRuntime.get(this)
+                if (globalRuntime.consumeResearchResponse(response)) {
+                    globalAgentExecutor.execute(::processGlobalAgentEvents)
+                    return
+                }
+                AgentConnectorResponseBus.publish(this, response)
             }
         }
         if (stored.notify) {
@@ -279,6 +303,56 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         getSystemService(NotificationManager::class.java).notify(AGENT_SCHEDULE_NOTIFICATION_ID, notification)
     }
 
+    private fun processGlobalAgentEvents() {
+        val runtime = GlobalSuperAgentRuntime.get(this)
+        runCatching { runtime.processPending() }
+        repeat(2) {
+            globalResearchExecutor.execute {
+                val executed = runCatching { runtime.executeResearchCycle() }.getOrNull() ?: return@execute
+                if (executed.status == GlobalResearchTaskStatus.COMPLETED) {
+                    runCatching { runtime.processPending() }
+                }
+                notifyPendingGlobalMessage(runtime)
+            }
+        }
+        notifyPendingGlobalMessage(runtime)
+    }
+
+    private fun notifyPendingGlobalMessage(runtime: GlobalSuperAgentRuntime) {
+        if (AppForegroundTracker.isForeground()) return
+        val message = runtime.pendingProactiveMessages()
+            .lastOrNull {
+                it.status == GlobalProactiveMessageStatus.PENDING &&
+                    it.target != GlobalProactiveTarget.GLOBAL_DIGEST
+            } ?: return
+        showGlobalAgentNotification(message)
+        runtime.markNotified(setOf(message.id))
+    }
+
+    private fun showGlobalAgentNotification(message: GlobalProactiveMessage) {
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("signalasi_open_agent", true)
+            putExtra("signalasi_agent_conversation_id", message.sourceConversationId)
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            GLOBAL_AGENT_NOTIFICATION_ID,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = Notification.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_tab_chat_filled)
+            .setContentTitle(message.title.ifBlank { "SignalASI" })
+            .setContentText(message.content.take(160))
+            .setStyle(Notification.BigTextStyle().bigText(message.content))
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setShowWhen(true)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(GLOBAL_AGENT_NOTIFICATION_ID, notification)
+    }
+
     private fun handleDebugIncoming(intent: Intent?) {
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
         val encodedPayload = intent?.getStringExtra("signalasi_debug_service_payload_b64")?.trim().orEmpty()
@@ -295,4 +369,5 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
             ChatHistoryStore.markNotified(this, it.contactId, it.messageId)
         }
     }
+
 }

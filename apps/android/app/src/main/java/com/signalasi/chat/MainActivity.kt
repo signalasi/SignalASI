@@ -293,6 +293,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val historySaveRunnable = Runnable { enqueueChatHistorySave() }
     private lateinit var mobileNativeAgent: MobileNativeAgent
     private lateinit var agentTranscriptStore: AgentTranscriptStore
+    private lateinit var globalSuperAgentRuntime: GlobalSuperAgentRuntime
     private lateinit var agentRunRecorder: AgentRunRecorder
     private lateinit var agentSkillRuntime: AgentSkillRuntime
     private lateinit var agentSkillMatcher: AgentSkillMatcher
@@ -433,6 +434,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             nativeToolEventSink = AgentNativeToolEventSink(::recordNativeToolLifecycleEvent)
         )
         agentTranscriptStore = AgentTranscriptStore(this)
+        globalSuperAgentRuntime = GlobalSuperAgentRuntime.get(this)
         agentRunRecorder = AgentRunRecorder(this)
         agentRunEventStore = AgentRunEventStore(this)
         encryptedAgentRegistry = EncryptedAgentRegistry(this)
@@ -673,6 +675,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         consumePendingAgentConnectorResponses()
         reloadChatHistoryIfChanged()
         maintainMcpCredentials()
+        refreshGlobalAgentCognition()
     }
 
     private fun maintainMcpCredentials() {
@@ -706,23 +709,34 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val sourceMessageId = envelope?.optString("source_message_id")?.toLongOrNull()
             ?: envelope?.optLong("source_message_id", 0L)?.takeIf { it > 0L }
             ?: return
-        AgentConnectorResponseBus.publish(
-            this,
-            AgentConnectorResponse(
-                sourceMessageId = sourceMessageId,
-                contactId = envelope?.optString("contact_id").orEmpty().ifBlank { message.contact.id },
-                content = message.content,
-                conversationId = envelope?.optString("conversation_id").orEmpty(),
-                turnId = envelope?.optString("turn_id").orEmpty(),
-                taskId = envelope?.optString("task_id").orEmpty(),
-                richOutputJson = CodexStyleResponsePolicy.filterAssistantRichOutput(
-                    AgentRichContentCodec.fromEnvelope(envelope)
-                )
+        val response = AgentConnectorResponse(
+            sourceMessageId = sourceMessageId,
+            contactId = envelope?.optString("contact_id").orEmpty().ifBlank { message.contact.id },
+            content = message.content,
+            conversationId = envelope?.optString("conversation_id").orEmpty(),
+            turnId = envelope?.optString("turn_id").orEmpty(),
+            taskId = envelope?.optString("task_id").orEmpty(),
+            richOutputJson = CodexStyleResponsePolicy.filterAssistantRichOutput(
+                AgentRichContentCodec.fromEnvelope(envelope)
             )
         )
+        if (::globalSuperAgentRuntime.isInitialized &&
+            globalSuperAgentRuntime.consumeResearchResponse(response)
+        ) {
+            refreshGlobalAgentCognition()
+            return
+        }
+        AgentConnectorResponseBus.publish(this, response)
     }
 
     private fun consumeAgentConnectorResponse(response: AgentConnectorResponse) {
+        if (::globalSuperAgentRuntime.isInitialized &&
+            globalSuperAgentRuntime.consumeResearchResponse(response)
+        ) {
+            AgentConnectorResponseStore.remove(this, response)
+            refreshGlobalAgentCognition()
+            return
+        }
         val runtime = runtimeForConnectorResponse(
             response.sourceMessageId,
             response.contactId,
@@ -1864,6 +1878,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             taskId = turnId,
             richOutputJson = AgentRichContentCodec.encode(attachments.map(AgentInputAttachment::richBlock))
         )
+        refreshGlobalAgentCognition()
         AgentTurnAttachmentRegistry.put(turnId, attachments)
         refreshAgentConversationHeader()
         renderAgentTranscript(agentTranscriptStore.list())
@@ -1955,7 +1970,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         forcedAction: AgentAction? = null
     ) {
         val routingStartedAt = SystemClock.elapsedRealtime()
-        val conversationContext = agentTranscriptStore.context(conversationId)
+        val conversationContext = globalSuperAgentRuntime.augmentContext(
+            agentTranscriptStore.context(conversationId),
+            goal
+        )
         AgentFastLocalResponse.reply(goal, conversationContext)?.let { response ->
             agentTranscriptStore.append(
                 AgentTranscriptRole.ASSISTANT,
@@ -2666,7 +2684,26 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun agentConversationDisplayTitle(conversation: AgentConversation): String =
-        if (conversation.title == "New session") getString(R.string.agent_session_new) else conversation.title
+        (if (conversation.title == "New session") getString(R.string.agent_session_new) else conversation.title).let { title ->
+            if (conversation.createdByAgent) getString(R.string.agent_session_created_by_agent, title) else title
+        }
+
+    private fun refreshGlobalAgentCognition() {
+        if (!::globalSuperAgentRuntime.isInitialized || !::agentTranscriptStore.isInitialized) return
+        thread(name = "signalasi-global-agent-cognition") {
+            runCatching { globalSuperAgentRuntime.processPending() }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val delivered = runCatching {
+                    globalSuperAgentRuntime.deliverPending(agentTranscriptStore)
+                }.getOrDefault(emptyList())
+                if (delivered.isNotEmpty() && activeMainTab == PAGE_AGENT) {
+                    refreshAgentConversationHeader()
+                    renderAgentTranscript(agentTranscriptStore.list())
+                }
+            }
+        }
+    }
 
     private fun agentConversationSourceLabel(conversation: AgentConversation): String {
         val selected = conversation.selectedModelOrAgent

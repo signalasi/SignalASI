@@ -1329,4 +1329,5 @@
     <string name="agent_runtime_artifact_saved_picker">文件已保存</string>
     <string name="agent_runtime_artifact_save_failed">文件保存失败，请重试。</string>
     <string name="agent_trace_processed_details">\u67e5\u770b\u5904\u7406\u8be6\u60c5</string>
+    <string name="agent_session_created_by_agent">Signal &#183; %1$s</string>
 </resources>
