@@ -238,7 +238,7 @@ class AgentWorkspaceFileTools(
     }
 
     fun initializeWorkspace(workspaceId: String): AgentWorkspaceFileResult<AgentWorkspaceMutation> =
-        runOperation("initialize", workspaceId) {
+        runOperation("initialize", workspaceId, workspaceId) {
             val relative = workspaceDirectoryName(workspaceId)
             val candidate = storageRoot.resolve(relative)
             val existed = Files.exists(candidate, NOFOLLOW_LINKS)
@@ -255,7 +255,7 @@ class AgentWorkspaceFileTools(
         workspaceId: String,
         path: String,
         recursive: Boolean = true
-    ): AgentWorkspaceFileResult<AgentWorkspaceMutation> = runOperation("mkdir", path) {
+    ): AgentWorkspaceFileResult<AgentWorkspaceMutation> = runOperation("mkdir", workspaceId, path) {
         val root = workspaceRoot(workspaceId)
         val target = resolvePath(root, path, allowRoot = true)
         val existed = Files.exists(target, NOFOLLOW_LINKS)
@@ -284,7 +284,7 @@ class AgentWorkspaceFileTools(
         path: String = "",
         recursive: Boolean = false,
         maxEntries: Int = policy.maxListEntries
-    ): AgentWorkspaceFileResult<AgentWorkspaceDirectoryListing> = runOperation("list", path) {
+    ): AgentWorkspaceFileResult<AgentWorkspaceDirectoryListing> = runOperation("list", workspaceId, path) {
         val limit = requireLimit(maxEntries, policy.maxListEntries, "list entries")
         val root = workspaceRoot(workspaceId)
         val directory = resolvePath(root, path, allowRoot = true)
@@ -308,7 +308,7 @@ class AgentWorkspaceFileTools(
     }
 
     fun stat(workspaceId: String, path: String): AgentWorkspaceFileResult<AgentWorkspaceFileMetadata> =
-        runOperation("stat", path) {
+        runOperation("stat", workspaceId, path) {
             val root = workspaceRoot(workspaceId)
             metadata(root, resolvePath(root, path, allowRoot = true))
         }
@@ -317,7 +317,7 @@ class AgentWorkspaceFileTools(
         workspaceId: String,
         path: String,
         maxBytes: Long = policy.maxTextReadBytes
-    ): AgentWorkspaceFileResult<AgentWorkspaceTextRead> = runOperation("read_text", path) {
+    ): AgentWorkspaceFileResult<AgentWorkspaceTextRead> = runOperation("read_text", workspaceId, path) {
         val limit = requireLimit(maxBytes, policy.maxTextReadBytes, "text read bytes")
         val root = workspaceRoot(workspaceId)
         val file = resolvePath(root, path, allowRoot = false)
@@ -335,7 +335,7 @@ class AgentWorkspaceFileTools(
         workspaceId: String,
         path: String,
         maxBytes: Long = policy.maxBytesReadBytes
-    ): AgentWorkspaceFileResult<AgentWorkspaceBytesRead> = runOperation("read_bytes", path) {
+    ): AgentWorkspaceFileResult<AgentWorkspaceBytesRead> = runOperation("read_bytes", workspaceId, path) {
         val limit = requireLimit(maxBytes, policy.maxBytesReadBytes, "binary read bytes")
         val root = workspaceRoot(workspaceId)
         val file = resolvePath(root, path, allowRoot = false)
@@ -425,7 +425,7 @@ class AgentWorkspaceFileTools(
         overwrite: Boolean = false,
         createParents: Boolean = false
     ): AgentWorkspaceFileResult<AgentWorkspaceMutation> =
-        runOperation("move", "$sourcePath -> $destinationPath") {
+        runOperation("move", workspaceId, "$sourcePath -> $destinationPath") {
             val root = workspaceRoot(workspaceId)
             val source = resolvePath(root, sourcePath, allowRoot = false)
             val destination = resolvePath(root, destinationPath, allowRoot = false)
@@ -451,7 +451,7 @@ class AgentWorkspaceFileTools(
         overwrite: Boolean = false,
         createParents: Boolean = false
     ): AgentWorkspaceFileResult<AgentWorkspaceMutation> =
-        runOperation("copy", "$sourcePath -> $destinationPath") {
+        runOperation("copy", workspaceId, "$sourcePath -> $destinationPath") {
             val root = workspaceRoot(workspaceId)
             val source = resolvePath(root, sourcePath, allowRoot = false)
             val destination = resolvePath(root, destinationPath, allowRoot = false)
@@ -473,7 +473,7 @@ class AgentWorkspaceFileTools(
         workspaceId: String,
         path: String,
         recursive: Boolean = false
-    ): AgentWorkspaceFileResult<AgentWorkspaceMutation> = runOperation("delete", path) {
+    ): AgentWorkspaceFileResult<AgentWorkspaceMutation> = runOperation("delete", workspaceId, path) {
         val root = workspaceRoot(workspaceId)
         val target = resolvePath(root, path, allowRoot = false)
         val entries = if (recursive) {
@@ -501,7 +501,7 @@ class AgentWorkspaceFileTools(
         query: String,
         caseSensitive: Boolean = false,
         maxResults: Int = policy.maxSearchResults
-    ): AgentWorkspaceFileResult<AgentWorkspaceTextSearchResult> = runOperation("search_text", path) {
+    ): AgentWorkspaceFileResult<AgentWorkspaceTextSearchResult> = runOperation("search_text", workspaceId, path) {
         if (query.isEmpty()) invalidPath("Search query cannot be empty")
         if (query.length > MAX_SEARCH_QUERY_CHARACTERS) limitExceeded("Search query is too long")
         val resultLimit = requireLimit(maxResults, policy.maxSearchResults, "search results")
@@ -574,7 +574,7 @@ class AgentWorkspaceFileTools(
         expectedText: String,
         replacementText: String,
         expectedOccurrences: Int = 1
-    ): AgentWorkspaceFileResult<AgentWorkspacePatchResult> = runOperation("apply_exact_patch", path) {
+    ): AgentWorkspaceFileResult<AgentWorkspacePatchResult> = runOperation("apply_exact_patch", workspaceId, path) {
         if (expectedText.isEmpty()) patchMismatch("Expected text cannot be empty")
         if (expectedOccurrences <= 0) patchMismatch("Expected occurrence count must be positive")
         val root = workspaceRoot(workspaceId)
@@ -604,7 +604,7 @@ class AgentWorkspaceFileTools(
         workspaceId: String,
         path: String,
         proposedText: String
-    ): AgentWorkspaceFileResult<AgentWorkspaceDiffSummary> = runOperation("diff_summary", path) {
+    ): AgentWorkspaceFileResult<AgentWorkspaceDiffSummary> = runOperation("diff_summary", workspaceId, path) {
         val proposedBytes = proposedText.toByteArray(Charsets.UTF_8)
         if (proposedBytes.size.toLong() > policy.maxPatchBytes) {
             limitExceeded("Proposed text exceeds the diff size limit")
@@ -618,7 +618,7 @@ class AgentWorkspaceFileTools(
     fun sha256(
         workspaceId: String,
         path: String
-    ): AgentWorkspaceFileResult<AgentWorkspaceDigest> = runOperation("sha256", path) {
+    ): AgentWorkspaceFileResult<AgentWorkspaceDigest> = runOperation("sha256", workspaceId, path) {
         val root = workspaceRoot(workspaceId)
         val file = resolvePath(root, path, allowRoot = false)
         requireFile(file)
@@ -648,7 +648,7 @@ class AgentWorkspaceFileTools(
         sourcePaths: List<String>,
         overwrite: Boolean = false,
         createParents: Boolean = false
-    ): AgentWorkspaceFileResult<AgentWorkspaceZipListing> = runOperation("zip_create", archivePath) {
+    ): AgentWorkspaceFileResult<AgentWorkspaceZipListing> = runOperation("zip_create", workspaceId, archivePath) {
         if (sourcePaths.isEmpty()) invalidPath("At least one ZIP source path is required")
         val root = workspaceRoot(workspaceId)
         val archive = resolvePath(root, archivePath, allowRoot = false)
@@ -714,7 +714,7 @@ class AgentWorkspaceFileTools(
     fun listZip(
         workspaceId: String,
         archivePath: String
-    ): AgentWorkspaceFileResult<AgentWorkspaceZipListing> = runOperation("zip_list", archivePath) {
+    ): AgentWorkspaceFileResult<AgentWorkspaceZipListing> = runOperation("zip_list", workspaceId, archivePath) {
         val root = workspaceRoot(workspaceId)
         val archive = resolvePath(root, archivePath, allowRoot = false)
         requireFile(archive)
@@ -727,7 +727,7 @@ class AgentWorkspaceFileTools(
         destinationPath: String,
         overwrite: Boolean = false
     ): AgentWorkspaceFileResult<AgentWorkspaceZipExtraction> =
-        runOperation("zip_extract", "$archivePath -> $destinationPath") {
+        runOperation("zip_extract", workspaceId, "$archivePath -> $destinationPath") {
             val root = workspaceRoot(workspaceId)
             val archive = resolvePath(root, archivePath, allowRoot = false)
             requireFile(archive)
@@ -803,7 +803,7 @@ class AgentWorkspaceFileTools(
         createParents: Boolean,
         requireMissing: Boolean,
         appendExisting: Boolean
-    ): AgentWorkspaceFileResult<AgentWorkspaceMutation> = runOperation(operation, path) {
+    ): AgentWorkspaceFileResult<AgentWorkspaceMutation> = runOperation(operation, workspaceId, path) {
         if (bytes.size.toLong() > policy.maxWriteBytes) limitExceeded("Write exceeds the configured size limit")
         val root = workspaceRoot(workspaceId)
         val file = resolvePath(root, path, allowRoot = false)
@@ -1315,10 +1315,11 @@ class AgentWorkspaceFileTools(
 
     private fun <T> runOperation(
         operation: String,
+        workspaceId: String,
         path: String,
         block: () -> T
     ): AgentWorkspaceFileResult<T> = try {
-        AgentWorkspaceFileResult.Success(block())
+        AgentWorkspaceFileResult.Success(AgentWorkspaceScope.withLock(workspaceId, block))
     } catch (failure: WorkspaceFailure) {
         AgentWorkspaceFileResult.Failure(
             AgentWorkspaceFileError(failure.code, operation, path, failure.message.orEmpty())

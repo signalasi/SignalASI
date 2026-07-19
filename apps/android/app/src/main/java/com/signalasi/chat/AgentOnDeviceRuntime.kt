@@ -251,7 +251,9 @@ data class AgentRuntimeExecutionResponse(
     val durationMillis: Long,
     val artifacts: List<Map<String, Any?>> = emptyList(),
     val requestId: String = "",
-    val executionReceipt: AgentRuntimeExecutionReceipt? = null
+    val executionReceipt: AgentRuntimeExecutionReceipt? = null,
+    val projectFileCount: Int = 0,
+    val projectBytes: Long = 0L
 )
 
 fun interface AgentOnDeviceRuntimeBridge {
@@ -343,6 +345,10 @@ class AgentOnDeviceRuntimeManager(
     }
 
     fun execute(request: AgentRuntimeExecutionRequest): AgentRuntimeExecutionResponse {
+        return AgentWorkspaceScope.withLock(request.workspaceId) { executeLocked(request) }
+    }
+
+    private fun executeLocked(request: AgentRuntimeExecutionRequest): AgentRuntimeExecutionResponse {
         require(request.source.toByteArray().size <= MAX_SOURCE_BYTES) { "Runtime source exceeds the limit" }
         require(request.arguments.size <= MAX_ARGUMENTS) { "Runtime argument count exceeds the limit" }
         require(request.arguments.all { it.toByteArray().size <= MAX_ARGUMENT_BYTES }) {
@@ -378,10 +384,13 @@ class AgentOnDeviceRuntimeManager(
         receiptStore.begin(normalizedRequest, packVersions)
         return try {
             val rawResponse = activeBridge.execute(normalizedRequest)
+            val project = workspaceManager.syncProject(prepared, normalizedRequest.resourceLimits.diskBytes)
             val artifacts = workspaceManager.collectArtifacts(prepared, normalizedRequest)
             val response = rawResponse.copy(
                 artifacts = artifacts,
-                requestId = normalizedRequest.requestId
+                requestId = normalizedRequest.requestId,
+                projectFileCount = project.fileCount,
+                projectBytes = project.totalBytes
             ).bounded()
             val receipt = receiptStore.complete(normalizedRequest.requestId, response, artifacts)
             workspaceManager.markFinished(
@@ -390,6 +399,7 @@ class AgentOnDeviceRuntimeManager(
             )
             response.copy(executionReceipt = receipt)
         } catch (error: Throwable) {
+            runCatching { workspaceManager.syncProject(prepared, normalizedRequest.resourceLimits.diskBytes) }
             receiptStore.fail(normalizedRequest.requestId, error)
             workspaceManager.markFinished(
                 prepared,
@@ -668,9 +678,10 @@ class AgentOnDeviceRuntimeManager(
 object AgentOnDeviceRuntimeTools {
     const val STATUS = "signalasi.runtime.status"
     const val LIST_PACKS = "signalasi.runtime.packs.list"
+    const val INSTALL_PACK = "signalasi.runtime.packs.install"
     const val EXECUTE = "signalasi.runtime.execute"
 
-    val toolIds = setOf(STATUS, LIST_PACKS, EXECUTE)
+    val toolIds = setOf(STATUS, LIST_PACKS, INSTALL_PACK, EXECUTE)
 
     fun definitions(context: Context): List<AgentNativeToolDefinition> {
         val manager = AgentOnDeviceRuntimeManager(context.applicationContext)
@@ -708,11 +719,12 @@ object AgentOnDeviceRuntimeTools {
                 },
                 executorId = "signalasi.android_runtime_broker"
             ),
+            runtimePackInstallDefinition(context.applicationContext, manager),
             AgentNativeToolDefinition(
                 descriptor = descriptor(
                     id = EXECUTE,
                     title = "Execute in the on-device Linux sandbox",
-                    description = "Runs bounded shell, language, build, or FFmpeg work in the Android-local Linux runtime.",
+                    description = "Runs bounded shell, language, build, test, or FFmpeg work in a persistent conversation project inside the Android-local Linux runtime. Files and artifacts remain available to later turns.",
                     input = executionInputSchema(),
                     risk = AgentNativeToolRisk.MEDIUM,
                     timeoutMillis = 30 * 60_000L,
@@ -732,7 +744,8 @@ object AgentOnDeviceRuntimeTools {
                         networkEnabled = invocation.input["network_enabled"] as? Boolean ?: false,
                         allowedNetworkDomains = invocation.input.stringList("allowed_network_domains"),
                         artifactPaths = invocation.input.stringList("artifact_paths"),
-                        workspaceId = invocation.context.turnId
+                        workspaceId = invocation.context.attributes["workspace_id"].orEmpty()
+                            .ifBlank { invocation.context.turnId }
                             .ifBlank { invocation.context.conversationId }
                             .ifBlank { invocation.context.invocationId },
                         requestId = invocation.context.invocationId,
@@ -791,11 +804,109 @@ object AgentOnDeviceRuntimeTools {
         )
     }
 
+    private fun runtimePackInstallDefinition(
+        context: Context,
+        manager: AgentOnDeviceRuntimeManager
+    ): AgentNativeToolDefinition = AgentNativeToolDefinition(
+        descriptor = descriptor(
+            id = INSTALL_PACK,
+            title = "Install a trusted on-device runtime pack",
+            description = "Downloads, verifies, and installs a signed Linux, language, or media runtime pack and its dependencies.",
+            input = AgentNativeJsonSchema.objectSchema(
+                properties = mapOf(
+                    "pack_id" to AgentNativeJsonSchema.string(enumValues = AgentOnDeviceRuntimeManager.REQUIRED_PACKS)
+                ),
+                required = setOf("pack_id"),
+                additionalProperties = false
+            ),
+            risk = AgentNativeToolRisk.MEDIUM,
+            timeoutMillis = 30 * 60_000L,
+            availability = AgentNativeToolAvailability.AVAILABLE
+        ),
+        executor = AgentNativeToolExecutor { invocation ->
+            val requestedPack = invocation.input["pack_id"]?.toString().orEmpty()
+            if (requestedPack !in AgentOnDeviceRuntimeManager.REQUIRED_PACKS) {
+                return@AgentNativeToolExecutor AgentNativeToolExecutionResult.failure(
+                    "invalid_runtime_pack", "Runtime pack is invalid"
+                )
+            }
+            val catalogManager = AgentRuntimePackCatalogManager(context)
+            try {
+                invocation.reportProgress("catalog", "Refreshing the trusted runtime catalog")
+                catalogManager.refresh(cancellationToken = invocation.cancellationToken)
+                val entry = catalogManager.cachedCompatible().firstOrNull {
+                    it.packId == requestedPack && it.architecture == manager.architecture()
+                } ?: error("No compatible signed runtime pack is available for $requestedPack")
+                val plan = catalogManager.installationPlan(entry)
+                val installed = mutableListOf<Map<String, Any?>>()
+                plan.forEachIndexed { index, item ->
+                    if (invocation.cancellationToken.isCancellationRequested) {
+                        throw AgentNativeToolCancelledException()
+                    }
+                    val current = manager.packStatuses().first { it.id == item.packId }
+                    if (current.state == AgentRuntimePackState.READY && current.manifest?.version == item.version) {
+                        installed += mapOf(
+                            "pack_id" to item.packId,
+                            "version" to item.version,
+                            "state" to "already_ready"
+                        )
+                    } else {
+                        invocation.reportProgress(
+                            "download",
+                            "Downloading ${item.packId}",
+                            (index * 100) / plan.size.coerceAtLeast(1)
+                        )
+                        val result = catalogManager.downloadAndInstall(
+                            item,
+                            invocation.cancellationToken,
+                            onDownloadProgress = { progress ->
+                                val percent = if (progress.totalBytes > 0L) {
+                                    ((progress.downloadedBytes * 100L) / progress.totalBytes)
+                                        .toInt().coerceIn(0, 100)
+                                } else null
+                                invocation.reportProgress("download", "Downloading ${item.packId}", percent)
+                            },
+                            onInstallProgress = { progress ->
+                                invocation.reportProgress(
+                                    "install",
+                                    "Installing ${item.packId}: ${progress.stage.name.lowercase(Locale.ROOT)}"
+                                )
+                            }
+                        )
+                        installed += mapOf(
+                            "pack_id" to result.packId,
+                            "version" to result.version,
+                            "state" to result.state.wireValue,
+                            "installed_bytes" to result.installedBytes
+                        )
+                    }
+                }
+                AgentNativeToolExecutionResult.success(
+                    mapOf("requested_pack" to requestedPack, "installed" to installed),
+                    "Trusted runtime pack is ready"
+                )
+            } catch (error: AgentNativeToolCancelledException) {
+                throw error
+            } catch (error: Throwable) {
+                AgentNativeToolExecutionResult.failure(
+                    "runtime_pack_install_failed",
+                    error.message ?: "Runtime pack installation failed"
+                )
+            } finally {
+                catalogManager.close()
+            }
+        },
+        executorId = "signalasi.android_runtime_pack_manager",
+        provenanceMetadata = mapOf("verification" to "signed_catalog_and_pack")
+    )
+
     private fun runtimeExecutionOutput(response: AgentRuntimeExecutionResponse): AgentNativeJsonObject = buildMap {
         put("exit_code", response.exitCode)
         put("stdout", response.stdout)
         put("stderr", response.stderr)
         put("duration_ms", response.durationMillis)
+        put("workspace_file_count", response.projectFileCount)
+        put("workspace_bytes", response.projectBytes)
         put("artifacts", response.artifacts)
         response.executionReceipt?.let { put("execution_receipt", it.toEvidenceMap()) }
     }

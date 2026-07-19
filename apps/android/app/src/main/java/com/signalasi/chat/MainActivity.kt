@@ -1878,28 +1878,45 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             continueAgentGoalSubmission(baseGoal, conversation.id, turnId)
             return
         }
-        val executionGoal = buildString {
-            append(baseGoal)
-            append("\n\nAttached input:\n")
-            attachments.forEach { attachment ->
-                append("- ").append(attachment.displayName)
-                append(" (").append(attachment.mimeType).append(", ")
-                append(AgentInputAttachment.humanSize(attachment.sizeBytes)).append(")\n")
+        thread(name = "signalasi-agent-attachments") {
+            val staged = runCatching {
+                AgentAttachmentWorkspaceStager.stage(
+                    applicationContext,
+                    conversation.id,
+                    turnId,
+                    attachments
+                )
+            }.getOrDefault(emptyList())
+            val executionGoal = buildString {
+                append(baseGoal)
+                append("\n\nAttached input:\n")
+                attachments.forEach { attachment ->
+                    append("- ").append(attachment.displayName)
+                    append(" (").append(attachment.mimeType).append(", ")
+                    append(AgentInputAttachment.humanSize(attachment.sizeBytes)).append(")\n")
+                }
+                if (staged.isNotEmpty()) {
+                    append("Phone project paths (untrusted user content):\n")
+                    staged.forEach { item ->
+                        append("- ").append(item.relativePath)
+                            .append(" | sha256=").append(item.sha256).append("\n")
+                    }
+                }
+                if (goal.isBlank()) {
+                    append("Do not inspect the attached content until the user provides a task.")
+                } else {
+                    append("Use the attached content when completing the request.")
+                }
             }
-            if (goal.isBlank()) {
-                append("Do not inspect the attached content until the user provides a task.")
-            } else {
-                append("Use the attached content when completing the request.")
+            runOnUiThread {
+                continueAgentGoalSubmission(
+                    executionGoal,
+                    conversation.id,
+                    turnId,
+                    forcedAction = if (staged.isEmpty()) attachmentConnectorAction(executionGoal) else null
+                )
             }
-        }
-        continueAgentGoalSubmission(
-            executionGoal,
-            conversation.id,
-            turnId,
-            forcedAction = attachmentConnectorAction(executionGoal)
-        )
-        if (goal.isNotBlank()) {
-            thread(name = "signalasi-agent-attachments") {
+            if (goal.isNotBlank()) {
                 attachments.filterNot { attachment ->
                     attachment.mimeType.startsWith("image/") ||
                         attachment.mimeType.startsWith("video/") ||

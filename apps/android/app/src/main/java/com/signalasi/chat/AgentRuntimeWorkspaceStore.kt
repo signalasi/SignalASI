@@ -4,6 +4,9 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.Locale
 
@@ -249,11 +252,28 @@ data class AgentRuntimePreparedWorkspace(
     val workspaceId: String,
     val directory: File,
     val sourceFile: File,
-    val guestPath: String
+    val guestPath: String,
+    val projectDirectory: File,
+    val importedProjectBytes: Long
 )
 
-class AgentRuntimeWorkspaceManager(context: Context) {
-    private val root = File(context.applicationContext.filesDir, "agent-runtime/workspaces")
+data class AgentRuntimeProjectSync(
+    val fileCount: Int,
+    val totalBytes: Long,
+    val projectDirectory: File
+)
+
+class AgentRuntimeWorkspaceManager private constructor(
+    private val root: File,
+    private val projectRoot: File
+) {
+    constructor(context: Context) : this(
+        File(context.applicationContext.filesDir, "agent-runtime/workspaces"),
+        File(context.applicationContext.filesDir, "agent-native-workspaces")
+    )
+
+    internal constructor(runtimeRoot: File, projectRoot: File, forTesting: Boolean = true) :
+        this(runtimeRoot, projectRoot)
 
     @Synchronized
     fun prepare(request: AgentRuntimeExecutionRequest): AgentRuntimePreparedWorkspace {
@@ -272,14 +292,26 @@ class AgentRuntimeWorkspaceManager(context: Context) {
         }
         cleanupExpired()
         check(root.mkdirs() || root.isDirectory) { "Runtime workspace storage is unavailable" }
+        check(projectRoot.mkdirs() || projectRoot.isDirectory) { "Agent project storage is unavailable" }
+        val projectDirectory = safeChild(projectRoot, request.workspaceId)
+            ?: error("Agent project path is invalid")
+        check(projectDirectory.mkdirs() || projectDirectory.isDirectory) { "Agent project could not be opened" }
         val workspaceDirectory = safeChild(root, sha256(request.workspaceId.toByteArray()).take(32))
             ?: error("Runtime workspace path is invalid")
         val runDirectory = safeChild(workspaceDirectory, request.requestId)
             ?: error("Runtime request path is invalid")
         check(!runDirectory.exists()) { "Runtime request workspace already exists" }
         check(runDirectory.mkdirs()) { "Runtime request workspace could not be created" }
+        val importedProjectBytes = copyTree(
+            source = projectDirectory,
+            destination = runDirectory,
+            byteLimit = request.resourceLimits.diskBytes
+        ).totalBytes
         val sourceFile = File(runDirectory, sourceFileName(request.language))
         sourceFile.writeText(request.source, Charsets.UTF_8)
+        check(directorySize(runDirectory, request.resourceLimits.diskBytes) <= request.resourceLimits.diskBytes) {
+            "Agent project exceeds the runtime disk quota"
+        }
         File(runDirectory, "request.json").writeText(
             JSONObject()
                 .put("request_id", request.requestId)
@@ -295,8 +327,38 @@ class AgentRuntimeWorkspaceManager(context: Context) {
             workspaceId = request.workspaceId,
             directory = runDirectory,
             sourceFile = sourceFile,
-            guestPath = "/workspace/${workspaceDirectory.name}/${runDirectory.name}"
+            guestPath = "/workspace/${workspaceDirectory.name}/${runDirectory.name}",
+            projectDirectory = projectDirectory,
+            importedProjectBytes = importedProjectBytes
         )
+    }
+
+    /** Replaces the durable project snapshot only after a complete, bounded copy succeeds. */
+    @Synchronized
+    fun syncProject(prepared: AgentRuntimePreparedWorkspace, byteLimit: Long): AgentRuntimeProjectSync {
+        val parent = prepared.projectDirectory.parentFile ?: error("Agent project storage is invalid")
+        val staging = safeChild(parent, ".${prepared.projectDirectory.name}.${prepared.requestId}.staging")
+            ?: error("Agent project staging path is invalid")
+        val backup = safeChild(parent, ".${prepared.projectDirectory.name}.${prepared.requestId}.backup")
+            ?: error("Agent project backup path is invalid")
+        staging.deleteRecursively()
+        backup.deleteRecursively()
+        check(staging.mkdirs()) { "Agent project staging directory could not be created" }
+        val copied = try {
+            copyTree(prepared.directory, staging, byteLimit, excludeRuntimeControlFiles = true)
+        } catch (error: Throwable) {
+            staging.deleteRecursively()
+            throw error
+        }
+        val current = prepared.projectDirectory
+        if (current.exists()) check(current.renameTo(backup)) { "Agent project backup could not be created" }
+        if (!staging.renameTo(current)) {
+            current.deleteRecursively()
+            if (backup.exists()) backup.renameTo(current)
+            error("Agent project snapshot could not be committed")
+        }
+        backup.deleteRecursively()
+        return AgentRuntimeProjectSync(copied.fileCount, copied.totalBytes, current)
     }
 
     @Synchronized
@@ -312,11 +374,14 @@ class AgentRuntimeWorkspaceManager(context: Context) {
             check(bytes <= request.resourceLimits.maxArtifactBytes) { "Runtime artifact exceeds its size limit" }
             totalBytes += bytes
             check(totalBytes <= request.resourceLimits.diskBytes) { "Runtime artifacts exceed the workspace quota" }
+            val durableArtifact = safeChild(prepared.projectDirectory, relative)
+                ?.takeIf(File::isFile)
+                ?: artifact
             mapOf(
                 "relative_path" to relative.replace('\\', '/'),
                 "size_bytes" to bytes,
                 "sha256" to sha256File(artifact),
-                "host_path" to artifact.absolutePath
+                "host_path" to durableArtifact.absolutePath
             )
         }
     }
@@ -351,6 +416,64 @@ class AgentRuntimeWorkspaceManager(context: Context) {
         return candidate.takeIf { it.path.startsWith(canonicalParent.path + File.separator) }
     }
 
+    private fun copyTree(
+        source: File,
+        destination: File,
+        byteLimit: Long,
+        excludeRuntimeControlFiles: Boolean = false
+    ): AgentRuntimeProjectSync {
+        val sourcePath = source.toPath()
+        val destinationPath = destination.toPath()
+        var files = 0
+        var bytes = 0L
+        Files.walk(sourcePath).use { paths ->
+            paths.forEach { current ->
+                if (Files.isSymbolicLink(current)) error("Symbolic links are not allowed in Agent projects")
+                val relative = sourcePath.relativize(current)
+                if (relative.toString().isEmpty()) return@forEach
+                val portable = relative.toString().replace('\\', '/')
+                if (excludeRuntimeControlFiles && isRuntimeControlPath(portable)) return@forEach
+                val target = destinationPath.resolve(relative).normalize()
+                check(target.startsWith(destinationPath)) { "Agent project path escapes its workspace" }
+                when {
+                    Files.isDirectory(current, LinkOption.NOFOLLOW_LINKS) -> Files.createDirectories(target)
+                    Files.isRegularFile(current, LinkOption.NOFOLLOW_LINKS) -> {
+                        val size = Files.size(current)
+                        bytes += size
+                        check(bytes <= byteLimit) { "Agent project exceeds the runtime disk quota" }
+                        Files.createDirectories(target.parent)
+                        Files.copy(
+                            current,
+                            target,
+                            StandardCopyOption.REPLACE_EXISTING,
+                            StandardCopyOption.COPY_ATTRIBUTES
+                        )
+                        files += 1
+                    }
+                    else -> error("Unsupported entry in Agent project: $portable")
+                }
+            }
+        }
+        return AgentRuntimeProjectSync(files, bytes, destination)
+    }
+
+    private fun directorySize(directory: File, limit: Long): Long {
+        var total = 0L
+        Files.walk(directory.toPath()).use { paths ->
+            paths.forEach { path ->
+                if (Files.isSymbolicLink(path)) error("Symbolic links are not allowed in Agent projects")
+                if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                    total += Files.size(path)
+                    check(total <= limit) { "Agent project exceeds the runtime disk quota" }
+                }
+            }
+        }
+        return total
+    }
+
+    private fun isRuntimeControlPath(path: String): Boolean =
+        path in RUNTIME_CONTROL_FILES || path == ".tmp" || path.startsWith(".tmp/")
+
     private fun validateRelativePath(value: String) {
         require(value.isNotBlank() && value.length <= MAX_ARTIFACT_PATH_CHARS && !File(value).isAbsolute) {
             "Runtime artifact path is invalid"
@@ -379,11 +502,18 @@ class AgentRuntimeWorkspaceManager(context: Context) {
     }
 
     companion object {
-        private const val MAX_WORKSPACE_ID_CHARS = 160
+        private const val MAX_WORKSPACE_ID_CHARS = 64
         private const val MAX_ARTIFACT_PATH_CHARS = 1_024
         private const val WORKSPACE_TTL_MILLIS = 7L * 24L * 60L * 60L * 1_000L
         private val ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
         private val DOMAIN_PATTERN = Regex("(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+        private val RUNTIME_CONTROL_FILES = setOf(
+            "request.json",
+            "status.json",
+            ".signalasi-stdout",
+            ".signalasi-stderr",
+            ".signalasi-main"
+        )
     }
 }
 

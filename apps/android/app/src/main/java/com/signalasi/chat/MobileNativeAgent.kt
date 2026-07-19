@@ -289,17 +289,22 @@ class MobileNativeAgent(
         conversationId: String = "",
         turnId: String = ""
     ): AgentNativeToolResult {
+        val effectiveConversationId = conversationId.ifBlank { activeConversationContext.conversationId }
+        val workspaceId = AgentWorkspaceScope.id(effectiveConversationId, sessionId)
         val invocationContext = AgentNativeToolInvocationContext(
             sessionId = sessionId,
-            conversationId = conversationId.ifBlank { activeConversationContext.conversationId },
+            conversationId = effectiveConversationId,
             turnId = turnId.ifBlank { activeConversationTurnId },
             grantedPermissions = grantedPermissions,
             grantedConsents = grantedConsents,
-            attributes = mapOf("execution_authority" to "signalasi-phone")
+            attributes = mapOf(
+                "execution_authority" to "signalasi-phone",
+                "workspace_id" to workspaceId
+            )
         )
         return nativeToolRegistry.invoke(
             id = toolId,
-            input = input,
+            input = AgentWorkspaceScope.bindToolInput(toolId, input, workspaceId),
             context = invocationContext,
             hooks = nativeToolHooks(toolId, invocationContext, cancellationToken)
         )
@@ -318,6 +323,9 @@ class MobileNativeAgent(
             ?: return AgentActionResult(action.id, false, "Native tool is not registered: $toolId")
         val input = runCatching { nativeJsonObject(action.parameters["input_json"].orEmpty()) }
             .getOrElse { return AgentActionResult(action.id, false, it.message ?: "Invalid native tool input") }
+        val effectiveConversationId = conversationIdOverride.ifBlank { activeConversationContext.conversationId }
+        val workspaceId = AgentWorkspaceScope.id(effectiveConversationId, sessionId)
+        val scopedInput = AgentWorkspaceScope.bindToolInput(toolId, input, workspaceId)
         val confirmationTier = AgentConfirmationPolicy.tier(action)
         val rememberedConsent = confirmationTier == AgentConfirmationTier.CONFIRM_ONCE &&
             confirmationConsentStore.isRemembered(AgentConfirmationPolicy.consentKey(action))
@@ -330,7 +338,7 @@ class MobileNativeAgent(
         }
         val invocationContext = AgentNativeToolInvocationContext(
             sessionId = sessionId,
-            conversationId = conversationIdOverride.ifBlank { activeConversationContext.conversationId },
+            conversationId = effectiveConversationId,
             turnId = turnIdOverride.ifBlank { activeConversationTurnId },
             callerId = "signalasi.mobile_agent.plan",
             idempotencyKey = if (descriptor.idempotency == AgentNativeToolIdempotency.IDEMPOTENCY_KEY_REQUIRED) {
@@ -341,16 +349,17 @@ class MobileNativeAgent(
             attributes = mapOf(
                 "execution_authority" to "signalasi-phone",
                 "confirmation_id" to action.id,
-                "step_id" to action.id
+                "step_id" to action.id,
+                "workspace_id" to workspaceId
             )
         )
         val result = nativeToolRegistry.invoke(
             id = toolId,
-            input = input,
+            input = scopedInput,
             context = invocationContext,
             hooks = nativeToolHooks(toolId, invocationContext)
         )
-        val renderedOutput = AgentNativeJsonCodec.stringify(result.output).take(8_000)
+        val renderedOutput = AgentNativeJsonCodec.stringify(result.output).take(MAX_NATIVE_TOOL_EVIDENCE_CHARACTERS)
         val nativeMessage = result.message.ifBlank { result.error?.message.orEmpty() }
         val responseLanguage = action.parameters["response_language"].orEmpty()
         val zh = responseLanguage == "zh" || (responseLanguage.isBlank() && currentGoal.any { it in '\u3400'..'\u9fff' })
@@ -445,6 +454,10 @@ class MobileNativeAgent(
     ): String {
         if (output.isEmpty()) return renderNativeToolFailure(message, zh)
         if (toolId == AgentWebMediaNativeTools.WEB_SEARCH) return renderPhoneWebSearchResult(output, zh)
+        if (toolId == AgentOnDeviceRuntimeTools.STATUS) return renderRuntimeStatus(output, zh)
+        if (toolId == AgentOnDeviceRuntimeTools.LIST_PACKS) return renderRuntimePackList(output, zh)
+        if (toolId == AgentOnDeviceRuntimeTools.EXECUTE) return renderRuntimeExecution(output, message, zh)
+        if (toolId == AgentOnDeviceRuntimeTools.INSTALL_PACK) return renderRuntimePackInstallation(output, zh)
         renderAndroidSystemSummary(toolId, output, zh)?.let { return it }
         if (zh) return renderNativeToolResultChinese(toolId, message, output)
         fun bool(name: String) = output[name] as? Boolean ?: false
@@ -547,6 +560,88 @@ class MobileNativeAgent(
             } else {
                 message
             }
+        }
+    }
+
+    private fun renderRuntimeExecution(output: AgentNativeJsonObject, message: String, zh: Boolean): String {
+        val exitCode = (output["exit_code"] as? Number)?.toInt()
+        val stdout = output["stdout"]?.toString().orEmpty().trim().take(6_000)
+        val stderr = output["stderr"]?.toString().orEmpty().trim().take(3_000)
+        val duration = (output["duration_ms"] as? Number)?.toLong()
+        val artifacts = (output["artifacts"] as? Iterable<*>)
+            ?.mapNotNull { (it as? Map<*, *>)?.get("relative_path")?.toString()?.takeIf(String::isNotBlank) }
+            .orEmpty()
+        val heading = when {
+            exitCode == 0 && zh -> "\u5df2\u5728\u624b\u673a\u672c\u673a Linux \u73af\u5883\u4e2d\u5b8c\u6210\u8fd0\u884c\u3002"
+            exitCode == 0 -> "Completed in the phone's on-device Linux runtime."
+            zh -> "\u672c\u673a\u8fd0\u884c\u5931\u8d25\uff0c\u9000\u51fa\u7801\u4e3a ${exitCode ?: "\u672a\u77e5"}\u3002"
+            else -> "The on-device run failed with exit code ${exitCode ?: "unknown"}."
+        }
+        return buildList {
+            add(heading)
+            if (stdout.isNotBlank()) add(if (zh) "\u7ed3\u679c\uff1a\n$stdout" else "Result:\n$stdout")
+            if (stderr.isNotBlank()) add(if (zh) "\u9519\u8bef\uff1a\n$stderr" else "Error:\n$stderr")
+            if (stderr.isBlank() && exitCode != 0 && message.isNotBlank()) {
+                add(if (zh) "\u9519\u8bef\uff1a\n${message.take(3_000)}" else "Error:\n${message.take(3_000)}")
+            }
+            if (artifacts.isNotEmpty()) {
+                add((if (zh) "\u4ea7\u7269\uff1a" else "Artifacts:") + "\n" + artifacts.joinToString("\n") { "- $it" })
+            }
+            if (duration != null) add(if (zh) "\u8017\u65f6\uff1a${duration} ms" else "Duration: ${duration} ms")
+        }.joinToString("\n\n")
+    }
+
+    private fun renderRuntimeStatus(output: AgentNativeJsonObject, zh: Boolean): String {
+        val ready = output["backend_ready"] as? Boolean == true
+        val backend = output["backend"]?.toString().orEmpty()
+        val reason = output["reason"]?.toString().orEmpty()
+        val languages = (output["languages"] as? Iterable<*>)
+            ?.mapNotNull { it as? Map<*, *> }
+            ?.filter { it["ready"] == true }
+            ?.mapNotNull { it["id"]?.toString() }
+            .orEmpty()
+        return if (zh) {
+            "\u672c\u673a Linux \u8fd0\u884c\u73af\u5883${if (ready) "\u5df2\u5c31\u7eea" else "\u5c1a\u672a\u5c31\u7eea"}\u3002" +
+                "\n\n\u540e\u7aef\uff1a${backend.ifBlank { "\u65e0" }}" +
+                "\n\u53ef\u7528\u80fd\u529b\uff1a${languages.joinToString("\u3001").ifBlank { "\u65e0" }}" +
+                reason.takeIf(String::isNotBlank)?.let { "\n\u72b6\u6001\uff1a$it" }.orEmpty()
+        } else {
+            "The on-device Linux runtime is ${if (ready) "ready" else "not ready"}." +
+                "\n\nBackend: ${backend.ifBlank { "none" }}" +
+                "\nAvailable: ${languages.joinToString(", ").ifBlank { "none" }}" +
+                reason.takeIf(String::isNotBlank)?.let { "\nStatus: $it" }.orEmpty()
+        }
+    }
+
+    private fun renderRuntimePackList(output: AgentNativeJsonObject, zh: Boolean): String {
+        val packs = (output["packs"] as? Iterable<*>)
+            ?.mapNotNull { it as? Map<*, *> }
+            .orEmpty()
+        val lines = packs.map { row ->
+            val id = row["id"]?.toString().orEmpty()
+            val state = row["state"]?.toString().orEmpty()
+            val version = row["version"]?.toString().orEmpty()
+            "- $id: $state${version.takeIf(String::isNotBlank)?.let { " ($it)" }.orEmpty()}"
+        }
+        val heading = if (zh) "\u672c\u673a\u8fd0\u884c\u5305\uff1a" else "On-device runtime packs:"
+        return heading + if (lines.isEmpty()) "\n-" else "\n" + lines.joinToString("\n")
+    }
+
+    private fun renderRuntimePackInstallation(output: AgentNativeJsonObject, zh: Boolean): String {
+        val requested = output["requested_pack"]?.toString().orEmpty()
+        val installed = (output["installed"] as? Iterable<*>)
+            ?.mapNotNull { it as? Map<*, *> }
+            ?.mapNotNull { row ->
+                val id = row["pack_id"]?.toString().orEmpty()
+                val version = row["version"]?.toString().orEmpty()
+                if (id.isBlank()) null else "$id${version.takeIf(String::isNotBlank)?.let { " $it" }.orEmpty()}"
+            }
+            .orEmpty()
+        val ready = installed.ifEmpty { listOf(requested) }.filter(String::isNotBlank)
+        return if (zh) {
+            "\u672c\u673a\u8fd0\u884c\u73af\u5883\u5df2\u5c31\u7eea\uff1a${ready.joinToString("\u3001")}\u3002"
+        } else {
+            "On-device runtime ready: ${ready.joinToString(", ")}."
         }
     }
 
@@ -5267,6 +5362,7 @@ class MobileNativeAgent(
     companion object {
         private const val MAX_AUDIT_ITEMS = 20
         private const val MAX_CONNECTOR_RESPONSE_CHARACTERS = 24_000
+        private const val MAX_NATIVE_TOOL_EVIDENCE_CHARACTERS = 128 * 1_024
         private const val MAX_TASK_RESULT_CHARACTERS = 4_000
         private const val MAX_SPECIALIZED_ADAPTER_REPLANS = 8
         private val ACTIVE_EXECUTION_PHASES = setOf(

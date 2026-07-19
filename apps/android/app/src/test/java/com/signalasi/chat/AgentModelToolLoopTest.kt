@@ -278,6 +278,59 @@ class AgentModelToolLoopTest {
         assertEquals("send_failed", result?.error?.code)
     }
 
+    @Test
+    fun bindsWorkspaceToolCallsToTheCurrentModelLoopWorkspace() = runBlocking {
+        var receivedWorkspace = ""
+        val toolId = AgentPhoneNativeToolCatalog.WORKSPACE_READ_TEXT
+        val registry = AgentNativeToolRegistry(MutableClock(100)).register(
+            AgentNativeToolDefinition(
+                descriptor = AgentNativeToolDescriptor(
+                    id = toolId,
+                    version = "1.0.0",
+                    title = "Read workspace text",
+                    description = "Test workspace scoping.",
+                    location = AgentNativeToolLocation.PHONE,
+                    inputSchema = AgentNativeJsonSchema.objectSchema(
+                        properties = mapOf(
+                            "workspace_id" to AgentNativeJsonSchema.string(),
+                            "path" to AgentNativeJsonSchema.string()
+                        ),
+                        required = setOf("workspace_id", "path"),
+                        additionalProperties = false
+                    ),
+                    outputSchema = AgentNativeJsonSchema.any(),
+                    risk = AgentNativeToolRisk.LOW
+                ),
+                executor = AgentNativeToolExecutor { invocation ->
+                    receivedWorkspace = invocation.input["workspace_id"]?.toString().orEmpty()
+                    AgentNativeToolExecutionResult.success(mapOf("text" to "ok"))
+                },
+                executorId = "test.workspace_scope"
+            )
+        )
+        val adapter = ScriptedAdapter(
+            AgentModelResponse(
+                toolCalls = listOf(
+                    AgentModelToolCall(
+                        callId = "workspace-call",
+                        toolId = toolId,
+                        arguments = mapOf("workspace_id" to "foreign-workspace", "path" to "notes.txt"),
+                        toolVersion = "1.0.0"
+                    )
+                )
+            ),
+            AgentModelResponse("Read the project file.")
+        )
+
+        val outcome = loop(adapter, registry).run(request())
+
+        assertEquals(AgentModelToolLoopStatus.COMPLETED, outcome.status)
+        val toolResult = outcome.messages.single { it.role == AgentModelMessageRole.TOOL }.toolResult
+        assertEquals(toolResult?.error?.toString(), AgentNativeToolResultStatus.SUCCEEDED.wireValue, toolResult?.status)
+        assertEquals("workspace-1", receivedWorkspace)
+        assertEquals("ok", toolResult?.output?.get("text"))
+    }
+
     private fun loop(
         adapter: AgentModelAdapter,
         registry: AgentNativeToolRegistry,

@@ -136,6 +136,7 @@ object AgentConfirmationPolicy {
         AgentHardwareNativeTools.NFC_STATUS,
         AgentHardwareNativeTools.FLASHLIGHT_SET,
         AgentWebMediaNativeTools.WEB_SEARCH,
+        AgentOnDeviceRuntimeTools.EXECUTE,
         AgentHardwareNativeTools.BLUETOOTH_PAIRING_HANDOFF,
         AgentAndroidSystemNativeTools.AUDIO_STATUS,
         AgentAndroidSystemNativeTools.AUDIO_VOLUME_SET,
@@ -149,7 +150,8 @@ object AgentConfirmationPolicy {
         AgentHardwareNativeTools.BLUETOOTH_DISCOVERY_FOREGROUND,
         AgentHardwareNativeTools.INSTALLED_APPS_LIST,
         AgentHardwareNativeTools.PACKAGE_DETAIL,
-        AgentAndroidSystemNativeTools.WIFI_SCAN_START
+        AgentAndroidSystemNativeTools.WIFI_SCAN_START,
+        AgentOnDeviceRuntimeTools.INSTALL_PACK
     )
 
     private val ALWAYS_CONFIRM_TERMS = listOf(

@@ -503,9 +503,16 @@ class AgentModelToolLoop(
 
     private fun processCall(
         state: LoopState,
-        call: AgentModelToolCall,
+        proposedCall: AgentModelToolCall,
         remainingCalls: List<AgentModelToolCall>
     ): ProcessResult {
+        val call = proposedCall.copy(
+            arguments = AgentWorkspaceScope.bindToolInput(
+                proposedCall.toolId,
+                proposedCall.arguments,
+                state.request.workspaceId
+            )
+        )
         emit(state, AgentModelToolLoopEventType.TOOL_CALL_PROPOSED, call = call)
         if (!consumeToolCallAttempt(state)) {
             return ProcessResult.Terminal(
