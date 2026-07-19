@@ -4927,8 +4927,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .sortedByDescending(GlobalResearchTask::updatedAtMillis)
             .take(30)
         val message = tasks.takeIf(List<GlobalResearchTask>::isNotEmpty)?.joinToString("\n\n") {
-            "\u2022 ${it.topic}\n${globalResearchStatusLabel(it.status)}" +
-                it.lastError.takeIf(String::isNotBlank)?.let { error -> " \u00b7 ${error.take(120)}" }.orEmpty()
+            val plan = it.researchPlan
+            val progress = if (plan.units.isNotEmpty()) {
+                "\n" + getString(
+                    R.string.cc_global_research_progress,
+                    plan.completedUnits().size,
+                    plan.units.size,
+                    globalResearchPlanPhaseLabel(plan.phase),
+                    it.evidenceLedger.independentSourceCount,
+                    (it.evidenceLedger.overallConfidence * 100).toInt()
+                ) + if (it.evidenceLedger.verified) {
+                    " \u00b7 ${getString(R.string.cc_global_research_verified)}"
+                } else ""
+            } else ""
+            "\u2022 ${it.topic}\n${globalResearchStatusLabel(it.status)}$progress" +
+                it.lastError.takeIf(String::isNotBlank)?.let { error -> "\n${error.take(120)}" }.orEmpty()
         } ?: getString(R.string.cc_global_empty)
         AlertDialog.Builder(this)
             .setTitle(R.string.cc_global_research_queue_title)
@@ -4936,6 +4949,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .setPositiveButton(android.R.string.ok, null)
             .show()
     }
+
+    private fun globalResearchPlanPhaseLabel(phase: GlobalResearchPlanPhase): String = getString(when (phase) {
+        GlobalResearchPlanPhase.UNPLANNED -> R.string.cc_global_research_phase_unplanned
+        GlobalResearchPlanPhase.COLLECTING -> R.string.cc_global_research_phase_collecting
+        GlobalResearchPlanPhase.SYNTHESIS_PENDING -> R.string.cc_global_research_phase_synthesis_pending
+        GlobalResearchPlanPhase.SYNTHESIZING -> R.string.cc_global_research_phase_synthesizing
+        GlobalResearchPlanPhase.COMPLETED -> R.string.cc_global_status_completed
+    })
 
     private fun showGlobalInsightsDialog() {
         val messages = globalSuperAgentRuntime.pendingProactiveMessages().takeLast(30)

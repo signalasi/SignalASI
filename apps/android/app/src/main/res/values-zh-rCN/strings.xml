@@ -1397,4 +1397,10 @@
     <string name="cc_global_learning_topics">影响最强的主题偏好</string>
     <string name="cc_global_learning_reset">重置学习</string>
     <string name="cc_global_learning_reset_confirm">清除主动帮助的已学习偏好？会话记忆和其他数据不会受影响。</string>
+    <string name="cc_global_research_progress">%1$d/%2$d 个证据任务 &#183; %3$s\n%4$d 个独立来源 &#183; 置信度 %5$d%%</string>
+    <string name="cc_global_research_verified">已验证</string>
+    <string name="cc_global_research_phase_unplanned">正在规划</string>
+    <string name="cc_global_research_phase_collecting">正在收集证据</string>
+    <string name="cc_global_research_phase_synthesis_pending">等待综合</string>
+    <string name="cc_global_research_phase_synthesizing">正在综合</string>
 </resources>

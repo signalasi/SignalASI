@@ -76,6 +76,19 @@ class GlobalAgentRepository(context: Context) {
         saveResearchTasks(loadResearchTasks().filterNot { it.id == task.id } + task)
     }
 
+    fun updateResearchTask(
+        taskId: String,
+        transform: (GlobalResearchTask) -> GlobalResearchTask
+    ): GlobalResearchTask? = synchronized(STORE_LOCK) {
+        val tasks = loadResearchTasks().toMutableList()
+        val index = tasks.indexOfFirst { it.id == taskId }
+        if (index < 0) return@synchronized null
+        val updated = transform(tasks[index])
+        tasks[index] = updated
+        saveResearchTasks(tasks)
+        updated
+    }
+
     fun claimResearchTask(nowMillis: Long = System.currentTimeMillis()): GlobalResearchTask? = synchronized(STORE_LOCK) {
         val tasks = loadResearchTasks()
             .map { GlobalResearchTaskPolicy.recoverIfStale(it, nowMillis) }
@@ -156,7 +169,7 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 2)
+            .put("version", 3)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("world", encodeWorld(loadWorld()))
             .put("research_tasks", JSONArray().apply {
@@ -380,6 +393,8 @@ class GlobalAgentRepository(context: Context) {
         .put("last_error", task.lastError)
         .put("result", task.result)
         .put("evidence_uris", JSONArray(task.evidenceUris))
+        .put("research_plan", encodeResearchPlan(task.researchPlan))
+        .put("evidence_ledger", encodeEvidenceLedger(task.evidenceLedger))
         .put("created_at_millis", task.createdAtMillis)
         .put("updated_at_millis", task.updatedAtMillis)
 
@@ -410,8 +425,153 @@ class GlobalAgentRepository(context: Context) {
             lastError = json.optString("last_error"),
             result = json.optString("result"),
             evidenceUris = json.optJSONArray("evidence_uris").strings(),
+            researchPlan = decodeResearchPlan(json.optJSONObject("research_plan")),
+            evidenceLedger = decodeEvidenceLedger(json.optJSONObject("evidence_ledger")),
             createdAtMillis = json.optLong("created_at_millis"),
             updatedAtMillis = json.optLong("updated_at_millis")
+        )
+    }
+
+    private fun encodeResearchPlan(plan: GlobalResearchPlan): JSONObject = JSONObject()
+        .put("id", plan.id)
+        .put("phase", plan.phase.name)
+        .put("units", JSONArray().apply { plan.units.forEach { put(encodeResearchUnit(it)) } })
+        .put("synthesis_resource_id", plan.synthesisResourceId)
+        .put("synthesis_source_message_id", plan.synthesisSourceMessageId)
+        .put("synthesis_lease_expires_at_millis", plan.synthesisLeaseExpiresAtMillis)
+        .put("synthesis_attempt_count", plan.synthesisAttemptCount)
+        .put("created_at_millis", plan.createdAtMillis)
+        .put("updated_at_millis", plan.updatedAtMillis)
+
+    private fun decodeResearchPlan(json: JSONObject?): GlobalResearchPlan {
+        if (json == null || json.optString("id").isBlank()) return GlobalResearchPlan()
+        val units = json.optJSONArray("units")
+        return GlobalResearchPlan(
+            id = json.optString("id"),
+            phase = enumValue(json.optString("phase"), GlobalResearchPlanPhase.UNPLANNED),
+            units = buildList {
+                if (units != null) for (index in 0 until units.length()) {
+                    decodeResearchUnit(units.optJSONObject(index))?.let(::add)
+                }
+            },
+            synthesisResourceId = json.optString("synthesis_resource_id"),
+            synthesisSourceMessageId = json.optLong("synthesis_source_message_id"),
+            synthesisLeaseExpiresAtMillis = json.optLong("synthesis_lease_expires_at_millis"),
+            synthesisAttemptCount = json.optInt("synthesis_attempt_count"),
+            createdAtMillis = json.optLong("created_at_millis"),
+            updatedAtMillis = json.optLong("updated_at_millis")
+        )
+    }
+
+    private fun encodeResearchUnit(unit: GlobalResearchUnit): JSONObject = JSONObject()
+        .put("id", unit.id)
+        .put("purpose", unit.purpose.name)
+        .put("question", unit.question)
+        .put("source_focus", unit.sourceFocus)
+        .put("status", unit.status.name)
+        .put("resource_id", unit.resourceId)
+        .put("attempted_resource_ids", JSONArray(unit.attemptedResourceIds))
+        .put("source_message_id", unit.sourceMessageId)
+        .put("attempt_count", unit.attemptCount)
+        .put("lease_expires_at_millis", unit.leaseExpiresAtMillis)
+        .put("result", unit.result)
+        .put("evidence_uris", JSONArray(unit.evidenceUris))
+        .put("last_error", unit.lastError)
+        .put("started_at_millis", unit.startedAtMillis)
+        .put("completed_at_millis", unit.completedAtMillis)
+
+    private fun decodeResearchUnit(json: JSONObject?): GlobalResearchUnit? {
+        if (json == null || json.optString("id").isBlank()) return null
+        return GlobalResearchUnit(
+            id = json.optString("id"),
+            purpose = enumValue(json.optString("purpose"), GlobalResearchUnitPurpose.CURRENT_FACTS),
+            question = json.optString("question"),
+            sourceFocus = json.optString("source_focus"),
+            status = enumValue(json.optString("status"), GlobalResearchUnitStatus.PENDING),
+            resourceId = json.optString("resource_id"),
+            attemptedResourceIds = json.optJSONArray("attempted_resource_ids").strings(),
+            sourceMessageId = json.optLong("source_message_id"),
+            attemptCount = json.optInt("attempt_count"),
+            leaseExpiresAtMillis = json.optLong("lease_expires_at_millis"),
+            result = json.optString("result"),
+            evidenceUris = json.optJSONArray("evidence_uris").strings(),
+            lastError = json.optString("last_error"),
+            startedAtMillis = json.optLong("started_at_millis"),
+            completedAtMillis = json.optLong("completed_at_millis")
+        )
+    }
+
+    private fun encodeEvidenceLedger(ledger: GlobalEvidenceLedger): JSONObject = JSONObject()
+        .put("sources", JSONArray().apply { ledger.sources.forEach { put(encodeEvidenceSource(it)) } })
+        .put("claims", JSONArray().apply { ledger.claims.forEach { put(encodeEvidenceClaim(it)) } })
+        .put("independent_source_count", ledger.independentSourceCount)
+        .put("corroborated_claim_count", ledger.corroboratedClaimCount)
+        .put("contested_claim_count", ledger.contestedClaimCount)
+        .put("overall_confidence", ledger.overallConfidence)
+        .put("verified", ledger.verified)
+        .put("updated_at_millis", ledger.updatedAtMillis)
+
+    private fun decodeEvidenceLedger(json: JSONObject?): GlobalEvidenceLedger {
+        if (json == null) return GlobalEvidenceLedger()
+        val sources = json.optJSONArray("sources")
+        val claims = json.optJSONArray("claims")
+        return GlobalEvidenceLedger(
+            sources = buildList {
+                if (sources != null) for (index in 0 until sources.length()) {
+                    decodeEvidenceSource(sources.optJSONObject(index))?.let(::add)
+                }
+            },
+            claims = buildList {
+                if (claims != null) for (index in 0 until claims.length()) {
+                    decodeEvidenceClaim(claims.optJSONObject(index))?.let(::add)
+                }
+            },
+            independentSourceCount = json.optInt("independent_source_count"),
+            corroboratedClaimCount = json.optInt("corroborated_claim_count"),
+            contestedClaimCount = json.optInt("contested_claim_count"),
+            overallConfidence = json.optDouble("overall_confidence").coerceIn(0.0, 1.0),
+            verified = json.optBoolean("verified"),
+            updatedAtMillis = json.optLong("updated_at_millis")
+        )
+    }
+
+    private fun encodeEvidenceSource(source: GlobalEvidenceSource): JSONObject = JSONObject()
+        .put("uri", source.uri)
+        .put("kind", source.kind.name)
+        .put("quality_score", source.qualityScore)
+        .put("contributing_unit_ids", JSONArray(source.contributingUnitIds.toList()))
+        .put("retrieved_at_millis", source.retrievedAtMillis)
+
+    private fun decodeEvidenceSource(json: JSONObject?): GlobalEvidenceSource? {
+        if (json == null || json.optString("uri").isBlank()) return null
+        return GlobalEvidenceSource(
+            uri = json.optString("uri"),
+            kind = enumValue(json.optString("kind"), GlobalEvidenceSourceKind.UNKNOWN),
+            qualityScore = json.optDouble("quality_score").coerceIn(0.0, 1.0),
+            contributingUnitIds = json.optJSONArray("contributing_unit_ids").strings().toSet(),
+            retrievedAtMillis = json.optLong("retrieved_at_millis")
+        )
+    }
+
+    private fun encodeEvidenceClaim(claim: GlobalEvidenceClaim): JSONObject = JSONObject()
+        .put("id", claim.id)
+        .put("statement", claim.statement)
+        .put("source_uris", JSONArray(claim.sourceUris.toList()))
+        .put("contributing_unit_ids", JSONArray(claim.contributingUnitIds.toList()))
+        .put("corroboration_count", claim.corroborationCount)
+        .put("confidence", claim.confidence)
+        .put("contested", claim.contested)
+
+    private fun decodeEvidenceClaim(json: JSONObject?): GlobalEvidenceClaim? {
+        if (json == null || json.optString("statement").isBlank()) return null
+        return GlobalEvidenceClaim(
+            id = json.optString("id").ifBlank { UUID.randomUUID().toString() },
+            statement = json.optString("statement"),
+            sourceUris = json.optJSONArray("source_uris").strings().toSet(),
+            contributingUnitIds = json.optJSONArray("contributing_unit_ids").strings().toSet(),
+            corroborationCount = json.optInt("corroboration_count", 1).coerceAtLeast(1),
+            confidence = json.optDouble("confidence").coerceIn(0.0, 1.0),
+            contested = json.optBoolean("contested")
         )
     }
 

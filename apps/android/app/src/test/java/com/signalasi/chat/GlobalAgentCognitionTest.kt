@@ -459,6 +459,135 @@ class GlobalAgentCognitionTest {
         assertTrue(feedbackEvent.id in reduction.world.processedEventIds)
     }
 
+    @Test
+    fun deepResearchBuildsIndependentMultiSourceWorkUnits() {
+        val task = researchTask(GlobalResearchDepth.DEEP_RESEARCH)
+
+        val plan = GlobalResearchPlanBuilder.create(task, 1_000L)
+
+        assertEquals(GlobalResearchPlanPhase.COLLECTING, plan.phase)
+        assertEquals(4, plan.units.size)
+        assertEquals(4, plan.units.map(GlobalResearchUnit::purpose).distinct().size)
+        assertEquals(3, GlobalResearchPlanBuilder.parallelism(task.depth, 4))
+        assertEquals(3, GlobalResearchPlanBuilder.parallelism(task.depth, 1))
+        assertTrue(plan.units.all { it.status == GlobalResearchUnitStatus.PENDING })
+    }
+
+    @Test
+    fun staleEvidenceWorkerReturnsToPendingWithoutLosingCompletedWork() {
+        val task = researchTask(GlobalResearchDepth.DEEP_RESEARCH)
+        val initial = GlobalResearchPlanBuilder.create(task, 1_000L)
+        val plan = initial.copy(units = initial.units.mapIndexed { index, unit ->
+            when (index) {
+                0 -> unit.copy(
+                    status = GlobalResearchUnitStatus.RUNNING,
+                    resourceId = "codex",
+                    sourceMessageId = 42L,
+                    attemptCount = 1,
+                    leaseExpiresAtMillis = 1_999L
+                )
+                1 -> unit.copy(status = GlobalResearchUnitStatus.COMPLETED, result = "Completed evidence")
+                else -> unit
+            }
+        })
+
+        val recovered = GlobalResearchPlanBuilder.recoverStale(plan, 2_000L)
+
+        val first = recovered.units[0]
+        assertEquals(GlobalResearchUnitStatus.PENDING, first.status)
+        assertEquals(0L, first.sourceMessageId)
+        assertTrue("codex" in first.attemptedResourceIds)
+        assertEquals(GlobalResearchUnitStatus.COMPLETED, recovered.units[1].status)
+    }
+
+    @Test
+    fun evidenceLedgerScoresPrimarySourcesAndCorroboration() {
+        val task = researchTask(GlobalResearchDepth.DEEP_RESEARCH)
+        val initial = GlobalResearchPlanBuilder.create(task, 1_000L)
+        val sharedClaim = "Android requires compatible native libraries when applications use sixteen kilobyte memory pages."
+        val completed = initial.copy(units = initial.units.take(2).mapIndexed { index, unit ->
+            unit.copy(
+                status = GlobalResearchUnitStatus.COMPLETED,
+                resourceId = if (index == 0) "codex" else "cloud-models",
+                result = if (index == 0) {
+                    "$sharedClaim https://developer.android.com/guide/practices/page-sizes"
+                } else {
+                    "$sharedClaim https://github.com/android/ndk/issues/2000"
+                },
+                evidenceUris = if (index == 0) {
+                    listOf("https://developer.android.com/guide/practices/page-sizes")
+                } else listOf("https://github.com/android/ndk/issues/2000")
+            )
+        })
+
+        val ledger = GlobalEvidenceEvaluator.build(completed, 2_000L)
+
+        assertEquals(2, ledger.independentSourceCount)
+        assertTrue(ledger.sources.any { it.kind == GlobalEvidenceSourceKind.OFFICIAL })
+        assertTrue(ledger.sources.any { it.kind == GlobalEvidenceSourceKind.CODE_REPOSITORY })
+        assertTrue(ledger.claims.first().corroborationCount >= 2)
+        assertTrue(ledger.corroboratedClaimCount >= 1)
+        assertTrue(ledger.verified)
+    }
+
+    @Test
+    fun deepResearchNeedsIndependentEvidenceWhileQuickFactsCanUseOnePrimarySource() {
+        val deepTask = researchTask(GlobalResearchDepth.DEEP_RESEARCH)
+        val deepPlan = GlobalResearchPlanBuilder.create(deepTask, 1_000L).let { plan ->
+            plan.copy(units = plan.units.mapIndexed { index, unit ->
+                if (index == 0) unit.copy(
+                    status = GlobalResearchUnitStatus.COMPLETED,
+                    result = "The official compatibility requirement is current. https://developer.android.com/guide/practices/page-sizes",
+                    evidenceUris = listOf("https://developer.android.com/guide/practices/page-sizes")
+                ) else unit.copy(status = GlobalResearchUnitStatus.FAILED)
+            })
+        }
+        val quickTask = researchTask(GlobalResearchDepth.QUICK_FACT)
+        val quickPlan = GlobalResearchPlanBuilder.create(quickTask, 1_000L).let { plan ->
+            plan.copy(units = plan.units.map { unit ->
+                unit.copy(
+                    status = GlobalResearchUnitStatus.COMPLETED,
+                    result = "The official compatibility requirement is current. https://developer.android.com/guide/practices/page-sizes",
+                    evidenceUris = listOf("https://developer.android.com/guide/practices/page-sizes")
+                )
+            })
+        }
+
+        assertFalse(GlobalEvidenceEvaluator.build(deepPlan, 2_000L).verified)
+        assertTrue(GlobalEvidenceEvaluator.build(quickPlan, 2_000L).verified)
+    }
+
+    @Test
+    fun onlyVerifiedResearchBecomesDurableFact() {
+        fun toolResult(verified: Boolean) = GlobalConversationEvent(
+            id = "research-$verified",
+            type = GlobalConversationEventType.TOOL_RESULT,
+            conversationId = "conversation-a",
+            actor = GlobalConversationActor.TOOL,
+            content = "The verified compatibility requirement is documented.",
+            conversationTitle = "Runtime compatibility",
+            metadata = mapOf("verified" to verified.toString())
+        )
+        val verifiedEvent = toolResult(true)
+        val verifiedReduction = GlobalWorldModelReducer.reduce(
+            PersonalWorldModel(),
+            verifiedEvent,
+            pipeline.understand(verifiedEvent, PersonalWorldModel())
+        )
+        val unverifiedEvent = toolResult(false)
+        val unverifiedReduction = GlobalWorldModelReducer.reduce(
+            PersonalWorldModel(),
+            unverifiedEvent,
+            pipeline.understand(unverifiedEvent, PersonalWorldModel())
+        )
+
+        assertTrue(verifiedReduction.world.items.any {
+            it.kind == GlobalWorldItemKind.FACT && it.layer == GlobalWorldLayer.TOPIC
+        })
+        assertTrue(unverifiedReduction.world.items.none { it.kind == GlobalWorldItemKind.FACT })
+        assertTrue(unverifiedReduction.world.items.any { it.kind == GlobalWorldItemKind.STATE })
+    }
+
     private fun event(
         conversationId: String,
         title: String,
@@ -506,5 +635,15 @@ class GlobalAgentCognitionTest {
         target = GlobalProactiveTarget.CURRENT_CONVERSATION,
         kind = kind,
         createdAtMillis = createdAtMillis
+    )
+
+    private fun researchTask(depth: GlobalResearchDepth) = GlobalResearchTask(
+        id = "research-task",
+        sourceEventId = "source-event",
+        sourceConversationId = "conversation-a",
+        topic = "Android runtime",
+        question = "Evaluate Android runtime compatibility and implementation tradeoffs",
+        depth = depth,
+        preferredSources = listOf("official", "repositories")
     )
 }

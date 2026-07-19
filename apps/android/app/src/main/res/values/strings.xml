@@ -1487,4 +1487,10 @@
     <string name="cc_global_learning_topics">Strongest learned topic preferences</string>
     <string name="cc_global_learning_reset">Reset learning</string>
     <string name="cc_global_learning_reset_confirm">Clear learned proactive-help preferences? Conversation memory and other data will remain unchanged.</string>
+    <string name="cc_global_research_progress">%1$d/%2$d evidence tasks &#183; %3$s\n%4$d independent sources &#183; %5$d%% confidence</string>
+    <string name="cc_global_research_verified">Verified</string>
+    <string name="cc_global_research_phase_unplanned">Planning</string>
+    <string name="cc_global_research_phase_collecting">Collecting evidence</string>
+    <string name="cc_global_research_phase_synthesis_pending">Ready to synthesize</string>
+    <string name="cc_global_research_phase_synthesizing">Synthesizing</string>
 </resources>

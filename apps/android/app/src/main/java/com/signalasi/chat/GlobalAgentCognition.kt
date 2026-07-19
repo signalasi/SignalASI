@@ -531,6 +531,10 @@ object GlobalWorldModelReducer {
                         lastSeenAtMillis = event.timestampMillis,
                         expiresAtMillis = event.timestampMillis + REALTIME_TTL_MILLIS
                     ))
+                } else if (event.type == GlobalConversationEventType.TOOL_RESULT &&
+                    event.metadata["verified"] == "true"
+                ) {
+                    addAll(GlobalWorldItemKind.FACT, GlobalWorldLayer.TOPIC, evidence, 0.82)
                 } else {
                     addAll(GlobalWorldItemKind.STATE, GlobalWorldLayer.REALTIME, evidence, 0.66)
                 }
@@ -881,6 +885,8 @@ data class GlobalResearchTask(
     val lastError: String = "",
     val result: String = "",
     val evidenceUris: List<String> = emptyList(),
+    val researchPlan: GlobalResearchPlan = GlobalResearchPlan(),
+    val evidenceLedger: GlobalEvidenceLedger = GlobalEvidenceLedger(),
     val createdAtMillis: Long = System.currentTimeMillis(),
     val updatedAtMillis: Long = System.currentTimeMillis()
 )
@@ -906,10 +912,10 @@ object GlobalResearchTaskPolicy {
         ?: DEFAULT_MONITOR_INTERVAL_MILLIS
 
     fun recoverIfStale(task: GlobalResearchTask, nowMillis: Long): GlobalResearchTask {
-        if (task.status != GlobalResearchTaskStatus.RUNNING ||
-            task.leaseExpiresAtMillis <= 0L ||
-            task.leaseExpiresAtMillis > nowMillis
-        ) return task
+        val recoveredPlan = GlobalResearchPlanBuilder.recoverStale(task.researchPlan, nowMillis)
+        val parentExpired = task.status == GlobalResearchTaskStatus.RUNNING &&
+            task.leaseExpiresAtMillis > 0L && task.leaseExpiresAtMillis <= nowMillis
+        if (!parentExpired && recoveredPlan == task.researchPlan) return task
         return task.copy(
             status = GlobalResearchTaskStatus.WAITING_FOR_RESOURCE,
             attemptedResourceIds = (task.attemptedResourceIds + task.resourceId)
@@ -919,6 +925,7 @@ object GlobalResearchTaskPolicy {
             nextAttemptAtMillis = nowMillis,
             leaseExpiresAtMillis = 0L,
             lastError = "The previous research lease expired before a result arrived",
+            researchPlan = recoveredPlan,
             updatedAtMillis = nowMillis
         )
     }
