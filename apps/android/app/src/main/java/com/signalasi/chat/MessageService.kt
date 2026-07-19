@@ -309,7 +309,11 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         repeat(2) {
             globalResearchExecutor.execute {
                 val executed = runCatching { runtime.executeResearchCycle() }.getOrNull() ?: return@execute
-                if (executed.status == GlobalResearchTaskStatus.COMPLETED) {
+                if (executed.status in setOf(
+                        GlobalResearchTaskStatus.COMPLETED,
+                        GlobalResearchTaskStatus.SCHEDULED
+                    )
+                ) {
                     runCatching { runtime.processPending() }
                 }
                 notifyPendingGlobalMessage(runtime)
@@ -320,16 +324,12 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
 
     private fun notifyPendingGlobalMessage(runtime: GlobalSuperAgentRuntime) {
         if (AppForegroundTracker.isForeground()) return
-        val message = runtime.pendingProactiveMessages()
-            .lastOrNull {
-                it.status == GlobalProactiveMessageStatus.PENDING &&
-                    it.target != GlobalProactiveTarget.GLOBAL_DIGEST
-            } ?: return
-        showGlobalAgentNotification(message)
-        runtime.markNotified(setOf(message.id))
+        val candidate = runtime.nextNotificationCandidate() ?: return
+        showGlobalAgentNotification(candidate)
+        runtime.markNotified(candidate.messageIds)
     }
 
-    private fun showGlobalAgentNotification(message: GlobalProactiveMessage) {
+    private fun showGlobalAgentNotification(message: GlobalAgentNotificationCandidate) {
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("signalasi_open_agent", true)
@@ -343,7 +343,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         )
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_tab_chat_filled)
-            .setContentTitle(message.title.ifBlank { "SignalASI" })
+            .setContentTitle(message.title)
             .setContentText(message.content.take(160))
             .setStyle(Notification.BigTextStyle().bigText(message.content))
             .setContentIntent(pendingIntent)

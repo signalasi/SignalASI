@@ -294,6 +294,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var mobileNativeAgent: MobileNativeAgent
     private lateinit var agentTranscriptStore: AgentTranscriptStore
     private lateinit var globalSuperAgentRuntime: GlobalSuperAgentRuntime
+    private var openLatestGlobalInsightWhenDelivered = false
     private lateinit var agentRunRecorder: AgentRunRecorder
     private lateinit var agentSkillRuntime: AgentSkillRuntime
     private lateinit var agentSkillMatcher: AgentSkillMatcher
@@ -435,6 +436,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         )
         agentTranscriptStore = AgentTranscriptStore(this)
         globalSuperAgentRuntime = GlobalSuperAgentRuntime.get(this)
+        openLatestGlobalInsightWhenDelivered = intent?.getBooleanExtra("signalasi_open_agent", false) == true
+        intent?.removeExtra("signalasi_open_agent")
         agentRunRecorder = AgentRunRecorder(this)
         agentRunEventStore = AgentRunEventStore(this)
         encryptedAgentRegistry = EncryptedAgentRegistry(this)
@@ -590,8 +593,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         setIntent(intent)
         if (intent?.getBooleanExtra("signalasi_open_agent", false) == true) {
             intent.removeExtra("signalasi_open_agent")
+            openLatestGlobalInsightWhenDelivered = true
             showMainTab(PAGE_AGENT)
             renderAgentState(mobileNativeAgent.reloadSession())
+            refreshGlobalAgentCognition()
         }
         handleDebugSendIntent(intent)
         handleDebugIncomingIntent(intent)
@@ -2685,7 +2690,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun agentConversationDisplayTitle(conversation: AgentConversation): String =
         (if (conversation.title == "New session") getString(R.string.agent_session_new) else conversation.title).let { title ->
-            if (conversation.createdByAgent) getString(R.string.agent_session_created_by_agent, title) else title
+            val sourceTitle = if (conversation.createdByAgent) {
+                getString(R.string.agent_session_created_by_agent, title)
+            } else title
+            if (conversation.trackingPaused) {
+                "$sourceTitle \u00b7 ${getString(R.string.agent_session_tracking_paused)}"
+            } else sourceTitle
         }
 
     private fun refreshGlobalAgentCognition() {
@@ -2697,6 +2707,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 val delivered = runCatching {
                     globalSuperAgentRuntime.deliverPending(agentTranscriptStore)
                 }.getOrDefault(emptyList())
+                if (openLatestGlobalInsightWhenDelivered) {
+                    delivered.lastOrNull { it.deliveredConversationId.isNotBlank() }
+                        ?.deliveredConversationId
+                        ?.let { targetId ->
+                            if (agentTranscriptStore.switchConversation(targetId)) {
+                                renderedAgentTranscriptIds.clear()
+                                agentOutputList.removeAllViews()
+                            }
+                        }
+                    openLatestGlobalInsightWhenDelivered = false
+                }
                 if (delivered.isNotEmpty() && activeMainTab == PAGE_AGENT) {
                     refreshAgentConversationHeader()
                     renderAgentTranscript(agentTranscriptStore.list())
@@ -2932,6 +2953,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun showAgentConversationQuickActions(conversation: AgentConversation, showArchived: Boolean) {
         val labels = arrayOf(
             getString(R.string.agent_session_modify),
+            getString(if (conversation.trackingPaused) R.string.agent_session_resume_tracking else R.string.agent_session_pause_tracking),
             getString(R.string.common_delete),
             getString(R.string.agent_session_delete_more)
         )
@@ -2947,8 +2969,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         refreshAgentConversationHeader()
                         showAgentSessionsPage(showArchived)
                     }
-                    1 -> confirmDeleteAgentConversation(conversation, showArchived)
-                    2 -> showAgentConversationMultiDelete(showArchived)
+                    1 -> {
+                        agentTranscriptStore.setTrackingPaused(conversation.id, !conversation.trackingPaused)
+                        showAgentSessionsPage(showArchived)
+                    }
+                    2 -> confirmDeleteAgentConversation(conversation, showArchived)
+                    3 -> showAgentConversationMultiDelete(showArchived)
                 }
             }
             .setNegativeButton(getString(R.string.common_cancel), null)
@@ -3035,6 +3061,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             getString(R.string.agent_session_rename),
             getString(if (conversation.pinned) R.string.agent_session_unpin else R.string.agent_session_pin),
             getString(if (conversation.privateMode) R.string.agent_session_standard else R.string.agent_session_private),
+            getString(if (conversation.trackingPaused) R.string.agent_session_resume_tracking else R.string.agent_session_pause_tracking),
             getString(R.string.agent_session_context_policy),
             getString(R.string.agent_session_summary),
             getString(R.string.agent_session_details),
@@ -3057,13 +3084,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         agentTranscriptStore.setPrivateMode(conversation.id, !conversation.privateMode)
                         showAgentSessionsPage()
                     }
-                    3 -> showAgentConversationContextPolicy(conversation)
-                    4 -> showTextSettingDialog(getString(R.string.agent_session_summary), conversation.summary) {
+                    3 -> {
+                        agentTranscriptStore.setTrackingPaused(conversation.id, !conversation.trackingPaused)
+                        showAgentSessionsPage()
+                    }
+                    4 -> showAgentConversationContextPolicy(conversation)
+                    5 -> showTextSettingDialog(getString(R.string.agent_session_summary), conversation.summary) {
                         agentTranscriptStore.updateSummary(conversation.id, it)
                         showAgentSessionsPage()
                     }
-                    5 -> showAgentConversationDetails(conversation)
-                    6 -> {
+                    6 -> showAgentConversationDetails(conversation)
+                    7 -> {
                         if (conversation.status == AgentConversationStatus.ARCHIVED) {
                             agentTranscriptStore.restoreConversation(conversation.id)
                         } else {
@@ -3071,7 +3102,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         }
                         showAgentSessionsPage()
                     }
-                    7 -> android.app.AlertDialog.Builder(this)
+                    8 -> android.app.AlertDialog.Builder(this)
                         .setTitle(getString(R.string.agent_session_delete))
                         .setMessage(getString(R.string.agent_session_delete_confirm))
                         .setPositiveButton(getString(R.string.common_delete)) { _, _ ->
@@ -4280,6 +4311,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val homeAssistant = HomeAssistantSettingsStore.load(this)
         val homeAssistantReady = homeAssistant.configured
         val onDeviceRuntime = AgentOnDeviceRuntimeManager(this).status()
+        val globalRuntime = if (::globalSuperAgentRuntime.isInitialized) {
+            globalSuperAgentRuntime
+        } else GlobalSuperAgentRuntime.get(this)
+        val globalDashboard = globalRuntime.dashboard()
+        val globalSettings = globalRuntime.settings()
 
         controlCenterRenderer.render(
             content,
@@ -4311,6 +4347,19 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     ControlCenterSectionSpec(
                         getString(R.string.cc_section_intelligent_core),
                         listOf(
+                            ccRouteRow(
+                                ControlCenterRoute.GLOBAL_AGENT,
+                                getString(R.string.cc_global_agent_title),
+                                getString(
+                                    R.string.cc_global_agent_home_subtitle,
+                                    globalDashboard.topicCount,
+                                    globalDashboard.activeGoalCount,
+                                    globalDashboard.pendingInsightCount
+                                ),
+                                R.drawable.ic_agent_node,
+                                getString(if (globalSettings.enabled) R.string.cc_status_online else R.string.on_device_agent_status_paused),
+                                if (globalSettings.enabled) ControlCenterTone.VIOLET else ControlCenterTone.AMBER
+                            ),
                             ccRouteRow(ControlCenterRoute.AGENT_CORE, R.string.cc_agent_core_title, R.string.cc_agent_core_subtitle, R.drawable.ic_agent_node, getString(if (safety.executionPaused) R.string.on_device_agent_status_paused else R.string.cc_status_online), if (safety.executionPaused) ControlCenterTone.AMBER else ControlCenterTone.GREEN),
                             ccRouteRow(ControlCenterRoute.RESOURCE_ROUTING, R.string.cc_resource_routing_title, R.string.cc_resource_routing_subtitle, R.drawable.ic_settings_model, getString(if (availableResources > 0) R.string.cc_status_available else R.string.status_needs_setup), if (availableResources > 0) ControlCenterTone.BLUE else ControlCenterTone.AMBER),
                             ccRouteRow(ControlCenterRoute.MEMORY, getString(R.string.cc_memory_title), getString(R.string.cc_memory_subtitle, memoryCount), R.drawable.ic_agent_memory, getString(if (safety.memoryCapture) R.string.status_enabled else R.string.common_off), if (safety.memoryCapture) ControlCenterTone.GREEN else ControlCenterTone.NEUTRAL),
@@ -4421,6 +4470,26 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             return
         }
         when (actionId) {
+            "global.toggle_enabled" -> updateGlobalAgentSettings { it.copy(enabled = !it.enabled) }
+            "global.toggle_proactive" -> updateGlobalAgentSettings {
+                it.copy(proactiveInsightsEnabled = !it.proactiveInsightsEnabled)
+            }
+            "global.toggle_research" -> updateGlobalAgentSettings {
+                it.copy(autonomousResearchEnabled = !it.autonomousResearchEnabled)
+            }
+            "global.toggle_auto_conversations" -> updateGlobalAgentSettings {
+                it.copy(autoCreateConversationsEnabled = !it.autoCreateConversationsEnabled)
+            }
+            "global.toggle_notifications" -> updateGlobalAgentSettings {
+                it.copy(notificationsEnabled = !it.notificationsEnabled)
+            }
+            "global.process_now" -> processGlobalAgentNow()
+            "global.world.goals" -> showGlobalWorldItemsDialog(GlobalWorldItemKind.GOAL)
+            "global.world.tasks" -> showGlobalWorldItemsDialog(GlobalWorldItemKind.TASK)
+            "global.world.conflicts" -> showGlobalWorldConflictsDialog()
+            "global.world.links" -> showGlobalConversationLinksDialog()
+            "global.research" -> showGlobalResearchTasksDialog()
+            "global.insights" -> showGlobalInsightsDialog()
             "profile.nickname" -> openExistingControlCenterPage { showEditNicknameDialog() }
             "profile.copy_id" -> copyText(SignalASICrypto.localSignalasiId(), getString(R.string.security_copied_signalasi_id))
             "profile.copy_fingerprint" -> copyText(SignalASICrypto.localIdentitySha256(), getString(R.string.security_copied_phone_fingerprint))
@@ -4621,6 +4690,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             when (destination.route) {
                 ControlCenterRoute.PROFILE -> renderControlCenterProfilePage()
                 ControlCenterRoute.SYSTEM_STATUS -> renderControlCenterSystemStatusPage()
+                ControlCenterRoute.GLOBAL_AGENT -> renderControlCenterGlobalAgentPage()
                 ControlCenterRoute.AGENT_CORE -> renderControlCenterAgentCorePage()
                 ControlCenterRoute.EXECUTION_POLICY -> renderControlCenterExecutionPolicyPage()
                 ControlCenterRoute.RESOURCE_ROUTING -> renderControlCenterRoutingPage()
@@ -4685,6 +4755,203 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         showFeaturePage(title)
         controlCenterRenderer.render(featureContent, page, ::handleControlCenterAction)
     }
+
+    private fun renderControlCenterGlobalAgentPage() {
+        val runtime = if (::globalSuperAgentRuntime.isInitialized) {
+            globalSuperAgentRuntime
+        } else GlobalSuperAgentRuntime.get(this)
+        val settings = runtime.settings()
+        val dashboard = runtime.dashboard()
+        val research = runtime.researchTasks()
+        val activeResearch = research.count {
+            it.status in setOf(
+                GlobalResearchTaskStatus.QUEUED,
+                GlobalResearchTaskStatus.RUNNING,
+                GlobalResearchTaskStatus.SCHEDULED,
+                GlobalResearchTaskStatus.WAITING_FOR_RESOURCE
+            )
+        }
+        showControlCenterFeature(
+            getString(R.string.cc_global_agent_title),
+            ControlCenterPageSpec(
+                banner = if (dashboard.unresolvedConflictCount > 0) {
+                    ControlCenterBannerSpec(
+                        title = getString(R.string.cc_global_conflicts_banner, dashboard.unresolvedConflictCount),
+                        subtitle = getString(R.string.cc_global_conflicts_banner_subtitle),
+                        iconRes = R.drawable.ic_info_outline,
+                        tone = ControlCenterTone.AMBER,
+                        actionId = "global.world.conflicts"
+                    )
+                } else null,
+                hero = ControlCenterHeroSpec(
+                    title = getString(R.string.cc_global_agent_title),
+                    subtitle = getString(R.string.cc_global_agent_subtitle),
+                    iconRes = R.drawable.signalasi_mark_large,
+                    preserveIconColor = true,
+                    badges = listOf(
+                        ControlCenterBadgeSpec(
+                            getString(if (settings.enabled) R.string.cc_global_understanding_active else R.string.on_device_agent_status_paused),
+                            if (settings.enabled) ControlCenterTone.GREEN else ControlCenterTone.AMBER
+                        ),
+                        ControlCenterBadgeSpec(
+                            getString(if (settings.autonomousResearchEnabled) R.string.cc_global_research_active else R.string.common_off),
+                            if (settings.autonomousResearchEnabled) ControlCenterTone.BLUE else ControlCenterTone.NEUTRAL
+                        )
+                    ),
+                    metrics = listOf(
+                        ControlCenterMetricSpec(dashboard.topicCount.toString(), getString(R.string.cc_global_metric_topics)),
+                        ControlCenterMetricSpec(dashboard.crossConversationLinkCount.toString(), getString(R.string.cc_global_metric_links)),
+                        ControlCenterMetricSpec(dashboard.pendingInsightCount.toString(), getString(R.string.cc_global_metric_insights))
+                    )
+                ),
+                sections = listOf(
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_global_section_autonomy),
+                        listOf(
+                            ControlCenterRowSpec("global.toggle_enabled", getString(R.string.cc_global_master_title), getString(R.string.cc_global_master_subtitle), R.drawable.ic_agent_node, switchValue = settings.enabled, showChevron = false),
+                            ControlCenterRowSpec("global.toggle_proactive", getString(R.string.cc_global_proactive_title), getString(R.string.cc_global_proactive_subtitle), R.drawable.ic_agent_memory, switchValue = settings.proactiveInsightsEnabled, showChevron = false, enabled = settings.enabled),
+                            ControlCenterRowSpec("global.toggle_research", getString(R.string.cc_global_research_title), getString(R.string.cc_global_research_subtitle), R.drawable.ic_agent_knowledge, switchValue = settings.autonomousResearchEnabled, showChevron = false, enabled = settings.enabled),
+                            ControlCenterRowSpec("global.toggle_auto_conversations", getString(R.string.cc_global_topics_title), getString(R.string.cc_global_topics_subtitle), R.drawable.ic_agent_history, switchValue = settings.autoCreateConversationsEnabled, showChevron = false, enabled = settings.enabled),
+                            ControlCenterRowSpec("global.toggle_notifications", getString(R.string.cc_global_notifications_title), getString(R.string.cc_global_notifications_subtitle), R.drawable.ic_settings_notification, switchValue = settings.notificationsEnabled, showChevron = false, enabled = settings.enabled)
+                        )
+                    ),
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_global_section_world),
+                        listOf(
+                            ControlCenterRowSpec("global.world.goals", getString(R.string.cc_global_goals_title), getString(R.string.cc_global_goals_subtitle), R.drawable.ic_agent_node, dashboard.activeGoalCount.toString(), ControlCenterTone.VIOLET),
+                            ControlCenterRowSpec("global.world.tasks", getString(R.string.cc_global_tasks_title), getString(R.string.cc_global_tasks_subtitle), R.drawable.ic_agent_history, dashboard.activeTaskCount.toString(), ControlCenterTone.BLUE),
+                            ControlCenterRowSpec("global.world.conflicts", getString(R.string.cc_global_conflicts_title), getString(R.string.cc_global_conflicts_subtitle), R.drawable.ic_info_outline, dashboard.unresolvedConflictCount.toString(), if (dashboard.unresolvedConflictCount > 0) ControlCenterTone.AMBER else ControlCenterTone.NEUTRAL),
+                            ControlCenterRowSpec("global.world.links", getString(R.string.cc_global_links_title), getString(R.string.cc_global_links_subtitle), R.drawable.ic_protocol_link, dashboard.crossConversationLinkCount.toString(), ControlCenterTone.GREEN)
+                        )
+                    ),
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_global_section_intelligence),
+                        listOf(
+                            ControlCenterRowSpec("global.research", getString(R.string.cc_global_research_queue_title), getString(R.string.cc_global_research_queue_subtitle), R.drawable.ic_agent_knowledge, activeResearch.toString(), if (activeResearch > 0) ControlCenterTone.BLUE else ControlCenterTone.NEUTRAL),
+                            ControlCenterRowSpec("global.insights", getString(R.string.cc_global_pending_insights_title), getString(R.string.cc_global_pending_insights_subtitle), R.drawable.ic_agent_memory, dashboard.pendingInsightCount.toString(), if (dashboard.pendingInsightCount > 0) ControlCenterTone.VIOLET else ControlCenterTone.NEUTRAL),
+                            ControlCenterRowSpec("global.process_now", getString(R.string.cc_global_process_now_title), getString(R.string.cc_global_process_now_subtitle), R.drawable.ic_reset_data, getString(R.string.cc_global_process_now_action), ControlCenterTone.GREEN, showChevron = false, enabled = settings.enabled)
+                        )
+                    ),
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_global_section_privacy),
+                        listOf(
+                            ControlCenterRowSpec("apps.chat_history", getString(R.string.cc_global_sessions_title), getString(R.string.cc_global_sessions_subtitle), R.drawable.ic_agent_history, "", ControlCenterTone.NEUTRAL)
+                        )
+                    )
+                ),
+                footer = getString(R.string.cc_global_footer)
+            )
+        )
+    }
+
+    private fun updateGlobalAgentSettings(transform: (GlobalAgentSettings) -> GlobalAgentSettings) {
+        val runtime = if (::globalSuperAgentRuntime.isInitialized) globalSuperAgentRuntime else GlobalSuperAgentRuntime.get(this)
+        runtime.updateSettings(transform)
+        renderControlCenterGlobalAgentPage()
+    }
+
+    private fun processGlobalAgentNow() {
+        val runtime = if (::globalSuperAgentRuntime.isInitialized) globalSuperAgentRuntime else GlobalSuperAgentRuntime.get(this)
+        thread(name = "signalasi-global-agent-manual") {
+            val batch = runCatching { runtime.processPending(250) }.getOrNull()
+            repeat(2) { runCatching { runtime.executeResearchCycle() } }
+            runOnUiThread {
+                runtime.deliverPending(agentTranscriptStore)
+                renderAgentTranscript(agentTranscriptStore.list())
+                if (controlCenterDestination?.route == ControlCenterRoute.GLOBAL_AGENT) {
+                    renderControlCenterGlobalAgentPage()
+                }
+                Toast.makeText(
+                    this,
+                    getString(R.string.cc_global_processed_result, batch?.processedEventCount ?: 0),
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    private fun showGlobalWorldItemsDialog(kind: GlobalWorldItemKind) {
+        val items = globalSuperAgentRuntime.worldSnapshot().items
+            .filter { it.kind == kind && it.status in setOf(GlobalWorldItemStatus.ACTIVE, GlobalWorldItemStatus.CONFLICTED) }
+            .sortedByDescending(GlobalWorldItem::lastSeenAtMillis)
+            .take(30)
+        val title = getString(if (kind == GlobalWorldItemKind.GOAL) R.string.cc_global_goals_title else R.string.cc_global_tasks_title)
+        val message = items.takeIf(List<GlobalWorldItem>::isNotEmpty)?.joinToString("\n\n") {
+            "\u2022 ${it.value}\n${it.topic} \u00b7 ${it.conversationIds.size}"
+        } ?: getString(R.string.cc_global_empty)
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun showGlobalWorldConflictsDialog() {
+        val conflicts = globalSuperAgentRuntime.worldSnapshot().items
+            .filter { it.status == GlobalWorldItemStatus.CONFLICTED }
+            .groupBy { it.conflictGroupId.ifBlank { it.stableKey } }
+            .values
+            .take(20)
+        val message = conflicts.takeIf(Collection<List<GlobalWorldItem>>::isNotEmpty)?.joinToString("\n\n") { group ->
+            group.joinToString("\n") { "\u2022 ${it.value}" }
+        } ?: getString(R.string.cc_global_empty)
+        AlertDialog.Builder(this)
+            .setTitle(R.string.cc_global_conflicts_title)
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun showGlobalConversationLinksDialog() {
+        val links = globalSuperAgentRuntime.worldSnapshot().links
+            .sortedByDescending(GlobalConversationLink::strength)
+            .take(30)
+        val message = links.takeIf(List<GlobalConversationLink>::isNotEmpty)?.joinToString("\n\n") {
+            "\u2022 ${it.topic}\n${(it.strength * 100).toInt()}% \u00b7 ${it.evidenceCount}"
+        } ?: getString(R.string.cc_global_empty)
+        AlertDialog.Builder(this)
+            .setTitle(R.string.cc_global_links_title)
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun showGlobalResearchTasksDialog() {
+        val tasks = globalSuperAgentRuntime.researchTasks()
+            .sortedByDescending(GlobalResearchTask::updatedAtMillis)
+            .take(30)
+        val message = tasks.takeIf(List<GlobalResearchTask>::isNotEmpty)?.joinToString("\n\n") {
+            "\u2022 ${it.topic}\n${globalResearchStatusLabel(it.status)}" +
+                it.lastError.takeIf(String::isNotBlank)?.let { error -> " \u00b7 ${error.take(120)}" }.orEmpty()
+        } ?: getString(R.string.cc_global_empty)
+        AlertDialog.Builder(this)
+            .setTitle(R.string.cc_global_research_queue_title)
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun showGlobalInsightsDialog() {
+        val messages = globalSuperAgentRuntime.pendingProactiveMessages().takeLast(30)
+        val message = messages.takeIf(List<GlobalProactiveMessage>::isNotEmpty)?.joinToString("\n\n") {
+            "\u2022 ${it.title}\n${it.content.take(240)}"
+        } ?: getString(R.string.cc_global_empty)
+        AlertDialog.Builder(this)
+            .setTitle(R.string.cc_global_pending_insights_title)
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun globalResearchStatusLabel(status: GlobalResearchTaskStatus): String = getString(when (status) {
+        GlobalResearchTaskStatus.QUEUED -> R.string.cc_global_status_queued
+        GlobalResearchTaskStatus.RUNNING -> R.string.cc_global_status_running
+        GlobalResearchTaskStatus.SCHEDULED -> R.string.cc_global_status_scheduled
+        GlobalResearchTaskStatus.WAITING_FOR_RESOURCE -> R.string.cc_global_status_waiting
+        GlobalResearchTaskStatus.COMPLETED -> R.string.cc_global_status_completed
+        GlobalResearchTaskStatus.FAILED -> R.string.cc_global_status_failed
+        GlobalResearchTaskStatus.PAUSED -> R.string.on_device_agent_status_paused
+    })
 
     private fun renderControlCenterProfilePage() {
         val profile = AppStore.profile(this)
@@ -11858,6 +12125,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
         }
         saveChatHistory()
+        if (!stored.isSystem) {
+            GlobalConversationEventBus.publishChatMessage(
+                this,
+                stored.contact.id,
+                stored.contact.name,
+                stored.id,
+                stored.content,
+                if (stored.isMine) GlobalConversationActor.USER else GlobalConversationActor.ASSISTANT,
+                stored.timestamp,
+                mapOf(
+                    "direction" to if (stored.isMine) "outgoing" else "incoming",
+                    "task_id" to stored.taskId
+                )
+            )
+        }
         refreshVisibleMessages(stored.contact.id)
         refreshContactList()
     }
@@ -11865,7 +12147,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun deleteMessageAt(contactId: String, position: Int) {
         val list = messages[contactId] ?: return
         if (position < 0 || position >= list.size) return
-        list.removeAt(position)
+        val removed = list.removeAt(position)
+        if (!removed.isSystem) {
+            GlobalConversationEventBus.publishChatMessageDeleted(this, contactId, removed.id)
+        }
         saveChatHistory()
         if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
             messageList.post {

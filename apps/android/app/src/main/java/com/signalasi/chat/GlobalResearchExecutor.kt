@@ -3,7 +3,6 @@ package com.signalasi.chat
 import android.content.Context
 import org.json.JSONObject
 import java.util.Locale
-import kotlin.math.absoluteValue
 
 data class GlobalResearchExecutionResult(
     val taskId: String,
@@ -25,19 +24,21 @@ class GlobalResearchExecutor(context: Context) {
             targets = connectorRegistry.availableTargets(),
             tools = emptyList()
         )
-        val ordered = (listOfNotNull(routing.primary?.resource?.targetId) +
+        val routed = (listOfNotNull(routing.primary?.resource?.targetId) +
             routing.fallbacks.mapNotNull { it.resource.targetId.takeIf(String::isNotBlank) })
             .distinct()
+        val candidates = (task.fallbackResourceIds + routed).filter(String::isNotBlank).distinct()
+        val untried = candidates.filterNot { it in task.attemptedResourceIds }
+        val ordered = untried.ifEmpty { candidates }
         if (ordered.isEmpty()) return waitForResource(task, "No research-capable model or Agent is available")
 
-        val attempted = mutableListOf<String>()
+        var currentTask = task
         var lastError = "No research resource accepted the task"
         ordered.forEachIndexed { index, resourceId ->
-            attempted += resourceId
             val remaining = ordered.drop(index + 1)
             val cloud = cloudContact(resourceId)
             if (cloud != null) {
-                val running = task.copy(
+                val running = currentTask.copy(
                     resourceId = resourceId,
                     fallbackResourceIds = remaining,
                     status = GlobalResearchTaskStatus.RUNNING,
@@ -60,18 +61,31 @@ class GlobalResearchExecutor(context: Context) {
                     lastError = naturalFailure(response.exceptionOrNull())
                 }
                 AgentResourceHealthStore(appContext).record("target:$resourceId", false, 0L)
+                currentTask = running.copy(
+                    attemptedResourceIds = (running.attemptedResourceIds + resourceId).distinct(),
+                    fallbackResourceIds = remaining,
+                    leaseExpiresAtMillis = 0L,
+                    updatedAtMillis = System.currentTimeMillis()
+                )
                 return@forEachIndexed
             }
 
             val contactId = resolvePairedContact(resourceId)
             if (contactId != null) {
-                val published = dispatchPairedAgent(task, resourceId, contactId, remaining)
+                val published = dispatchPairedAgent(currentTask, resourceId, contactId, remaining)
                 if (published != null) return published
                 lastError = "The paired Agent did not accept the research task"
                 AgentResourceHealthStore(appContext).record("target:$resourceId", false, 0L)
             }
+            currentTask = currentTask.copy(
+                resourceId = resourceId,
+                attemptedResourceIds = (currentTask.attemptedResourceIds + resourceId).distinct(),
+                fallbackResourceIds = remaining,
+                leaseExpiresAtMillis = 0L,
+                updatedAtMillis = System.currentTimeMillis()
+            )
         }
-        return retryOrFail(task.copy(fallbackResourceIds = ordered - attempted.toSet()), lastError)
+        return retryOrFail(currentTask, lastError)
     }
 
     fun consumeConnectorResponse(response: AgentConnectorResponse): Boolean {
@@ -84,7 +98,14 @@ class GlobalResearchExecutor(context: Context) {
                 )
         } ?: return false
         if (!response.success) {
-            retryOrFail(task, response.content.ifBlank { "The paired Agent could not complete the research task" })
+            retryOrFail(
+                task.copy(
+                    attemptedResourceIds = (task.attemptedResourceIds + task.resourceId).filter(String::isNotBlank).distinct(),
+                    sourceMessageId = 0L,
+                    leaseExpiresAtMillis = 0L
+                ),
+                response.content.ifBlank { "The paired Agent could not complete the research task" }
+            )
             return true
         }
         complete(task, response.content, task.resourceId.ifBlank { response.contactId })
@@ -114,6 +135,7 @@ class GlobalResearchExecutor(context: Context) {
             fallbackResourceIds = fallbacks,
             sourceMessageId = sourceMessageId,
             status = GlobalResearchTaskStatus.RUNNING,
+            leaseExpiresAtMillis = System.currentTimeMillis() + GlobalResearchTaskPolicy.leaseMillis(task.depth),
             updatedAtMillis = System.currentTimeMillis()
         ))
         return GlobalResearchExecutionResult(
@@ -134,9 +156,26 @@ class GlobalResearchExecutor(context: Context) {
         val evidenceUris = HTTPS_URL.findAll(result).map { it.value.trimEnd('.', ',', ')', ']', '}') }
             .distinct().take(MAX_EVIDENCE_URIS).toList()
         val now = System.currentTimeMillis()
+        val materialChange = GlobalResearchTaskPolicy.isMaterialChange(
+            task.result,
+            task.evidenceUris,
+            result,
+            evidenceUris
+        )
+        val continuous = task.depth == GlobalResearchDepth.CONTINUOUS_MONITOR
         val completed = task.copy(
-            status = GlobalResearchTaskStatus.COMPLETED,
+            status = if (continuous) GlobalResearchTaskStatus.SCHEDULED else GlobalResearchTaskStatus.COMPLETED,
             resourceId = resourceId,
+            fallbackResourceIds = emptyList(),
+            attemptedResourceIds = emptyList(),
+            sourceMessageId = 0L,
+            attemptCount = if (continuous) 0 else task.attemptCount,
+            nextAttemptAtMillis = if (continuous) {
+                now + GlobalResearchTaskPolicy.monitorIntervalMillis(task.monitorIntervalMillis)
+            } else 0L,
+            leaseExpiresAtMillis = 0L,
+            lastCompletedAtMillis = now,
+            lastResultFingerprint = GlobalResearchTaskPolicy.fingerprint(result, evidenceUris),
             result = result,
             evidenceUris = evidenceUris,
             lastError = "",
@@ -144,46 +183,57 @@ class GlobalResearchExecutor(context: Context) {
         )
         repository.upsertResearchTask(completed)
         val chinese = GlobalAgentText.containsCjk(task.question)
-        repository.appendProactiveMessage(GlobalProactiveMessage(
-            sourceEventId = "research:${task.id}",
-            sourceConversationId = task.sourceConversationId,
-            target = when (task.depth) {
-                GlobalResearchDepth.DEEP_RESEARCH,
-                GlobalResearchDepth.CONTINUOUS_MONITOR -> GlobalProactiveTarget.NEW_CONVERSATION
-                GlobalResearchDepth.QUICK_FACT,
-                GlobalResearchDepth.PROACTIVE_INFERENCE -> GlobalProactiveTarget.CURRENT_CONVERSATION
-            },
-            title = if (chinese) "\u7814\u7a76\u7ed3\u679c" else "Research result",
-            content = result,
-            topic = task.topic,
-            urgent = false,
-            createdAtMillis = now
-        ))
-        repository.enqueue(GlobalConversationEvent(
-            id = "research-result:${task.id}",
-            type = GlobalConversationEventType.TOOL_RESULT,
-            conversationId = task.sourceConversationId,
-            messageId = task.id,
-            actor = GlobalConversationActor.TOOL,
-            timestampMillis = now,
-            content = result,
-            contentRef = "encrypted://global-agent/research/${task.id}",
-            conversationTitle = task.topic,
-            topicHints = setOf(task.topic),
-            metadata = mapOf(
-                "research_task_id" to task.id,
-                "resource_id" to resourceId,
-                "evidence_count" to evidenceUris.size.toString()
-            )
-        ))
+        val settings = repository.settings()
+        if (!continuous || materialChange) {
+            repository.appendProactiveMessage(GlobalProactiveMessage(
+                sourceEventId = "research:${task.id}:${completed.lastResultFingerprint}",
+                sourceConversationId = task.sourceConversationId,
+                target = when {
+                    !settings.autoCreateConversationsEnabled -> GlobalProactiveTarget.CURRENT_CONVERSATION
+                    else -> when (task.depth) {
+                    GlobalResearchDepth.DEEP_RESEARCH,
+                    GlobalResearchDepth.CONTINUOUS_MONITOR -> GlobalProactiveTarget.NEW_CONVERSATION
+                    GlobalResearchDepth.QUICK_FACT,
+                    GlobalResearchDepth.PROACTIVE_INFERENCE -> GlobalProactiveTarget.CURRENT_CONVERSATION
+                    }
+                },
+                title = if (chinese) "\u7814\u7a76\u7ed3\u679c" else "Research result",
+                content = result,
+                topic = task.topic,
+                urgent = false,
+                createdAtMillis = now
+            ))
+            repository.enqueue(GlobalConversationEvent(
+                id = "research-result:${task.id}:${completed.lastResultFingerprint}",
+                type = GlobalConversationEventType.TOOL_RESULT,
+                conversationId = task.sourceConversationId,
+                messageId = task.id,
+                actor = GlobalConversationActor.TOOL,
+                timestampMillis = now,
+                content = result,
+                contentRef = "encrypted://global-agent/research/${task.id}",
+                conversationTitle = task.topic,
+                topicHints = setOf(task.topic),
+                metadata = mapOf(
+                    "research_task_id" to task.id,
+                    "resource_id" to resourceId,
+                    "evidence_count" to evidenceUris.size.toString(),
+                    "material_change" to materialChange.toString(),
+                    "monitoring" to continuous.toString(),
+                    "verified" to "true"
+                )
+            ))
+        }
         AgentResourceHealthStore(appContext).record("target:$resourceId", true, now - task.updatedAtMillis)
-        return GlobalResearchExecutionResult(task.id, GlobalResearchTaskStatus.COMPLETED, resourceId, result.take(240))
+        return GlobalResearchExecutionResult(task.id, completed.status, resourceId, result.take(240))
     }
 
     private fun waitForResource(task: GlobalResearchTask, reason: String): GlobalResearchExecutionResult {
         val waiting = task.copy(
             status = GlobalResearchTaskStatus.WAITING_FOR_RESOURCE,
             nextAttemptAtMillis = System.currentTimeMillis() + RESOURCE_RETRY_MILLIS,
+            sourceMessageId = 0L,
+            leaseExpiresAtMillis = 0L,
             lastError = reason,
             updatedAtMillis = System.currentTimeMillis()
         )
@@ -193,10 +243,25 @@ class GlobalResearchExecutor(context: Context) {
 
     private fun retryOrFail(task: GlobalResearchTask, reason: String): GlobalResearchExecutionResult {
         val now = System.currentTimeMillis()
+        if (task.depth == GlobalResearchDepth.CONTINUOUS_MONITOR && task.attemptCount >= MAX_ATTEMPTS) {
+            val scheduled = task.copy(
+                status = GlobalResearchTaskStatus.SCHEDULED,
+                sourceMessageId = 0L,
+                attemptCount = 0,
+                nextAttemptAtMillis = now + MONITOR_FAILURE_RETRY_MILLIS,
+                leaseExpiresAtMillis = 0L,
+                lastError = reason.take(600),
+                updatedAtMillis = now
+            )
+            repository.upsertResearchTask(scheduled)
+            return GlobalResearchExecutionResult(task.id, scheduled.status, task.resourceId, reason)
+        }
         if (task.attemptCount < MAX_ATTEMPTS) {
             val waiting = task.copy(
                 status = GlobalResearchTaskStatus.WAITING_FOR_RESOURCE,
-                nextAttemptAtMillis = now + retryDelay(task.attemptCount),
+                sourceMessageId = 0L,
+                nextAttemptAtMillis = now + GlobalResearchTaskPolicy.retryDelayMillis(task.attemptCount),
+                leaseExpiresAtMillis = 0L,
                 lastError = reason.take(600),
                 updatedAtMillis = now
             )
@@ -205,6 +270,8 @@ class GlobalResearchExecutor(context: Context) {
         }
         val failed = task.copy(
             status = GlobalResearchTaskStatus.FAILED,
+            sourceMessageId = 0L,
+            leaseExpiresAtMillis = 0L,
             lastError = reason.take(600),
             updatedAtMillis = now
         )
@@ -291,7 +358,7 @@ class GlobalResearchExecutor(context: Context) {
     }
 
     private fun correlationId(taskId: String): Long =
-        System.currentTimeMillis() * 1_000L + (taskId.hashCode().absoluteValue % 1_000)
+        System.currentTimeMillis() * 1_024L + (taskId.hashCode().toLong() and 1_023L)
 
     private fun canonicalResourceId(value: String): String {
         val id = value.lowercase(Locale.ROOT)
@@ -311,15 +378,10 @@ class GlobalResearchExecutor(context: Context) {
         ?.ifBlank { null }
         ?: "The research resource failed without a result"
 
-    private fun retryDelay(attemptCount: Int): Long = when (attemptCount.coerceAtLeast(1)) {
-        1 -> 60_000L
-        2 -> 5L * 60_000L
-        else -> 30L * 60_000L
-    }
-
     private companion object {
         const val MAX_ATTEMPTS = 3
         const val RESOURCE_RETRY_MILLIS = 30L * 60L * 1_000L
+        const val MONITOR_FAILURE_RETRY_MILLIS = 6L * 60L * 60L * 1_000L
         const val MAX_RESULT_CHARACTERS = 24_000
         const val MAX_PROMPT_CHARACTERS = 12_000
         const val MAX_EVIDENCE_URIS = 20

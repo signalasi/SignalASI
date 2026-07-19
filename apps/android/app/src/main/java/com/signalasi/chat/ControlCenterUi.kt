@@ -28,6 +28,7 @@ enum class ControlCenterTone {
 enum class ControlCenterRoute(val wireValue: String) {
     PROFILE("profile"),
     SYSTEM_STATUS("system_status"),
+    GLOBAL_AGENT("global_agent"),
     AGENT_CORE("agent_core"),
     EXECUTION_POLICY("execution_policy"),
     RESOURCE_ROUTING("resource_routing"),

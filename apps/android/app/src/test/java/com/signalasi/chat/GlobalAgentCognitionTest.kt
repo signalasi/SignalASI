@@ -182,6 +182,131 @@ class GlobalAgentCognitionTest {
         assertNotNull(task)
         assertEquals(GlobalResearchDepth.CONTINUOUS_MONITOR, task?.depth)
         assertTrue("official" in task!!.preferredSources)
+        assertTrue(task.monitorIntervalMillis >= 60L * 60L * 1_000L)
+    }
+
+    @Test
+    fun expiredResearchLeaseRecoversWithoutLosingFallbacks() {
+        val now = 10_000L
+        val running = GlobalResearchTask(
+            sourceEventId = "event-a",
+            sourceConversationId = "conversation-a",
+            topic = "Runtime reliability",
+            question = "Investigate runtime reliability",
+            depth = GlobalResearchDepth.DEEP_RESEARCH,
+            preferredSources = listOf("official"),
+            status = GlobalResearchTaskStatus.RUNNING,
+            resourceId = "codex",
+            fallbackResourceIds = listOf("cloud-models"),
+            sourceMessageId = 42L,
+            leaseExpiresAtMillis = now - 1L
+        )
+
+        val recovered = GlobalResearchTaskPolicy.recoverIfStale(running, now)
+
+        assertEquals(GlobalResearchTaskStatus.WAITING_FOR_RESOURCE, recovered.status)
+        assertEquals(0L, recovered.sourceMessageId)
+        assertEquals(0L, recovered.leaseExpiresAtMillis)
+        assertTrue("codex" in recovered.attemptedResourceIds)
+        assertEquals(listOf("cloud-models"), recovered.fallbackResourceIds)
+    }
+
+    @Test
+    fun activeResearchLeaseIsNotRecoveredEarly() {
+        val now = 10_000L
+        val running = GlobalResearchTask(
+            sourceEventId = "event-a",
+            sourceConversationId = "conversation-a",
+            topic = "Runtime reliability",
+            question = "Investigate runtime reliability",
+            depth = GlobalResearchDepth.DEEP_RESEARCH,
+            preferredSources = listOf("official"),
+            status = GlobalResearchTaskStatus.RUNNING,
+            leaseExpiresAtMillis = now + 1L
+        )
+
+        assertEquals(running, GlobalResearchTaskPolicy.recoverIfStale(running, now))
+    }
+
+    @Test
+    fun monitoringReportsOnlyMaterialChanges() {
+        val previous = "Version 1.2 is current and supports feature A."
+        val equivalent = "Version 1.2 is current. It supports feature A."
+        val changed = "Version 1.3 is current and introduces feature B."
+
+        assertFalse(GlobalResearchTaskPolicy.isMaterialChange(
+            previous,
+            listOf("https://example.com/v1.2"),
+            equivalent,
+            listOf("https://example.com/v1.2")
+        ))
+        assertTrue(GlobalResearchTaskPolicy.isMaterialChange(
+            previous,
+            listOf("https://example.com/v1.2"),
+            changed,
+            listOf("https://example.com/v1.3")
+        ))
+    }
+
+    @Test
+    fun deletedChatMessageRemovesItsWorldModelEvidence() {
+        val message = event("contact:codex", "Codex", "We need a durable Android runtime")
+        val understanding = GlobalUnderstanding(
+            eventId = message.id,
+            topic = "Android runtime",
+            intent = "planning",
+            goalCandidates = listOf("We need a durable Android runtime")
+        )
+        val created = GlobalWorldModelReducer.reduce(PersonalWorldModel(), message, understanding)
+        val deletion = GlobalConversationEvent(
+            id = "delete-${message.id}",
+            type = GlobalConversationEventType.MESSAGE_DELETED,
+            conversationId = message.conversationId,
+            actor = GlobalConversationActor.SYSTEM,
+            metadata = mapOf("deleted_event_id" to message.id)
+        )
+
+        val deleted = GlobalWorldModelReducer.reduce(
+            created.world,
+            deletion,
+            GlobalUnderstanding(eventId = deletion.id, topic = "Android runtime", intent = "delete")
+        )
+
+        assertTrue(deleted.world.items.none { message.id in it.evidenceEventIds })
+    }
+
+    @Test
+    fun terminalTaskStatusReplacesRunningRealtimeState() {
+        fun taskEvent(status: String, sequence: Long) = GlobalConversationEvent(
+            id = "task-a-$status-$sequence",
+            type = GlobalConversationEventType.TASK_UPDATED,
+            conversationId = "contact:codex",
+            actor = GlobalConversationActor.TOOL,
+            content = "Codex: $status",
+            conversationTitle = "Codex",
+            metadata = mapOf(
+                "contact_id" to "codex",
+                "task_id" to "task-a",
+                "task_status" to status
+            )
+        )
+        val runningEvent = taskEvent("running", 1L)
+        val running = GlobalWorldModelReducer.reduce(
+            PersonalWorldModel(),
+            runningEvent,
+            pipeline.understand(runningEvent, PersonalWorldModel())
+        )
+        val completedEvent = taskEvent("completed", 2L)
+        val completed = GlobalWorldModelReducer.reduce(
+            running.world,
+            completedEvent,
+            pipeline.understand(completedEvent, running.world)
+        )
+        val states = completed.world.items.filter { it.kind == GlobalWorldItemKind.STATE }
+
+        assertEquals(1, states.size)
+        assertEquals(GlobalWorldItemStatus.COMPLETED, states.single().status)
+        assertTrue(states.single().value.contains("completed"))
     }
 
     @Test

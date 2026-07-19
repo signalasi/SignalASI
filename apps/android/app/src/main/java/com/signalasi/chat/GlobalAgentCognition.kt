@@ -371,9 +371,30 @@ object GlobalWorldModelReducer {
                 conflicts = emptyList()
             )
         }
+        if (event.type == GlobalConversationEventType.MESSAGE_DELETED) {
+            val deletedEventId = event.metadata["deleted_event_id"].orEmpty()
+            val retainedItems = world.items.mapNotNull { item ->
+                if (deletedEventId.isBlank() || deletedEventId !in item.evidenceEventIds) return@mapNotNull item
+                val remainingEvidence = item.evidenceEventIds - deletedEventId
+                if (remainingEvidence.isEmpty()) null else item.copy(
+                    evidenceEventIds = remainingEvidence,
+                    evidenceCount = (item.evidenceCount - 1).coerceAtLeast(remainingEvidence.size).coerceAtLeast(1),
+                    lastSeenAtMillis = event.timestampMillis
+                )
+            }
+            return GlobalWorldReduction(
+                world = world.copy(
+                    items = retainedItems,
+                    processedEventIds = (world.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
+                    updatedAtMillis = event.timestampMillis
+                ),
+                changedItems = emptyList(),
+                conflicts = emptyList()
+            )
+        }
         val now = event.timestampMillis
         val candidates = buildCandidates(event, understanding)
-        val mutable = world.items.toMutableList()
+        val mutable = world.items.filter { it.expiresAtMillis <= 0L || it.expiresAtMillis > now }.toMutableList()
         val changed = mutableListOf<GlobalWorldItem>()
         val conflicts = mutableListOf<Pair<GlobalWorldItem, GlobalWorldItem>>()
         candidates.forEach { candidate ->
@@ -383,12 +404,17 @@ object GlobalWorldModelReducer {
             if (existingIndex >= 0) {
                 val existing = mutable[existingIndex]
                 val merged = existing.copy(
+                    value = if (existing.kind == GlobalWorldItemKind.STATE) candidate.value else existing.value,
+                    status = if (existing.kind == GlobalWorldItemKind.STATE) candidate.status else existing.status,
                     confidence = max(existing.confidence, candidate.confidence)
                         .plus(0.03).coerceAtMost(0.98),
                     evidenceCount = existing.evidenceCount + 1,
                     conversationIds = (existing.conversationIds + candidate.conversationIds).take(20).toSet(),
                     evidenceEventIds = (existing.evidenceEventIds + event.id).takeLast(20),
-                    lastSeenAtMillis = now
+                    lastSeenAtMillis = now,
+                    expiresAtMillis = if (existing.kind == GlobalWorldItemKind.STATE) {
+                        candidate.expiresAtMillis
+                    } else existing.expiresAtMillis
                 )
                 mutable[existingIndex] = merged
                 changed += merged
@@ -473,7 +499,31 @@ object GlobalWorldModelReducer {
             }
             GlobalConversationActor.TOOL -> {
                 val evidence = event.content.takeIf { it.isNotBlank() }?.let(::listOf).orEmpty()
-                addAll(GlobalWorldItemKind.STATE, GlobalWorldLayer.REALTIME, evidence, 0.66)
+                if (event.type == GlobalConversationEventType.TASK_UPDATED && evidence.isNotEmpty()) {
+                    val taskStatus = event.metadata["task_status"].orEmpty()
+                    add(GlobalWorldItem(
+                        stableKey = GlobalAgentText.stableKey(
+                            "task-state",
+                            event.metadata["contact_id"].orEmpty(),
+                            event.metadata["task_id"].orEmpty().ifBlank { event.messageId }
+                        ),
+                        kind = GlobalWorldItemKind.STATE,
+                        layer = GlobalWorldLayer.REALTIME,
+                        topic = understanding.topic,
+                        value = evidence.first().take(1_200),
+                        confidence = 0.82,
+                        conversationIds = setOf(event.conversationId),
+                        evidenceEventIds = listOf(event.id),
+                        status = if (taskStatus in TERMINAL_TASK_STATUSES) {
+                            GlobalWorldItemStatus.COMPLETED
+                        } else GlobalWorldItemStatus.ACTIVE,
+                        firstSeenAtMillis = event.timestampMillis,
+                        lastSeenAtMillis = event.timestampMillis,
+                        expiresAtMillis = event.timestampMillis + REALTIME_TTL_MILLIS
+                    ))
+                } else {
+                    addAll(GlobalWorldItemKind.STATE, GlobalWorldLayer.REALTIME, evidence, 0.66)
+                }
             }
             GlobalConversationActor.ASSISTANT -> {
                 val evidence = event.content.takeIf {
@@ -533,6 +583,7 @@ object GlobalWorldModelReducer {
     }
 
     private const val REALTIME_TTL_MILLIS = 14L * 24L * 60L * 60L * 1_000L
+    private val TERMINAL_TASK_STATUSES = setOf("completed", "failed", "cancelled", "timed_out", "not_found")
     private const val MAX_WORLD_ITEMS = 1_500
     private const val MAX_LINKS = 600
     private const val MAX_PROCESSED_EVENT_IDS = 4_000
@@ -560,15 +611,28 @@ data class GlobalInterventionHistory(
     val lastTopicNotificationMillis: Map<String, Long> = emptyMap()
 )
 
+data class GlobalAgentSettings(
+    val enabled: Boolean = true,
+    val proactiveInsightsEnabled: Boolean = true,
+    val autonomousResearchEnabled: Boolean = true,
+    val autoCreateConversationsEnabled: Boolean = true,
+    val notificationsEnabled: Boolean = true,
+    val dailyMessageBudget: Int = 4,
+    val topicCooldownMillis: Long = 6L * 60L * 60L * 1_000L,
+    val monitorIntervalMillis: Long = 24L * 60L * 60L * 1_000L
+)
+
 object GlobalInterventionPolicy {
     fun decide(
         event: GlobalConversationEvent,
         understanding: GlobalUnderstanding,
         reduction: GlobalWorldReduction,
         history: GlobalInterventionHistory,
-        nowMillis: Long = event.timestampMillis
+        nowMillis: Long = event.timestampMillis,
+        settings: GlobalAgentSettings = GlobalAgentSettings()
     ): GlobalInterventionDecision {
-        if (event.sensitivity == GlobalConversationSensitivity.SESSION_PRIVATE ||
+        if (!settings.enabled ||
+            event.sensitivity == GlobalConversationSensitivity.SESSION_PRIVATE ||
             event.actor !in setOf(GlobalConversationActor.USER, GlobalConversationActor.TOOL)
         ) {
             return GlobalInterventionDecision(
@@ -591,10 +655,12 @@ object GlobalInterventionPolicy {
         val notificationsToday = history.notificationTimestamps.count { nowMillis - it in 0..DAY_MILLIS }
         val topicKey = GlobalAgentText.normalize(understanding.topic)
         val lastTopicNotification = history.lastTopicNotificationMillis[topicKey] ?: 0L
-        val cooldownActive = nowMillis - lastTopicNotification in 0 until TOPIC_COOLDOWN_MILLIS
+        val cooldownActive = nowMillis - lastTopicNotification in 0 until settings.topicCooldownMillis
         val urgent = understanding.urgency >= 0.90 && understanding.riskCandidates.isNotEmpty()
-        val notificationAllowed = urgent || (notificationsToday < DAILY_NOTIFICATION_BUDGET && !cooldownActive)
+        val notificationAllowed = settings.proactiveInsightsEnabled &&
+            (urgent || (notificationsToday < settings.dailyMessageBudget && !cooldownActive))
         val mode = when {
+            !settings.proactiveInsightsEnabled -> GlobalInterventionMode.RECORD_ONLY
             urgent && score >= 0.52 -> GlobalInterventionMode.IMMEDIATE
             score >= 0.68 && notificationAllowed -> GlobalInterventionMode.CURRENT_CONVERSATION
             understanding.durableFollowUpUseful && understanding.complexity >= 0.62 && score >= 0.48 ->
@@ -613,19 +679,26 @@ object GlobalInterventionPolicy {
             mode = mode,
             score = score,
             reason = reason,
-            researchRequired = understanding.externalResearchUseful && score >= 0.34,
-            autonomousPreparationAllowed = understanding.externalResearchUseful || understanding.durableFollowUpUseful,
+            researchRequired = settings.autonomousResearchEnabled && understanding.externalResearchUseful && score >= 0.34,
+            autonomousPreparationAllowed = settings.autonomousResearchEnabled &&
+                (understanding.externalResearchUseful || understanding.durableFollowUpUseful),
             notificationAllowed = notificationAllowed
         )
     }
 
-    private const val DAILY_NOTIFICATION_BUDGET = 4
     private const val DAY_MILLIS = 24L * 60L * 60L * 1_000L
-    private const val TOPIC_COOLDOWN_MILLIS = 6L * 60L * 60L * 1_000L
 }
 
 enum class GlobalResearchDepth { QUICK_FACT, DEEP_RESEARCH, CONTINUOUS_MONITOR, PROACTIVE_INFERENCE }
-enum class GlobalResearchTaskStatus { QUEUED, RUNNING, WAITING_FOR_RESOURCE, COMPLETED, FAILED, PAUSED }
+enum class GlobalResearchTaskStatus {
+    QUEUED,
+    RUNNING,
+    SCHEDULED,
+    WAITING_FOR_RESOURCE,
+    COMPLETED,
+    FAILED,
+    PAUSED
+}
 
 data class GlobalResearchTask(
     val id: String = UUID.randomUUID().toString(),
@@ -638,15 +711,84 @@ data class GlobalResearchTask(
     val status: GlobalResearchTaskStatus = GlobalResearchTaskStatus.QUEUED,
     val resourceId: String = "",
     val fallbackResourceIds: List<String> = emptyList(),
+    val attemptedResourceIds: List<String> = emptyList(),
     val sourceMessageId: Long = 0L,
     val attemptCount: Int = 0,
     val nextAttemptAtMillis: Long = 0L,
+    val leaseExpiresAtMillis: Long = 0L,
+    val monitorIntervalMillis: Long = 0L,
+    val lastCompletedAtMillis: Long = 0L,
+    val lastResultFingerprint: String = "",
     val lastError: String = "",
     val result: String = "",
     val evidenceUris: List<String> = emptyList(),
     val createdAtMillis: Long = System.currentTimeMillis(),
     val updatedAtMillis: Long = System.currentTimeMillis()
 )
+
+object GlobalResearchTaskPolicy {
+    fun leaseMillis(depth: GlobalResearchDepth): Long = when (depth) {
+        GlobalResearchDepth.QUICK_FACT -> 2L * 60L * 1_000L
+        GlobalResearchDepth.PROACTIVE_INFERENCE -> 3L * 60L * 1_000L
+        GlobalResearchDepth.DEEP_RESEARCH -> 8L * 60L * 1_000L
+        GlobalResearchDepth.CONTINUOUS_MONITOR -> 10L * 60L * 1_000L
+    }
+
+    fun retryDelayMillis(attemptCount: Int): Long = when (attemptCount.coerceAtLeast(1)) {
+        1 -> 30_000L
+        2 -> 2L * 60L * 1_000L
+        3 -> 10L * 60L * 1_000L
+        else -> 30L * 60L * 1_000L
+    }
+
+    fun monitorIntervalMillis(configured: Long): Long = configured
+        .takeIf { it > 0L }
+        ?.coerceIn(MIN_MONITOR_INTERVAL_MILLIS, MAX_MONITOR_INTERVAL_MILLIS)
+        ?: DEFAULT_MONITOR_INTERVAL_MILLIS
+
+    fun recoverIfStale(task: GlobalResearchTask, nowMillis: Long): GlobalResearchTask {
+        if (task.status != GlobalResearchTaskStatus.RUNNING ||
+            task.leaseExpiresAtMillis <= 0L ||
+            task.leaseExpiresAtMillis > nowMillis
+        ) return task
+        return task.copy(
+            status = GlobalResearchTaskStatus.WAITING_FOR_RESOURCE,
+            attemptedResourceIds = (task.attemptedResourceIds + task.resourceId)
+                .filter(String::isNotBlank)
+                .distinct(),
+            sourceMessageId = 0L,
+            nextAttemptAtMillis = nowMillis,
+            leaseExpiresAtMillis = 0L,
+            lastError = "The previous research lease expired before a result arrived",
+            updatedAtMillis = nowMillis
+        )
+    }
+
+    fun fingerprint(result: String, evidenceUris: List<String>): String = GlobalAgentText.stableKey(
+        result.replace(Regex("\\s+"), " ").trim().take(20_000),
+        evidenceUris.sorted().joinToString("|")
+    )
+
+    fun isMaterialChange(
+        previousResult: String,
+        previousEvidenceUris: List<String>,
+        nextResult: String,
+        nextEvidenceUris: List<String>
+    ): Boolean {
+        if (previousResult.isBlank()) return true
+        val previousTokens = GlobalAgentText.tokens(previousResult.replace(RESULT_PUNCTUATION, " "))
+        val nextTokens = GlobalAgentText.tokens(nextResult.replace(RESULT_PUNCTUATION, " "))
+        val semanticOverlap = GlobalAgentText.overlap(previousTokens, nextTokens)
+        val newEvidence = nextEvidenceUris.toSet() - previousEvidenceUris.toSet()
+        return semanticOverlap < MATERIAL_CHANGE_OVERLAP || newEvidence.isNotEmpty()
+    }
+
+    private const val MATERIAL_CHANGE_OVERLAP = 0.88
+    private val RESULT_PUNCTUATION = Regex("[.,;:!?()\\[\\]{}]")
+    private const val MIN_MONITOR_INTERVAL_MILLIS = 60L * 60L * 1_000L
+    private const val DEFAULT_MONITOR_INTERVAL_MILLIS = 24L * 60L * 60L * 1_000L
+    private const val MAX_MONITOR_INTERVAL_MILLIS = 30L * 24L * 60L * 60L * 1_000L
+}
 
 object GlobalResearchPlanner {
     fun plan(event: GlobalConversationEvent, understanding: GlobalUnderstanding): GlobalResearchTask? {
@@ -669,6 +811,9 @@ object GlobalResearchPlanner {
             question = event.content.replace(Regex("\\s+"), " ").trim().take(2_000),
             depth = depth,
             preferredSources = sources,
+            monitorIntervalMillis = if (depth == GlobalResearchDepth.CONTINUOUS_MONITOR) {
+                GlobalResearchTaskPolicy.monitorIntervalMillis(0L)
+            } else 0L,
             createdAtMillis = event.timestampMillis,
             updatedAtMillis = event.timestampMillis
         )
@@ -694,7 +839,8 @@ data class GlobalProactiveMessage(
     val urgent: Boolean,
     val status: GlobalProactiveMessageStatus = GlobalProactiveMessageStatus.PENDING,
     val createdAtMillis: Long = System.currentTimeMillis(),
-    val deliveredAtMillis: Long = 0L
+    val deliveredAtMillis: Long = 0L,
+    val deliveredConversationId: String = ""
 )
 
 object GlobalProactiveMessageFactory {

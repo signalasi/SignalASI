@@ -45,13 +45,14 @@ object ChatHistoryStore {
         }
         appendTrace(trace, "created", "agent_runtime")
         val array = root.optJSONArray(contactId) ?: JSONArray()
+        val timestamp = System.currentTimeMillis()
         array.put(JSONObject()
             .put("id", nextId)
             .put("content", cleanContent)
             .put("isMine", true)
             .put("contactId", contactId)
             .put("isSystem", false)
-            .put("timestamp", System.currentTimeMillis())
+            .put("timestamp", timestamp)
             .put("deliveryStatus", deliveryStatus)
             .put("deliveryTrace", trace))
         root.put(contactId, trim(array))
@@ -59,6 +60,20 @@ object ChatHistoryStore {
             .putString(HISTORY_KEY, root.toString())
             .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis())
             .apply()
+        val contactName = AppStore.contactById(appContext, contactId)
+            ?.optString("name")
+            .orEmpty()
+            .ifBlank { contactId }
+        GlobalConversationEventBus.publishChatMessage(
+            appContext,
+            contactId,
+            contactName,
+            nextId,
+            cleanContent,
+            GlobalConversationActor.USER,
+            timestamp,
+            mapOf("direction" to "outgoing")
+        )
         return nextId
     }
 
@@ -84,13 +99,14 @@ object ChatHistoryStore {
         val nextId = maxMessageId(root) + 1L
         val array = root.optJSONArray(parsed.contactId) ?: JSONArray()
         if (hasIncomingDuplicate(array, parsed)) return null
+        val timestamp = System.currentTimeMillis()
         array.put(JSONObject()
             .put("id", nextId)
             .put("content", parsed.content)
             .put("isMine", false)
             .put("contactId", parsed.contactId)
             .put("isSystem", false)
-            .put("timestamp", System.currentTimeMillis())
+            .put("timestamp", timestamp)
             .put("deliveryStatus", "")
             .put("taskId", parsed.taskId)
             .put("remoteMessageId", parsed.remoteMessageId)
@@ -100,6 +116,22 @@ object ChatHistoryStore {
             .putString(HISTORY_KEY, root.toString())
             .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis())
             .apply()
+        if (parsed.contactId != CONTACT_SYSTEM) {
+            GlobalConversationEventBus.publishChatMessage(
+                appContext,
+                parsed.contactId,
+                parsed.contactName,
+                nextId,
+                parsed.content,
+                GlobalConversationActor.ASSISTANT,
+                timestamp,
+                mapOf(
+                    "direction" to "incoming",
+                    "task_id" to parsed.taskId,
+                    "remote_message_id" to parsed.remoteMessageId
+                )
+            )
+        }
         return parsed.copy(messageId = nextId)
     }
 
@@ -150,6 +182,15 @@ object ChatHistoryStore {
             appendTrace(trace, "agent_$status", payload.optString("agent_id"))
         }
         mergeMessageTaskState(context, contactId, messageId, payload.optString("task_id"), status, statusSeq, label, trace)
+        GlobalConversationEventBus.publishTaskStatus(
+            context,
+            contactId,
+            payload.optString("task_id"),
+            messageId,
+            status,
+            statusSeq,
+            label
+        )
         return true
     }
 

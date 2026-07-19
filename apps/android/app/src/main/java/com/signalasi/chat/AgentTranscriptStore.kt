@@ -284,6 +284,23 @@ class AgentTranscriptStore(context: Context) {
         updateConversation(conversationId) { it.copy(privateMode = enabled) }
 
     @Synchronized
+    fun setTrackingPaused(conversationId: String, paused: Boolean): Boolean =
+        updateConversation(conversationId) { it.copy(trackingPaused = paused) }
+
+    @Synchronized
+    fun agentConversationForTopic(title: String, parentConversationId: String = ""): AgentConversation? {
+        val normalizedTitle = GlobalAgentText.normalize(title)
+        val normalizedParent = parentConversationId.trim()
+        return conversations(includeArchived = true).firstOrNull { conversation ->
+            conversation.createdByAgent &&
+                conversation.status == AgentConversationStatus.ACTIVE &&
+                !conversation.trackingPaused &&
+                GlobalAgentText.normalize(conversation.title) == normalizedTitle &&
+                (normalizedParent.isBlank() || conversation.parentConversationId == normalizedParent)
+        }
+    }
+
+    @Synchronized
     fun setSelectedModelOrAgent(conversationId: String, value: String): Boolean =
         updateConversation(conversationId) {
             it.copy(selectedModelOrAgent = value.trim().take(80).ifBlank { it.selectedModelOrAgent })
