@@ -7,6 +7,7 @@ target="aarch64-unknown-linux-gnu"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_dir/../.." && pwd)"
+source "$script_dir/runtime-download.sh"
 work_root="${SIGNALASI_RUNTIME_BUILD_DIR:-$repository_root/build/runtime/rust}"
 download_dir="${SIGNALASI_RUNTIME_DOWNLOAD_DIR:-$repository_root/build/runtime/downloads}"
 output="${1:-$repository_root/build/runtime/release/rust-$rust_version-arm64-v8a.img}"
@@ -33,18 +34,11 @@ if [[ -z "$work_root" || "$work_root" == "/" || "$work_root" == "$repository_roo
 fi
 
 mkdir -p "$download_dir" "$work_root" "$(dirname "$output")"
-if [[ ! -f "$archive" ]]; then
-  temporary="$archive.partial"
-  rm -f "$temporary"
-  curl --fail --location --retry 3 \
-    "https://static.rust-lang.org/dist/rust-$rust_version-$target.tar.xz" \
-    --output "$temporary"
-  mv "$temporary" "$archive"
-fi
-printf '%s  %s\n' "$rust_archive_sha256" "$archive" | sha256sum --check --status || {
-  echo "Rust archive integrity check failed." >&2
-  exit 3
-}
+download_verified_runtime_input \
+  "https://static.rust-lang.org/dist/rust-$rust_version-$target.tar.xz" \
+  "$archive" \
+  "$rust_archive_sha256" \
+  "Rust $rust_version"
 
 source_root="$work_root/source-root"
 extracted="$work_root/extracted"

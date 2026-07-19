@@ -8,6 +8,7 @@ mit_license_sha256="860e3d7a86b84e6a7012c7a635fc64df475cebc6cce34dfeb73a5982ec58
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_dir/../.." && pwd)"
+source "$script_dir/runtime-download.sh"
 work_root="${SIGNALASI_RUNTIME_BUILD_DIR:-$repository_root/build/runtime/python-uv}"
 download_dir="${SIGNALASI_RUNTIME_DOWNLOAD_DIR:-$repository_root/build/runtime/downloads}"
 output="${1:-$repository_root/build/runtime/release/python-uv-$uv_version-arm64-v8a.img}"
@@ -39,33 +40,21 @@ if [[ -z "$work_root" || "$work_root" == "/" || "$work_root" == "$repository_roo
 fi
 
 mkdir -p "$download_dir" "$work_root" "$(dirname "$output")"
-download() {
-  local url="$1"
-  local destination="$2"
-  if [[ ! -f "$destination" ]]; then
-    local temporary="$destination.partial"
-    rm -f "$temporary"
-    curl --fail --location --retry 3 "$url" --output "$temporary"
-    mv "$temporary" "$destination"
-  fi
-}
-verify() {
-  local expected="$1"
-  local path="$2"
-  printf '%s  %s\n' "$expected" "$path" | sha256sum --check --status || {
-    echo "Downloaded runtime input failed integrity verification: $path" >&2
-    exit 3
-  }
-}
-
-download \
+download_verified_runtime_input \
   "https://releases.astral.sh/github/uv/releases/download/$uv_version/uv-aarch64-unknown-linux-musl.tar.gz" \
-  "$archive"
-download "https://raw.githubusercontent.com/astral-sh/uv/$uv_version/LICENSE-APACHE" "$apache_license"
-download "https://raw.githubusercontent.com/astral-sh/uv/$uv_version/LICENSE-MIT" "$mit_license"
-verify "$uv_archive_sha256" "$archive"
-verify "$apache_license_sha256" "$apache_license"
-verify "$mit_license_sha256" "$mit_license"
+  "$archive" \
+  "$uv_archive_sha256" \
+  "uv $uv_version"
+download_verified_runtime_input \
+  "https://raw.githubusercontent.com/astral-sh/uv/$uv_version/LICENSE-APACHE" \
+  "$apache_license" \
+  "$apache_license_sha256" \
+  "uv Apache license"
+download_verified_runtime_input \
+  "https://raw.githubusercontent.com/astral-sh/uv/$uv_version/LICENSE-MIT" \
+  "$mit_license" \
+  "$mit_license_sha256" \
+  "uv MIT license"
 
 source_root="$work_root/source-root"
 extracted="$work_root/extracted"

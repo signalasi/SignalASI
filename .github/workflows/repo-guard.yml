@@ -25,6 +25,7 @@ jobs:
           bash -n tools/runtime/build-python-uv-image.sh
           bash -n tools/runtime/build-node-js-image.sh
           bash -n tools/runtime/build-go-image.sh
+          bash -n tools/runtime/runtime-download.sh
           bash -n tools/runtime/build-rust-image.sh
           bash -n tools/runtime/build-cpp-image.sh
           bash -n tools/runtime/build-java-image.sh

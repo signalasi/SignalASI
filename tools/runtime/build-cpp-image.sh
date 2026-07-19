@@ -6,6 +6,7 @@ zig_archive_sha256="ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e153
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_dir/../.." && pwd)"
+source "$script_dir/runtime-download.sh"
 work_root="${SIGNALASI_RUNTIME_BUILD_DIR:-$repository_root/build/runtime/cpp}"
 download_dir="${SIGNALASI_RUNTIME_DOWNLOAD_DIR:-$repository_root/build/runtime/downloads}"
 output="${1:-$repository_root/build/runtime/release/cpp-zig-$zig_version-arm64-v8a.img}"
@@ -32,18 +33,11 @@ if [[ -z "$work_root" || "$work_root" == "/" || "$work_root" == "$repository_roo
 fi
 
 mkdir -p "$download_dir" "$work_root" "$(dirname "$output")"
-if [[ ! -f "$archive" ]]; then
-  temporary="$archive.partial"
-  rm -f "$temporary"
-  curl --fail --location --retry 3 \
-    "https://ziglang.org/download/$zig_version/zig-aarch64-linux-$zig_version.tar.xz" \
-    --output "$temporary"
-  mv "$temporary" "$archive"
-fi
-printf '%s  %s\n' "$zig_archive_sha256" "$archive" | sha256sum --check --status || {
-  echo "Zig archive integrity check failed." >&2
-  exit 3
-}
+download_verified_runtime_input \
+  "https://ziglang.org/download/$zig_version/zig-aarch64-linux-$zig_version.tar.xz" \
+  "$archive" \
+  "$zig_archive_sha256" \
+  "Zig $zig_version"
 
 source_root="$work_root/source-root"
 rm -rf "$source_root"

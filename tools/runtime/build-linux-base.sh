@@ -7,6 +7,7 @@ source_date_epoch="${SOURCE_DATE_EPOCH:-1781395200}"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_dir/../.." && pwd)"
+source "$script_dir/runtime-download.sh"
 external_tree="$repository_root/apps/android/runtime/buildroot-external"
 work_root="${SIGNALASI_RUNTIME_BUILD_DIR:-$repository_root/build/runtime/linux-base}"
 download_dir="${SIGNALASI_RUNTIME_DOWNLOAD_DIR:-$repository_root/build/runtime/downloads}"
@@ -20,7 +21,7 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   exit 2
 fi
 
-for command in curl sha256sum tar make install realpath; do
+for command in curl sha256sum tar make install realpath mv; do
   command -v "$command" >/dev/null || {
     echo "Missing build dependency: $command" >&2
     exit 2
@@ -44,15 +45,11 @@ if [[ "$source_dir" != "$work_root/source" || "$output_dir" != "$work_root/outpu
 fi
 
 mkdir -p "$download_dir" "$work_root" "$(dirname "$image_output")"
-if [[ ! -f "$archive" ]]; then
-  curl --fail --location --retry 3 \
-    "https://buildroot.org/downloads/buildroot-$buildroot_version.tar.xz" \
-    --output "$archive"
-fi
-printf '%s  %s\n' "$buildroot_sha256" "$archive" | sha256sum --check --status || {
-  echo "Buildroot archive integrity check failed." >&2
-  exit 3
-}
+download_verified_runtime_input \
+  "https://buildroot.org/downloads/buildroot-$buildroot_version.tar.xz" \
+  "$archive" \
+  "$buildroot_sha256" \
+  "Buildroot $buildroot_version"
 
 rm -rf "$source_dir" "$output_dir"
 mkdir -p "$source_dir" "$output_dir"

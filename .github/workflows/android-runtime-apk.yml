@@ -84,6 +84,104 @@ jobs:
           node tools/runtime/print-runtime-trust-anchor.mjs \
             --certificate build/runtime/signing/runtime-cert.pem
 
+      - name: Restore optional runtime download cache
+        uses: actions/cache@v4
+        with:
+          path: build/runtime/downloads
+          key: android-runtime-inputs-v2-${{ runner.os }}-${{ hashFiles('tools/runtime/build-*-image.sh', 'tools/runtime/runtime-download.sh') }}
+          restore-keys: |
+            android-runtime-inputs-v2-${{ runner.os }}-
+            android-runtime-inputs-v1-${{ runner.os }}-
+
+      - name: Restore optional software image cache
+        id: optional-images-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build/runtime/release/node-js-*.img
+            build/runtime/release/node-js-*.img.config.json
+            build/runtime/release/go-*.img
+            build/runtime/release/go-*.img.config.json
+            build/runtime/release/cpp-zig-*.img
+            build/runtime/release/cpp-zig-*.img.config.json
+            build/runtime/release/rust-*.img
+            build/runtime/release/rust-*.img.config.json
+            build/runtime/release/java-*.img
+            build/runtime/release/java-*.img.config.json
+            build/runtime/release/ffmpeg-*.img
+            build/runtime/release/ffmpeg-*.img.config.json
+          key: android-runtime-software-images-v1-${{ runner.os }}-${{ hashFiles('tools/runtime/build-node-js-image.sh', 'tools/runtime/build-go-image.sh', 'tools/runtime/build-cpp-image.sh', 'tools/runtime/build-rust-image.sh', 'tools/runtime/build-java-image.sh', 'tools/runtime/build-ffmpeg-image.sh', 'tools/runtime/runtime-download.sh', 'tools/runtime/runtime-image.mjs', 'tools/runtime/build-runtime-image.mjs') }}
+
+      - name: Inspect restored optional software images
+        id: optional-images-state
+        run: |
+          required=(
+            build/runtime/release/node-js-24.18.0-arm64-v8a.img
+            build/runtime/release/node-js-24.18.0-arm64-v8a.img.config.json
+            build/runtime/release/go-1.26.5-arm64-v8a.img
+            build/runtime/release/go-1.26.5-arm64-v8a.img.config.json
+            build/runtime/release/cpp-zig-0.16.0-arm64-v8a.img
+            build/runtime/release/cpp-zig-0.16.0-arm64-v8a.img.config.json
+            build/runtime/release/rust-1.97.1-arm64-v8a.img
+            build/runtime/release/rust-1.97.1-arm64-v8a.img.config.json
+            build/runtime/release/java-25.0.3_9-arm64-v8a.img
+            build/runtime/release/java-25.0.3_9-arm64-v8a.img.config.json
+            build/runtime/release/ffmpeg-8.1.2-arm64-v8a.img
+            build/runtime/release/ffmpeg-8.1.2-arm64-v8a.img.config.json
+          )
+          ready=true
+          for path in "${required[@]}"; do
+            [[ -s "$path" ]] || ready=false
+          done
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+
+      - name: Build optional software images
+        if: steps.optional-images-state.outputs.ready != 'true'
+        run: |
+          run_pack() {
+            local label="$1"
+            shift
+            local log_file
+            log_file="$(mktemp)"
+            set +e
+            "$@" 2>&1 | tee "$log_file"
+            local status="${PIPESTATUS[0]}"
+            set -e
+            if [[ "$status" -ne 0 ]]; then
+              local summary
+              summary="$(tail -n 12 "$log_file" | tr '\r\n' '  ' | sed 's/%/%25/g')"
+              echo "::error title=$label runtime build failed::$summary"
+              rm -f "$log_file"
+              return "$status"
+            fi
+            rm -f "$log_file"
+          }
+          run_pack "Node.js" npm run runtime:build-node-js
+          run_pack "Go" npm run runtime:build-go
+          run_pack "C and C++" npm run runtime:build-cpp
+          run_pack "Rust" npm run runtime:build-rust
+          run_pack "Java" npm run runtime:build-java
+          run_pack "FFmpeg" npm run runtime:build-ffmpeg
+
+      - name: Save optional software image cache
+        if: steps.optional-images-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build/runtime/release/node-js-*.img
+            build/runtime/release/node-js-*.img.config.json
+            build/runtime/release/go-*.img
+            build/runtime/release/go-*.img.config.json
+            build/runtime/release/cpp-zig-*.img
+            build/runtime/release/cpp-zig-*.img.config.json
+            build/runtime/release/rust-*.img
+            build/runtime/release/rust-*.img.config.json
+            build/runtime/release/java-*.img
+            build/runtime/release/java-*.img.config.json
+            build/runtime/release/ffmpeg-*.img
+            build/runtime/release/ffmpeg-*.img.config.json
+          key: ${{ steps.optional-images-cache.outputs.cache-primary-key }}
+
       - name: Restore Android QEMU engine cache
         id: qemu-cache
         uses: actions/cache@v4
@@ -133,7 +231,31 @@ jobs:
             build/runtime/android-jni-libs
             build/runtime/android-assets/runtime/qemu
 
+      - name: Restore default runtime image cache
+        id: default-images-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build/runtime/release/linux-base-1.0.0-arm64-v8a.img
+            build/runtime/release/linux-base-1.0.0-arm64-v8a.img.config.json
+            build/runtime/release/python-uv-0.11.29-arm64-v8a.img
+            build/runtime/release/python-uv-0.11.29-arm64-v8a.img.config.json
+          key: android-default-runtime-images-v1-${{ runner.os }}-${{ hashFiles('tools/runtime/build-linux-base.sh', 'tools/runtime/build-python-uv-image.sh', 'tools/runtime/runtime-download.sh', 'tools/runtime/runtime-image.mjs', 'tools/runtime/build-runtime-image.mjs', 'apps/android/runtime/buildroot-external/**') }}
+
+      - name: Inspect restored default runtime images
+        id: default-images-state
+        run: |
+          if [[ -s build/runtime/release/linux-base-1.0.0-arm64-v8a.img && \
+                -s build/runtime/release/linux-base-1.0.0-arm64-v8a.img.config.json && \
+                -s build/runtime/release/python-uv-0.11.29-arm64-v8a.img && \
+                -s build/runtime/release/python-uv-0.11.29-arm64-v8a.img.config.json ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build default Linux and Python images
+        if: steps.default-images-state.outputs.ready != 'true'
         run: |
           mkdir -p build/runtime/release
           npm run runtime:build-linux-base -- "$PWD/build/runtime/release/linux-base-1.0.0-arm64-v8a.img"
@@ -158,22 +280,16 @@ jobs:
           }, null, 2)}\n`);
           NODE
 
-      - name: Restore optional runtime download cache
-        uses: actions/cache@v4
+      - name: Save default runtime image cache
+        if: steps.default-images-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
         with:
-          path: build/runtime/downloads
-          key: android-runtime-inputs-v1-${{ runner.os }}-${{ hashFiles('tools/runtime/build-*-image.sh') }}
-          restore-keys: |
-            android-runtime-inputs-v1-${{ runner.os }}-
-
-      - name: Build optional software images
-        run: |
-          npm run runtime:build-node-js
-          npm run runtime:build-go
-          npm run runtime:build-cpp
-          npm run runtime:build-rust
-          npm run runtime:build-java
-          npm run runtime:build-ffmpeg
+          path: |
+            build/runtime/release/linux-base-1.0.0-arm64-v8a.img
+            build/runtime/release/linux-base-1.0.0-arm64-v8a.img.config.json
+            build/runtime/release/python-uv-0.11.29-arm64-v8a.img
+            build/runtime/release/python-uv-0.11.29-arm64-v8a.img.config.json
+          key: ${{ steps.default-images-cache.outputs.cache-primary-key }}
 
       - name: Sign all runtime and software packs
         run: |

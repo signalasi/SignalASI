@@ -7,6 +7,7 @@ java_archive_sha256="3e4287cb98870ba824ed698854bdc27cff984254caf66dd12cc291e7bfd
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_dir/../.." && pwd)"
+source "$script_dir/runtime-download.sh"
 work_root="${SIGNALASI_RUNTIME_BUILD_DIR:-$repository_root/build/runtime/java}"
 download_dir="${SIGNALASI_RUNTIME_DOWNLOAD_DIR:-$repository_root/build/runtime/downloads}"
 output="${1:-$repository_root/build/runtime/release/java-$java_archive_version-arm64-v8a.img}"
@@ -34,18 +35,11 @@ if [[ -z "$work_root" || "$work_root" == "/" || "$work_root" == "$repository_roo
 fi
 
 mkdir -p "$download_dir" "$work_root" "$(dirname "$output")"
-if [[ ! -f "$archive" ]]; then
-  temporary="$archive.partial"
-  rm -f "$temporary"
-  curl --fail --location --retry 3 \
-    "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.3%2B9/$archive_name" \
-    --output "$temporary"
-  mv "$temporary" "$archive"
-fi
-printf '%s  %s\n' "$java_archive_sha256" "$archive" | sha256sum --check --status || {
-  echo "Temurin archive integrity check failed." >&2
-  exit 3
-}
+download_verified_runtime_input \
+  "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.3%2B9/$archive_name" \
+  "$archive" \
+  "$java_archive_sha256" \
+  "Temurin $java_version"
 
 source_root="$work_root/source-root"
 rm -rf "$source_root"

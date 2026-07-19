@@ -8,6 +8,7 @@ zig_archive_sha256="70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_dir/../.." && pwd)"
+source "$script_dir/runtime-download.sh"
 work_root="${SIGNALASI_RUNTIME_BUILD_DIR:-$repository_root/build/runtime/ffmpeg}"
 download_dir="${SIGNALASI_RUNTIME_DOWNLOAD_DIR:-$repository_root/build/runtime/downloads}"
 output="${1:-$repository_root/build/runtime/release/ffmpeg-$ffmpeg_version-arm64-v8a.img}"
@@ -35,29 +36,16 @@ if [[ -z "$work_root" || "$work_root" == "/" || "$work_root" == "$repository_roo
 fi
 
 mkdir -p "$download_dir" "$work_root" "$(dirname "$output")"
-download() {
-  local url="$1"
-  local destination="$2"
-  if [[ ! -f "$destination" ]]; then
-    local temporary="$destination.partial"
-    rm -f "$temporary"
-    curl --fail --location --retry 3 "$url" --output "$temporary"
-    mv "$temporary" "$destination"
-  fi
-}
-verify() {
-  local expected="$1"
-  local path="$2"
-  printf '%s  %s\n' "$expected" "$path" | sha256sum --check --status || {
-    echo "Downloaded runtime input failed integrity verification: $path" >&2
-    exit 3
-  }
-}
-
-download "https://ffmpeg.org/releases/ffmpeg-$ffmpeg_version.tar.xz" "$ffmpeg_archive"
-download "https://ziglang.org/download/$zig_version/zig-x86_64-linux-$zig_version.tar.xz" "$zig_archive"
-verify "$ffmpeg_archive_sha256" "$ffmpeg_archive"
-verify "$zig_archive_sha256" "$zig_archive"
+download_verified_runtime_input \
+  "https://ffmpeg.org/releases/ffmpeg-$ffmpeg_version.tar.xz" \
+  "$ffmpeg_archive" \
+  "$ffmpeg_archive_sha256" \
+  "FFmpeg $ffmpeg_version"
+download_verified_runtime_input \
+  "https://ziglang.org/download/$zig_version/zig-x86_64-linux-$zig_version.tar.xz" \
+  "$zig_archive" \
+  "$zig_archive_sha256" \
+  "Zig host compiler $zig_version"
 
 source_tree="$work_root/ffmpeg-source"
 zig_root="$work_root/zig-host"

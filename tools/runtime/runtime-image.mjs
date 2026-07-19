@@ -64,10 +64,10 @@ export function validateRuntimeImageSource(
       const metadata = lstatSync(path);
       fileCount += 1;
       if (fileCount > MAX_SOURCE_FILES) throw new Error('runtime image has too many files');
-      if (platform !== 'win32' && (metadata.mode & 0o6000) !== 0) {
+      if (!metadata.isSymbolicLink() && platform !== 'win32' && (metadata.mode & 0o6000) !== 0) {
         throw new Error('setuid and setgid files are forbidden');
       }
-      if (platform !== 'win32' && (metadata.mode & 0o002) !== 0) {
+      if (!metadata.isSymbolicLink() && platform !== 'win32' && (metadata.mode & 0o002) !== 0) {
         throw new Error('world-writable runtime files are forbidden');
       }
       if (metadata.isSymbolicLink()) {
