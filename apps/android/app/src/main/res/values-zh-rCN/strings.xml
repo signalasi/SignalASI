@@ -1112,6 +1112,10 @@
     <string name="cloud_tool_running">正在调用 %1$s · %2$s</string>
     <string name="cloud_tool_completed">%1$s 已完成 · %2$s</string>
     <string name="agent_trace_plan_updated">已更新执行计划</string>
+    <string name="agent_trace_reasoning_summary">已分析请求 · %1$s</string>
+    <string name="agent_trace_tool_started">正在运行 %1$s</string>
+    <string name="agent_trace_tool_completed">%1$s 已完成 · %2$s</string>
+    <string name="agent_trace_tool_failed">%1$s 需要修正 · %2$s</string>
     <string name="agent_trace_tool_result_ready">工具结果已准备</string>
     <string name="agent_trace_recovery_started">正在恢复中断的步骤</string>
     <string name="agent_trace_recovery_completed">恢复成功</string>

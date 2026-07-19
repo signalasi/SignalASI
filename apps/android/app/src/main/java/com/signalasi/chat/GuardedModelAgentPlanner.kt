@@ -21,7 +21,7 @@ class GuardedModelAgentPlanner(
         if (fallbackPlan.plannerProfile.startsWith("specialized-adapter:")) return fallbackPlan
         if (fallbackPlan.actions.any(AgentAction::isPhoneDevelopmentRuntimeHandoff)) {
             return fallbackPlan.copy(
-                plannerProfile = "phone-development-manifest-v1",
+                plannerProfile = PHONE_DEVELOPMENT_PLANNER_PROFILE,
                 routeRationale = "A reasoning resource authors code while the phone Linux runtime owns file creation, execution, verification, and artifacts."
             )
         }

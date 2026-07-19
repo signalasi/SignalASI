@@ -6920,7 +6920,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             AgentAuditEvent.PLAN_REPLANNED,
             AgentAuditEvent.PLAN_REPLAN_LIMIT_REACHED,
             AgentAuditEvent.PLAN_EDITED,
-            AgentAuditEvent.PLAN_EDIT_REJECTED -> R.string.cc_audit_planning
+            AgentAuditEvent.PLAN_EDIT_REJECTED,
+            AgentAuditEvent.REASONING_SUMMARY -> R.string.cc_audit_planning
+            AgentAuditEvent.TOOL_STARTED,
+            AgentAuditEvent.TOOL_COMPLETED,
             AgentAuditEvent.TOOL_OUTPUT_HANDOFF,
             AgentAuditEvent.TOOL_GRAPH_BLOCKED,
             AgentAuditEvent.AUTONOMY_GUARD_BLOCKED,
@@ -7815,6 +7818,22 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .ifBlank { getString(R.string.agent_output_on_device) }
         val phoneNativePlan = state.plan?.actions?.any { it.kind == AgentActionKind.CALL_NATIVE_TOOL } == true
         return when (entry.event) {
+            AgentAuditEvent.REASONING_SUMMARY -> auditDetailValue(entry.detail, "summary")
+                .ifBlank { getString(R.string.agent_trace_reasoning_summary, route) }
+            AgentAuditEvent.TOOL_STARTED -> getString(
+                R.string.agent_trace_tool_started,
+                auditDetailValue(entry.detail, "target").ifBlank { route }
+            )
+            AgentAuditEvent.TOOL_COMPLETED -> {
+                val target = auditDetailValue(entry.detail, "target").ifBlank { route }
+                val duration = auditDetailValue(entry.detail, "duration_ms").toLongOrNull() ?: 0L
+                val succeeded = auditDetailValue(entry.detail, "success") == "true"
+                getString(
+                    if (succeeded) R.string.agent_trace_tool_completed else R.string.agent_trace_tool_failed,
+                    target,
+                    agentTraceDuration(duration)
+                )
+            }
             AgentAuditEvent.PLAN_REPLANNED,
             AgentAuditEvent.PLAN_EDITED -> getString(R.string.agent_trace_plan_updated)
             AgentAuditEvent.TOOL_OUTPUT_HANDOFF -> getString(R.string.agent_trace_tool_result_ready)
@@ -7842,6 +7861,19 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             AgentAuditEvent.TASK_INTERRUPTED -> getString(R.string.agent_trace_task_interrupted)
             else -> null
         }
+    }
+
+    private fun auditDetailValue(detail: String, key: String): String = detail
+        .split(';')
+        .asSequence()
+        .map(String::trim)
+        .firstOrNull { it.startsWith("$key=") }
+        ?.substringAfter('=')
+        .orEmpty()
+
+    private fun agentTraceDuration(durationMillis: Long): String = when {
+        durationMillis < 1_000L -> "${durationMillis.coerceAtLeast(0L)} ms"
+        else -> String.format(Locale.US, "%.1f s", durationMillis / 1_000.0)
     }
 
     private fun renderAgentToolbox(state: AgentUiState) {

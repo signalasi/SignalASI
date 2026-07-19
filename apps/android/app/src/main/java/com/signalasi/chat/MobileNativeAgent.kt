@@ -1293,6 +1293,10 @@ class MobileNativeAgent(
             AgentAuditEvent.INVOCATION_AUDIT,
             "planner=${draftPlan.plannerProfile}; actions=${draftPlan.actions.size}; valid=${draftPlan.validation.valid}"
         )
+        recordAudit(
+            AgentAuditEvent.REASONING_SUMMARY,
+            "route=${draftPlan.selectedAgentOrModel.take(160)}; actions=${draftPlan.actions.size}; profile=${draftPlan.plannerProfile.take(120)}"
+        )
         phase = when {
             safetyReview.blocked -> AgentPhase.BLOCKED
             safetyReview.requiresConfirmation -> AgentPhase.WAITING_CONFIRMATION
@@ -1453,7 +1457,16 @@ class MobileNativeAgent(
                 "action=${hardenedAction.id}; sources=${hardenedAction.outputSourceIds().size}; target=${hardenedAction.target}"
             )
         }
+        val toolStartedAt = System.currentTimeMillis()
+        recordAudit(
+            AgentAuditEvent.TOOL_STARTED,
+            "action=${hardenedAction.id}; kind=${hardenedAction.kind}; target=${hardenedAction.target.take(160)}"
+        )
         lastActionResult = executeAction(executionAction, currentScreen, userConfirmed)
+        recordAudit(
+            AgentAuditEvent.TOOL_COMPLETED,
+            "action=${hardenedAction.id}; success=${lastActionResult?.success == true}; duration_ms=${System.currentTimeMillis() - toolStartedAt}; target=${hardenedAction.target.take(160)}"
+        )
         phase = AgentPhase.VERIFYING
         val observation = captureVerificationScreen(
             action = hardenedAction,
@@ -1480,6 +1493,8 @@ class MobileNativeAgent(
         val specializedContinuation = updatedPlan?.plannerProfile?.startsWith("specialized-adapter:") == true &&
             hardenedAction.requiresSpecializedContinuation()
         val replanReason = when {
+            lastActionResult?.success != true && hardenedAction.isPhoneDevelopmentRuntimeHandoff() ->
+                PHONE_DEVELOPMENT_REPLAN_REASON
             lastActionResult?.success != true -> "action_failed:${hardenedAction.kind.name}"
             specializedContinuation -> "specialized_step_completed:${hardenedAction.id}"
             hasPendingBeforeReplan && hardenedAction.kind.mayChangeScreen() && !preservesToolGraph ->
@@ -1570,7 +1585,26 @@ class MobileNativeAgent(
             metadata = completedMetadata
         )
         val responseStatus = if (success) AgentActionStatus.COMPLETED else AgentActionStatus.FAILED
-        val responsePlan = plan.markAction(actionId, responseStatus, completedResult)
+        var responsePlan = plan.markAction(actionId, responseStatus, completedResult)
+        val completedAction = plan.actions.firstOrNull { it.id == actionId }
+        if (success && completedAction?.parameters?.get("connector_task_mode") == PHONE_DEVELOPMENT_CONNECTOR_MODE) {
+            AgentPhoneDevelopmentManifestCodec.parse(response).getOrNull()?.decisionSummary
+                ?.takeIf(String::isNotBlank)
+                ?.let { summary ->
+                    recordAudit(
+                        AgentAuditEvent.REASONING_SUMMARY,
+                        "summary=${summary.replace(';', ',').take(600)}"
+                    )
+                }
+            val installedPackIds = AgentOnDeviceRuntimeManager(appContext).packStatuses()
+                .filter { it.state == AgentRuntimePackState.READY }
+                .mapTo(linkedSetOf(), AgentRuntimePackStatus::id)
+            responsePlan = responsePlan.withPhoneDevelopmentPackInstalls(
+                authorActionId = actionId,
+                sourceResult = response,
+                installedPackIds = installedPackIds
+            )
+        }
         currentPlan = responsePlan
         lastActionResult = completedResult
         val hasPendingActions = responsePlan.actions.any {
@@ -2194,8 +2228,15 @@ class MobileNativeAgent(
     ): AgentPlan? {
         val settings = AgentModelPlannerSettingsStore(appContext).load()
         val specializedAdapter = plan.plannerProfile.startsWith("specialized-adapter:")
-        if (!specializedAdapter && (!settings.enabled || (!settings.dynamicReplanning && !force))) return null
-        val maxReplans = if (specializedAdapter) MAX_SPECIALIZED_ADAPTER_REPLANS else settings.maxReplans
+        val phoneDevelopmentRepair = plan.plannerProfile == PHONE_DEVELOPMENT_PLANNER_PROFILE &&
+            reason == PHONE_DEVELOPMENT_REPLAN_REASON
+        if (!specializedAdapter && !phoneDevelopmentRepair &&
+            (!settings.enabled || (!settings.dynamicReplanning && !force))) return null
+        val maxReplans = when {
+            phoneDevelopmentRepair -> MAX_PHONE_DEVELOPMENT_REPAIRS
+            specializedAdapter -> MAX_SPECIALIZED_ADAPTER_REPLANS
+            else -> settings.maxReplans
+        }
         if (plan.replanCount >= maxReplans) {
             recordAudit(
                 AgentAuditEvent.PLAN_REPLAN_LIMIT_REACHED,
@@ -2227,7 +2268,8 @@ class MobileNativeAgent(
             )
         )
         if (!proposal.plannerProfile.startsWith("guarded-model:") &&
-            !proposal.plannerProfile.startsWith("specialized-adapter:")) return null
+            !proposal.plannerProfile.startsWith("specialized-adapter:") &&
+            proposal.plannerProfile != PHONE_DEVELOPMENT_PLANNER_PROFILE) return null
         val revision = plan.revision + 1
         val actionIdMap = proposal.actions.mapIndexed { index, action ->
             action.id to "r$revision-${index + 1}-${action.id}"
@@ -5426,6 +5468,7 @@ class MobileNativeAgent(
         private const val MAX_NATIVE_TOOL_EVIDENCE_CHARACTERS = 128 * 1_024
         private const val MAX_TASK_RESULT_CHARACTERS = 4_000
         private const val MAX_SPECIALIZED_ADAPTER_REPLANS = 8
+        private const val MAX_PHONE_DEVELOPMENT_REPAIRS = 2
         private val ACTIVE_EXECUTION_PHASES = setOf(
             AgentPhase.PLANNING,
             AgentPhase.WAITING_CONFIRMATION,
@@ -5620,6 +5663,15 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                     else -> 3
                 }
             } ?: return null
+        val authoringPrompt = if (request.replanReason == PHONE_DEVELOPMENT_REPLAN_REASON) {
+            AgentPhoneDevelopmentPolicy.repairPrompt(
+                goal = request.goal,
+                history = request.executionHistory,
+                runtimeSummary = request.runtimeContext.compactSummary()
+            ) ?: AgentPhoneDevelopmentPolicy.planningPrompt(request.goal)
+        } else {
+            AgentPhoneDevelopmentPolicy.planningPrompt(request.goal)
+        }
         val manifestAction = connectorAction(
             request = request,
             connectorId = plannerTarget.id,
@@ -5629,7 +5681,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             risk = AgentRisk.LOW,
             parameters = mapOf(
                 "connector_id" to plannerTarget.id,
-                "prompt" to AgentPhoneDevelopmentPolicy.planningPrompt(request.goal),
+                "prompt" to authoringPrompt,
                 "connector_task_mode" to PHONE_DEVELOPMENT_CONNECTOR_MODE
             )
         )
@@ -10542,6 +10594,9 @@ enum class AgentAuditEvent {
     PLAN_REPLAN_LIMIT_REACHED,
     PLAN_EDITED,
     PLAN_EDIT_REJECTED,
+    REASONING_SUMMARY,
+    TOOL_STARTED,
+    TOOL_COMPLETED,
     TOOL_OUTPUT_HANDOFF,
     TOOL_GRAPH_BLOCKED,
     AUTONOMY_GUARD_BLOCKED,

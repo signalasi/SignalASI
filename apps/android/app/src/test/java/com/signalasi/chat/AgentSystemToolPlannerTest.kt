@@ -81,6 +81,103 @@ class AgentSystemToolPlannerTest {
     }
 
     @Test
+    fun returnsFailedPhoneVerificationToTheAuthoringModel() {
+        val manifestAction = AgentAction(
+            id = "author",
+            kind = AgentActionKind.CALL_CONNECTOR,
+            target = "Codex",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.COMPLETED,
+            description = "Prepare code",
+            result = """{"schema":"signalasi.phone-development-manifest.v2","language":"python","entry_file":"main.py","files":[{"path":"main.py","content":"if True:\\nprint('broken')"}],"artifact_paths":[]}"""
+        )
+        val failedExecution = AgentAction(
+            id = "execute",
+            kind = AgentActionKind.CALL_NATIVE_TOOL,
+            target = "Phone Linux",
+            risk = AgentRisk.MEDIUM,
+            status = AgentActionStatus.FAILED,
+            description = "Run and verify",
+            parameters = mapOf(
+                "tool_id" to AgentOnDeviceRuntimeTools.EXECUTE,
+                "use_outputs_from" to manifestAction.id,
+                PHONE_DEVELOPMENT_MANIFEST_PARAMETER to "true"
+            ),
+            result = "IndentationError: expected an indented block"
+        )
+
+        val prompt = AgentPhoneDevelopmentPolicy.repairPrompt(
+            goal = "Write and verify a Python program",
+            history = listOf(manifestAction, failedExecution),
+            runtimeSummary = "python: ready; browser-automation: not installed"
+        )
+
+        assertNotNull(prompt)
+        assertTrue(prompt.orEmpty().contains("Previous manifest"))
+        assertTrue(prompt.orEmpty().contains("IndentationError"))
+        assertTrue(prompt.orEmpty().contains("browser-automation: not installed"))
+        assertTrue(prompt.orEmpty().contains("complete replacement JSON object"))
+    }
+
+    @Test
+    fun insertsTrustedRuntimePackInstallationBeforePhoneExecution() {
+        val author = AgentAction(
+            id = "author",
+            kind = AgentActionKind.CALL_CONNECTOR,
+            target = "Codex",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.COMPLETED,
+            description = "Prepare code",
+            parameters = mapOf("connector_task_mode" to PHONE_DEVELOPMENT_CONNECTOR_MODE)
+        )
+        val execute = AgentAction(
+            id = "execute",
+            kind = AgentActionKind.CALL_NATIVE_TOOL,
+            target = "Phone Linux",
+            risk = AgentRisk.MEDIUM,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = "Run and verify",
+            parameters = mapOf(
+                "tool_id" to AgentOnDeviceRuntimeTools.EXECUTE,
+                "depends_on" to author.id,
+                "use_outputs_from" to author.id,
+                PHONE_DEVELOPMENT_MANIFEST_PARAMETER to "true"
+            )
+        )
+        val manifest = JSONObject()
+            .put("schema", "signalasi.phone-development-manifest.v2")
+            .put("language", "python")
+            .put("entry_file", "main.py")
+            .put("files", org.json.JSONArray().put(
+                JSONObject().put("path", "main.py").put("content", "print('ready')")
+            ))
+            .put("required_packs", org.json.JSONArray().put("node-js").put("browser-automation"))
+            .put("artifact_paths", org.json.JSONArray())
+            .toString()
+        val plan = AgentPlanFactory.actions(
+            request(
+                "Build a browser script",
+                ScreenContext("com.signalasi.chat", pageTitle = "SignalASI"),
+                emptyList()
+            ),
+            listOf(author, execute)
+        ).markAction(author.id, AgentActionStatus.COMPLETED, AgentActionResult(author.id, true, manifest))
+
+        val expanded = plan.withPhoneDevelopmentPackInstalls(
+            authorActionId = author.id,
+            sourceResult = manifest,
+            installedPackIds = setOf("linux-base", "python-uv", "node-js")
+        )
+
+        assertEquals(3, expanded.actions.size)
+        val install = expanded.actions[1]
+        assertEquals(AgentOnDeviceRuntimeTools.INSTALL_PACK, install.parameters["tool_id"])
+        assertEquals("browser-automation", JSONObject(install.parameters.getValue("input_json")).getString("pack_id"))
+        assertEquals(install.id, expanded.actions.last().parameters["depends_on"])
+        assertEquals(author.id, expanded.actions.last().parameters["use_outputs_from"])
+    }
+
+    @Test
     fun keepsLargeOrExplicitDesktopDevelopmentTasksOnDesktop() {
         assertFalse(AgentPhoneDevelopmentPolicy.shouldUsePhoneRuntime("Build the entire Android repository with Gradle"))
         assertFalse(AgentPhoneDevelopmentPolicy.shouldUsePhoneRuntime("Write a Python program on the desktop"))

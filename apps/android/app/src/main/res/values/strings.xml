@@ -1202,6 +1202,10 @@
     <string name="cloud_tool_running">Running %1$s · %2$s</string>
     <string name="cloud_tool_completed">Completed %1$s · %2$s</string>
     <string name="agent_trace_plan_updated">Updated the plan</string>
+    <string name="agent_trace_reasoning_summary">Analyzed the request · %1$s</string>
+    <string name="agent_trace_tool_started">Running %1$s</string>
+    <string name="agent_trace_tool_completed">%1$s completed · %2$s</string>
+    <string name="agent_trace_tool_failed">%1$s needs revision · %2$s</string>
     <string name="agent_trace_tool_result_ready">Prepared the tool result</string>
     <string name="agent_trace_recovery_started">Recovering from an interrupted step</string>
     <string name="agent_trace_recovery_completed">Recovery succeeded</string>
