@@ -102,6 +102,15 @@ class GlobalCognitionExecutor(context: Context) {
         rawResult: String,
         resourceId: String
     ): GlobalCognitionExecutionResult {
+        if (repository.loadWorld().hasRetractedEvidence(task.sourceEvent.evidenceRoots())) {
+            val invalidated = GlobalAgentEvidenceLifecyclePolicy.invalidateCognitionTasks(
+                listOf(task),
+                task.sourceEvent.evidenceRoots(),
+                System.currentTimeMillis()
+            ).single()
+            deliberationStore.upsertCognitionTask(invalidated)
+            return GlobalCognitionExecutionResult(task.id, invalidated.status, resourceId, invalidated.lastError)
+        }
         val result = GlobalModelUnderstandingParser.parse(rawResult)
             ?: return retryOrFail(task, "The reasoning result was not valid structured cognition data")
         val now = System.currentTimeMillis()
@@ -122,6 +131,7 @@ class GlobalCognitionExecutor(context: Context) {
     }
 
     private fun applyResult(task: GlobalCognitionTask) {
+        if (repository.loadWorld().hasRetractedEvidence(task.sourceEvent.evidenceRoots())) return
         val settings = repository.settings()
         val merged = GlobalCognitionMerger.merge(task, task.result)
         val cognitionEvent = task.sourceEvent.copy(
@@ -137,7 +147,9 @@ class GlobalCognitionExecutor(context: Context) {
                 "model_confidence" to task.result.confidence.toString(),
                 "resource_id" to task.resourceId,
                 "project" to task.result.project
-            )
+            ),
+            causalEventIds = task.sourceEvent.evidenceRoots(),
+            retractedEventIds = emptySet()
         )
         val reduction = GlobalWorldModelReducer.reduce(repository.loadWorld(), cognitionEvent, merged)
         repository.saveWorld(reduction.world)
@@ -202,6 +214,7 @@ class GlobalCognitionExecutor(context: Context) {
         if (insight.isNotBlank() && decision.mode != GlobalInterventionMode.RECORD_ONLY) {
             repository.appendProactiveMessage(GlobalProactiveMessage(
                 sourceEventId = "cognition-insight:${task.id}",
+                causalEventIds = task.sourceEvent.evidenceRoots(),
                 sourceConversationId = task.sourceEvent.conversationId,
                 target = decision.mode.toTarget(),
                 title = if (GlobalAgentText.containsCjk(task.sourceEvent.content)) {
@@ -287,6 +300,7 @@ class GlobalCognitionExecutor(context: Context) {
             } else GlobalResearchDepth.QUICK_FACT
             existing += GlobalResearchTask(
                 sourceEventId = "cognition:${task.id}:research:${GlobalAgentText.stableKey(question)}",
+                causalEventIds = task.sourceEvent.evidenceRoots(),
                 sourceConversationId = task.sourceEvent.conversationId,
                 topic = merged.topic,
                 question = question,
@@ -423,6 +437,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
             GlobalAutonomousActionKind.CREATE_TOPIC -> {
                 repository.appendProactiveMessage(GlobalProactiveMessage(
                     sourceEventId = "autonomous-topic:${run.id}:${action.id}",
+                    causalEventIds = run.causalEventIds.ifEmpty { setOf(run.sourceEventId) },
                     sourceConversationId = run.sourceConversationId,
                     target = GlobalProactiveTarget.NEW_CONVERSATION,
                     title = action.targetTopic.ifBlank { run.topic },
@@ -1024,6 +1039,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
         val now = System.currentTimeMillis()
         val task = GlobalResearchTask(
             sourceEventId = sourceEventId,
+            causalEventIds = run.causalEventIds.ifEmpty { setOf(run.sourceEventId) },
             sourceConversationId = run.sourceConversationId,
             topic = action.targetTopic.ifBlank { run.topic },
             question = action.goal,
@@ -1047,6 +1063,8 @@ class GlobalAutonomousRunExecutor(context: Context) {
     )
 
     private fun publishRunResult(run: GlobalAutonomousRun) {
+        val causalEventIds = run.causalEventIds.ifEmpty { setOf(run.sourceEventId) }
+        if (repository.loadWorld().hasRetractedEvidence(causalEventIds)) return
         val sourceId = "autonomous-result:${run.id}:${run.updatedAtMillis}"
         if (repository.proactiveMessages().any { it.sourceEventId == sourceId }) return
         val completed = run.completedActions().filter {
@@ -1065,6 +1083,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
         }
         repository.appendProactiveMessage(GlobalProactiveMessage(
             sourceEventId = sourceId,
+            causalEventIds = run.causalEventIds.ifEmpty { setOf(run.sourceEventId) },
             sourceConversationId = run.sourceConversationId,
             target = if (run.actions.size >= 3) GlobalProactiveTarget.NEW_CONVERSATION else GlobalProactiveTarget.CURRENT_CONVERSATION,
             title = if (GlobalAgentText.containsCjk(run.goal)) "Signal \u5df2\u51c6\u5907" else "Signal prepared",
@@ -1094,7 +1113,9 @@ class GlobalAutonomousRunExecutor(context: Context) {
                 "supported_action_count" to completed.count {
                     it.verificationStatus == GlobalActionVerificationStatus.SUPPORTED
                 }.toString()
-            )
+            ),
+            causalEventIds = run.causalEventIds.ifEmpty { setOf(run.sourceEventId) }
+                .filter(String::isNotBlank).toSet()
         ))
     }
 

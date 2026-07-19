@@ -1018,7 +1018,8 @@ class GlobalLongHorizonCoordinator(context: Context) {
                 "long_horizon_goal_id" to goal.id,
                 "checkpoint_count" to (goal.checkpointCount + 1).toString(),
                 "origin" to "global_long_horizon_scheduler"
-            )
+            ),
+            causalEventIds = goal.sourceEventIds.filter(String::isNotBlank).toSet()
         )
         val baseline = GlobalUnderstanding(
             eventId = event.id,

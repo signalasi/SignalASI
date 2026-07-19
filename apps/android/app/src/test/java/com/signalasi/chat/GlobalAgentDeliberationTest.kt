@@ -206,6 +206,76 @@ class GlobalAgentDeliberationTest {
     }
 
     @Test
+    fun `retracting source evidence stops every pending derived workflow`() {
+        val source = event("Build a durable runtime")
+        val cognition = GlobalCognitionTask(
+            sourceEvent = source,
+            baselineUnderstanding = understanding(source, complexity = 0.8),
+            status = GlobalCognitionTaskStatus.RUNNING,
+            sourceMessageId = 41L,
+            leaseExpiresAtMillis = 9_000L
+        )
+        val research = GlobalResearchTask(
+            sourceEventId = "research-a",
+            sourceConversationId = source.conversationId,
+            topic = "Runtime",
+            question = "Verify the runtime",
+            depth = GlobalResearchDepth.DEEP_RESEARCH,
+            preferredSources = listOf("official"),
+            causalEventIds = setOf(source.id),
+            status = GlobalResearchTaskStatus.RUNNING,
+            sourceMessageId = 42L,
+            leaseExpiresAtMillis = 9_000L
+        )
+        val run = GlobalAutonomousRun(
+            sourceCognitionTaskId = cognition.id,
+            sourceEventId = source.id,
+            sourceConversationId = source.conversationId,
+            topic = "Runtime",
+            goal = "Prepare the runtime",
+            actions = listOf(GlobalAutonomousAction(
+                kind = GlobalAutonomousActionKind.DRAFT,
+                goal = "Draft the implementation",
+                status = GlobalAutonomousActionStatus.RUNNING,
+                sourceMessageId = 43L,
+                leaseExpiresAtMillis = 9_000L
+            )),
+            causalEventIds = setOf(source.id),
+            status = GlobalAutonomousRunStatus.RUNNING
+        )
+        val proactive = GlobalProactiveMessage(
+            sourceEventId = "insight-a",
+            sourceConversationId = source.conversationId,
+            target = GlobalProactiveTarget.CURRENT_CONVERSATION,
+            title = "Insight",
+            content = "A derived result",
+            topic = "Runtime",
+            urgent = false,
+            causalEventIds = setOf(source.id)
+        )
+
+        val invalidatedCognition = GlobalAgentEvidenceLifecyclePolicy.invalidateCognitionTasks(
+            listOf(cognition), setOf(source.id), 10_000L
+        ).single()
+        val invalidatedResearch = GlobalAgentEvidenceLifecyclePolicy.invalidateResearchTasks(
+            listOf(research), setOf(source.id), 10_000L
+        ).single()
+        val invalidatedRun = GlobalAgentEvidenceLifecyclePolicy.invalidateAutonomousRuns(
+            listOf(run), setOf(source.id), 10_000L
+        ).single()
+        val invalidatedMessage = GlobalAgentEvidenceLifecyclePolicy.invalidateProactiveMessages(
+            listOf(proactive), setOf(source.id)
+        ).single()
+
+        assertEquals(GlobalCognitionTaskStatus.FAILED, invalidatedCognition.status)
+        assertEquals(0L, invalidatedCognition.sourceMessageId)
+        assertEquals(GlobalResearchTaskStatus.FAILED, invalidatedResearch.status)
+        assertEquals(GlobalAutonomousRunStatus.PAUSED, invalidatedRun.status)
+        assertEquals(GlobalAutonomousActionStatus.SKIPPED, invalidatedRun.actions.single().status)
+        assertEquals(GlobalProactiveMessageStatus.DISMISSED, invalidatedMessage.status)
+    }
+
+    @Test
     fun `model cognition enters world model as inferred evidence`() {
         val source = event("Continue the global Agent project")
         val cognitionEvent = source.copy(

@@ -215,7 +215,7 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 6)
+            .put("version", 7)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("world", encodeWorld(loadWorld()))
             .put("topic_project_graph", topicGraphStore.export())
@@ -314,6 +314,8 @@ class GlobalAgentRepository(context: Context) {
         .put("topic_hints", JSONArray(event.topicHints.toList()))
         .put("sensitivity", event.sensitivity.name)
         .put("metadata", JSONObject(event.metadata))
+        .put("causal_event_ids", JSONArray(event.causalEventIds.toList()))
+        .put("retracted_event_ids", JSONArray(event.retractedEventIds.toList()))
 
     private fun decodeEvent(json: JSONObject?): GlobalConversationEvent? {
         if (json == null) return null
@@ -332,7 +334,9 @@ class GlobalAgentRepository(context: Context) {
             conversationTitle = json.optString("conversation_title").take(160),
             topicHints = json.optJSONArray("topic_hints").strings().toSet(),
             sensitivity = enumValue(json.optString("sensitivity"), GlobalConversationSensitivity.PERSONAL),
-            metadata = json.optJSONObject("metadata").stringMap()
+            metadata = json.optJSONObject("metadata").stringMap(),
+            causalEventIds = json.optJSONArray("causal_event_ids").strings().toSet(),
+            retractedEventIds = json.optJSONArray("retracted_event_ids").strings().toSet()
         )
     }
 
@@ -340,6 +344,7 @@ class GlobalAgentRepository(context: Context) {
         .put("items", JSONArray().apply { world.items.forEach { put(encodeWorldItem(it)) } })
         .put("links", JSONArray().apply { world.links.forEach { put(encodeLink(it)) } })
         .put("processed_event_ids", JSONArray(world.processedEventIds))
+        .put("retracted_event_ids", JSONArray(world.retractedEventIds))
         .put("updated_at_millis", world.updatedAtMillis)
 
     private fun decodeWorld(raw: String): PersonalWorldModel = runCatching {
@@ -355,6 +360,7 @@ class GlobalAgentRepository(context: Context) {
                 for (index in 0 until array.length()) decodeLink(array.optJSONObject(index))?.let(::add)
             },
             processedEventIds = root.optJSONArray("processed_event_ids").strings(),
+            retractedEventIds = root.optJSONArray("retracted_event_ids").strings(),
             updatedAtMillis = root.optLong("updated_at_millis")
         )
     }.getOrDefault(PersonalWorldModel())
@@ -370,6 +376,9 @@ class GlobalAgentRepository(context: Context) {
         .put("evidence_count", item.evidenceCount)
         .put("conversation_ids", JSONArray(item.conversationIds.toList()))
         .put("evidence_event_ids", JSONArray(item.evidenceEventIds))
+        .put("evidence_provenance", JSONArray().apply {
+            item.evidenceProvenance.forEach { put(encodeEvidenceRef(it)) }
+        })
         .put("status", item.status.name)
         .put("conflict_group_id", item.conflictGroupId)
         .put("first_seen_at_millis", item.firstSeenAtMillis)
@@ -392,6 +401,7 @@ class GlobalAgentRepository(context: Context) {
             evidenceCount = json.optInt("evidence_count", 1).coerceAtLeast(1),
             conversationIds = json.optJSONArray("conversation_ids").strings().toSet(),
             evidenceEventIds = json.optJSONArray("evidence_event_ids").strings().takeLast(20),
+            evidenceProvenance = decodeEvidenceRefs(json.optJSONArray("evidence_provenance")),
             status = enumValue(json.optString("status"), GlobalWorldItemStatus.ACTIVE),
             conflictGroupId = json.optString("conflict_group_id"),
             firstSeenAtMillis = json.optLong("first_seen_at_millis"),
@@ -407,6 +417,9 @@ class GlobalAgentRepository(context: Context) {
         .put("topic", link.topic)
         .put("strength", link.strength)
         .put("evidence_count", link.evidenceCount)
+        .put("evidence_provenance", JSONArray().apply {
+            link.evidenceProvenance.forEach { put(encodeEvidenceRef(it)) }
+        })
         .put("last_seen_at_millis", link.lastSeenAtMillis)
 
     private fun decodeLink(json: JSONObject?): GlobalConversationLink? {
@@ -421,13 +434,39 @@ class GlobalAgentRepository(context: Context) {
             topic = json.optString("topic"),
             strength = json.optDouble("strength", 0.5).coerceIn(0.0, 1.0),
             evidenceCount = json.optInt("evidence_count", 1).coerceAtLeast(1),
+            evidenceProvenance = decodeEvidenceRefs(json.optJSONArray("evidence_provenance")),
             lastSeenAtMillis = json.optLong("last_seen_at_millis")
         )
+    }
+
+    private fun encodeEvidenceRef(evidence: GlobalEvidenceRef): JSONObject = JSONObject()
+        .put("event_id", evidence.eventId)
+        .put("causal_event_ids", JSONArray(evidence.causalEventIds.toList()))
+        .put("conversation_id", evidence.conversationId)
+        .put("timestamp_millis", evidence.timestampMillis)
+
+    private fun decodeEvidenceRefs(array: JSONArray?): List<GlobalEvidenceRef> {
+        if (array == null) return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val json = array.optJSONObject(index) ?: continue
+                val eventId = json.optString("event_id")
+                if (eventId.isBlank()) continue
+                add(GlobalEvidenceRef(
+                    eventId = eventId,
+                    causalEventIds = json.optJSONArray("causal_event_ids").strings().toSet()
+                        .ifEmpty { setOf(eventId) },
+                    conversationId = json.optString("conversation_id"),
+                    timestampMillis = json.optLong("timestamp_millis")
+                ))
+            }
+        }
     }
 
     private fun encodeResearchTask(task: GlobalResearchTask): JSONObject = JSONObject()
         .put("id", task.id)
         .put("source_event_id", task.sourceEventId)
+        .put("causal_event_ids", JSONArray(task.causalEventIds.toList()))
         .put("source_conversation_id", task.sourceConversationId)
         .put("topic", task.topic)
         .put("question", task.question)
@@ -460,6 +499,8 @@ class GlobalAgentRepository(context: Context) {
         return GlobalResearchTask(
             id = id,
             sourceEventId = sourceEventId,
+            causalEventIds = json.optJSONArray("causal_event_ids").strings().toSet()
+                .ifEmpty { setOf(sourceEventId) },
             sourceConversationId = json.optString("source_conversation_id"),
             topic = json.optString("topic"),
             question = json.optString("question"),
@@ -632,6 +673,7 @@ class GlobalAgentRepository(context: Context) {
     private fun encodeProactiveMessage(message: GlobalProactiveMessage): JSONObject = JSONObject()
         .put("id", message.id)
         .put("source_event_id", message.sourceEventId)
+        .put("causal_event_ids", JSONArray(message.causalEventIds.toList()))
         .put("source_conversation_id", message.sourceConversationId)
         .put("target", message.target.name)
         .put("title", message.title)
@@ -651,6 +693,8 @@ class GlobalAgentRepository(context: Context) {
         return GlobalProactiveMessage(
             id = id,
             sourceEventId = json.optString("source_event_id"),
+            causalEventIds = json.optJSONArray("causal_event_ids").strings().toSet()
+                .ifEmpty { setOf(json.optString("source_event_id")) },
             sourceConversationId = json.optString("source_conversation_id"),
             target = enumValue(json.optString("target"), GlobalProactiveTarget.CURRENT_CONVERSATION),
             title = json.optString("title"),
@@ -803,6 +847,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     private val autonomousRunExecutor by lazy { GlobalAutonomousRunExecutor(appContext) }
     private val deliberationStore by lazy { GlobalAgentDeliberationStore(appContext) }
     private val longHorizonCoordinator by lazy { GlobalLongHorizonCoordinator(appContext) }
+    private val longHorizonStore by lazy { GlobalLongHorizonGoalStore(appContext) }
 
     fun processPending(maxEvents: Int = 100): GlobalAgentProcessingBatch = synchronized(PROCESS_LOCK) {
         val settings = repository.settings()
@@ -823,9 +868,83 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         val newTasks = mutableListOf<GlobalResearchTask>()
         val newCognitionTasks = mutableListOf<GlobalCognitionTask>()
         val newMessages = mutableListOf<GlobalProactiveMessage>()
+        var researchTasksInvalidated = false
+        var cognitionTasksInvalidated = false
+        var proactiveMessagesInvalidated = false
         var changedItems = 0
         events.forEach { event ->
-            if (event.sensitivity == GlobalConversationSensitivity.SESSION_PRIVATE) {
+            val retractedEvidence = event.effectiveRetractions()
+            if (retractedEvidence.isNotEmpty()) {
+                fun <T> replaceIfChanged(target: MutableList<T>, updated: List<T>): Boolean {
+                    if (target == updated) return false
+                    target.clear()
+                    target.addAll(updated)
+                    return true
+                }
+                researchTasksInvalidated = replaceIfChanged(
+                    existingTasks,
+                    GlobalAgentEvidenceLifecyclePolicy.invalidateResearchTasks(
+                        existingTasks,
+                        retractedEvidence,
+                        event.timestampMillis
+                    )
+                ) || researchTasksInvalidated
+                replaceIfChanged(
+                    newTasks,
+                    GlobalAgentEvidenceLifecyclePolicy.invalidateResearchTasks(
+                        newTasks,
+                        retractedEvidence,
+                        event.timestampMillis
+                    )
+                )
+                cognitionTasksInvalidated = replaceIfChanged(
+                    existingCognitionTasks,
+                    GlobalAgentEvidenceLifecyclePolicy.invalidateCognitionTasks(
+                        existingCognitionTasks,
+                        retractedEvidence,
+                        event.timestampMillis
+                    )
+                ) || cognitionTasksInvalidated
+                replaceIfChanged(
+                    newCognitionTasks,
+                    GlobalAgentEvidenceLifecyclePolicy.invalidateCognitionTasks(
+                        newCognitionTasks,
+                        retractedEvidence,
+                        event.timestampMillis
+                    )
+                )
+                proactiveMessagesInvalidated = replaceIfChanged(
+                    existingMessages,
+                    GlobalAgentEvidenceLifecyclePolicy.invalidateProactiveMessages(
+                        existingMessages,
+                        retractedEvidence
+                    )
+                ) || proactiveMessagesInvalidated
+                replaceIfChanged(
+                    newMessages,
+                    GlobalAgentEvidenceLifecyclePolicy.invalidateProactiveMessages(
+                        newMessages,
+                        retractedEvidence
+                    )
+                )
+                val currentRuns = deliberationStore.autonomousRuns()
+                val invalidatedRuns = GlobalAgentEvidenceLifecyclePolicy.invalidateAutonomousRuns(
+                    currentRuns,
+                    retractedEvidence,
+                    event.timestampMillis
+                )
+                if (invalidatedRuns != currentRuns) deliberationStore.saveAutonomousRuns(invalidatedRuns)
+                val currentGoals = longHorizonStore.goals()
+                val invalidatedGoals = GlobalAgentEvidenceLifecyclePolicy.invalidateLongHorizonGoals(
+                    currentGoals,
+                    retractedEvidence,
+                    event.timestampMillis
+                )
+                if (invalidatedGoals != currentGoals) longHorizonStore.save(invalidatedGoals)
+            }
+            val lifecycleRetraction = event.effectiveRetractions().isNotEmpty() ||
+                event.type == GlobalConversationEventType.CONVERSATION_DELETED
+            if (event.sensitivity == GlobalConversationSensitivity.SESSION_PRIVATE && !lifecycleRetraction) {
                 world = world.copy(
                     processedEventIds = (world.processedEventIds + event.id).takeLast(4_000),
                     updatedAtMillis = event.timestampMillis
@@ -905,9 +1024,15 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         }
         repository.saveWorld(world)
         repository.saveTopicGraph(topicGraph)
-        if (newTasks.isNotEmpty()) repository.saveResearchTasks(existingTasks + newTasks)
-        if (newCognitionTasks.isNotEmpty()) deliberationStore.saveCognitionTasks(existingCognitionTasks + newCognitionTasks)
-        if (newMessages.isNotEmpty()) repository.saveProactiveMessages(existingMessages + newMessages)
+        if (researchTasksInvalidated || newTasks.isNotEmpty()) {
+            repository.saveResearchTasks(existingTasks + newTasks)
+        }
+        if (cognitionTasksInvalidated || newCognitionTasks.isNotEmpty()) {
+            deliberationStore.saveCognitionTasks(existingCognitionTasks + newCognitionTasks)
+        }
+        if (proactiveMessagesInvalidated || newMessages.isNotEmpty()) {
+            repository.saveProactiveMessages(existingMessages + newMessages)
+        }
         repository.removeEvents(events.map(GlobalConversationEvent::id).toSet())
         GlobalAgentProcessingBatch(events.size, changedItems, newTasks, newMessages, newCognitionTasks)
     }
@@ -1484,7 +1609,8 @@ object GlobalConversationEventBus {
                 "deleted_event_id" to "chat:$contactId:$messageId",
                 "contact_id" to contactId,
                 "origin" to "contact_chat"
-            )
+            ),
+            retractedEventIds = setOf("chat:$contactId:$messageId")
         )
         val enqueued = repository.enqueue(event)
         if (enqueued) requestProcessing(context)
@@ -1495,7 +1621,8 @@ object GlobalConversationEventBus {
         context: Context,
         conversation: AgentConversation,
         entry: AgentTranscriptEntry,
-        updated: Boolean = false
+        updated: Boolean = false,
+        supersededEntryId: String = ""
     ): Boolean {
         if (conversation.trackingPaused) return false
         val repository = GlobalAgentRepository(context)
@@ -1525,8 +1652,48 @@ object GlobalConversationEventBus {
                 "turn_id" to entry.turnId,
                 "task_id" to entry.taskId,
                 "role" to entry.role.name,
+                "superseded_event_id" to supersededEntryId.takeIf(String::isNotBlank)
+                    ?.let { "transcript:$it" }.orEmpty(),
                 "origin" to if (actor == GlobalConversationActor.GLOBAL_AGENT) "global_agent" else "conversation"
-            )
+            ),
+            retractedEventIds = supersededEntryId.takeIf(String::isNotBlank)
+                ?.let { setOf("transcript:$it") }
+                .orEmpty()
+        )
+        val enqueued = repository.enqueue(event)
+        if (enqueued) requestProcessing(context)
+        return enqueued
+    }
+
+    fun publishTranscriptEntryDeleted(
+        context: Context,
+        conversation: AgentConversation,
+        entry: AgentTranscriptEntry,
+        timestampMillis: Long = System.currentTimeMillis()
+    ): Boolean {
+        if (conversation.trackingPaused) return false
+        val repository = GlobalAgentRepository(context)
+        if (!repository.settings().enabled) return false
+        val deletedEventId = "transcript:${entry.id}"
+        val event = GlobalConversationEvent(
+            id = "transcript-deleted:${entry.id}:$timestampMillis",
+            type = GlobalConversationEventType.MESSAGE_DELETED,
+            conversationId = entry.conversationId,
+            messageId = entry.id,
+            actor = GlobalConversationActor.SYSTEM,
+            timestampMillis = timestampMillis,
+            conversationTitle = conversation.title,
+            sensitivity = if (conversation.privateMode) {
+                GlobalConversationSensitivity.SESSION_PRIVATE
+            } else GlobalConversationSensitivity.PERSONAL,
+            metadata = mapOf(
+                "deleted_event_id" to deletedEventId,
+                "turn_id" to entry.turnId,
+                "task_id" to entry.taskId,
+                "role" to entry.role.name,
+                "origin" to "conversation"
+            ),
+            retractedEventIds = setOf(deletedEventId)
         )
         val enqueued = repository.enqueue(event)
         if (enqueued) requestProcessing(context)

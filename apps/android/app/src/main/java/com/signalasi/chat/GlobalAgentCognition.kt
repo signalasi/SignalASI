@@ -34,8 +34,44 @@ data class GlobalConversationEvent(
     val conversationTitle: String = "",
     val topicHints: Set<String> = emptySet(),
     val sensitivity: GlobalConversationSensitivity = GlobalConversationSensitivity.PERSONAL,
-    val metadata: Map<String, String> = emptyMap()
+    val metadata: Map<String, String> = emptyMap(),
+    val causalEventIds: Set<String> = emptySet(),
+    val retractedEventIds: Set<String> = emptySet()
 )
+
+data class GlobalEvidenceRef(
+    val eventId: String,
+    val causalEventIds: Set<String> = emptySet(),
+    val conversationId: String = "",
+    val timestampMillis: Long = 0L
+) {
+    fun invalidatedBy(eventIds: Set<String>): Boolean =
+        eventId in eventIds || causalEventIds.any(eventIds::contains)
+}
+
+fun GlobalConversationEvent.evidenceRoots(): Set<String> =
+    causalEventIds.filter(String::isNotBlank).toSet().ifEmpty { setOf(id) }
+
+fun GlobalConversationEvent.evidenceRef(): GlobalEvidenceRef = GlobalEvidenceRef(
+    eventId = id,
+    causalEventIds = evidenceRoots(),
+    conversationId = conversationId,
+    timestampMillis = timestampMillis
+)
+
+fun GlobalConversationEvent.effectiveRetractions(): Set<String> = buildSet {
+    addAll(retractedEventIds.filter(String::isNotBlank))
+    metadata["deleted_event_id"]?.takeIf(String::isNotBlank)?.let(::add)
+    metadata["superseded_event_id"]?.takeIf(String::isNotBlank)?.let(::add)
+    metadata["superseded_event_ids"].orEmpty()
+        .split(',')
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .forEach(::add)
+}
+
+fun PersonalWorldModel.hasRetractedEvidence(eventIds: Set<String>): Boolean =
+    eventIds.any(retractedEventIds::contains)
 
 enum class GlobalWorldLayer { CONVERSATION, TOPIC, USER, REALTIME }
 
@@ -64,6 +100,7 @@ data class GlobalWorldItem(
     val evidenceCount: Int = 1,
     val conversationIds: Set<String> = emptySet(),
     val evidenceEventIds: List<String> = emptyList(),
+    val evidenceProvenance: List<GlobalEvidenceRef> = emptyList(),
     val status: GlobalWorldItemStatus = GlobalWorldItemStatus.ACTIVE,
     val conflictGroupId: String = "",
     val firstSeenAtMillis: Long = System.currentTimeMillis(),
@@ -78,6 +115,7 @@ data class GlobalConversationLink(
     val topic: String,
     val strength: Double,
     val evidenceCount: Int = 1,
+    val evidenceProvenance: List<GlobalEvidenceRef> = emptyList(),
     val lastSeenAtMillis: Long = System.currentTimeMillis()
 )
 
@@ -85,6 +123,7 @@ data class PersonalWorldModel(
     val items: List<GlobalWorldItem> = emptyList(),
     val links: List<GlobalConversationLink> = emptyList(),
     val processedEventIds: List<String> = emptyList(),
+    val retractedEventIds: List<String> = emptyList(),
     val updatedAtMillis: Long = 0L
 ) {
     fun relevant(query: String, currentConversationId: String, limit: Int = 16): List<GlobalWorldItem> {
@@ -355,10 +394,29 @@ object GlobalWorldModelReducer {
         understanding: GlobalUnderstanding
     ): GlobalWorldReduction {
         if (event.id in world.processedEventIds) return GlobalWorldReduction(world, emptyList(), emptyList())
+        val incomingRetractions = event.effectiveRetractions()
+        val retractedEventIds = (world.retractedEventIds + incomingRetractions)
+            .filter(String::isNotBlank)
+            .distinct()
+            .takeLast(MAX_RETRACTED_EVENT_IDS)
+        val retractedWorld = retractEvidence(world, incomingRetractions, event.timestampMillis).copy(
+            retractedEventIds = retractedEventIds
+        )
+        if (event.evidenceRoots().any(retractedEventIds::contains)) {
+            return GlobalWorldReduction(
+                world = retractedWorld.copy(
+                    processedEventIds = (retractedWorld.processedEventIds + event.id)
+                        .takeLast(MAX_PROCESSED_EVENT_IDS),
+                    updatedAtMillis = event.timestampMillis
+                ),
+                changedItems = emptyList(),
+                conflicts = emptyList()
+            )
+        }
         if (event.type == GlobalConversationEventType.USER_FEEDBACK) {
             return GlobalWorldReduction(
-                world = world.copy(
-                    processedEventIds = (world.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
+                world = retractedWorld.copy(
+                    processedEventIds = (retractedWorld.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
                     updatedAtMillis = event.timestampMillis
                 ),
                 changedItems = emptyList(),
@@ -366,18 +424,18 @@ object GlobalWorldModelReducer {
             )
         }
         if (event.type == GlobalConversationEventType.CONVERSATION_DELETED) {
-            val retainedItems = world.items.mapNotNull { item ->
+            val retainedItems = retractedWorld.items.mapNotNull { item ->
                 if (event.conversationId !in item.conversationIds) return@mapNotNull item
                 val remainingConversations = item.conversationIds - event.conversationId
                 if (remainingConversations.isEmpty()) null else item.copy(conversationIds = remainingConversations)
             }
             return GlobalWorldReduction(
-                world = world.copy(
+                world = retractedWorld.copy(
                     items = retainedItems,
-                    links = world.links.filterNot {
+                    links = retractedWorld.links.filterNot {
                         it.leftConversationId == event.conversationId || it.rightConversationId == event.conversationId
                     },
-                    processedEventIds = (world.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
+                    processedEventIds = (retractedWorld.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
                     updatedAtMillis = event.timestampMillis
                 ),
                 changedItems = emptyList(),
@@ -385,20 +443,9 @@ object GlobalWorldModelReducer {
             )
         }
         if (event.type == GlobalConversationEventType.MESSAGE_DELETED) {
-            val deletedEventId = event.metadata["deleted_event_id"].orEmpty()
-            val retainedItems = world.items.mapNotNull { item ->
-                if (deletedEventId.isBlank() || deletedEventId !in item.evidenceEventIds) return@mapNotNull item
-                val remainingEvidence = item.evidenceEventIds - deletedEventId
-                if (remainingEvidence.isEmpty()) null else item.copy(
-                    evidenceEventIds = remainingEvidence,
-                    evidenceCount = (item.evidenceCount - 1).coerceAtLeast(remainingEvidence.size).coerceAtLeast(1),
-                    lastSeenAtMillis = event.timestampMillis
-                )
-            }
             return GlobalWorldReduction(
-                world = world.copy(
-                    items = retainedItems,
-                    processedEventIds = (world.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
+                world = retractedWorld.copy(
+                    processedEventIds = (retractedWorld.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
                     updatedAtMillis = event.timestampMillis
                 ),
                 changedItems = emptyList(),
@@ -407,7 +454,7 @@ object GlobalWorldModelReducer {
         }
         val now = event.timestampMillis
         val candidates = buildCandidates(event, understanding)
-        val mutable = world.items.filter { it.expiresAtMillis <= 0L || it.expiresAtMillis > now }.toMutableList()
+        val mutable = retractedWorld.items.filter { it.expiresAtMillis <= 0L || it.expiresAtMillis > now }.toMutableList()
         val changed = mutableListOf<GlobalWorldItem>()
         val conflicts = mutableListOf<Pair<GlobalWorldItem, GlobalWorldItem>>()
         candidates.forEach { candidate ->
@@ -416,14 +463,18 @@ object GlobalWorldModelReducer {
             }
             if (existingIndex >= 0) {
                 val existing = mutable[existingIndex]
+                val evidence = (itemEvidence(existing) + itemEvidence(candidate))
+                    .distinctBy(GlobalEvidenceRef::eventId)
+                    .takeLast(MAX_EVIDENCE_PER_ITEM)
                 val merged = existing.copy(
                     value = if (existing.kind == GlobalWorldItemKind.STATE) candidate.value else existing.value,
                     status = if (existing.kind == GlobalWorldItemKind.STATE) candidate.status else existing.status,
                     confidence = max(existing.confidence, candidate.confidence)
                         .plus(0.03).coerceAtMost(0.98),
-                    evidenceCount = existing.evidenceCount + 1,
+                    evidenceCount = evidence.size.coerceAtLeast(1),
                     conversationIds = (existing.conversationIds + candidate.conversationIds).take(20).toSet(),
-                    evidenceEventIds = (existing.evidenceEventIds + event.id).takeLast(20),
+                    evidenceEventIds = evidence.map(GlobalEvidenceRef::eventId),
+                    evidenceProvenance = evidence,
                     lastSeenAtMillis = now,
                     expiresAtMillis = if (existing.kind == GlobalWorldItemKind.STATE) {
                         candidate.expiresAtMillis
@@ -456,7 +507,7 @@ object GlobalWorldModelReducer {
                 }
             }
         }
-        val links = mergeLinks(world.links, event, understanding, now)
+        val links = mergeLinks(retractedWorld.links, event, understanding, now)
         val boundedItems = mutable
             .sortedWith(compareBy<GlobalWorldItem> { it.status == GlobalWorldItemStatus.SUPERSEDED }
                 .thenByDescending { it.lastSeenAtMillis })
@@ -465,7 +516,8 @@ object GlobalWorldModelReducer {
             world = PersonalWorldModel(
                 items = boundedItems,
                 links = links,
-                processedEventIds = (world.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
+                processedEventIds = (retractedWorld.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
+                retractedEventIds = retractedWorld.retractedEventIds,
                 updatedAtMillis = now
             ),
             changedItems = changed,
@@ -490,6 +542,7 @@ object GlobalWorldModelReducer {
                     confidence = confidence,
                     conversationIds = setOf(event.conversationId),
                     evidenceEventIds = listOf(event.id),
+                    evidenceProvenance = listOf(event.evidenceRef()),
                     firstSeenAtMillis = event.timestampMillis,
                     lastSeenAtMillis = event.timestampMillis,
                     expiresAtMillis = if (layer == GlobalWorldLayer.REALTIME) {
@@ -539,6 +592,7 @@ object GlobalWorldModelReducer {
                         confidence = 0.82,
                         conversationIds = setOf(event.conversationId),
                         evidenceEventIds = listOf(event.id),
+                        evidenceProvenance = listOf(event.evidenceRef()),
                         status = if (taskStatus in TERMINAL_TASK_STATUSES) {
                             GlobalWorldItemStatus.COMPLETED
                         } else GlobalWorldItemStatus.ACTIVE,
@@ -593,9 +647,13 @@ object GlobalWorldModelReducer {
             }
             if (existingIndex >= 0) {
                 val existing = mutable[existingIndex]
+                val evidence = (linkEvidence(existing) + event.evidenceRef())
+                    .distinctBy(GlobalEvidenceRef::eventId)
+                    .takeLast(MAX_EVIDENCE_PER_LINK)
                 mutable[existingIndex] = existing.copy(
                     strength = (existing.strength + 0.08).coerceAtMost(1.0),
-                    evidenceCount = existing.evidenceCount + 1,
+                    evidenceCount = evidence.size.coerceAtLeast(1),
+                    evidenceProvenance = evidence,
                     lastSeenAtMillis = now
                 )
             } else {
@@ -604,6 +662,7 @@ object GlobalWorldModelReducer {
                     rightConversationId = pair[1],
                     topic = understanding.topic,
                     strength = 0.58,
+                    evidenceProvenance = listOf(event.evidenceRef()),
                     lastSeenAtMillis = now
                 )
             }
@@ -611,11 +670,84 @@ object GlobalWorldModelReducer {
         return mutable.sortedByDescending(GlobalConversationLink::lastSeenAtMillis).take(MAX_LINKS)
     }
 
+    private fun retractEvidence(
+        world: PersonalWorldModel,
+        eventIds: Set<String>,
+        nowMillis: Long
+    ): PersonalWorldModel {
+        if (eventIds.isEmpty()) return world
+        val retainedItems = world.items.mapNotNull { item ->
+            val evidence = itemEvidence(item)
+            if (evidence.isEmpty()) return@mapNotNull item
+            val retained = evidence.filterNot { it.invalidatedBy(eventIds) }
+            if (retained.size == evidence.size) return@mapNotNull item
+            if (retained.isEmpty()) return@mapNotNull null
+            val conversations = retained.map(GlobalEvidenceRef::conversationId)
+                .filter(String::isNotBlank)
+                .toSet()
+            item.copy(
+                evidenceCount = retained.size,
+                conversationIds = conversations.ifEmpty { item.conversationIds },
+                evidenceEventIds = retained.map(GlobalEvidenceRef::eventId),
+                evidenceProvenance = retained,
+                lastSeenAtMillis = retained.maxOfOrNull(GlobalEvidenceRef::timestampMillis)
+                    ?.takeIf { it > 0L }
+                    ?: item.lastSeenAtMillis
+            )
+        }
+        val conflictCounts = retainedItems.asSequence()
+            .filter { it.status == GlobalWorldItemStatus.CONFLICTED && it.conflictGroupId.isNotBlank() }
+            .groupingBy(GlobalWorldItem::conflictGroupId)
+            .eachCount()
+        val reconciledItems = retainedItems.map { item ->
+            if (item.status == GlobalWorldItemStatus.CONFLICTED &&
+                conflictCounts[item.conflictGroupId].orZero() < 2
+            ) item.copy(status = GlobalWorldItemStatus.ACTIVE, conflictGroupId = "") else item
+        }
+        val retainedLinks = world.links.mapNotNull { link ->
+            val evidence = linkEvidence(link)
+            if (evidence.isEmpty()) return@mapNotNull link
+            val retained = evidence.filterNot { it.invalidatedBy(eventIds) }
+            when {
+                retained.size == evidence.size -> link
+                retained.isEmpty() -> null
+                else -> link.copy(
+                    evidenceCount = retained.size,
+                    evidenceProvenance = retained,
+                    lastSeenAtMillis = retained.maxOfOrNull(GlobalEvidenceRef::timestampMillis)
+                        ?.takeIf { it > 0L }
+                        ?: link.lastSeenAtMillis
+                )
+            }
+        }
+        return world.copy(items = reconciledItems, links = retainedLinks, updatedAtMillis = nowMillis)
+    }
+
+    private fun itemEvidence(item: GlobalWorldItem): List<GlobalEvidenceRef> =
+        item.evidenceProvenance.ifEmpty {
+            item.evidenceEventIds.map { eventId ->
+                GlobalEvidenceRef(
+                    eventId = eventId,
+                    causalEventIds = setOf(eventId),
+                    conversationId = item.conversationIds.singleOrNull().orEmpty(),
+                    timestampMillis = item.lastSeenAtMillis
+                )
+            }
+        }
+
+    private fun linkEvidence(link: GlobalConversationLink): List<GlobalEvidenceRef> =
+        link.evidenceProvenance
+
+    private fun Int?.orZero(): Int = this ?: 0
+
     private const val REALTIME_TTL_MILLIS = 14L * 24L * 60L * 60L * 1_000L
     private val TERMINAL_TASK_STATUSES = setOf("completed", "failed", "cancelled", "timed_out", "not_found")
+    private const val MAX_EVIDENCE_PER_ITEM = 20
+    private const val MAX_EVIDENCE_PER_LINK = 20
     private const val MAX_WORLD_ITEMS = 1_500
     private const val MAX_LINKS = 600
     private const val MAX_PROCESSED_EVENT_IDS = 4_000
+    private const val MAX_RETRACTED_EVENT_IDS = 4_000
 }
 
 enum class GlobalInterventionMode {
@@ -892,6 +1024,7 @@ data class GlobalResearchTask(
     val question: String,
     val depth: GlobalResearchDepth,
     val preferredSources: List<String>,
+    val causalEventIds: Set<String> = emptySet(),
     val status: GlobalResearchTaskStatus = GlobalResearchTaskStatus.QUEUED,
     val resourceId: String = "",
     val fallbackResourceIds: List<String> = emptyList(),
@@ -993,6 +1126,7 @@ object GlobalResearchPlanner {
         }
         return GlobalResearchTask(
             sourceEventId = event.id,
+            causalEventIds = event.evidenceRoots(),
             sourceConversationId = event.conversationId,
             topic = understanding.topic,
             question = event.content.replace(Regex("\\s+"), " ").trim().take(2_000),
@@ -1024,6 +1158,7 @@ data class GlobalProactiveMessage(
     val content: String,
     val topic: String,
     val urgent: Boolean,
+    val causalEventIds: Set<String> = emptySet(),
     val status: GlobalProactiveMessageStatus = GlobalProactiveMessageStatus.PENDING,
     val createdAtMillis: Long = System.currentTimeMillis(),
     val deliveredAtMillis: Long = 0L,
@@ -1063,6 +1198,7 @@ object GlobalProactiveMessageFactory {
         }
         return GlobalProactiveMessage(
             sourceEventId = event.id,
+            causalEventIds = event.evidenceRoots(),
             sourceConversationId = event.conversationId,
             target = target,
             title = if (chinese) "Signal \u5efa\u8bae" else "Signal insight",

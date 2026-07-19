@@ -463,6 +463,16 @@ class GlobalResearchExecutor(context: Context) {
         resourceId: String,
         evidenceLedger: GlobalEvidenceLedger
     ): GlobalResearchExecutionResult {
+        val causalEventIds = task.causalEventIds.ifEmpty { setOf(task.sourceEventId) }
+        if (repository.loadWorld().hasRetractedEvidence(causalEventIds)) {
+            val invalidated = GlobalAgentEvidenceLifecyclePolicy.invalidateResearchTasks(
+                listOf(task),
+                causalEventIds,
+                System.currentTimeMillis()
+            ).single()
+            repository.upsertResearchTask(invalidated)
+            return GlobalResearchExecutionResult(task.id, invalidated.status, resourceId, invalidated.lastError)
+        }
         val result = CodexStyleResponsePolicy.sanitizeAssistantText(rawResult).trim().take(MAX_RESULT_CHARACTERS)
         if (result.isBlank()) return retryOrFail(task, "The research result was empty")
         val evidenceUris = (evidenceLedger.sources.map(GlobalEvidenceSource::uri) +
@@ -523,6 +533,7 @@ class GlobalResearchExecutor(context: Context) {
         val settings = repository.settings()
         repository.appendProactiveMessage(GlobalProactiveMessage(
             sourceEventId = "research:${task.id}:${task.lastResultFingerprint}",
+            causalEventIds = task.causalEventIds.ifEmpty { setOf(task.sourceEventId) },
             sourceConversationId = task.sourceConversationId,
             target = when {
                 !settings.autoCreateConversationsEnabled -> GlobalProactiveTarget.CURRENT_CONVERSATION
@@ -558,7 +569,9 @@ class GlobalResearchExecutor(context: Context) {
                 "material_change" to materialChange.toString(),
                 "monitoring" to continuous.toString(),
                 "verified" to task.evidenceLedger.verified.toString()
-            )
+            ),
+            causalEventIds = task.causalEventIds.ifEmpty { setOf(task.sourceEventId) }
+                .filter(String::isNotBlank).toSet()
         ))
     }
 
@@ -616,9 +629,12 @@ class GlobalResearchExecutor(context: Context) {
     }
 
     private fun publishResearchFailure(task: GlobalResearchTask, reason: String) {
+        val causalEventIds = task.causalEventIds.ifEmpty { setOf(task.sourceEventId) }
+        if (repository.loadWorld().hasRetractedEvidence(causalEventIds)) return
         val chinese = GlobalAgentText.containsCjk(task.question)
         repository.appendProactiveMessage(GlobalProactiveMessage(
             sourceEventId = "research-failed:${task.id}",
+            causalEventIds = task.causalEventIds.ifEmpty { setOf(task.sourceEventId) },
             sourceConversationId = task.sourceConversationId,
             target = GlobalProactiveTarget.CURRENT_CONVERSATION,
             title = if (chinese) "\u7814\u7a76\u6682\u672a\u5b8c\u6210" else "Research paused",

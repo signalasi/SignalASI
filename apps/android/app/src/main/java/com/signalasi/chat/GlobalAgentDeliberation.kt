@@ -361,6 +361,7 @@ data class GlobalAutonomousRun(
     val topic: String,
     val goal: String,
     val actions: List<GlobalAutonomousAction>,
+    val causalEventIds: Set<String> = emptySet(),
     val status: GlobalAutonomousRunStatus = GlobalAutonomousRunStatus.QUEUED,
     val revision: Int = 1,
     val replanCount: Int = 0,
@@ -594,6 +595,7 @@ object GlobalAutonomousRunPlanner {
         return GlobalAutonomousRun(
             sourceCognitionTaskId = task.id,
             sourceEventId = task.sourceEvent.id,
+            causalEventIds = task.sourceEvent.evidenceRoots(),
             sourceConversationId = task.sourceEvent.conversationId,
             topic = result.topic.ifBlank { task.baselineUnderstanding.topic },
             goal = task.sourceEvent.content.take(2_000),
@@ -894,6 +896,7 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
         .put("id", run.id)
         .put("source_cognition_task_id", run.sourceCognitionTaskId)
         .put("source_event_id", run.sourceEventId)
+        .put("causal_event_ids", JSONArray(run.causalEventIds.toList()))
         .put("source_conversation_id", run.sourceConversationId)
         .put("topic", run.topic)
         .put("goal", run.goal.take(2_000))
@@ -919,6 +922,8 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
             id = id,
             sourceCognitionTaskId = json.optString("source_cognition_task_id"),
             sourceEventId = sourceEventId,
+            causalEventIds = strings(json.optJSONArray("causal_event_ids")).toSet()
+                .ifEmpty { setOf(sourceEventId) },
             sourceConversationId = json.optString("source_conversation_id"),
             topic = json.optString("topic").take(160),
             goal = json.optString("goal").take(2_000),
@@ -1185,6 +1190,8 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
         .put("topic_hints", JSONArray(event.topicHints.toList()))
         .put("sensitivity", event.sensitivity.name)
         .put("metadata", JSONObject(event.metadata))
+        .put("causal_event_ids", JSONArray(event.causalEventIds.toList()))
+        .put("retracted_event_ids", JSONArray(event.retractedEventIds.toList()))
 
     private fun decodeEvent(json: JSONObject?): GlobalConversationEvent? {
         if (json == null) return null
@@ -1203,7 +1210,9 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
             conversationTitle = json.optString("conversation_title").take(160),
             topicHints = strings(json.optJSONArray("topic_hints")).toSet(),
             sensitivity = enumValue(json.optString("sensitivity"), GlobalConversationSensitivity.PERSONAL),
-            metadata = stringMap(json.optJSONObject("metadata"))
+            metadata = stringMap(json.optJSONObject("metadata")),
+            causalEventIds = strings(json.optJSONArray("causal_event_ids")).toSet(),
+            retractedEventIds = strings(json.optJSONArray("retracted_event_ids")).toSet()
         )
     }
 

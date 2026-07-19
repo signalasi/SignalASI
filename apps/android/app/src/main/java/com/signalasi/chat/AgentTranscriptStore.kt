@@ -371,8 +371,11 @@ class AgentTranscriptStore(context: Context) {
     @Synchronized
     fun deleteEntry(entryId: String): Boolean {
         val current = allEntries()
-        if (current.none { it.id == entryId }) return false
+        val removed = current.firstOrNull { it.id == entryId } ?: return false
         saveEntries(current.filterNot { it.id == entryId })
+        conversationForEvent(removed.conversationId)?.let { conversation ->
+            GlobalConversationEventBus.publishTranscriptEntryDeleted(appContext, conversation, removed)
+        }
         return true
     }
 
@@ -381,11 +384,16 @@ class AgentTranscriptStore(context: Context) {
         val cleanKey = dedupeKey.trim()
         if (cleanKey.isBlank()) return false
         val current = allEntries()
-        val filtered = current.filterNot {
+        val removed = current.filter {
             it.conversationId == conversationId && it.dedupeKey == cleanKey
         }
-        if (filtered.size == current.size) return false
-        saveEntries(filtered)
+        if (removed.isEmpty()) return false
+        saveEntries(current - removed.toSet())
+        conversationForEvent(conversationId)?.let { conversation ->
+            removed.forEach { entry ->
+                GlobalConversationEventBus.publishTranscriptEntryDeleted(appContext, conversation, entry)
+            }
+        }
         return true
     }
 
@@ -492,6 +500,7 @@ class AgentTranscriptStore(context: Context) {
         val current = allEntries().toMutableList()
         val index = current.indexOfFirst { it.conversationId == conversationId && it.dedupeKey == cleanKey }
         val updated = index >= 0
+        var supersededEntryId = ""
         val eventEntry: AgentTranscriptEntry
         if (updated) {
             val previous = current[index]
@@ -499,6 +508,7 @@ class AgentTranscriptStore(context: Context) {
             if (previous.text == cleanText && previous.role == role &&
                 (normalizedRichOutput.isBlank() || normalizedRichOutput == previous.richOutputJson)
             ) return false
+            supersededEntryId = previous.id
             eventEntry = previous.copy(
                 id = UUID.randomUUID().toString(), role = role, text = cleanText,
                 timestampMillis = timestampMillis,
@@ -518,7 +528,13 @@ class AgentTranscriptStore(context: Context) {
         touchConversation(conversationId, role, cleanText, timestampMillis)
         if (role == AgentTranscriptRole.ASSISTANT) compactContextIfNeeded(conversationId)
         conversationForEvent(conversationId)?.let { conversation ->
-            GlobalConversationEventBus.publishTranscriptEntry(appContext, conversation, eventEntry, updated = updated)
+            GlobalConversationEventBus.publishTranscriptEntry(
+                appContext,
+                conversation,
+                eventEntry,
+                updated = updated,
+                supersededEntryId = supersededEntryId
+            )
         }
         return true
     }
@@ -531,9 +547,17 @@ class AgentTranscriptStore(context: Context) {
     @Synchronized
     fun removeExactText(text: String): Int {
         val current = allEntries()
-        val filtered = current.filterNot { it.text == text }
-        if (filtered.size != current.size) saveEntries(filtered)
-        return current.size - filtered.size
+        val removed = current.filter { it.text == text }
+        if (removed.isEmpty()) return 0
+        saveEntries(current - removed.toSet())
+        removed.groupBy(AgentTranscriptEntry::conversationId).forEach { (conversationId, entries) ->
+            conversationForEvent(conversationId)?.let { conversation ->
+                entries.forEach { entry ->
+                    GlobalConversationEventBus.publishTranscriptEntryDeleted(appContext, conversation, entry)
+                }
+            }
+        }
+        return removed.size
     }
 
     @Synchronized

@@ -276,6 +276,121 @@ class GlobalAgentCognitionTest {
     }
 
     @Test
+    fun updatedMessageReplacesItsPreviousWorldModelEvidence() {
+        val original = event("conversation-a", "Runtime", "Use the legacy runtime")
+        val created = GlobalWorldModelReducer.reduce(
+            PersonalWorldModel(),
+            original,
+            GlobalUnderstanding(
+                eventId = original.id,
+                topic = "Runtime",
+                intent = "decision",
+                decisionCandidates = listOf("Use the legacy runtime")
+            )
+        )
+        val replacement = original.copy(
+            id = "replacement-event",
+            type = GlobalConversationEventType.MESSAGE_UPDATED,
+            content = "Use the isolated runtime",
+            retractedEventIds = setOf(original.id)
+        )
+
+        val updated = GlobalWorldModelReducer.reduce(
+            created.world,
+            replacement,
+            GlobalUnderstanding(
+                eventId = replacement.id,
+                topic = "Runtime",
+                intent = "decision",
+                decisionCandidates = listOf("Use the isolated runtime")
+            )
+        )
+
+        assertTrue(updated.world.items.none { original.id in it.evidenceEventIds })
+        assertTrue(updated.world.items.any {
+            replacement.id in it.evidenceEventIds && it.value == "Use the isolated runtime"
+        })
+        assertTrue(original.id in updated.world.retractedEventIds)
+    }
+
+    @Test
+    fun deletingRootEvidenceAlsoRetractsDerivedCognition() {
+        val root = event("conversation-a", "Runtime", "Review the runtime architecture")
+        val derived = root.copy(
+            id = "cognition-a",
+            type = GlobalConversationEventType.COGNITION_RESULT,
+            actor = GlobalConversationActor.GLOBAL_AGENT,
+            content = "The runtime needs an isolated execution boundary",
+            causalEventIds = setOf(root.id)
+        )
+        val withDerived = GlobalWorldModelReducer.reduce(
+            PersonalWorldModel(),
+            derived,
+            GlobalUnderstanding(
+                eventId = derived.id,
+                topic = "Runtime",
+                intent = "analysis",
+                decisionCandidates = listOf("Use an isolated execution boundary")
+            )
+        )
+        val deletion = GlobalConversationEvent(
+            id = "delete-root",
+            type = GlobalConversationEventType.MESSAGE_DELETED,
+            conversationId = root.conversationId,
+            actor = GlobalConversationActor.SYSTEM,
+            retractedEventIds = setOf(root.id)
+        )
+
+        val deleted = GlobalWorldModelReducer.reduce(
+            withDerived.world,
+            deletion,
+            GlobalUnderstanding(eventId = deletion.id, topic = "Runtime", intent = "delete")
+        )
+
+        assertTrue(deleted.world.items.none { item ->
+            item.evidenceProvenance.any { it.eventId == derived.id }
+        })
+    }
+
+    @Test
+    fun lateDerivedResultCannotRestoreRetractedEvidence() {
+        val root = event("conversation-a", "Runtime", "Review the runtime architecture")
+        val deletion = GlobalConversationEvent(
+            id = "delete-root",
+            type = GlobalConversationEventType.MESSAGE_DELETED,
+            conversationId = root.conversationId,
+            actor = GlobalConversationActor.SYSTEM,
+            retractedEventIds = setOf(root.id)
+        )
+        val deleted = GlobalWorldModelReducer.reduce(
+            PersonalWorldModel(),
+            deletion,
+            GlobalUnderstanding(eventId = deletion.id, topic = "Runtime", intent = "delete")
+        )
+        val lateResult = root.copy(
+            id = "late-cognition",
+            type = GlobalConversationEventType.COGNITION_RESULT,
+            actor = GlobalConversationActor.GLOBAL_AGENT,
+            content = "A late result that must not become memory",
+            causalEventIds = setOf(root.id)
+        )
+
+        val ignored = GlobalWorldModelReducer.reduce(
+            deleted.world,
+            lateResult,
+            GlobalUnderstanding(
+                eventId = lateResult.id,
+                topic = "Runtime",
+                intent = "analysis",
+                goalCandidates = listOf("Persist the late result")
+            )
+        )
+
+        assertTrue(ignored.world.items.isEmpty())
+        assertTrue(lateResult.id in ignored.world.processedEventIds)
+    }
+
+    @Test
     fun terminalTaskStatusReplacesRunningRealtimeState() {
         fun taskEvent(status: String, sequence: Long) = GlobalConversationEvent(
             id = "task-a-$status-$sequence",

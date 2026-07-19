@@ -99,6 +99,72 @@ class GlobalAgentKnowledgeGraphTest {
     }
 
     @Test
+    fun `deleting message evidence retracts its topic graph branch`() {
+        val source = event("event-a", "conversation-a", "Android runtime")
+        val sourceUnderstanding = understanding(source, "Android runtime").copy(
+            relatedTopics = setOf("Run engine")
+        )
+        val graph = GlobalTopicProjectGraphReducer.reduce(
+            GlobalTopicProjectGraph(),
+            source,
+            sourceUnderstanding,
+            reduction(source, sourceUnderstanding)
+        )
+        val deletion = GlobalConversationEvent(
+            id = "delete-event-a",
+            type = GlobalConversationEventType.MESSAGE_DELETED,
+            conversationId = source.conversationId,
+            actor = GlobalConversationActor.SYSTEM,
+            retractedEventIds = setOf(source.id)
+        )
+
+        val retracted = GlobalTopicProjectGraphReducer.reduce(
+            graph,
+            deletion,
+            understanding(deletion, "Android runtime"),
+            GlobalWorldReduction(PersonalWorldModel(), emptyList(), emptyList())
+        )
+
+        assertTrue(retracted.nodes.isEmpty())
+        assertTrue(retracted.relations.isEmpty())
+        assertTrue(source.id in retracted.retractedEventIds)
+    }
+
+    @Test
+    fun `late derived event cannot recreate a retracted topic`() {
+        val source = event("event-a", "conversation-a", "Android runtime")
+        val deletion = GlobalConversationEvent(
+            id = "delete-event-a",
+            type = GlobalConversationEventType.MESSAGE_DELETED,
+            conversationId = source.conversationId,
+            actor = GlobalConversationActor.SYSTEM,
+            retractedEventIds = setOf(source.id)
+        )
+        val retracted = GlobalTopicProjectGraphReducer.reduce(
+            GlobalTopicProjectGraph(),
+            deletion,
+            understanding(deletion, "Android runtime"),
+            GlobalWorldReduction(PersonalWorldModel(), emptyList(), emptyList())
+        )
+        val late = source.copy(
+            id = "late-cognition",
+            type = GlobalConversationEventType.COGNITION_RESULT,
+            actor = GlobalConversationActor.GLOBAL_AGENT,
+            causalEventIds = setOf(source.id)
+        )
+
+        val ignored = GlobalTopicProjectGraphReducer.reduce(
+            retracted,
+            late,
+            understanding(late, "Android runtime"),
+            reduction(late, understanding(late, "Android runtime"))
+        )
+
+        assertTrue(ignored.nodes.isEmpty())
+        assertTrue(ignored.relations.isEmpty())
+    }
+
+    @Test
     fun `action dependencies expose only ready branches`() {
         val inspect = action("inspect", emptySet())
         val draft = action("draft", setOf("inspect"))
