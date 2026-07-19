@@ -709,11 +709,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         super.onPause()
     }
 
-    private fun publishAgentConnectorResponse(envelope: JSONObject?, message: ChatMessage) {
-        if (envelope?.optString("type").orEmpty().ifBlank { "text" } != "text") return
+    private fun publishAgentConnectorResponse(envelope: JSONObject?, message: ChatMessage): Boolean {
+        if (envelope?.optString("type").orEmpty().ifBlank { "text" } != "text") return false
         val sourceMessageId = envelope?.optString("source_message_id")?.toLongOrNull()
             ?: envelope?.optLong("source_message_id", 0L)?.takeIf { it > 0L }
-            ?: return
+            ?: return false
         val response = AgentConnectorResponse(
             sourceMessageId = sourceMessageId,
             contactId = envelope?.optString("contact_id").orEmpty().ifBlank { message.contact.id },
@@ -729,9 +729,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             globalSuperAgentRuntime.consumeResearchResponse(response)
         ) {
             refreshGlobalAgentCognition()
-            return
+            return true
         }
         AgentConnectorResponseBus.publish(this, response)
+        return false
     }
 
     private fun consumeAgentConnectorResponse(response: AgentConnectorResponse) {
@@ -1022,10 +1023,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     !it.isMine && it.taskId == msg.taskId && it.content == msg.content
                 }
             ) return@runOnUiThread
-            msg.deliveryTrace.add(newTraceEvent("phone_reply_received", msg.taskId))
-            msg.deliveryTrace.add(newTraceEvent("received", "MQTT inbound"))
-            msg.deliveryTrace.add(newTraceEvent("decrypted", "SignalASI Link"))
-            addMessage(msg, fromIncoming = true)
             val sourceMessageId = envelope?.optString("source_message_id")?.toLongOrNull()
                 ?: envelope?.optLong("source_message_id", 0L)
                 ?: 0L
@@ -1042,11 +1039,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 )
             } else null
             val nativeAgentResponse = supersededResponse || matchingAgentRuntime != null
+            if (publishAgentConnectorResponse(envelope, msg)) return@runOnUiThread
+            msg.deliveryTrace.add(newTraceEvent("phone_reply_received", msg.taskId))
+            msg.deliveryTrace.add(newTraceEvent("received", "MQTT inbound"))
+            msg.deliveryTrace.add(newTraceEvent("decrypted", "SignalASI Link"))
+            addMessage(msg, fromIncoming = true)
             if (supersededResponse) supersededConnectorSourceIds.remove(sourceMessageId)
             if (responseTaskId.isNotBlank()) {
                 completedConnectorTaskIds.add(responseTaskId)
             }
-            publishAgentConnectorResponse(envelope, msg)
             if (!nativeAgentResponse && responseConversationId.isNotBlank() &&
                 agentTranscriptStore.conversations(includeArchived = true).any { it.id == responseConversationId }
             ) {
@@ -2702,10 +2703,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (!::globalSuperAgentRuntime.isInitialized || !::agentTranscriptStore.isInitialized) return
         thread(name = "signalasi-global-agent-cognition") {
             runCatching { globalSuperAgentRuntime.processPending() }
+            runCatching { globalSuperAgentRuntime.processLongHorizonCycle() }
             runCatching { globalSuperAgentRuntime.executeCognitionCycle() }
             runCatching { globalSuperAgentRuntime.executeAutonomousCycle() }
             runCatching { globalSuperAgentRuntime.executeResearchCycle() }
             runCatching { globalSuperAgentRuntime.processPending() }
+            runCatching { globalSuperAgentRuntime.processLongHorizonCycle() }
+            runCatching { globalSuperAgentRuntime.scheduleNextWake() }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 val delivered = runCatching {
@@ -4484,6 +4488,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "global.toggle_autonomous_preparation" -> updateGlobalAgentSettings {
                 it.copy(autonomousPreparationEnabled = !it.autonomousPreparationEnabled)
             }
+            "global.toggle_dynamic_replanning" -> updateGlobalAgentSettings {
+                it.copy(dynamicAutonomousReplanningEnabled = !it.dynamicAutonomousReplanningEnabled)
+            }
+            "global.toggle_long_horizon" -> updateGlobalAgentSettings {
+                it.copy(longHorizonPlanningEnabled = !it.longHorizonPlanningEnabled)
+            }
             "global.toggle_cloud_cognition" -> updateGlobalAgentSettings {
                 it.copy(allowCloudCognition = !it.allowCloudCognition)
             }
@@ -4507,6 +4517,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "global.research" -> showGlobalResearchTasksDialog()
             "global.cognition" -> showGlobalCognitionTasksDialog()
             "global.runs" -> showGlobalAutonomousRunsDialog()
+            "global.long_horizon" -> showGlobalLongHorizonGoalsDialog()
             "global.insights" -> showGlobalInsightsDialog()
             "global.learning" -> showGlobalLearningDialog()
             "profile.nickname" -> openExistingControlCenterPage { showEditNicknameDialog() }
@@ -4832,6 +4843,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             ControlCenterRowSpec("global.toggle_enabled", getString(R.string.cc_global_master_title), getString(R.string.cc_global_master_subtitle), R.drawable.ic_agent_node, switchValue = settings.enabled, showChevron = false),
                             ControlCenterRowSpec("global.toggle_model_understanding", getString(R.string.cc_global_model_understanding_title), getString(R.string.cc_global_model_understanding_subtitle), R.drawable.ic_settings_model, switchValue = settings.modelUnderstandingEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_autonomous_preparation", getString(R.string.cc_global_autonomous_preparation_title), getString(R.string.cc_global_autonomous_preparation_subtitle), R.drawable.ic_agent_control, switchValue = settings.autonomousPreparationEnabled, showChevron = false, enabled = settings.enabled),
+                            ControlCenterRowSpec("global.toggle_dynamic_replanning", getString(R.string.cc_global_dynamic_replanning_title), getString(R.string.cc_global_dynamic_replanning_subtitle), R.drawable.ic_reset_data, switchValue = settings.dynamicAutonomousReplanningEnabled, showChevron = false, enabled = settings.enabled && settings.autonomousPreparationEnabled),
+                            ControlCenterRowSpec("global.toggle_long_horizon", getString(R.string.cc_global_long_horizon_toggle_title), getString(R.string.cc_global_long_horizon_toggle_subtitle), R.drawable.ic_agent_history, switchValue = settings.longHorizonPlanningEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_proactive", getString(R.string.cc_global_proactive_title), getString(R.string.cc_global_proactive_subtitle), R.drawable.ic_agent_memory, switchValue = settings.proactiveInsightsEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_learning", getString(R.string.cc_global_learning_toggle_title), getString(R.string.cc_global_learning_toggle_subtitle), R.drawable.ic_agent_skill, switchValue = settings.adaptiveLearningEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_research", getString(R.string.cc_global_research_title), getString(R.string.cc_global_research_subtitle), R.drawable.ic_agent_knowledge, switchValue = settings.autonomousResearchEnabled, showChevron = false, enabled = settings.enabled),
@@ -4853,6 +4866,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         listOf(
                             ControlCenterRowSpec("global.cognition", getString(R.string.cc_global_cognition_queue_title), getString(R.string.cc_global_cognition_queue_subtitle), R.drawable.ic_settings_model, activeCognition.toString(), if (activeCognition > 0) ControlCenterTone.VIOLET else ControlCenterTone.NEUTRAL),
                             ControlCenterRowSpec("global.runs", getString(R.string.cc_global_runs_title), getString(R.string.cc_global_runs_subtitle), R.drawable.ic_agent_control, (activeRuns + dashboard.waitingConfirmationCount).toString(), if (activeRuns > 0) ControlCenterTone.GREEN else if (dashboard.waitingConfirmationCount > 0) ControlCenterTone.AMBER else ControlCenterTone.NEUTRAL),
+                            ControlCenterRowSpec("global.long_horizon", getString(R.string.cc_global_long_horizon_title), getString(R.string.cc_global_long_horizon_subtitle), R.drawable.ic_agent_history, dashboard.longHorizonGoalCount.toString(), if (dashboard.blockedLongHorizonGoalCount > 0) ControlCenterTone.AMBER else if (dashboard.longHorizonGoalCount > 0) ControlCenterTone.VIOLET else ControlCenterTone.NEUTRAL),
                             ControlCenterRowSpec("global.research", getString(R.string.cc_global_research_queue_title), getString(R.string.cc_global_research_queue_subtitle), R.drawable.ic_agent_knowledge, activeResearch.toString(), if (activeResearch > 0) ControlCenterTone.BLUE else ControlCenterTone.NEUTRAL),
                             ControlCenterRowSpec("global.insights", getString(R.string.cc_global_pending_insights_title), getString(R.string.cc_global_pending_insights_subtitle), R.drawable.ic_agent_memory, dashboard.pendingInsightCount.toString(), if (dashboard.pendingInsightCount > 0) ControlCenterTone.VIOLET else ControlCenterTone.NEUTRAL),
                             ControlCenterRowSpec("global.learning", getString(R.string.cc_global_learning_title), getString(R.string.cc_global_learning_subtitle), R.drawable.ic_agent_skill, getString(R.string.cc_global_learning_status, dashboard.feedbackCount, dashboard.learnedTopicCount), if (dashboard.feedbackCount > 0) ControlCenterTone.GREEN else ControlCenterTone.NEUTRAL),
@@ -4882,12 +4896,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val runtime = if (::globalSuperAgentRuntime.isInitialized) globalSuperAgentRuntime else GlobalSuperAgentRuntime.get(this)
         thread(name = "signalasi-global-agent-manual") {
             val batch = runCatching { runtime.processPending(250) }.getOrNull()
+            runCatching { runtime.processLongHorizonCycle() }
             repeat(2) {
                 runCatching { runtime.executeCognitionCycle() }
                 runCatching { runtime.executeAutonomousCycle() }
                 runCatching { runtime.executeResearchCycle() }
             }
             runCatching { runtime.processPending(250) }
+            runCatching { runtime.processLongHorizonCycle() }
+            runCatching { runtime.scheduleNextWake() }
             runOnUiThread {
                 runtime.deliverPending(agentTranscriptStore)
                 renderAgentTranscript(agentTranscriptStore.list())
@@ -5061,6 +5078,66 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         builder.show()
     }
 
+    private fun showGlobalLongHorizonGoalsDialog() {
+        val goals = globalSuperAgentRuntime.longHorizonGoals()
+            .sortedWith(compareByDescending<GlobalLongHorizonGoal> { it.priority }
+                .thenByDescending { it.updatedAtMillis })
+            .take(50)
+        if (goals.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle(R.string.cc_global_long_horizon_title)
+                .setMessage(R.string.cc_global_empty)
+                .setPositiveButton(android.R.string.ok, null)
+                .show()
+            return
+        }
+        val labels = goals.map { goal ->
+            getString(
+                R.string.cc_global_long_horizon_row,
+                goal.title,
+                globalLongHorizonStatusLabel(goal.status),
+                goal.checkpointCount
+            )
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(R.string.cc_global_long_horizon_title)
+            .setItems(labels) { _, index -> showGlobalLongHorizonGoalDialog(goals[index]) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showGlobalLongHorizonGoalDialog(goal: GlobalLongHorizonGoal) {
+        val details = buildString {
+            append(globalLongHorizonStatusLabel(goal.status))
+            append(" \u00b7 ").append((goal.priority * 100).toInt()).append('%')
+            if (goal.progressSummary.isNotBlank()) append("\n\n").append(goal.progressSummary.take(1_000))
+            if (goal.blocker.isNotBlank()) append("\n\n").append(goal.blocker.take(600))
+            if (goal.nextCheckAtMillis > 0L) {
+                append("\n\n")
+                append(SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(goal.nextCheckAtMillis)))
+            }
+        }
+        val builder = AlertDialog.Builder(this)
+            .setTitle(goal.title)
+            .setMessage(details)
+            .setNegativeButton(android.R.string.cancel, null)
+        if (goal.status == GlobalLongHorizonGoalStatus.PAUSED) {
+            builder.setPositiveButton(R.string.cc_global_goal_resume) { _, _ ->
+                globalSuperAgentRuntime.resumeLongHorizonGoal(goal.id)
+                processGlobalAgentNow()
+            }
+        } else if (goal.status != GlobalLongHorizonGoalStatus.COMPLETED) {
+            builder.setNeutralButton(R.string.cc_global_goal_pause) { _, _ ->
+                globalSuperAgentRuntime.pauseLongHorizonGoal(goal.id)
+                renderControlCenterGlobalAgentPage()
+            }
+            builder.setPositiveButton(android.R.string.ok, null)
+        } else {
+            builder.setPositiveButton(android.R.string.ok, null)
+        }
+        builder.show()
+    }
+
     private fun globalCognitionStatusLabel(status: GlobalCognitionTaskStatus): String = getString(when (status) {
         GlobalCognitionTaskStatus.QUEUED -> R.string.cc_global_status_queued
         GlobalCognitionTaskStatus.RUNNING -> R.string.cc_global_status_running
@@ -5072,12 +5149,22 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun globalAutonomousRunStatusLabel(status: GlobalAutonomousRunStatus): String = getString(when (status) {
         GlobalAutonomousRunStatus.QUEUED -> R.string.cc_global_status_queued
         GlobalAutonomousRunStatus.RUNNING -> R.string.cc_global_status_running
+        GlobalAutonomousRunStatus.REPLANNING -> R.string.cc_global_status_replanning
         GlobalAutonomousRunStatus.WAITING_FOR_RESOURCE -> R.string.cc_global_status_waiting
         GlobalAutonomousRunStatus.WAITING_CONFIRMATION -> R.string.cc_global_status_confirmation
         GlobalAutonomousRunStatus.COMPLETED -> R.string.cc_global_status_completed
         GlobalAutonomousRunStatus.PARTIAL -> R.string.cc_global_status_partial
         GlobalAutonomousRunStatus.FAILED -> R.string.cc_global_status_failed
         GlobalAutonomousRunStatus.PAUSED -> R.string.on_device_agent_status_paused
+    })
+
+    private fun globalLongHorizonStatusLabel(status: GlobalLongHorizonGoalStatus): String = getString(when (status) {
+        GlobalLongHorizonGoalStatus.ACTIVE -> R.string.cc_global_status_active
+        GlobalLongHorizonGoalStatus.IN_PROGRESS -> R.string.cc_global_status_in_progress
+        GlobalLongHorizonGoalStatus.WAITING_CONFIRMATION -> R.string.cc_global_status_confirmation
+        GlobalLongHorizonGoalStatus.BLOCKED -> R.string.cc_global_status_blocked
+        GlobalLongHorizonGoalStatus.COMPLETED -> R.string.cc_global_status_completed
+        GlobalLongHorizonGoalStatus.PAUSED -> R.string.on_device_agent_status_paused
     })
 
     private fun globalAutonomousActionStatusLabel(status: GlobalAutonomousActionStatus): String = getString(when (status) {

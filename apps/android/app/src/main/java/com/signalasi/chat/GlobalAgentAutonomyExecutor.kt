@@ -24,6 +24,7 @@ class GlobalCognitionExecutor(context: Context) {
     private val repository = GlobalAgentRepository(appContext)
     private val deliberationStore = GlobalAgentDeliberationStore(appContext)
     private val resources = GlobalAgentResourceResolver(appContext)
+    private val goalStore = GlobalLongHorizonGoalStore(appContext)
 
     fun executeNext(): GlobalCognitionExecutionResult? {
         val task = deliberationStore.claimCognitionTask() ?: return null
@@ -140,12 +141,40 @@ class GlobalCognitionExecutor(context: Context) {
         val reduction = GlobalWorldModelReducer.reduce(repository.loadWorld(), cognitionEvent, merged)
         repository.saveWorld(reduction.world)
         enqueueResearch(task, merged)
+        var plannedRun: GlobalAutonomousRun? = null
         if (settings.autonomousPreparationEnabled) {
             GlobalAutonomousRunPlanner.plan(task)?.let { run ->
                 val duplicate = deliberationStore.autonomousRuns().any {
                     it.sourceCognitionTaskId == task.id && it.status != GlobalAutonomousRunStatus.FAILED
                 }
-                if (!duplicate) deliberationStore.upsertAutonomousRun(run)
+                if (!duplicate) {
+                    deliberationStore.upsertAutonomousRun(run)
+                    plannedRun = run
+                } else {
+                    plannedRun = deliberationStore.autonomousRuns().firstOrNull {
+                        it.sourceCognitionTaskId == task.id && it.status != GlobalAutonomousRunStatus.FAILED
+                    }
+                }
+            }
+        }
+        if (settings.longHorizonPlanningEnabled) {
+            if (task.longHorizonGoalId.isBlank()) {
+                val mergedGoals = GlobalLongHorizonGoalPolicy.mergeCognition(
+                    task,
+                    goalStore.goals(),
+                    task.updatedAtMillis
+                ).map { goal ->
+                    if (plannedRun != null && task.sourceEvent.id in goal.sourceEventIds &&
+                        goal.status != GlobalLongHorizonGoalStatus.COMPLETED
+                    ) goal.copy(
+                        status = GlobalLongHorizonGoalStatus.IN_PROGRESS,
+                        activeRunId = plannedRun?.id.orEmpty(),
+                        updatedAtMillis = task.updatedAtMillis
+                    ) else goal
+                }
+                goalStore.save(mergedGoals)
+            } else {
+                applyLongHorizonCheckpoint(task, plannedRun)
             }
         }
         val profile = if (settings.adaptiveLearningEnabled) {
@@ -176,6 +205,41 @@ class GlobalCognitionExecutor(context: Context) {
         } else if (decision.mode != GlobalInterventionMode.RECORD_ONLY) {
             GlobalProactiveMessageFactory.create(task.sourceEvent, merged, reduction, decision)
                 ?.let(repository::appendProactiveMessage)
+        }
+    }
+
+    private fun applyLongHorizonCheckpoint(task: GlobalCognitionTask, run: GlobalAutonomousRun?) {
+        val now = task.updatedAtMillis
+        goalStore.update(task.longHorizonGoalId) { goal ->
+            val state = task.result.goalState
+            val status = when {
+                state == GlobalGoalProgressState.COMPLETED -> GlobalLongHorizonGoalStatus.COMPLETED
+                state == GlobalGoalProgressState.PAUSED -> GlobalLongHorizonGoalStatus.PAUSED
+                state == GlobalGoalProgressState.BLOCKED -> GlobalLongHorizonGoalStatus.BLOCKED
+                run != null -> GlobalLongHorizonGoalStatus.IN_PROGRESS
+                else -> GlobalLongHorizonGoalStatus.ACTIVE
+            }
+            val interval = task.result.nextCheckHours.toLong() * 60L * 60L * 1_000L
+            goal.copy(
+                status = status,
+                activeCognitionTaskId = "",
+                activeRunId = run?.id.orEmpty(),
+                checkpointIntervalMillis = interval,
+                nextCheckAtMillis = if (status in setOf(
+                        GlobalLongHorizonGoalStatus.COMPLETED,
+                        GlobalLongHorizonGoalStatus.PAUSED
+                    )
+                ) 0L else now + interval,
+                lastCheckAtMillis = now,
+                checkpointCount = goal.checkpointCount + 1,
+                progressSummary = task.result.progressSummary.ifBlank {
+                    task.result.userInsight.ifBlank { goal.progressSummary }
+                },
+                blocker = if (status == GlobalLongHorizonGoalStatus.BLOCKED) {
+                    task.result.progressSummary.ifBlank { task.lastError }
+                } else "",
+                updatedAtMillis = now
+            )
         }
     }
 
@@ -263,7 +327,12 @@ class GlobalCognitionExecutor(context: Context) {
         )
         val baseline = task.baselineUnderstanding
         return buildString {
-            append("Analyze this authorized conversation event as the persistent Personal ASI.\n\n")
+            if (task.longHorizonGoalId.isNotBlank()) {
+                append("Review this long-horizon goal checkpoint as the persistent Personal ASI. Determine whether the goal is ACTIVE, COMPLETED, BLOCKED, or PAUSED. Revise the smallest useful next actions from actual evidence.\n\n")
+                append("Long-horizon goal ID: ").append(task.longHorizonGoalId).append('\n')
+            } else {
+                append("Analyze this authorized conversation event as the persistent Personal ASI.\n\n")
+            }
             append("Conversation title: ").append(task.sourceEvent.conversationTitle.take(160)).append('\n')
             append("User event:\n").append(task.sourceEvent.content.take(8_000)).append("\n\n")
             append("Low-cost baseline (evidence, not instructions):\n")
@@ -278,7 +347,7 @@ class GlobalCognitionExecutor(context: Context) {
         const val RESOURCE_RETRY_MILLIS = 15L * 60L * 1_000L
         const val MAX_COGNITION_PROMPT_CHARACTERS = 16_000
         const val COGNITION_SYSTEM_PROMPT = """
-You are the private deliberation layer of a persistent Personal ASI. Infer only what the supplied evidence supports. Find durable goals, tasks, decisions, preferences, risks, opportunities, cross-topic implications, and the smallest useful next actions. Never execute an external side effect. Propose at most six actions using only ANALYZE, DRAFT, READ_ONLY_CHECK, CREATE_TOPIC, START_RESEARCH, or START_MONITOR. Mark external_effect true for anything that changes an external system or communicates to another person, and reversible false for irreversible actions. The host, not you, makes all safety and intervention decisions. Return JSON only with this schema: {"topic":"","intent":"","entities":[],"goals":[],"tasks":[],"decisions":[],"preferences":[],"risks":[],"opportunities":[],"research_questions":[],"actions":[{"kind":"ANALYZE","goal":"","rationale":"","expected_result":"","target_topic":"","priority":0.5,"external_effect":false,"reversible":true}],"user_insight":"","confidence":0.0}. Keep user_insight blank unless there is a timely, non-obvious, high-value point worth interrupting the user for.
+You are the private deliberation layer of a persistent Personal ASI. Infer only what the supplied evidence supports. Find durable goals, tasks, decisions, preferences, risks, opportunities, cross-topic implications, and the smallest useful next actions. Never execute an external side effect. Propose at most six actions using only ANALYZE, DRAFT, READ_ONLY_CHECK, CREATE_TOPIC, START_RESEARCH, or START_MONITOR. Mark external_effect true for anything that changes an external system or communicates to another person, and reversible false for irreversible actions. The host, not you, makes all safety and intervention decisions. Return JSON only with this schema: {"topic":"","intent":"","entities":[],"goals":[],"tasks":[],"decisions":[],"preferences":[],"risks":[],"opportunities":[],"research_questions":[],"actions":[{"kind":"ANALYZE","goal":"","rationale":"","expected_result":"","target_topic":"","priority":0.5,"external_effect":false,"reversible":true}],"user_insight":"","goal_state":"ACTIVE","progress_summary":"","next_check_hours":24,"confidence":0.0}. Keep user_insight blank unless there is a timely, non-obvious, high-value point worth interrupting the user for. For a long-horizon checkpoint, set goal_state and progress_summary from evidence, not optimism.
 """
     }
 }
@@ -291,6 +360,11 @@ class GlobalAutonomousRunExecutor(context: Context) {
 
     fun executeNext(): GlobalAutonomousExecutionResult? {
         var run = store.claimAutonomousRun() ?: return null
+        if (run.review.status in setOf(
+                GlobalRunReviewStatus.PENDING,
+                GlobalRunReviewStatus.WAITING_FOR_RESOURCE
+            )
+        ) return dispatchPlanReview(run)
         repeat(MAX_LOCAL_STEPS_PER_CYCLE) {
             val action = run.actions.firstOrNull { it.status == GlobalAutonomousActionStatus.PENDING }
                 ?: return finishOrWait(run)
@@ -330,6 +404,22 @@ class GlobalAutonomousRunExecutor(context: Context) {
     }
 
     fun consumeConnectorResponse(response: AgentConnectorResponse): Boolean {
+        val reviewRun = store.autonomousRuns().firstOrNull { candidate ->
+            candidate.review.status == GlobalRunReviewStatus.RUNNING &&
+                candidate.review.sourceMessageId == response.sourceMessageId
+        }
+        if (reviewRun != null) {
+            if (response.success && response.content.isNotBlank()) {
+                completePlanReview(reviewRun, response.content)
+            } else {
+                failOrRetryPlanReview(
+                    reviewRun,
+                    response.content.ifBlank { "The delegated Agent returned no plan review" }
+                )
+            }
+            GlobalConversationEventBus.requestProcessing(appContext)
+            return true
+        }
         val run = store.autonomousRuns().firstOrNull { candidate ->
             candidate.status == GlobalAutonomousRunStatus.RUNNING && candidate.actions.any {
                 it.status == GlobalAutonomousActionStatus.RUNNING && it.sourceMessageId == response.sourceMessageId
@@ -340,6 +430,47 @@ class GlobalAutonomousRunExecutor(context: Context) {
             completeAction(run, action, CodexStyleResponsePolicy.sanitizeAssistantText(response.content).take(12_000))
         } else {
             failOrRetryAction(run, action, response.content.ifBlank { "The delegated Agent returned no result" })
+        }
+        GlobalConversationEventBus.requestProcessing(appContext)
+        return true
+    }
+
+    fun consumeResearchEvent(event: GlobalConversationEvent): Boolean {
+        val researchTaskId = event.metadata["research_task_id"].orEmpty()
+        if (researchTaskId.isBlank()) return false
+        val research = repository.researchTasks().firstOrNull { it.id == researchTaskId } ?: return false
+        val source = research.sourceEventId
+        if (!source.startsWith("autonomous:")) return false
+        val parts = source.split(':', limit = 3)
+        if (parts.size != 3) return false
+        val run = store.autonomousRuns().firstOrNull { it.id == parts[1] } ?: return false
+        val action = run.actions.firstOrNull { it.id == parts[2] } ?: return false
+        val result = event.content.trim().take(12_000)
+        if (result.isBlank() || action.result == result) return false
+        val now = event.timestampMillis
+        var updated = store.updateAutonomousRun(run.id) { current ->
+            current.copy(
+                actions = current.actions.map {
+                    if (it.id == action.id) it.copy(
+                        status = GlobalAutonomousActionStatus.COMPLETED,
+                        result = result,
+                        lastError = "",
+                        completedAtMillis = now
+                    ) else it
+                },
+                updatedAtMillis = now
+            )
+        } ?: return false
+        val settings = repository.settings()
+        if (settings.dynamicAutonomousReplanningEnabled &&
+            updated.replanCount < settings.maxAutonomousReplans
+        ) {
+            updated = GlobalAutonomousReplanPolicy.requestReview(
+                updated,
+                "New research evidence may change the remaining plan",
+                now
+            )
+            store.upsertAutonomousRun(updated)
         }
         GlobalConversationEventBus.requestProcessing(appContext)
         return true
@@ -373,12 +504,14 @@ class GlobalAutonomousRunExecutor(context: Context) {
                 naturalFailure(response.exceptionOrNull())
             )
         }
+        val selected = markActionRunning(run, action, resourceId, 0L)
+        val selectedAction = selected.actions.first { it.id == action.id }
         val contactId = resources.resolvePairedContact(resourceId)
-            ?: return failOrRetryAction(run, action, "The selected execution Agent is unavailable")
+            ?: return failOrRetryAction(selected, selectedAction, "The selected execution Agent is unavailable")
         val topic = AppStore.outgoingTopicForContact(appContext, contactId)
-            ?: return failOrRetryAction(run, action, "The selected execution route is unavailable")
+            ?: return failOrRetryAction(selected, selectedAction, "The selected execution route is unavailable")
         val sourceMessageId = correlationId(run.id, action.id)
-        val running = markActionRunning(run, action, resourceId, sourceMessageId)
+        val running = setActionSourceMessageId(selected, action.id, sourceMessageId)
         SignalASIMqttClient.connect(appContext)
         val published = SignalASIMqttClient.publishUserMessage(
             content = prompt,
@@ -425,13 +558,26 @@ class GlobalAutonomousRunExecutor(context: Context) {
         } ?: run
     }
 
+    private fun setActionSourceMessageId(
+        run: GlobalAutonomousRun,
+        actionId: String,
+        sourceMessageId: Long
+    ): GlobalAutonomousRun = store.updateAutonomousRun(run.id) { current ->
+        current.copy(
+            actions = current.actions.map {
+                if (it.id == actionId) it.copy(sourceMessageId = sourceMessageId) else it
+            },
+            updatedAtMillis = System.currentTimeMillis()
+        )
+    } ?: run
+
     private fun completeAction(
         run: GlobalAutonomousRun,
         action: GlobalAutonomousAction,
         result: String
     ): GlobalAutonomousRun {
         val now = System.currentTimeMillis()
-        return store.updateAutonomousRun(run.id) { current ->
+        var updated = store.updateAutonomousRun(run.id) { current ->
             val actions = current.actions.map {
                 if (it.id == action.id) it.copy(
                     status = GlobalAutonomousActionStatus.COMPLETED,
@@ -450,6 +596,25 @@ class GlobalAutonomousRunExecutor(context: Context) {
                 updatedAtMillis = now
             )
         } ?: run
+        val completedAction = updated.actions.firstOrNull { it.id == action.id } ?: action
+        val settings = repository.settings()
+        if (GlobalAutonomousReplanPolicy.shouldReview(
+                updated,
+                completedAction,
+                succeeded = true,
+                result = result,
+                enabled = settings.dynamicAutonomousReplanningEnabled,
+                maxReplans = settings.maxAutonomousReplans
+            )
+        ) {
+            updated = GlobalAutonomousReplanPolicy.requestReview(
+                updated,
+                "The completed discovery step may change the remaining plan",
+                now
+            )
+            store.upsertAutonomousRun(updated)
+        }
+        return updated
     }
 
     private fun updateAction(run: GlobalAutonomousRun, action: GlobalAutonomousAction): GlobalAutonomousRun {
@@ -471,7 +636,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
     ): GlobalAutonomousExecutionResult {
         val now = System.currentTimeMillis()
         val retry = action.attemptCount < GlobalAutonomousRunPolicy.MAX_ACTION_ATTEMPTS
-        val updated = store.updateAutonomousRun(run.id) { current ->
+        var updated = store.updateAutonomousRun(run.id) { current ->
             val actions = current.actions.map {
                 if (it.id == action.id) it.copy(
                     status = if (retry) GlobalAutonomousActionStatus.PENDING else GlobalAutonomousActionStatus.FAILED,
@@ -495,12 +660,43 @@ class GlobalAutonomousRunExecutor(context: Context) {
                 updatedAtMillis = now
             )
         } ?: run
+        val failedAction = updated.actions.firstOrNull { it.id == action.id } ?: action
+        val settings = repository.settings()
+        if (!retry && GlobalAutonomousReplanPolicy.shouldReview(
+                updated,
+                failedAction,
+                succeeded = false,
+                result = reason,
+                enabled = settings.dynamicAutonomousReplanningEnabled,
+                maxReplans = settings.maxAutonomousReplans
+            )
+        ) {
+            updated = GlobalAutonomousReplanPolicy.requestReview(
+                updated,
+                "A planned step failed and the plan needs a different path: ${reason.take(360)}",
+                now
+            )
+            store.upsertAutonomousRun(updated)
+        }
         if (updated.status in TERMINAL_RUN_STATUSES) publishRunResult(updated)
         return GlobalAutonomousExecutionResult(run.id, updated.status, action.resourceId, reason)
     }
 
     private fun finishOrWait(run: GlobalAutonomousRun): GlobalAutonomousExecutionResult {
         val latest = store.autonomousRuns().firstOrNull { it.id == run.id } ?: run
+        if (latest.review.status in setOf(
+                GlobalRunReviewStatus.PENDING,
+                GlobalRunReviewStatus.RUNNING,
+                GlobalRunReviewStatus.WAITING_FOR_RESOURCE
+            )
+        ) {
+            return GlobalAutonomousExecutionResult(
+                latest.id,
+                GlobalAutonomousRunStatus.REPLANNING,
+                latest.review.resourceId,
+                latest.review.reason
+            )
+        }
         val terminal = GlobalAutonomousRunPolicy.terminalStatus(latest.actions)
         val updated = if (terminal != null && latest.status != terminal) {
             latest.copy(status = terminal, leaseExpiresAtMillis = 0L, updatedAtMillis = System.currentTimeMillis())
@@ -512,6 +708,143 @@ class GlobalAutonomousRunExecutor(context: Context) {
             updated.status,
             detail = "${updated.completedActions().size}/${updated.actions.size} autonomous steps completed"
         )
+    }
+
+    private fun dispatchPlanReview(run: GlobalAutonomousRun): GlobalAutonomousExecutionResult {
+        val review = run.review
+        val candidates = resources.route(run.goal, repository.settings().allowCloudCognition)
+            .filterNot { it in review.attemptedResourceIds }
+        val resourceId = candidates.firstOrNull().orEmpty()
+        if (resourceId.isBlank()) {
+            return failOrRetryPlanReview(run, "No trusted resource is available to revise the plan")
+        }
+        val prompt = buildPlanReviewPrompt(run)
+        val cloud = resources.cloudContact(resourceId)
+        if (cloud != null) {
+            val running = markPlanReviewRunning(run, resourceId, 0L)
+            val response = runCatching {
+                CloudModelClient.sendStructured(appContext, cloud, REPLAN_SYSTEM_PROMPT, prompt)
+            }
+            return if (response.isSuccess && response.getOrNull().orEmpty().isNotBlank()) {
+                completePlanReview(running, response.getOrNull().orEmpty())
+            } else failOrRetryPlanReview(running, naturalFailure(response.exceptionOrNull()))
+        }
+        val selected = markPlanReviewRunning(run, resourceId, 0L)
+        val contactId = resources.resolvePairedContact(resourceId)
+            ?: return failOrRetryPlanReview(selected, "The selected plan review Agent is unavailable")
+        val topic = AppStore.outgoingTopicForContact(appContext, contactId)
+            ?: return failOrRetryPlanReview(selected, "The selected plan review route is unavailable")
+        val sourceMessageId = correlationId("global-replan", run.id, run.revision.toString())
+        val running = setPlanReviewSourceMessageId(selected, sourceMessageId)
+        SignalASIMqttClient.connect(appContext)
+        val published = SignalASIMqttClient.publishUserMessage(
+            content = prompt,
+            contactId = contactId,
+            topicOverride = topic,
+            clientMessageId = sourceMessageId,
+            conversationId = "global-replan:${run.id}",
+            turnId = "revision:${run.revision + 1}"
+        )
+        return if (published) {
+            GlobalAutonomousExecutionResult(
+                run.id,
+                GlobalAutonomousRunStatus.REPLANNING,
+                resourceId,
+                "Plan review accepted"
+            )
+        } else failOrRetryPlanReview(running, "The plan review Agent did not accept the task")
+    }
+
+    private fun markPlanReviewRunning(
+        run: GlobalAutonomousRun,
+        resourceId: String,
+        sourceMessageId: Long
+    ): GlobalAutonomousRun {
+        val now = System.currentTimeMillis()
+        return store.updateAutonomousRun(run.id) { current ->
+            current.copy(
+                status = GlobalAutonomousRunStatus.REPLANNING,
+                review = current.review.copy(
+                    status = GlobalRunReviewStatus.RUNNING,
+                    resourceId = resourceId,
+                    sourceMessageId = sourceMessageId,
+                    attemptCount = current.review.attemptCount + 1,
+                    leaseExpiresAtMillis = now + GlobalAutonomousReplanPolicy.LEASE_MILLIS,
+                    lastError = "",
+                    updatedAtMillis = now
+                ),
+                leaseExpiresAtMillis = now + GlobalAutonomousReplanPolicy.LEASE_MILLIS,
+                updatedAtMillis = now
+            )
+        } ?: run
+    }
+
+    private fun setPlanReviewSourceMessageId(
+        run: GlobalAutonomousRun,
+        sourceMessageId: Long
+    ): GlobalAutonomousRun = store.updateAutonomousRun(run.id) { current ->
+        current.copy(
+            review = current.review.copy(
+                sourceMessageId = sourceMessageId,
+                updatedAtMillis = System.currentTimeMillis()
+            ),
+            updatedAtMillis = System.currentTimeMillis()
+        )
+    } ?: run
+
+    private fun completePlanReview(
+        run: GlobalAutonomousRun,
+        rawResult: String
+    ): GlobalAutonomousExecutionResult {
+        val decision = GlobalRunReplanParser.parse(rawResult)
+            ?: return failOrRetryPlanReview(run, "The plan review was not valid structured data")
+        val updated = GlobalAutonomousReplanPolicy.applyDecision(run, decision)
+        store.upsertAutonomousRun(updated)
+        if (updated.status in TERMINAL_RUN_STATUSES) publishRunResult(updated)
+        return GlobalAutonomousExecutionResult(
+            updated.id,
+            updated.status,
+            updated.review.resourceId,
+            decision.summary.take(240)
+        )
+    }
+
+    private fun failOrRetryPlanReview(
+        run: GlobalAutonomousRun,
+        reason: String
+    ): GlobalAutonomousExecutionResult {
+        val now = System.currentTimeMillis()
+        val review = run.review
+        val retry = review.attemptCount < GlobalAutonomousReplanPolicy.MAX_REVIEW_ATTEMPTS
+        val updated = store.updateAutonomousRun(run.id) { current ->
+            val attempted = (current.review.attemptedResourceIds + current.review.resourceId)
+                .filter(String::isNotBlank).distinct()
+            val nextReview = current.review.copy(
+                status = if (retry) GlobalRunReviewStatus.WAITING_FOR_RESOURCE else GlobalRunReviewStatus.FAILED,
+                attemptedResourceIds = attempted,
+                sourceMessageId = 0L,
+                nextAttemptAtMillis = if (retry) {
+                    now + GlobalAutonomousRunPolicy.retryDelayMillis(current.review.attemptCount)
+                } else 0L,
+                leaseExpiresAtMillis = 0L,
+                lastError = reason.take(600),
+                updatedAtMillis = now
+            )
+            val fallbackStatus = if (retry) {
+                GlobalAutonomousRunStatus.REPLANNING
+            } else GlobalAutonomousRunPolicy.terminalStatus(current.actions)
+                ?: GlobalAutonomousRunStatus.WAITING_FOR_RESOURCE
+            current.copy(
+                status = fallbackStatus,
+                review = nextReview,
+                nextAttemptAtMillis = nextReview.nextAttemptAtMillis,
+                leaseExpiresAtMillis = 0L,
+                lastError = reason.take(600),
+                updatedAtMillis = now
+            )
+        } ?: run
+        if (updated.status in TERMINAL_RUN_STATUSES) publishRunResult(updated)
+        return GlobalAutonomousExecutionResult(updated.id, updated.status, review.resourceId, reason)
     }
 
     private fun queueResearch(run: GlobalAutonomousRun, action: GlobalAutonomousAction, continuous: Boolean) {
@@ -539,7 +872,12 @@ class GlobalAutonomousRunExecutor(context: Context) {
     private fun publishRunResult(run: GlobalAutonomousRun) {
         val sourceId = "autonomous-result:${run.id}:${run.updatedAtMillis}"
         if (repository.proactiveMessages().any { it.sourceEventId == sourceId }) return
-        val completed = run.completedActions().filter { it.result.isNotBlank() }
+        val completed = run.completedActions().filter {
+            it.result.isNotBlank() && it.kind !in setOf(
+                GlobalAutonomousActionKind.START_RESEARCH,
+                GlobalAutonomousActionKind.START_MONITOR
+            )
+        }
         if (completed.isEmpty()) return
         val content = completed.joinToString("\n\n") { action ->
             val heading = action.expectedResult.ifBlank { action.goal }.take(160)
@@ -590,6 +928,35 @@ class GlobalAutonomousRunExecutor(context: Context) {
         }.take(16_000)
     }
 
+    private fun buildPlanReviewPrompt(run: GlobalAutonomousRun): String {
+        val context = GlobalAgentContextSelector.build(
+            repository.loadWorld(),
+            run.goal,
+            run.sourceConversationId,
+            maxCharacters = 4_000
+        )
+        return buildString {
+            append("Review revision ").append(run.revision).append(" of this autonomous preparation plan.\n")
+            append("Goal: ").append(run.goal.take(2_000)).append("\n")
+            append("Review reason: ").append(run.review.reason.take(600)).append("\n\n")
+            append("Current steps:\n")
+            run.actions.take(12).forEach { action ->
+                append("- id=").append(action.id)
+                    .append("; kind=").append(action.kind.name)
+                    .append("; status=").append(action.status.name)
+                    .append("; goal=").append(action.goal.take(500)).append('\n')
+                if (action.result.isNotBlank()) {
+                    append("  result=").append(action.result.replace(Regex("\\s+"), " ").take(1_500)).append('\n')
+                }
+                if (action.lastError.isNotBlank()) {
+                    append("  error=").append(action.lastError.take(500)).append('\n')
+                }
+            }
+            if (context.isNotBlank()) append('\n').append(context).append('\n')
+            append("\nReturn only the review JSON. Cancel only pending action IDs that are obsolete. Add at most six necessary actions. Never turn an external or irreversible action into an unconfirmed action.")
+        }.take(18_000)
+    }
+
     private companion object {
         const val MAX_LOCAL_STEPS_PER_CYCLE = 6
         val TERMINAL_RUN_STATUSES = setOf(
@@ -599,6 +966,9 @@ class GlobalAutonomousRunExecutor(context: Context) {
         )
         const val AUTONOMY_SYSTEM_PROMPT = """
 You are an execution worker for a persistent Personal ASI. Perform only the supplied reversible preparation, analysis, draft, or read-only check. Do not create unrelated work. Never contact third parties, publish, purchase, delete irreversible data, change account permissions, or upload sensitive data. Clearly report the result, material uncertainty, and any artifact paths. Do not expose hidden chain of thought or internal orchestration logs.
+"""
+        const val REPLAN_SYSTEM_PROMPT = """
+You are the plan review layer of a persistent Personal ASI. Review actual step outcomes against the goal. Preserve completed evidence, cancel only obsolete pending steps, and propose the smallest useful next steps. Use only ANALYZE, DRAFT, READ_ONLY_CHECK, CREATE_TOPIC, START_RESEARCH, or START_MONITOR. Mark external_effect true for anything that changes an external system or communicates to another person, and reversible false for irreversible effects. Never claim completion without evidence. Return JSON only: {"goal_state":"ACTIVE","summary":"","cancel_action_ids":[],"actions":[{"kind":"ANALYZE","goal":"","rationale":"","expected_result":"","target_topic":"","priority":0.5,"external_effect":false,"reversible":true}],"next_check_hours":24,"confidence":0.0}.
 """
     }
 }

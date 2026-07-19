@@ -6,6 +6,24 @@ SignalASI is a personal super-agent operating system, not a chat client. It acce
 
 The product should exceed code-only agents by combining the strengths of coding agents, research agents, device automation, private memory, multimodal understanding, and trusted cross-device execution in one user-controlled runtime.
 
+## Global Personal ASI Runtime
+
+SignalASI has one persistent global Agent above all topic conversations. Conversations are bounded workspaces, not separate assistants with separate memories. Every authorized message, task update, tool result, and user feedback event enters the encrypted local cognition pipeline.
+
+The global runtime must:
+
+- Maintain conversation, topic/project, user-global, and realtime state as separate layers.
+- Use low-cost local extraction first and request model deliberation only for valuable cross-topic reasoning.
+- Link related conversations into one personal world model without sending complete history to every model.
+- Turn durable goals into persistent checkpoints that survive app restarts and temporary resource outages.
+- Revise autonomous plans from actual tool, research, and Agent outcomes while preserving completed evidence.
+- Run independent safe work concurrently, with leases, bounded retries, deduplication, and explicit partial states.
+- Keep internal cognition, research, and plan-review responses out of ordinary contact conversations.
+- Create or reuse topic conversations for substantial work and deliver only useful results at the right time.
+- Require local policy approval for irreversible external effects regardless of which model or Agent proposed them.
+
+Model output never owns lifecycle or safety state. The Android host validates structured cognition, action vocabularies, plan revisions, resource routes, confirmations, retries, and completion evidence before persistence or execution.
+
 ## Core Capability Pillars
 
 ### 1. Goal and Context Understanding

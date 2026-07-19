@@ -26,6 +26,7 @@ data class GlobalCognitionTask(
     val leaseExpiresAtMillis: Long = 0L,
     val lastError: String = "",
     val result: GlobalModelUnderstanding = GlobalModelUnderstanding(),
+    val longHorizonGoalId: String = "",
     val createdAtMillis: Long = System.currentTimeMillis(),
     val updatedAtMillis: Long = System.currentTimeMillis()
 )
@@ -43,13 +44,17 @@ data class GlobalModelUnderstanding(
     val researchQuestions: List<String> = emptyList(),
     val actions: List<GlobalAutonomousAction> = emptyList(),
     val userInsight: String = "",
+    val goalState: GlobalGoalProgressState = GlobalGoalProgressState.ACTIVE,
+    val progressSummary: String = "",
+    val nextCheckHours: Int = 24,
     val confidence: Double = 0.0
 ) {
     val meaningful: Boolean
         get() = topic.isNotBlank() || goals.isNotEmpty() || tasks.isNotEmpty() ||
             decisions.isNotEmpty() || preferences.isNotEmpty() || risks.isNotEmpty() ||
             opportunities.isNotEmpty() || researchQuestions.isNotEmpty() ||
-            actions.isNotEmpty() || userInsight.isNotBlank()
+            actions.isNotEmpty() || userInsight.isNotBlank() || progressSummary.isNotBlank() ||
+            goalState != GlobalGoalProgressState.ACTIVE
 }
 
 enum class GlobalAutonomousActionKind {
@@ -98,6 +103,7 @@ data class GlobalAutonomousAction(
 enum class GlobalAutonomousRunStatus {
     QUEUED,
     RUNNING,
+    REPLANNING,
     WAITING_FOR_RESOURCE,
     WAITING_CONFIRMATION,
     COMPLETED,
@@ -115,6 +121,10 @@ data class GlobalAutonomousRun(
     val goal: String,
     val actions: List<GlobalAutonomousAction>,
     val status: GlobalAutonomousRunStatus = GlobalAutonomousRunStatus.QUEUED,
+    val revision: Int = 1,
+    val replanCount: Int = 0,
+    val outcomeSummary: String = "",
+    val review: GlobalAutonomousRunReview = GlobalAutonomousRunReview(),
     val attemptCount: Int = 0,
     val nextAttemptAtMillis: Long = 0L,
     val leaseExpiresAtMillis: Long = 0L,
@@ -243,6 +253,9 @@ object GlobalModelUnderstandingParser {
             researchQuestions = strings(json.optJSONArray("research_questions"), 6, 1_000),
             actions = actions.distinctBy { GlobalAgentText.stableKey(it.kind.name, it.goal) },
             userInsight = clean(json.optString("user_insight"), 2_000),
+            goalState = enumValue(json.optString("goal_state"), GlobalGoalProgressState.ACTIVE),
+            progressSummary = clean(json.optString("progress_summary"), 2_000),
+            nextCheckHours = json.optInt("next_check_hours", 24).coerceIn(1, 24 * 30),
             confidence = json.optDouble("confidence", 0.5).coerceIn(0.0, 1.0)
         ).takeIf(GlobalModelUnderstanding::meaningful)
     }
@@ -276,12 +289,22 @@ object GlobalModelUnderstandingParser {
     private fun clean(value: String, maxCharacters: Int): String =
         value.replace(Regex("\\s+"), " ").trim().take(maxCharacters)
 
+    private inline fun <reified T : Enum<T>> enumValue(value: String, fallback: T): T {
+        val normalized = value.trim().uppercase(Locale.ROOT).replace('-', '_').replace(' ', '_')
+        return enumValues<T>().firstOrNull { it.name == normalized } ?: fallback
+    }
+
     private const val MAX_ACTIONS = 6
 }
 
 object GlobalAutonomousRunPlanner {
     fun plan(task: GlobalCognitionTask): GlobalAutonomousRun? {
         val result = task.result
+        if (task.longHorizonGoalId.isNotBlank() && result.goalState in setOf(
+                GlobalGoalProgressState.COMPLETED,
+                GlobalGoalProgressState.PAUSED
+            )
+        ) return null
         val actions = result.actions
             .sortedByDescending(GlobalAutonomousAction::priority)
             .distinctBy { GlobalAgentText.stableKey(it.kind.name, it.goal) }
@@ -313,6 +336,8 @@ object GlobalAutonomousRunPlanner {
 
 object GlobalAutonomousRunPolicy {
     fun recoverIfStale(run: GlobalAutonomousRun, nowMillis: Long): GlobalAutonomousRun {
+        val recoveredReview = GlobalAutonomousReplanPolicy.recoverIfStale(run, nowMillis)
+        if (recoveredReview != run) return recoveredReview
         if (run.status != GlobalAutonomousRunStatus.RUNNING ||
             run.leaseExpiresAtMillis <= 0L || run.leaseExpiresAtMillis > nowMillis
         ) return run
@@ -447,11 +472,16 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
         val index = runs.indexOfFirst {
             it.status in setOf(
                 GlobalAutonomousRunStatus.QUEUED,
+                GlobalAutonomousRunStatus.REPLANNING,
                 GlobalAutonomousRunStatus.WAITING_FOR_RESOURCE,
                 GlobalAutonomousRunStatus.RUNNING
-            ) && it.nextAttemptAtMillis <= nowMillis && it.actions.any { action ->
-                action.status == GlobalAutonomousActionStatus.PENDING
-            }
+            ) && it.nextAttemptAtMillis <= nowMillis && (
+                it.actions.any { action -> action.status == GlobalAutonomousActionStatus.PENDING } ||
+                    it.review.status in setOf(
+                        GlobalRunReviewStatus.PENDING,
+                        GlobalRunReviewStatus.WAITING_FOR_RESOURCE
+                    ) && it.review.nextAttemptAtMillis <= nowMillis
+                )
         }
         if (index < 0) {
             saveAutonomousRuns(runs)
@@ -515,6 +545,7 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
         .put("lease_expires_at_millis", task.leaseExpiresAtMillis)
         .put("last_error", task.lastError.take(600))
         .put("result", encodeModelUnderstanding(task.result))
+        .put("long_horizon_goal_id", task.longHorizonGoalId)
         .put("created_at_millis", task.createdAtMillis)
         .put("updated_at_millis", task.updatedAtMillis)
 
@@ -535,6 +566,7 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
             leaseExpiresAtMillis = json.optLong("lease_expires_at_millis"),
             lastError = json.optString("last_error").take(600),
             result = decodeModelUnderstanding(json.optJSONObject("result")),
+            longHorizonGoalId = json.optString("long_horizon_goal_id"),
             createdAtMillis = json.optLong("created_at_millis", sourceEvent.timestampMillis),
             updatedAtMillis = json.optLong("updated_at_millis", sourceEvent.timestampMillis)
         )
@@ -549,6 +581,10 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
         .put("goal", run.goal.take(2_000))
         .put("actions", JSONArray().apply { run.actions.forEach { put(encodeAction(it)) } })
         .put("status", run.status.name)
+        .put("revision", run.revision)
+        .put("replan_count", run.replanCount)
+        .put("outcome_summary", run.outcomeSummary)
+        .put("review", encodeReview(run.review))
         .put("attempt_count", run.attemptCount)
         .put("next_attempt_at_millis", run.nextAttemptAtMillis)
         .put("lease_expires_at_millis", run.leaseExpiresAtMillis)
@@ -573,6 +609,10 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
                 for (index in 0 until array.length()) decodeAction(array.optJSONObject(index))?.let(::add)
             }.take(8),
             status = enumValue(json.optString("status"), GlobalAutonomousRunStatus.QUEUED),
+            revision = json.optInt("revision", 1).coerceAtLeast(1),
+            replanCount = json.optInt("replan_count").coerceAtLeast(0),
+            outcomeSummary = json.optString("outcome_summary").take(2_000),
+            review = decodeReview(json.optJSONObject("review")),
             attemptCount = json.optInt("attempt_count").coerceAtLeast(0),
             nextAttemptAtMillis = json.optLong("next_attempt_at_millis"),
             leaseExpiresAtMillis = json.optLong("lease_expires_at_millis"),
@@ -595,6 +635,9 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
         .put("research_questions", JSONArray(result.researchQuestions))
         .put("actions", JSONArray().apply { result.actions.forEach { put(encodeAction(it)) } })
         .put("user_insight", result.userInsight)
+        .put("goal_state", result.goalState.name)
+        .put("progress_summary", result.progressSummary)
+        .put("next_check_hours", result.nextCheckHours)
         .put("confidence", result.confidence)
 
     private fun decodeModelUnderstanding(json: JSONObject?): GlobalModelUnderstanding {
@@ -615,6 +658,64 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
                 for (index in 0 until array.length()) decodeAction(array.optJSONObject(index))?.let(::add)
             }.take(6),
             userInsight = json.optString("user_insight").take(2_000),
+            goalState = enumValue(json.optString("goal_state"), GlobalGoalProgressState.ACTIVE),
+            progressSummary = json.optString("progress_summary").take(2_000),
+            nextCheckHours = json.optInt("next_check_hours", 24).coerceIn(1, 24 * 30),
+            confidence = json.optDouble("confidence", 0.0).coerceIn(0.0, 1.0)
+        )
+    }
+
+    private fun encodeReview(review: GlobalAutonomousRunReview): JSONObject = JSONObject()
+        .put("status", review.status.name)
+        .put("reason", review.reason)
+        .put("resource_id", review.resourceId)
+        .put("attempted_resource_ids", JSONArray(review.attemptedResourceIds))
+        .put("source_message_id", review.sourceMessageId)
+        .put("attempt_count", review.attemptCount)
+        .put("next_attempt_at_millis", review.nextAttemptAtMillis)
+        .put("lease_expires_at_millis", review.leaseExpiresAtMillis)
+        .put("last_error", review.lastError)
+        .put("decision", encodeReplanDecision(review.decision))
+        .put("created_at_millis", review.createdAtMillis)
+        .put("updated_at_millis", review.updatedAtMillis)
+
+    private fun decodeReview(json: JSONObject?): GlobalAutonomousRunReview {
+        if (json == null) return GlobalAutonomousRunReview()
+        return GlobalAutonomousRunReview(
+            status = enumValue(json.optString("status"), GlobalRunReviewStatus.NONE),
+            reason = json.optString("reason").take(600),
+            resourceId = json.optString("resource_id"),
+            attemptedResourceIds = strings(json.optJSONArray("attempted_resource_ids")),
+            sourceMessageId = json.optLong("source_message_id"),
+            attemptCount = json.optInt("attempt_count").coerceAtLeast(0),
+            nextAttemptAtMillis = json.optLong("next_attempt_at_millis"),
+            leaseExpiresAtMillis = json.optLong("lease_expires_at_millis"),
+            lastError = json.optString("last_error").take(600),
+            decision = decodeReplanDecision(json.optJSONObject("decision")),
+            createdAtMillis = json.optLong("created_at_millis"),
+            updatedAtMillis = json.optLong("updated_at_millis")
+        )
+    }
+
+    private fun encodeReplanDecision(decision: GlobalRunReplanDecision): JSONObject = JSONObject()
+        .put("goal_state", decision.goalState.name)
+        .put("summary", decision.summary)
+        .put("cancel_action_ids", JSONArray(decision.cancelActionIds.toList()))
+        .put("actions", JSONArray().apply { decision.actions.forEach { put(encodeAction(it)) } })
+        .put("next_check_hours", decision.nextCheckHours)
+        .put("confidence", decision.confidence)
+
+    private fun decodeReplanDecision(json: JSONObject?): GlobalRunReplanDecision {
+        if (json == null) return GlobalRunReplanDecision()
+        return GlobalRunReplanDecision(
+            goalState = enumValue(json.optString("goal_state"), GlobalGoalProgressState.ACTIVE),
+            summary = json.optString("summary").take(2_000),
+            cancelActionIds = strings(json.optJSONArray("cancel_action_ids")).take(12).toSet(),
+            actions = buildList {
+                val array = json.optJSONArray("actions") ?: JSONArray()
+                for (index in 0 until array.length()) decodeAction(array.optJSONObject(index))?.let(::add)
+            }.take(6),
+            nextCheckHours = json.optInt("next_check_hours", 24).coerceIn(1, 24 * 30),
             confidence = json.optDouble("confidence", 0.0).coerceIn(0.0, 1.0)
         )
     }

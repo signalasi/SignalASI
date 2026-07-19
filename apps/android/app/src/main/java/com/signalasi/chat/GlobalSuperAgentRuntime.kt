@@ -26,7 +26,10 @@ data class GlobalAgentDashboardSnapshot(
     val queuedResearchCount: Int,
     val queuedCognitionCount: Int,
     val activeAutonomousRunCount: Int,
+    val replanningRunCount: Int,
     val waitingConfirmationCount: Int,
+    val longHorizonGoalCount: Int,
+    val blockedLongHorizonGoalCount: Int,
     val pendingInsightCount: Int,
     val feedbackCount: Int,
     val learnedTopicCount: Int,
@@ -43,6 +46,7 @@ data class GlobalAgentNotificationCandidate(
 class GlobalAgentRepository(context: Context) {
     private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE_NAME)
     private val deliberationStore = GlobalAgentDeliberationStore(context.applicationContext)
+    private val longHorizonStore = GlobalLongHorizonGoalStore(context.applicationContext)
 
     fun enqueue(event: GlobalConversationEvent): Boolean = synchronized(STORE_LOCK) {
         val events = loadEvents().toMutableList()
@@ -150,6 +154,10 @@ class GlobalAgentRepository(context: Context) {
     fun claimAutonomousRun(nowMillis: Long = System.currentTimeMillis()): GlobalAutonomousRun? =
         deliberationStore.claimAutonomousRun(nowMillis)
 
+    fun longHorizonGoals(): List<GlobalLongHorizonGoal> = longHorizonStore.goals()
+
+    fun saveLongHorizonGoals(goals: List<GlobalLongHorizonGoal>) = longHorizonStore.save(goals)
+
     fun proactiveMessages(): List<GlobalProactiveMessage> = synchronized(STORE_LOCK) { loadProactiveMessages() }
 
     fun saveProactiveMessages(messages: List<GlobalProactiveMessage>) = synchronized(STORE_LOCK) {
@@ -202,7 +210,7 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 4)
+            .put("version", 5)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("world", encodeWorld(loadWorld()))
             .put("research_tasks", JSONArray().apply {
@@ -210,6 +218,7 @@ class GlobalAgentRepository(context: Context) {
             })
             .put("cognition_tasks", deliberationStore.exportCognitionTasks())
             .put("autonomous_runs", deliberationStore.exportAutonomousRuns())
+            .put("long_horizon_goals", longHorizonStore.export())
             .put("proactive_messages", JSONArray().apply {
                 loadProactiveMessages().forEach { put(encodeProactiveMessage(it)) }
             })
@@ -232,6 +241,7 @@ class GlobalAgentRepository(context: Context) {
         }
         payload.optJSONArray("cognition_tasks")?.let(deliberationStore::restoreCognitionTasks)
         payload.optJSONArray("autonomous_runs")?.let(deliberationStore::restoreAutonomousRuns)
+        payload.optJSONArray("long_horizon_goals")?.let(longHorizonStore::restore)
         payload.optJSONArray("proactive_messages")?.let { array ->
             saveProactiveMessages(buildList {
                 for (index in 0 until array.length()) decodeProactiveMessage(array.optJSONObject(index))?.let(::add)
@@ -699,6 +709,9 @@ class GlobalAgentRepository(context: Context) {
         .put("proactive_insights_enabled", settings.proactiveInsightsEnabled)
         .put("model_understanding_enabled", settings.modelUnderstandingEnabled)
         .put("autonomous_preparation_enabled", settings.autonomousPreparationEnabled)
+        .put("dynamic_autonomous_replanning_enabled", settings.dynamicAutonomousReplanningEnabled)
+        .put("long_horizon_planning_enabled", settings.longHorizonPlanningEnabled)
+        .put("max_autonomous_replans", settings.maxAutonomousReplans)
         .put("allow_cloud_cognition", settings.allowCloudCognition)
         .put("autonomous_research_enabled", settings.autonomousResearchEnabled)
         .put("auto_create_conversations_enabled", settings.autoCreateConversationsEnabled)
@@ -716,6 +729,9 @@ class GlobalAgentRepository(context: Context) {
             proactiveInsightsEnabled = json.optBoolean("proactive_insights_enabled", true),
             modelUnderstandingEnabled = json.optBoolean("model_understanding_enabled", true),
             autonomousPreparationEnabled = json.optBoolean("autonomous_preparation_enabled", true),
+            dynamicAutonomousReplanningEnabled = json.optBoolean("dynamic_autonomous_replanning_enabled", true),
+            longHorizonPlanningEnabled = json.optBoolean("long_horizon_planning_enabled", true),
+            maxAutonomousReplans = json.optInt("max_autonomous_replans", 3).coerceIn(1, 5),
             allowCloudCognition = json.optBoolean("allow_cloud_cognition", false),
             autonomousResearchEnabled = json.optBoolean("autonomous_research_enabled", true),
             autoCreateConversationsEnabled = json.optBoolean("auto_create_conversations_enabled", true),
@@ -779,6 +795,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     private val cognitionExecutor by lazy { GlobalCognitionExecutor(appContext) }
     private val autonomousRunExecutor by lazy { GlobalAutonomousRunExecutor(appContext) }
     private val deliberationStore by lazy { GlobalAgentDeliberationStore(appContext) }
+    private val longHorizonCoordinator by lazy { GlobalLongHorizonCoordinator(appContext) }
 
     fun processPending(maxEvents: Int = 100): GlobalAgentProcessingBatch = synchronized(PROCESS_LOCK) {
         val settings = repository.settings()
@@ -806,6 +823,9 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                     updatedAtMillis = event.timestampMillis
                 )
                 return@forEach
+            }
+            if (event.type == GlobalConversationEventType.TOOL_RESULT) {
+                autonomousRunExecutor.consumeResearchEvent(event)
             }
             val understanding = understandingPipeline.understand(event, world)
             val reduction = GlobalWorldModelReducer.reduce(world, event, understanding)
@@ -895,6 +915,18 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     fun cognitionTasks(): List<GlobalCognitionTask> = deliberationStore.cognitionTasks()
 
     fun autonomousRuns(): List<GlobalAutonomousRun> = deliberationStore.autonomousRuns()
+
+    fun longHorizonGoals(): List<GlobalLongHorizonGoal> = longHorizonCoordinator.goals()
+
+    fun processLongHorizonCycle(): GlobalLongHorizonCycleResult = longHorizonCoordinator.processDue()
+
+    fun pauseLongHorizonGoal(goalId: String): Boolean = longHorizonCoordinator.pause(goalId)
+
+    fun resumeLongHorizonGoal(goalId: String): Boolean {
+        val resumed = longHorizonCoordinator.resume(goalId)
+        if (resumed) GlobalConversationEventBus.requestProcessing(appContext)
+        return resumed
+    }
 
     fun approveAutonomousRun(runId: String): Boolean {
         val now = System.currentTimeMillis()
@@ -1018,6 +1050,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         val updated = transform(repository.settings())
         repository.saveSettings(updated)
         if (updated.enabled) GlobalConversationEventBus.requestProcessing(appContext)
+        scheduleNextWake()
         return updated
     }
 
@@ -1037,6 +1070,60 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         val settings = repository.settings()
         if (!settings.enabled || !settings.autonomousPreparationEnabled) return null
         return autonomousRunExecutor.executeNext()
+    }
+
+    fun scheduleNextWake(nowMillis: Long = System.currentTimeMillis()): Long {
+        val settings = repository.settings()
+        if (!settings.enabled) {
+            GlobalAgentWakeScheduler.schedule(appContext, 0L)
+            return 0L
+        }
+        val candidates = buildList {
+            repository.researchTasks().forEach { task ->
+                when (task.status) {
+                    GlobalResearchTaskStatus.QUEUED -> add(nowMillis + MIN_WAKE_DELAY_MILLIS)
+                    GlobalResearchTaskStatus.RUNNING -> task.leaseExpiresAtMillis.takeIf { it > 0L }?.let(::add)
+                    GlobalResearchTaskStatus.SCHEDULED,
+                    GlobalResearchTaskStatus.WAITING_FOR_RESOURCE -> task.nextAttemptAtMillis.takeIf { it > 0L }?.let(::add)
+                    else -> Unit
+                }
+            }
+            deliberationStore.cognitionTasks().forEach { task ->
+                when (task.status) {
+                    GlobalCognitionTaskStatus.QUEUED -> add(nowMillis + MIN_WAKE_DELAY_MILLIS)
+                    GlobalCognitionTaskStatus.RUNNING -> task.leaseExpiresAtMillis.takeIf { it > 0L }?.let(::add)
+                    GlobalCognitionTaskStatus.WAITING_FOR_RESOURCE -> task.nextAttemptAtMillis.takeIf { it > 0L }?.let(::add)
+                    else -> Unit
+                }
+            }
+            deliberationStore.autonomousRuns().forEach { run ->
+                when (run.status) {
+                    GlobalAutonomousRunStatus.QUEUED -> add(nowMillis + MIN_WAKE_DELAY_MILLIS)
+                    GlobalAutonomousRunStatus.RUNNING -> run.leaseExpiresAtMillis.takeIf { it > 0L }?.let(::add)
+                    GlobalAutonomousRunStatus.REPLANNING -> {
+                        val at = when (run.review.status) {
+                            GlobalRunReviewStatus.RUNNING -> run.review.leaseExpiresAtMillis
+                            GlobalRunReviewStatus.PENDING -> nowMillis + MIN_WAKE_DELAY_MILLIS
+                            GlobalRunReviewStatus.WAITING_FOR_RESOURCE -> run.review.nextAttemptAtMillis
+                            else -> run.nextAttemptAtMillis
+                        }
+                        at.takeIf { it > 0L }?.let(::add)
+                    }
+                    GlobalAutonomousRunStatus.WAITING_FOR_RESOURCE -> run.nextAttemptAtMillis.takeIf { it > 0L }?.let(::add)
+                    else -> Unit
+                }
+            }
+            if (settings.longHorizonPlanningEnabled) {
+                longHorizonCoordinator.goals().asSequence()
+                    .filter { it.status in setOf(GlobalLongHorizonGoalStatus.ACTIVE, GlobalLongHorizonGoalStatus.BLOCKED) }
+                    .map(GlobalLongHorizonGoal::nextCheckAtMillis)
+                    .filter { it > 0L }
+                    .forEach { add(it) }
+            }
+        }
+        val next = candidates.minOrNull()?.coerceAtLeast(nowMillis + MIN_WAKE_DELAY_MILLIS) ?: 0L
+        GlobalAgentWakeScheduler.schedule(appContext, next)
+        return next
     }
 
     fun consumeConnectorResponse(response: AgentConnectorResponse): Boolean =
@@ -1219,6 +1306,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         val profile = adaptiveProfile()
         val cognition = deliberationStore.cognitionTasks()
         val runs = deliberationStore.autonomousRuns()
+        val longGoals = longHorizonCoordinator.goals()
         return GlobalAgentDashboardSnapshot(
             pendingEventCount = repository.pendingEvents(250).size,
             worldItemCount = active.size,
@@ -1241,10 +1329,16 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                 it.status in setOf(
                     GlobalAutonomousRunStatus.QUEUED,
                     GlobalAutonomousRunStatus.RUNNING,
+                    GlobalAutonomousRunStatus.REPLANNING,
                     GlobalAutonomousRunStatus.WAITING_FOR_RESOURCE
                 )
             },
+            replanningRunCount = runs.count { it.status == GlobalAutonomousRunStatus.REPLANNING },
             waitingConfirmationCount = runs.count { it.status == GlobalAutonomousRunStatus.WAITING_CONFIRMATION },
+            longHorizonGoalCount = longGoals.count {
+                it.status !in setOf(GlobalLongHorizonGoalStatus.COMPLETED, GlobalLongHorizonGoalStatus.PAUSED)
+            },
+            blockedLongHorizonGoalCount = longGoals.count { it.status == GlobalLongHorizonGoalStatus.BLOCKED },
             pendingInsightCount = pendingProactiveMessages().size,
             feedbackCount = profile.sampleCount,
             learnedTopicCount = profile.topicAffinity.size,
@@ -1260,6 +1354,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         private const val MAX_DIGEST_ITEMS = 12
         private const val MAX_DIGEST_CHARACTERS = 12_000
         private const val DIGEST_MAX_WAIT_MILLIS = 12L * 60L * 60L * 1_000L
+        private const val MIN_WAKE_DELAY_MILLIS = 60_000L
         private val PROCESS_LOCK = Any()
         @Volatile private var instance: GlobalSuperAgentRuntime? = null
 

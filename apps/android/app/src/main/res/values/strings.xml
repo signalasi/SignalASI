@@ -1435,6 +1435,10 @@
     <string name="cc_global_model_understanding_subtitle">Use a trusted reasoning resource only when cross-topic meaning needs deeper analysis</string>
     <string name="cc_global_autonomous_preparation_title">Autonomous preparation</string>
     <string name="cc_global_autonomous_preparation_subtitle">Prepare research, analysis, drafts, checks, and topic workspaces without external side effects</string>
+    <string name="cc_global_dynamic_replanning_title">Dynamic replanning</string>
+    <string name="cc_global_dynamic_replanning_subtitle">Review real outcomes and revise remaining steps without discarding completed evidence</string>
+    <string name="cc_global_long_horizon_toggle_title">Long-horizon planning</string>
+    <string name="cc_global_long_horizon_toggle_subtitle">Keep durable goals alive across sessions, restarts, and resource outages</string>
     <string name="cc_global_proactive_title">Proactive insights</string>
     <string name="cc_global_proactive_subtitle">Surface valuable risks, conflicts, opportunities, and omissions</string>
     <string name="cc_global_research_title">Autonomous research</string>
@@ -1461,6 +1465,11 @@
     <string name="cc_global_cognition_queue_subtitle">Model deliberation queued for valuable cross-conversation events</string>
     <string name="cc_global_runs_title">Autonomous work</string>
     <string name="cc_global_runs_subtitle">Safe preparation plans, delegated work, recovery, and confirmation</string>
+    <string name="cc_global_long_horizon_title">Goal scheduler</string>
+    <string name="cc_global_long_horizon_subtitle">Persistent checkpoints and progress across every conversation</string>
+    <string name="cc_global_long_horizon_row">%1$s · %2$s · checkpoint %3$d</string>
+    <string name="cc_global_goal_pause">Pause tracking</string>
+    <string name="cc_global_goal_resume">Resume now</string>
     <string name="cc_global_run_row">%1$s\n%2$s &#183; %3$d/%4$d steps</string>
     <string name="cc_global_pending_insights_title">Pending insights</string>
     <string name="cc_global_pending_insights_subtitle">Findings waiting for the right delivery moment</string>
@@ -1483,6 +1492,10 @@
     <string name="cc_global_status_failed">Failed</string>
     <string name="cc_global_status_confirmation">Waiting for confirmation</string>
     <string name="cc_global_status_partial">Partially completed</string>
+    <string name="cc_global_status_replanning">Replanning</string>
+    <string name="cc_global_status_blocked">Blocked</string>
+    <string name="cc_global_status_active">Active</string>
+    <string name="cc_global_status_in_progress">In progress</string>
     <string name="cc_global_status_skipped">Skipped</string>
     <string name="common_reject">Reject</string>
     <string name="agent_session_pause_tracking">Pause global tracking</string>

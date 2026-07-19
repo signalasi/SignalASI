@@ -1418,4 +1418,17 @@
     <string name="cc_global_research_phase_collecting">正在收集证据</string>
     <string name="cc_global_research_phase_synthesis_pending">等待综合</string>
     <string name="cc_global_research_phase_synthesizing">正在综合</string>
+    <string name="cc_global_dynamic_replanning_title">动态重规划</string>
+    <string name="cc_global_dynamic_replanning_subtitle">根据真实执行结果修订后续步骤，同时保留已完成证据</string>
+    <string name="cc_global_long_horizon_toggle_title">长期目标调度</string>
+    <string name="cc_global_long_horizon_toggle_subtitle">跨会话、重启和资源中断持续推进长期目标</string>
+    <string name="cc_global_long_horizon_title">目标调度器</string>
+    <string name="cc_global_long_horizon_subtitle">跨所有会话持续检查目标与进度</string>
+    <string name="cc_global_long_horizon_row">%1$s · %2$s · 第 %3$d 次检查</string>
+    <string name="cc_global_goal_pause">暂停跟踪</string>
+    <string name="cc_global_goal_resume">立即恢复</string>
+    <string name="cc_global_status_replanning">正在重规划</string>
+    <string name="cc_global_status_blocked">受阻</string>
+    <string name="cc_global_status_active">进行中</string>
+    <string name="cc_global_status_in_progress">正在推进</string>
 </resources>

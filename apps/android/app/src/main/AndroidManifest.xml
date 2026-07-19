@@ -131,6 +131,9 @@
             android:name=".AgentWorkflowAlarmReceiver"
             android:exported="false" />
         <receiver
+            android:name=".GlobalAgentWakeReceiver"
+            android:exported="false" />
+        <receiver
             android:name=".SignalASIDeviceAdminReceiver"
             android:description="@string/device_admin_description"
             android:exported="true"

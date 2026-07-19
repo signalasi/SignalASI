@@ -90,15 +90,15 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         if (AppForegroundTracker.isForeground()) return
         val envelope = runCatching { JSONObject(payload) }.getOrNull()
         if (envelope != null && ChatHistoryStore.applyAgentTaskEvent(this, envelope)) return
-        val stored = ChatHistoryStore.appendIncoming(this, payload) ?: return
         if (envelope?.optString("type").orEmpty().ifBlank { "text" } == "text") {
             val sourceMessageId = envelope?.optString("source_message_id")?.toLongOrNull()
                 ?: envelope?.optLong("source_message_id", 0L)?.takeIf { it > 0L }
             if (sourceMessageId != null) {
+                val preview = ChatHistoryStore.inspectIncoming(this, payload) ?: return
                 val response = AgentConnectorResponse(
                     sourceMessageId = sourceMessageId,
-                    contactId = envelope?.optString("contact_id").orEmpty().ifBlank { stored.contactId },
-                    content = stored.content,
+                    contactId = envelope?.optString("contact_id").orEmpty().ifBlank { preview.contactId },
+                    content = preview.content,
                     conversationId = envelope?.optString("conversation_id").orEmpty(),
                     turnId = envelope?.optString("turn_id").orEmpty(),
                     taskId = envelope?.optString("task_id").orEmpty(),
@@ -112,6 +112,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
                 AgentConnectorResponseBus.publish(this, response)
             }
         }
+        val stored = ChatHistoryStore.appendIncoming(this, payload) ?: return
         if (stored.notify) {
             showIncomingNotification(stored)
             ChatHistoryStore.markNotified(this, stored.contactId, stored.messageId)
@@ -306,6 +307,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
     private fun processGlobalAgentEvents() {
         val runtime = GlobalSuperAgentRuntime.get(this)
         runCatching { runtime.processPending() }
+        runCatching { runtime.processLongHorizonCycle() }
         repeat(2) {
             globalResearchExecutor.execute {
                 val cognition = runCatching { runtime.executeCognitionCycle() }.getOrNull()
@@ -314,7 +316,8 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
                 if (cognition?.status == GlobalCognitionTaskStatus.COMPLETED ||
                     autonomous?.status in setOf(
                         GlobalAutonomousRunStatus.COMPLETED,
-                        GlobalAutonomousRunStatus.PARTIAL
+                        GlobalAutonomousRunStatus.PARTIAL,
+                        GlobalAutonomousRunStatus.REPLANNING
                     ) ||
                     research?.status in setOf(
                         GlobalResearchTaskStatus.COMPLETED,
@@ -322,11 +325,14 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
                     )
                 ) {
                     runCatching { runtime.processPending() }
+                    runCatching { runtime.processLongHorizonCycle() }
                 }
                 notifyPendingGlobalMessage(runtime)
+                runCatching { runtime.scheduleNextWake() }
             }
         }
         notifyPendingGlobalMessage(runtime)
+        runCatching { runtime.scheduleNextWake() }
     }
 
     private fun notifyPendingGlobalMessage(runtime: GlobalSuperAgentRuntime) {

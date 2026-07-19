@@ -78,6 +78,13 @@ object ChatHistoryStore {
     }
 
     @Synchronized
+    fun inspectIncoming(context: Context, payload: String): StoredIncomingMessage? {
+        val appContext = context.applicationContext
+        AppStore.ensureInitialized(appContext)
+        return parseIncoming(appContext, payload).takeIf { it.content.isNotBlank() }
+    }
+
+    @Synchronized
     fun appendIncoming(context: Context, payload: String): StoredIncomingMessage? {
         val appContext = context.applicationContext
         AppStore.ensureInitialized(appContext)
