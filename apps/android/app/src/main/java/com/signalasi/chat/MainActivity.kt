@@ -2702,6 +2702,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (!::globalSuperAgentRuntime.isInitialized || !::agentTranscriptStore.isInitialized) return
         thread(name = "signalasi-global-agent-cognition") {
             runCatching { globalSuperAgentRuntime.processPending() }
+            runCatching { globalSuperAgentRuntime.executeCognitionCycle() }
+            runCatching { globalSuperAgentRuntime.executeAutonomousCycle() }
+            runCatching { globalSuperAgentRuntime.executeResearchCycle() }
+            runCatching { globalSuperAgentRuntime.processPending() }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 val delivered = runCatching {
@@ -4474,6 +4478,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "global.toggle_proactive" -> updateGlobalAgentSettings {
                 it.copy(proactiveInsightsEnabled = !it.proactiveInsightsEnabled)
             }
+            "global.toggle_model_understanding" -> updateGlobalAgentSettings {
+                it.copy(modelUnderstandingEnabled = !it.modelUnderstandingEnabled)
+            }
+            "global.toggle_autonomous_preparation" -> updateGlobalAgentSettings {
+                it.copy(autonomousPreparationEnabled = !it.autonomousPreparationEnabled)
+            }
+            "global.toggle_cloud_cognition" -> updateGlobalAgentSettings {
+                it.copy(allowCloudCognition = !it.allowCloudCognition)
+            }
             "global.toggle_learning" -> updateGlobalAgentSettings {
                 it.copy(adaptiveLearningEnabled = !it.adaptiveLearningEnabled)
             }
@@ -4492,6 +4505,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "global.world.conflicts" -> showGlobalWorldConflictsDialog()
             "global.world.links" -> showGlobalConversationLinksDialog()
             "global.research" -> showGlobalResearchTasksDialog()
+            "global.cognition" -> showGlobalCognitionTasksDialog()
+            "global.runs" -> showGlobalAutonomousRunsDialog()
             "global.insights" -> showGlobalInsightsDialog()
             "global.learning" -> showGlobalLearningDialog()
             "profile.nickname" -> openExistingControlCenterPage { showEditNicknameDialog() }
@@ -4775,6 +4790,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 GlobalResearchTaskStatus.WAITING_FOR_RESOURCE
             )
         }
+        val activeCognition = dashboard.queuedCognitionCount
+        val activeRuns = dashboard.activeAutonomousRunCount
         showControlCenterFeature(
             getString(R.string.cc_global_agent_title),
             ControlCenterPageSpec(
@@ -4813,6 +4830,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         getString(R.string.cc_global_section_autonomy),
                         listOf(
                             ControlCenterRowSpec("global.toggle_enabled", getString(R.string.cc_global_master_title), getString(R.string.cc_global_master_subtitle), R.drawable.ic_agent_node, switchValue = settings.enabled, showChevron = false),
+                            ControlCenterRowSpec("global.toggle_model_understanding", getString(R.string.cc_global_model_understanding_title), getString(R.string.cc_global_model_understanding_subtitle), R.drawable.ic_settings_model, switchValue = settings.modelUnderstandingEnabled, showChevron = false, enabled = settings.enabled),
+                            ControlCenterRowSpec("global.toggle_autonomous_preparation", getString(R.string.cc_global_autonomous_preparation_title), getString(R.string.cc_global_autonomous_preparation_subtitle), R.drawable.ic_agent_control, switchValue = settings.autonomousPreparationEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_proactive", getString(R.string.cc_global_proactive_title), getString(R.string.cc_global_proactive_subtitle), R.drawable.ic_agent_memory, switchValue = settings.proactiveInsightsEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_learning", getString(R.string.cc_global_learning_toggle_title), getString(R.string.cc_global_learning_toggle_subtitle), R.drawable.ic_agent_skill, switchValue = settings.adaptiveLearningEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_research", getString(R.string.cc_global_research_title), getString(R.string.cc_global_research_subtitle), R.drawable.ic_agent_knowledge, switchValue = settings.autonomousResearchEnabled, showChevron = false, enabled = settings.enabled),
@@ -4832,6 +4851,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     ControlCenterSectionSpec(
                         getString(R.string.cc_global_section_intelligence),
                         listOf(
+                            ControlCenterRowSpec("global.cognition", getString(R.string.cc_global_cognition_queue_title), getString(R.string.cc_global_cognition_queue_subtitle), R.drawable.ic_settings_model, activeCognition.toString(), if (activeCognition > 0) ControlCenterTone.VIOLET else ControlCenterTone.NEUTRAL),
+                            ControlCenterRowSpec("global.runs", getString(R.string.cc_global_runs_title), getString(R.string.cc_global_runs_subtitle), R.drawable.ic_agent_control, (activeRuns + dashboard.waitingConfirmationCount).toString(), if (activeRuns > 0) ControlCenterTone.GREEN else if (dashboard.waitingConfirmationCount > 0) ControlCenterTone.AMBER else ControlCenterTone.NEUTRAL),
                             ControlCenterRowSpec("global.research", getString(R.string.cc_global_research_queue_title), getString(R.string.cc_global_research_queue_subtitle), R.drawable.ic_agent_knowledge, activeResearch.toString(), if (activeResearch > 0) ControlCenterTone.BLUE else ControlCenterTone.NEUTRAL),
                             ControlCenterRowSpec("global.insights", getString(R.string.cc_global_pending_insights_title), getString(R.string.cc_global_pending_insights_subtitle), R.drawable.ic_agent_memory, dashboard.pendingInsightCount.toString(), if (dashboard.pendingInsightCount > 0) ControlCenterTone.VIOLET else ControlCenterTone.NEUTRAL),
                             ControlCenterRowSpec("global.learning", getString(R.string.cc_global_learning_title), getString(R.string.cc_global_learning_subtitle), R.drawable.ic_agent_skill, getString(R.string.cc_global_learning_status, dashboard.feedbackCount, dashboard.learnedTopicCount), if (dashboard.feedbackCount > 0) ControlCenterTone.GREEN else ControlCenterTone.NEUTRAL),
@@ -4841,6 +4862,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     ControlCenterSectionSpec(
                         getString(R.string.cc_global_section_privacy),
                         listOf(
+                            ControlCenterRowSpec("global.toggle_cloud_cognition", getString(R.string.cc_global_cloud_cognition_title), getString(R.string.cc_global_cloud_cognition_subtitle), R.drawable.ic_security_shield, switchValue = settings.allowCloudCognition, showChevron = false, enabled = settings.enabled && settings.modelUnderstandingEnabled),
                             ControlCenterRowSpec("apps.chat_history", getString(R.string.cc_global_sessions_title), getString(R.string.cc_global_sessions_subtitle), R.drawable.ic_agent_history, "", ControlCenterTone.NEUTRAL)
                         )
                     )
@@ -4860,7 +4882,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val runtime = if (::globalSuperAgentRuntime.isInitialized) globalSuperAgentRuntime else GlobalSuperAgentRuntime.get(this)
         thread(name = "signalasi-global-agent-manual") {
             val batch = runCatching { runtime.processPending(250) }.getOrNull()
-            repeat(2) { runCatching { runtime.executeResearchCycle() } }
+            repeat(2) {
+                runCatching { runtime.executeCognitionCycle() }
+                runCatching { runtime.executeAutonomousCycle() }
+                runCatching { runtime.executeResearchCycle() }
+            }
+            runCatching { runtime.processPending(250) }
             runOnUiThread {
                 runtime.deliverPending(agentTranscriptStore)
                 renderAgentTranscript(agentTranscriptStore.list())
@@ -4956,6 +4983,110 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         GlobalResearchPlanPhase.SYNTHESIS_PENDING -> R.string.cc_global_research_phase_synthesis_pending
         GlobalResearchPlanPhase.SYNTHESIZING -> R.string.cc_global_research_phase_synthesizing
         GlobalResearchPlanPhase.COMPLETED -> R.string.cc_global_status_completed
+    })
+
+    private fun showGlobalCognitionTasksDialog() {
+        val tasks = globalSuperAgentRuntime.cognitionTasks()
+            .sortedByDescending(GlobalCognitionTask::updatedAtMillis)
+            .take(30)
+        val message = tasks.takeIf(List<GlobalCognitionTask>::isNotEmpty)?.joinToString("\n\n") { task ->
+            val topic = task.result.topic.ifBlank { task.baselineUnderstanding.topic }
+            buildString {
+                append("\u2022 ").append(topic)
+                append("\n").append(globalCognitionStatusLabel(task.status))
+                if (task.resourceId.isNotBlank()) append(" \u00b7 ").append(task.resourceId)
+                if (task.result.confidence > 0.0) {
+                    append(" \u00b7 ").append((task.result.confidence * 100).toInt()).append('%')
+                }
+                task.lastError.takeIf(String::isNotBlank)?.let { append("\n").append(it.take(160)) }
+            }
+        } ?: getString(R.string.cc_global_empty)
+        AlertDialog.Builder(this)
+            .setTitle(R.string.cc_global_cognition_queue_title)
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun showGlobalAutonomousRunsDialog() {
+        val runs = globalSuperAgentRuntime.autonomousRuns()
+            .sortedByDescending(GlobalAutonomousRun::updatedAtMillis)
+            .take(30)
+        if (runs.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle(R.string.cc_global_runs_title)
+                .setMessage(R.string.cc_global_empty)
+                .setPositiveButton(android.R.string.ok, null)
+                .show()
+            return
+        }
+        val labels = runs.map { run ->
+            getString(
+                R.string.cc_global_run_row,
+                run.topic.ifBlank { run.goal.take(80) },
+                globalAutonomousRunStatusLabel(run.status),
+                run.completedActions().size,
+                run.actions.size
+            )
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(R.string.cc_global_runs_title)
+            .setItems(labels) { _, index -> showGlobalAutonomousRunDialog(runs[index]) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showGlobalAutonomousRunDialog(run: GlobalAutonomousRun) {
+        val details = run.actions.joinToString("\n\n") { action ->
+            "\u2022 ${action.goal}\n${globalAutonomousActionStatusLabel(action.status)}" +
+                action.result.takeIf(String::isNotBlank)?.let { "\n${it.take(300)}" }.orEmpty() +
+                action.lastError.takeIf(String::isNotBlank)?.let { "\n${it.take(160)}" }.orEmpty()
+        }
+        val builder = AlertDialog.Builder(this)
+            .setTitle(run.topic.ifBlank { getString(R.string.cc_global_runs_title) })
+            .setMessage(details)
+            .setNegativeButton(android.R.string.cancel, null)
+        if (run.status == GlobalAutonomousRunStatus.WAITING_CONFIRMATION) {
+            builder.setNeutralButton(R.string.common_reject) { _, _ ->
+                globalSuperAgentRuntime.rejectAutonomousRun(run.id)
+                renderControlCenterGlobalAgentPage()
+            }
+            builder.setPositiveButton(R.string.common_confirm) { _, _ ->
+                globalSuperAgentRuntime.approveAutonomousRun(run.id)
+                processGlobalAgentNow()
+            }
+        } else {
+            builder.setPositiveButton(android.R.string.ok, null)
+        }
+        builder.show()
+    }
+
+    private fun globalCognitionStatusLabel(status: GlobalCognitionTaskStatus): String = getString(when (status) {
+        GlobalCognitionTaskStatus.QUEUED -> R.string.cc_global_status_queued
+        GlobalCognitionTaskStatus.RUNNING -> R.string.cc_global_status_running
+        GlobalCognitionTaskStatus.WAITING_FOR_RESOURCE -> R.string.cc_global_status_waiting
+        GlobalCognitionTaskStatus.COMPLETED -> R.string.cc_global_status_completed
+        GlobalCognitionTaskStatus.FAILED -> R.string.cc_global_status_failed
+    })
+
+    private fun globalAutonomousRunStatusLabel(status: GlobalAutonomousRunStatus): String = getString(when (status) {
+        GlobalAutonomousRunStatus.QUEUED -> R.string.cc_global_status_queued
+        GlobalAutonomousRunStatus.RUNNING -> R.string.cc_global_status_running
+        GlobalAutonomousRunStatus.WAITING_FOR_RESOURCE -> R.string.cc_global_status_waiting
+        GlobalAutonomousRunStatus.WAITING_CONFIRMATION -> R.string.cc_global_status_confirmation
+        GlobalAutonomousRunStatus.COMPLETED -> R.string.cc_global_status_completed
+        GlobalAutonomousRunStatus.PARTIAL -> R.string.cc_global_status_partial
+        GlobalAutonomousRunStatus.FAILED -> R.string.cc_global_status_failed
+        GlobalAutonomousRunStatus.PAUSED -> R.string.on_device_agent_status_paused
+    })
+
+    private fun globalAutonomousActionStatusLabel(status: GlobalAutonomousActionStatus): String = getString(when (status) {
+        GlobalAutonomousActionStatus.PENDING -> R.string.cc_global_status_queued
+        GlobalAutonomousActionStatus.RUNNING -> R.string.cc_global_status_running
+        GlobalAutonomousActionStatus.WAITING_CONFIRMATION -> R.string.cc_global_status_confirmation
+        GlobalAutonomousActionStatus.COMPLETED -> R.string.cc_global_status_completed
+        GlobalAutonomousActionStatus.FAILED -> R.string.cc_global_status_failed
+        GlobalAutonomousActionStatus.SKIPPED -> R.string.cc_global_status_skipped
     })
 
     private fun showGlobalInsightsDialog() {

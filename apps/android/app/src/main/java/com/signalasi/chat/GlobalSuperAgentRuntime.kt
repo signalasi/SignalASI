@@ -11,7 +11,8 @@ data class GlobalAgentProcessingBatch(
     val processedEventCount: Int,
     val changedWorldItemCount: Int,
     val queuedResearchTasks: List<GlobalResearchTask>,
-    val proactiveMessages: List<GlobalProactiveMessage>
+    val proactiveMessages: List<GlobalProactiveMessage>,
+    val queuedCognitionTasks: List<GlobalCognitionTask> = emptyList()
 )
 
 data class GlobalAgentDashboardSnapshot(
@@ -23,6 +24,9 @@ data class GlobalAgentDashboardSnapshot(
     val activeTaskCount: Int,
     val unresolvedConflictCount: Int,
     val queuedResearchCount: Int,
+    val queuedCognitionCount: Int,
+    val activeAutonomousRunCount: Int,
+    val waitingConfirmationCount: Int,
     val pendingInsightCount: Int,
     val feedbackCount: Int,
     val learnedTopicCount: Int,
@@ -38,6 +42,7 @@ data class GlobalAgentNotificationCandidate(
 
 class GlobalAgentRepository(context: Context) {
     private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE_NAME)
+    private val deliberationStore = GlobalAgentDeliberationStore(context.applicationContext)
 
     fun enqueue(event: GlobalConversationEvent): Boolean = synchronized(STORE_LOCK) {
         val events = loadEvents().toMutableList()
@@ -117,6 +122,34 @@ class GlobalAgentRepository(context: Context) {
         claimed
     }
 
+    fun cognitionTasks(): List<GlobalCognitionTask> = deliberationStore.cognitionTasks()
+
+    fun saveCognitionTasks(tasks: List<GlobalCognitionTask>) = deliberationStore.saveCognitionTasks(tasks)
+
+    fun upsertCognitionTask(task: GlobalCognitionTask) = deliberationStore.upsertCognitionTask(task)
+
+    fun updateCognitionTask(
+        taskId: String,
+        transform: (GlobalCognitionTask) -> GlobalCognitionTask
+    ): GlobalCognitionTask? = deliberationStore.updateCognitionTask(taskId, transform)
+
+    fun claimCognitionTask(nowMillis: Long = System.currentTimeMillis()): GlobalCognitionTask? =
+        deliberationStore.claimCognitionTask(nowMillis)
+
+    fun autonomousRuns(): List<GlobalAutonomousRun> = deliberationStore.autonomousRuns()
+
+    fun saveAutonomousRuns(runs: List<GlobalAutonomousRun>) = deliberationStore.saveAutonomousRuns(runs)
+
+    fun upsertAutonomousRun(run: GlobalAutonomousRun) = deliberationStore.upsertAutonomousRun(run)
+
+    fun updateAutonomousRun(
+        runId: String,
+        transform: (GlobalAutonomousRun) -> GlobalAutonomousRun
+    ): GlobalAutonomousRun? = deliberationStore.updateAutonomousRun(runId, transform)
+
+    fun claimAutonomousRun(nowMillis: Long = System.currentTimeMillis()): GlobalAutonomousRun? =
+        deliberationStore.claimAutonomousRun(nowMillis)
+
     fun proactiveMessages(): List<GlobalProactiveMessage> = synchronized(STORE_LOCK) { loadProactiveMessages() }
 
     fun saveProactiveMessages(messages: List<GlobalProactiveMessage>) = synchronized(STORE_LOCK) {
@@ -169,12 +202,14 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 3)
+            .put("version", 4)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("world", encodeWorld(loadWorld()))
             .put("research_tasks", JSONArray().apply {
                 loadResearchTasks().forEach { put(encodeResearchTask(it)) }
             })
+            .put("cognition_tasks", deliberationStore.exportCognitionTasks())
+            .put("autonomous_runs", deliberationStore.exportAutonomousRuns())
             .put("proactive_messages", JSONArray().apply {
                 loadProactiveMessages().forEach { put(encodeProactiveMessage(it)) }
             })
@@ -195,6 +230,8 @@ class GlobalAgentRepository(context: Context) {
                 for (index in 0 until array.length()) decodeResearchTask(array.optJSONObject(index))?.let(::add)
             }.takeLast(MAX_RESEARCH_TASKS))
         }
+        payload.optJSONArray("cognition_tasks")?.let(deliberationStore::restoreCognitionTasks)
+        payload.optJSONArray("autonomous_runs")?.let(deliberationStore::restoreAutonomousRuns)
         payload.optJSONArray("proactive_messages")?.let { array ->
             saveProactiveMessages(buildList {
                 for (index in 0 until array.length()) decodeProactiveMessage(array.optJSONObject(index))?.let(::add)
@@ -660,6 +697,9 @@ class GlobalAgentRepository(context: Context) {
     private fun encodeSettings(settings: GlobalAgentSettings): JSONObject = JSONObject()
         .put("enabled", settings.enabled)
         .put("proactive_insights_enabled", settings.proactiveInsightsEnabled)
+        .put("model_understanding_enabled", settings.modelUnderstandingEnabled)
+        .put("autonomous_preparation_enabled", settings.autonomousPreparationEnabled)
+        .put("allow_cloud_cognition", settings.allowCloudCognition)
         .put("autonomous_research_enabled", settings.autonomousResearchEnabled)
         .put("auto_create_conversations_enabled", settings.autoCreateConversationsEnabled)
         .put("notifications_enabled", settings.notificationsEnabled)
@@ -674,6 +714,9 @@ class GlobalAgentRepository(context: Context) {
         GlobalAgentSettings(
             enabled = json.optBoolean("enabled", true),
             proactiveInsightsEnabled = json.optBoolean("proactive_insights_enabled", true),
+            modelUnderstandingEnabled = json.optBoolean("model_understanding_enabled", true),
+            autonomousPreparationEnabled = json.optBoolean("autonomous_preparation_enabled", true),
+            allowCloudCognition = json.optBoolean("allow_cloud_cognition", false),
             autonomousResearchEnabled = json.optBoolean("autonomous_research_enabled", true),
             autoCreateConversationsEnabled = json.optBoolean("auto_create_conversations_enabled", true),
             notificationsEnabled = json.optBoolean("notifications_enabled", true),
@@ -733,6 +776,9 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     private val repository = GlobalAgentRepository(appContext)
     private val understandingPipeline = GlobalUnderstandingPipeline()
     private val researchExecutor by lazy { GlobalResearchExecutor(appContext) }
+    private val cognitionExecutor by lazy { GlobalCognitionExecutor(appContext) }
+    private val autonomousRunExecutor by lazy { GlobalAutonomousRunExecutor(appContext) }
+    private val deliberationStore by lazy { GlobalAgentDeliberationStore(appContext) }
 
     fun processPending(maxEvents: Int = 100): GlobalAgentProcessingBatch = synchronized(PROCESS_LOCK) {
         val settings = repository.settings()
@@ -747,8 +793,10 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             GlobalAgentLearningPolicy.profile(repository.feedback())
         } else GlobalAgentAdaptiveProfile()
         val existingTasks = repository.researchTasks().toMutableList()
+        val existingCognitionTasks = deliberationStore.cognitionTasks().toMutableList()
         val existingMessages = repository.proactiveMessages().toMutableList()
         val newTasks = mutableListOf<GlobalResearchTask>()
+        val newCognitionTasks = mutableListOf<GlobalCognitionTask>()
         val newMessages = mutableListOf<GlobalProactiveMessage>()
         var changedItems = 0
         events.forEach { event ->
@@ -771,6 +819,18 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                 settings = settings,
                 adaptiveProfile = adaptiveProfile
             )
+            val plannedCognition = if (settings.modelUnderstandingEnabled &&
+                GlobalCognitionTaskPolicy.shouldDeliberate(event, understanding, reduction) &&
+                (existingCognitionTasks + newCognitionTasks).none { it.sourceEvent.id == event.id }
+            ) {
+                GlobalCognitionTask(
+                    sourceEvent = event,
+                    baselineUnderstanding = understanding,
+                    createdAtMillis = event.timestampMillis,
+                    updatedAtMillis = event.timestampMillis
+                )
+            } else null
+            plannedCognition?.let(newCognitionTasks::add)
             val plannedTask = if (decision.researchRequired || decision.autonomousPreparationAllowed) {
                 GlobalResearchPlanner.plan(event, understanding)?.let { candidate ->
                     if (candidate.depth == GlobalResearchDepth.CONTINUOUS_MONITOR) {
@@ -799,7 +859,9 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                 understanding.riskCandidates.isEmpty() &&
                 understanding.opportunityCandidates.isEmpty() &&
                 decision.mode != GlobalInterventionMode.IMMEDIATE
-            if (!deferGenericMessageUntilResearch) {
+            val deferGenericMessageUntilCognition = plannedCognition != null &&
+                decision.mode != GlobalInterventionMode.IMMEDIATE
+            if (!deferGenericMessageUntilResearch && !deferGenericMessageUntilCognition) {
                 GlobalProactiveMessageFactory.create(event, understanding, reduction, decision)
                     ?.takeIf { candidate ->
                         (existingMessages + newMessages).none { message ->
@@ -814,9 +876,10 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         }
         repository.saveWorld(world)
         if (newTasks.isNotEmpty()) repository.saveResearchTasks(existingTasks + newTasks)
+        if (newCognitionTasks.isNotEmpty()) deliberationStore.saveCognitionTasks(existingCognitionTasks + newCognitionTasks)
         if (newMessages.isNotEmpty()) repository.saveProactiveMessages(existingMessages + newMessages)
         repository.removeEvents(events.map(GlobalConversationEvent::id).toSet())
-        GlobalAgentProcessingBatch(events.size, changedItems, newTasks, newMessages)
+        GlobalAgentProcessingBatch(events.size, changedItems, newTasks, newMessages, newCognitionTasks)
     }
 
     fun augmentContext(context: AgentConversationContext, query: String): AgentConversationContext {
@@ -828,6 +891,57 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     fun worldSnapshot(): PersonalWorldModel = repository.loadWorld()
 
     fun researchTasks(): List<GlobalResearchTask> = repository.researchTasks()
+
+    fun cognitionTasks(): List<GlobalCognitionTask> = deliberationStore.cognitionTasks()
+
+    fun autonomousRuns(): List<GlobalAutonomousRun> = deliberationStore.autonomousRuns()
+
+    fun approveAutonomousRun(runId: String): Boolean {
+        val now = System.currentTimeMillis()
+        val updated = deliberationStore.updateAutonomousRun(runId) { run ->
+            val actions = run.actions.map { action ->
+                if (action.status == GlobalAutonomousActionStatus.WAITING_CONFIRMATION) {
+                    action.copy(
+                        confirmationGranted = true,
+                        status = GlobalAutonomousActionStatus.PENDING,
+                        lastError = ""
+                    )
+                } else action
+            }
+            run.copy(
+                actions = actions,
+                status = if (actions.any { it.status == GlobalAutonomousActionStatus.PENDING }) {
+                    GlobalAutonomousRunStatus.QUEUED
+                } else run.status,
+                nextAttemptAtMillis = now,
+                updatedAtMillis = now
+            )
+        } ?: return false
+        if (updated.status == GlobalAutonomousRunStatus.QUEUED) {
+            GlobalConversationEventBus.requestProcessing(appContext)
+        }
+        return true
+    }
+
+    fun rejectAutonomousRun(runId: String): Boolean {
+        val now = System.currentTimeMillis()
+        return deliberationStore.updateAutonomousRun(runId) { run ->
+            val actions = run.actions.map { action ->
+                if (action.status == GlobalAutonomousActionStatus.WAITING_CONFIRMATION) {
+                    action.copy(
+                        status = GlobalAutonomousActionStatus.SKIPPED,
+                        lastError = "The user declined this external effect",
+                        completedAtMillis = now
+                    )
+                } else action
+            }
+            run.copy(
+                actions = actions,
+                status = GlobalAutonomousRunStatus.PAUSED,
+                updatedAtMillis = now
+            )
+        } != null
+    }
 
     fun settings(): GlobalAgentSettings = repository.settings()
 
@@ -913,8 +1027,25 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         return researchExecutor.executeNext()
     }
 
+    fun executeCognitionCycle(): GlobalCognitionExecutionResult? {
+        val settings = repository.settings()
+        if (!settings.enabled || !settings.modelUnderstandingEnabled) return null
+        return cognitionExecutor.executeNext()
+    }
+
+    fun executeAutonomousCycle(): GlobalAutonomousExecutionResult? {
+        val settings = repository.settings()
+        if (!settings.enabled || !settings.autonomousPreparationEnabled) return null
+        return autonomousRunExecutor.executeNext()
+    }
+
+    fun consumeConnectorResponse(response: AgentConnectorResponse): Boolean =
+        cognitionExecutor.consumeConnectorResponse(response) ||
+            autonomousRunExecutor.consumeConnectorResponse(response) ||
+            researchExecutor.consumeConnectorResponse(response)
+
     fun consumeResearchResponse(response: AgentConnectorResponse): Boolean =
-        researchExecutor.consumeConnectorResponse(response)
+        consumeConnectorResponse(response)
 
     fun pendingProactiveMessages(): List<GlobalProactiveMessage> = repository.proactiveMessages()
         .filter { it.status in setOf(GlobalProactiveMessageStatus.PENDING, GlobalProactiveMessageStatus.NOTIFIED) }
@@ -1086,6 +1217,8 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         val world = repository.loadWorld()
         val active = world.items.filter { it.status == GlobalWorldItemStatus.ACTIVE }
         val profile = adaptiveProfile()
+        val cognition = deliberationStore.cognitionTasks()
+        val runs = deliberationStore.autonomousRuns()
         return GlobalAgentDashboardSnapshot(
             pendingEventCount = repository.pendingEvents(250).size,
             worldItemCount = active.size,
@@ -1097,6 +1230,21 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             queuedResearchCount = repository.researchTasks().count {
                 it.status in setOf(GlobalResearchTaskStatus.QUEUED, GlobalResearchTaskStatus.RUNNING, GlobalResearchTaskStatus.WAITING_FOR_RESOURCE)
             },
+            queuedCognitionCount = cognition.count {
+                it.status in setOf(
+                    GlobalCognitionTaskStatus.QUEUED,
+                    GlobalCognitionTaskStatus.RUNNING,
+                    GlobalCognitionTaskStatus.WAITING_FOR_RESOURCE
+                )
+            },
+            activeAutonomousRunCount = runs.count {
+                it.status in setOf(
+                    GlobalAutonomousRunStatus.QUEUED,
+                    GlobalAutonomousRunStatus.RUNNING,
+                    GlobalAutonomousRunStatus.WAITING_FOR_RESOURCE
+                )
+            },
+            waitingConfirmationCount = runs.count { it.status == GlobalAutonomousRunStatus.WAITING_CONFIRMATION },
             pendingInsightCount = pendingProactiveMessages().size,
             feedbackCount = profile.sampleCount,
             learnedTopicCount = profile.topicAffinity.size,

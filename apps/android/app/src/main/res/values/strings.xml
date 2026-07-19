@@ -1431,6 +1431,10 @@
     <string name="cc_global_section_autonomy">Autonomy</string>
     <string name="cc_global_master_title">Global understanding</string>
     <string name="cc_global_master_subtitle">Observe authorized conversations and maintain the personal world model</string>
+    <string name="cc_global_model_understanding_title">Model-assisted understanding</string>
+    <string name="cc_global_model_understanding_subtitle">Use a trusted reasoning resource only when cross-topic meaning needs deeper analysis</string>
+    <string name="cc_global_autonomous_preparation_title">Autonomous preparation</string>
+    <string name="cc_global_autonomous_preparation_subtitle">Prepare research, analysis, drafts, checks, and topic workspaces without external side effects</string>
     <string name="cc_global_proactive_title">Proactive insights</string>
     <string name="cc_global_proactive_subtitle">Surface valuable risks, conflicts, opportunities, and omissions</string>
     <string name="cc_global_research_title">Autonomous research</string>
@@ -1453,6 +1457,11 @@
     <string name="cc_global_section_intelligence">Intelligence acquisition</string>
     <string name="cc_global_research_queue_title">Research and monitoring</string>
     <string name="cc_global_research_queue_subtitle">Queued, running, scheduled, and recovering research work</string>
+    <string name="cc_global_cognition_queue_title">Deep understanding</string>
+    <string name="cc_global_cognition_queue_subtitle">Model deliberation queued for valuable cross-conversation events</string>
+    <string name="cc_global_runs_title">Autonomous work</string>
+    <string name="cc_global_runs_subtitle">Safe preparation plans, delegated work, recovery, and confirmation</string>
+    <string name="cc_global_run_row">%1$s\n%2$s &#183; %3$d/%4$d steps</string>
     <string name="cc_global_pending_insights_title">Pending insights</string>
     <string name="cc_global_pending_insights_subtitle">Findings waiting for the right delivery moment</string>
     <string name="cc_global_process_now_title">Process now</string>
@@ -1460,6 +1469,8 @@
     <string name="cc_global_process_now_action">Run</string>
     <string name="cc_global_processed_result">Processed %1$d events</string>
     <string name="cc_global_section_privacy">Conversation boundaries</string>
+    <string name="cc_global_cloud_cognition_title">Allow cloud understanding</string>
+    <string name="cc_global_cloud_cognition_subtitle">Off by default; when enabled, relevant personal context may be sent to a configured cloud model</string>
     <string name="cc_global_sessions_title">Conversation tracking</string>
     <string name="cc_global_sessions_subtitle">Manage private, paused, and Agent-created topic conversations</string>
     <string name="cc_global_footer">Private conversations are never added to the global world model. External side effects still follow SignalASI confirmation policy.</string>
@@ -1470,6 +1481,10 @@
     <string name="cc_global_status_waiting">Waiting for a resource</string>
     <string name="cc_global_status_completed">Completed</string>
     <string name="cc_global_status_failed">Failed</string>
+    <string name="cc_global_status_confirmation">Waiting for confirmation</string>
+    <string name="cc_global_status_partial">Partially completed</string>
+    <string name="cc_global_status_skipped">Skipped</string>
+    <string name="common_reject">Reject</string>
     <string name="agent_session_pause_tracking">Pause global tracking</string>
     <string name="agent_session_resume_tracking">Resume global tracking</string>
     <string name="agent_session_tracking_paused">Tracking paused</string>

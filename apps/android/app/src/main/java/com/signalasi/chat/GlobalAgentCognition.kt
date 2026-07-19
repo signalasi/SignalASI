@@ -14,6 +14,7 @@ enum class GlobalConversationEventType {
     CONVERSATION_DELETED,
     TASK_UPDATED,
     TOOL_RESULT,
+    COGNITION_RESULT,
     USER_FEEDBACK
 }
 
@@ -495,6 +496,18 @@ object GlobalWorldModelReducer {
                 ))
             }
         }
+        if (event.type == GlobalConversationEventType.COGNITION_RESULT &&
+            event.actor == GlobalConversationActor.GLOBAL_AGENT
+        ) {
+            addAll(GlobalWorldItemKind.TOPIC, GlobalWorldLayer.TOPIC, listOf(understanding.topic), 0.72)
+            addAll(GlobalWorldItemKind.GOAL, GlobalWorldLayer.TOPIC, understanding.goalCandidates, 0.68)
+            addAll(GlobalWorldItemKind.TASK, GlobalWorldLayer.REALTIME, understanding.taskCandidates, 0.66)
+            addAll(GlobalWorldItemKind.DECISION, GlobalWorldLayer.TOPIC, understanding.decisionCandidates, 0.68)
+            addAll(GlobalWorldItemKind.PREFERENCE, GlobalWorldLayer.USER, understanding.preferenceCandidates, 0.62)
+            addAll(GlobalWorldItemKind.RISK, GlobalWorldLayer.TOPIC, understanding.riskCandidates, 0.64)
+            addAll(GlobalWorldItemKind.OPPORTUNITY, GlobalWorldLayer.TOPIC, understanding.opportunityCandidates, 0.60)
+            return@buildList
+        }
         if (event.actor !in setOf(GlobalConversationActor.SYSTEM, GlobalConversationActor.GLOBAL_AGENT)) {
             addAll(GlobalWorldItemKind.TOPIC, GlobalWorldLayer.TOPIC, listOf(understanding.topic), 0.86)
         }
@@ -763,6 +776,9 @@ object GlobalAgentLearningPolicy {
 data class GlobalAgentSettings(
     val enabled: Boolean = true,
     val proactiveInsightsEnabled: Boolean = true,
+    val modelUnderstandingEnabled: Boolean = true,
+    val autonomousPreparationEnabled: Boolean = true,
+    val allowCloudCognition: Boolean = false,
     val autonomousResearchEnabled: Boolean = true,
     val autoCreateConversationsEnabled: Boolean = true,
     val notificationsEnabled: Boolean = true,

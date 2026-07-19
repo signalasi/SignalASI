@@ -308,8 +308,15 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         runCatching { runtime.processPending() }
         repeat(2) {
             globalResearchExecutor.execute {
-                val executed = runCatching { runtime.executeResearchCycle() }.getOrNull() ?: return@execute
-                if (executed.status in setOf(
+                val cognition = runCatching { runtime.executeCognitionCycle() }.getOrNull()
+                val autonomous = runCatching { runtime.executeAutonomousCycle() }.getOrNull()
+                val research = runCatching { runtime.executeResearchCycle() }.getOrNull()
+                if (cognition?.status == GlobalCognitionTaskStatus.COMPLETED ||
+                    autonomous?.status in setOf(
+                        GlobalAutonomousRunStatus.COMPLETED,
+                        GlobalAutonomousRunStatus.PARTIAL
+                    ) ||
+                    research?.status in setOf(
                         GlobalResearchTaskStatus.COMPLETED,
                         GlobalResearchTaskStatus.SCHEDULED
                     )

@@ -1341,6 +1341,10 @@
     <string name="cc_global_section_autonomy">自主能力</string>
     <string name="cc_global_master_title">全局理解</string>
     <string name="cc_global_master_subtitle">理解已授权会话并维护个人世界模型</string>
+    <string name="cc_global_model_understanding_title">模型深度理解</string>
+    <string name="cc_global_model_understanding_subtitle">只在跨主题含义需要深入分析时调用可信推理资源</string>
+    <string name="cc_global_autonomous_preparation_title">自主准备</string>
+    <string name="cc_global_autonomous_preparation_subtitle">自主准备研究、分析、草稿、检查和专题工作区，不产生外部后果</string>
     <string name="cc_global_proactive_title">主动发现</string>
     <string name="cc_global_proactive_subtitle">主动发现有价值的风险、矛盾、机会与遗漏</string>
     <string name="cc_global_research_title">自主研究</string>
@@ -1363,6 +1367,11 @@
     <string name="cc_global_section_intelligence">智能信息获取</string>
     <string name="cc_global_research_queue_title">研究与监控</string>
     <string name="cc_global_research_queue_subtitle">查看排队、运行、定期监控与恢复中的研究任务</string>
+    <string name="cc_global_cognition_queue_title">深度理解</string>
+    <string name="cc_global_cognition_queue_subtitle">查看针对高价值跨会话事件的模型思考任务</string>
+    <string name="cc_global_runs_title">自主工作</string>
+    <string name="cc_global_runs_subtitle">查看安全准备计划、委派任务、恢复与确认状态</string>
+    <string name="cc_global_run_row">%1$s\n%2$s &#183; %3$d/%4$d 步</string>
     <string name="cc_global_pending_insights_title">待投递发现</string>
     <string name="cc_global_pending_insights_subtitle">等待合适时机呈现的发现与建议</string>
     <string name="cc_global_process_now_title">立即处理</string>
@@ -1370,6 +1379,8 @@
     <string name="cc_global_process_now_action">运行</string>
     <string name="cc_global_processed_result">已处理 %1$d 个事件</string>
     <string name="cc_global_section_privacy">会话边界</string>
+    <string name="cc_global_cloud_cognition_title">允许云端理解</string>
+    <string name="cc_global_cloud_cognition_subtitle">默认关闭；开启后，相关个人上下文可能发送给已配置的云模型</string>
     <string name="cc_global_sessions_title">会话跟踪</string>
     <string name="cc_global_sessions_subtitle">管理私密、暂停跟踪和 Agent 创建的专题会话</string>
     <string name="cc_global_footer">私密会话不会进入全局世界模型；产生外部后果的操作仍遵循 SignalASI 确认策略。</string>
@@ -1380,6 +1391,10 @@
     <string name="cc_global_status_waiting">等待可用资源</string>
     <string name="cc_global_status_completed">已完成</string>
     <string name="cc_global_status_failed">失败</string>
+    <string name="cc_global_status_confirmation">等待确认</string>
+    <string name="cc_global_status_partial">部分完成</string>
+    <string name="cc_global_status_skipped">已跳过</string>
+    <string name="common_reject">拒绝</string>
     <string name="agent_session_pause_tracking">暂停全局跟踪</string>
     <string name="agent_session_resume_tracking">恢复全局跟踪</string>
     <string name="agent_session_tracking_paused">已暂停跟踪</string>
