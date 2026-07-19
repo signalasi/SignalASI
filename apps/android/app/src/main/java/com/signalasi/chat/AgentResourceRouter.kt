@@ -253,20 +253,18 @@ object AgentTaskRequirementAnalyzer {
 }
 
 class AgentResourceHealthStore(context: Context) {
-    private val prefs = context.applicationContext.getSharedPreferences("signalasi_agent_resource_health", Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences("signalasi_agent_resource_health", Context.MODE_PRIVATE)
 
     fun snapshot(id: String): AgentResourceHealth {
         val raw = prefs.getString(id, "")?.takeIf { it.isNotBlank() } ?: return AgentResourceHealth()
-        val json = runCatching { JSONObject(raw) }.getOrDefault(JSONObject())
-        return AgentResourceHealth(
-            successes = json.optInt("successes"),
-            failures = json.optInt("failures"),
-            consecutiveFailures = json.optInt("consecutive_failures"),
-            averageLatencyMs = json.optLong("average_latency_ms"),
-            circuitOpenUntil = json.optLong("circuit_open_until"),
-            lastUpdatedAt = json.optLong("last_updated_at")
-        )
+        return decode(raw)
     }
+
+    fun snapshots(): Map<String, AgentResourceHealth> = prefs.all.mapNotNull { (id, raw) ->
+        val value = raw as? String ?: return@mapNotNull null
+        id.takeIf(String::isNotBlank)?.let { it to decode(value) }
+    }.toMap()
 
     fun record(id: String, success: Boolean, latencyMs: Long) {
         val current = snapshot(id)
@@ -280,26 +278,25 @@ class AgentResourceHealthStore(context: Context) {
         val circuitUntil = if (backoffMultiplier > 0) {
             System.currentTimeMillis() + (60_000L * backoffMultiplier).coerceAtMost(15L * 60_000L)
         } else 0L
-        prefs.edit().putString(id, JSONObject()
-            .put("successes", successes)
-            .put("failures", failures)
-            .put("consecutive_failures", consecutive)
-            .put("average_latency_ms", average)
-            .put("circuit_open_until", circuitUntil)
-            .put("last_updated_at", System.currentTimeMillis())
-            .toString()).apply()
+        val now = System.currentTimeMillis()
+        persist(id, current, AgentResourceHealth(
+            successes = successes,
+            failures = failures,
+            consecutiveFailures = consecutive,
+            averageLatencyMs = average,
+            circuitOpenUntil = circuitUntil,
+            lastUpdatedAt = now
+        ), now)
     }
 
     fun markAvailable(id: String) {
         val current = snapshot(id)
-        prefs.edit().putString(id, JSONObject()
-            .put("successes", current.successes)
-            .put("failures", current.failures)
-            .put("consecutive_failures", 0)
-            .put("average_latency_ms", current.averageLatencyMs)
-            .put("circuit_open_until", 0L)
-            .put("last_updated_at", System.currentTimeMillis())
-            .toString()).apply()
+        val now = System.currentTimeMillis()
+        persist(id, current, current.copy(
+            consecutiveFailures = 0,
+            circuitOpenUntil = 0L,
+            lastUpdatedAt = now
+        ), now)
     }
 
     fun recordFailureDomainTimeout(id: String, latencyMs: Long) {
@@ -310,14 +307,54 @@ class AgentResourceHealthStore(context: Context) {
         val average = if (current.averageLatencyMs <= 0) latencyMs else
             ((current.averageLatencyMs * (samples - 1)) + latencyMs) / samples
         val cooldown = AgentFailoverPolicy.domainCooldownMs(consecutive)
-        prefs.edit().putString(id, JSONObject()
-            .put("successes", current.successes)
-            .put("failures", failures)
-            .put("consecutive_failures", consecutive)
-            .put("average_latency_ms", average)
-            .put("circuit_open_until", System.currentTimeMillis() + cooldown)
-            .put("last_updated_at", System.currentTimeMillis())
-            .toString()).apply()
+        val now = System.currentTimeMillis()
+        persist(id, current, AgentResourceHealth(
+            successes = current.successes,
+            failures = failures,
+            consecutiveFailures = consecutive,
+            averageLatencyMs = average,
+            circuitOpenUntil = now + cooldown,
+            lastUpdatedAt = now
+        ), now)
+    }
+
+    private fun persist(
+        id: String,
+        before: AgentResourceHealth,
+        after: AgentResourceHealth,
+        timestampMillis: Long
+    ) {
+        if (id.isBlank()) return
+        prefs.edit().putString(id, encode(after)).apply()
+        GlobalCapabilityObservationExtractor.resourceHealthTransition(
+            id,
+            before,
+            after,
+            timestampMillis
+        )?.let { event ->
+            GlobalConversationEventBus.publishCapabilityEvents(appContext, listOf(event))
+        }
+    }
+
+    private fun encode(value: AgentResourceHealth): String = JSONObject()
+        .put("successes", value.successes)
+        .put("failures", value.failures)
+        .put("consecutive_failures", value.consecutiveFailures)
+        .put("average_latency_ms", value.averageLatencyMs)
+        .put("circuit_open_until", value.circuitOpenUntil)
+        .put("last_updated_at", value.lastUpdatedAt)
+        .toString()
+
+    private fun decode(raw: String): AgentResourceHealth {
+        val json = runCatching { JSONObject(raw) }.getOrDefault(JSONObject())
+        return AgentResourceHealth(
+            successes = json.optInt("successes"),
+            failures = json.optInt("failures"),
+            consecutiveFailures = json.optInt("consecutive_failures"),
+            averageLatencyMs = json.optLong("average_latency_ms"),
+            circuitOpenUntil = json.optLong("circuit_open_until"),
+            lastUpdatedAt = json.optLong("last_updated_at")
+        )
     }
 }
 

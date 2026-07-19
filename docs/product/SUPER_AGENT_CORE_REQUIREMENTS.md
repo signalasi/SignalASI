@@ -21,6 +21,7 @@ The global runtime must:
 - Keep internal cognition, research, and plan-review responses out of ordinary contact conversations.
 - Create or reuse topic conversations for substantial work and deliver only useful results at the right time.
 - Require local policy approval for irreversible external effects regardless of which model or Agent proposed them.
+- Project remembered authorization, paired Agent, MCP, smart-device, and resource-health transitions into the encrypted world model without exposing endpoints, account fields, tokens, or device identifiers.
 
 Model output never owns lifecycle or safety state. The Android host validates structured cognition, action vocabularies, plan revisions, resource routes, confirmations, retries, and completion evidence before persistence or execution.
 
@@ -67,6 +68,7 @@ Ready action branches are reserved atomically before execution so multiple backg
 - Apply bounded fallbacks without weakening privacy or action confirmation.
 - Prefer deterministic tools for exact operations and specialist agents for code, research, or long-running work.
 - Record observed success, latency, token use, cost, and failure history for future routing.
+- Emit capability observations only for material registration, availability, capacity, setup, failure, and recovery changes; repeated heartbeats and same-state health samples must remain silent.
 
 ### 5. Multi-Agent Collaboration
 

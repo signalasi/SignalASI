@@ -29,7 +29,15 @@ enum class GlobalConversationEventType {
     KNOWLEDGE_IMPORTED,
     KNOWLEDGE_UPDATED,
     KNOWLEDGE_ACCESS_CHANGED,
-    KNOWLEDGE_DELETED
+    KNOWLEDGE_DELETED,
+    AUTHORIZATION_GRANTED,
+    AUTHORIZATION_REVOKED,
+    AUTHORIZATION_POLICY_CHANGED,
+    RESOURCE_REGISTERED,
+    RESOURCE_UPDATED,
+    RESOURCE_REMOVED,
+    RESOURCE_STATE_CHANGED,
+    CAPABILITY_SNAPSHOT_RESET
 }
 
 enum class GlobalConversationActor { USER, ASSISTANT, TOOL, SYSTEM, GLOBAL_AGENT }
@@ -424,10 +432,26 @@ object GlobalWorldModelReducer {
         val retractedWorld = retractEvidence(world, incomingRetractions, event.timestampMillis).copy(
             retractedEventIds = retractedEventIds
         )
+        val replacementStableKeys = if (event.type.isCapabilityLifecycleEvent()) {
+            event.metadata["replace_stable_keys"].orEmpty()
+                .split(',')
+                .map(String::trim)
+                .filter { it.startsWith(CAPABILITY_STABLE_KEY_PREFIX) }
+                .toSet()
+        } else emptySet()
+        val projectionAdjustedWorld = when {
+            event.type == GlobalConversationEventType.CAPABILITY_SNAPSHOT_RESET -> retractedWorld.copy(
+                items = retractedWorld.items.filterNot { it.stableKey.startsWith(CAPABILITY_STABLE_KEY_PREFIX) }
+            )
+            replacementStableKeys.isNotEmpty() -> retractedWorld.copy(
+                items = retractedWorld.items.filterNot { it.stableKey in replacementStableKeys }
+            )
+            else -> retractedWorld
+        }
         if (event.evidenceRoots().any(retractedEventIds::contains)) {
             return GlobalWorldReduction(
-                world = retractedWorld.copy(
-                    processedEventIds = (retractedWorld.processedEventIds + event.id)
+                world = projectionAdjustedWorld.copy(
+                    processedEventIds = (projectionAdjustedWorld.processedEventIds + event.id)
                         .takeLast(MAX_PROCESSED_EVENT_IDS),
                     updatedAtMillis = event.timestampMillis
                 ),
@@ -437,8 +461,20 @@ object GlobalWorldModelReducer {
         }
         if (event.type == GlobalConversationEventType.USER_FEEDBACK) {
             return GlobalWorldReduction(
-                world = retractedWorld.copy(
-                    processedEventIds = (retractedWorld.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
+                world = projectionAdjustedWorld.copy(
+                    processedEventIds = (projectionAdjustedWorld.processedEventIds + event.id)
+                        .takeLast(MAX_PROCESSED_EVENT_IDS),
+                    updatedAtMillis = event.timestampMillis
+                ),
+                changedItems = emptyList(),
+                conflicts = emptyList()
+            )
+        }
+        if (event.type == GlobalConversationEventType.CAPABILITY_SNAPSHOT_RESET) {
+            return GlobalWorldReduction(
+                world = projectionAdjustedWorld.copy(
+                    processedEventIds = (projectionAdjustedWorld.processedEventIds + event.id)
+                        .takeLast(MAX_PROCESSED_EVENT_IDS),
                     updatedAtMillis = event.timestampMillis
                 ),
                 changedItems = emptyList(),
@@ -446,18 +482,19 @@ object GlobalWorldModelReducer {
             )
         }
         if (event.excludesConversationFromGlobalModel()) {
-            val retainedItems = retractedWorld.items.mapNotNull { item ->
+            val retainedItems = projectionAdjustedWorld.items.mapNotNull { item ->
                 if (event.conversationId !in item.conversationIds) return@mapNotNull item
                 val remainingConversations = item.conversationIds - event.conversationId
                 if (remainingConversations.isEmpty()) null else item.copy(conversationIds = remainingConversations)
             }
             return GlobalWorldReduction(
-                world = retractedWorld.copy(
+                world = projectionAdjustedWorld.copy(
                     items = retainedItems,
-                    links = retractedWorld.links.filterNot {
+                    links = projectionAdjustedWorld.links.filterNot {
                         it.leftConversationId == event.conversationId || it.rightConversationId == event.conversationId
                     },
-                    processedEventIds = (retractedWorld.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
+                    processedEventIds = (projectionAdjustedWorld.processedEventIds + event.id)
+                        .takeLast(MAX_PROCESSED_EVENT_IDS),
                     updatedAtMillis = event.timestampMillis
                 ),
                 changedItems = emptyList(),
@@ -466,11 +503,13 @@ object GlobalWorldModelReducer {
         }
         if (event.type == GlobalConversationEventType.MESSAGE_DELETED ||
             event.type in PERSISTENT_CONTEXT_DELETE_EVENTS ||
-            event.metadata["projection"] == "retract_only"
+            event.metadata["projection"] == "retract_only" ||
+            (event.type.isCapabilityLifecycleEvent() && event.metadata["projection"] == "retract_stable_keys")
         ) {
             return GlobalWorldReduction(
-                world = retractedWorld.copy(
-                    processedEventIds = (retractedWorld.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
+                world = projectionAdjustedWorld.copy(
+                    processedEventIds = (projectionAdjustedWorld.processedEventIds + event.id)
+                        .takeLast(MAX_PROCESSED_EVENT_IDS),
                     updatedAtMillis = event.timestampMillis
                 ),
                 changedItems = emptyList(),
@@ -479,7 +518,9 @@ object GlobalWorldModelReducer {
         }
         val now = event.timestampMillis
         val candidates = buildCandidates(event, understanding)
-        val mutable = retractedWorld.items.filter { it.expiresAtMillis <= 0L || it.expiresAtMillis > now }.toMutableList()
+        val mutable = projectionAdjustedWorld.items
+            .filter { it.expiresAtMillis <= 0L || it.expiresAtMillis > now }
+            .toMutableList()
         val changed = mutableListOf<GlobalWorldItem>()
         val conflicts = mutableListOf<Pair<GlobalWorldItem, GlobalWorldItem>>()
         candidates.forEach { candidate ->
@@ -539,7 +580,7 @@ object GlobalWorldModelReducer {
                 }
             }
         }
-        val links = mergeLinks(retractedWorld.links, event, understanding, now)
+        val links = mergeLinks(projectionAdjustedWorld.links, event, understanding, now)
         val boundedItems = mutable
             .sortedWith(compareBy<GlobalWorldItem> { it.status == GlobalWorldItemStatus.SUPERSEDED }
                 .thenByDescending { it.lastSeenAtMillis })
@@ -549,7 +590,7 @@ object GlobalWorldModelReducer {
                 items = boundedItems,
                 links = links,
                 processedEventIds = (retractedWorld.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
-                retractedEventIds = retractedWorld.retractedEventIds,
+                retractedEventIds = projectionAdjustedWorld.retractedEventIds,
                 updatedAtMillis = now
             ),
             changedItems = changed,
@@ -678,6 +719,37 @@ object GlobalWorldModelReducer {
                 lastSeenAtMillis = event.timestampMillis
             ))
         }
+        fun addCapabilityProjection(slot: String) {
+            val stableKey = event.metadata["${slot}_stable_key"].orEmpty()
+            val value = event.metadata["${slot}_summary"].orEmpty()
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .take(1_200)
+            if (!stableKey.startsWith(CAPABILITY_STABLE_KEY_PREFIX) || value.isBlank()) return
+            val kind = runCatching {
+                GlobalWorldItemKind.valueOf(event.metadata["${slot}_kind"].orEmpty())
+            }.getOrDefault(if (slot == "state") GlobalWorldItemKind.STATE else GlobalWorldItemKind.FACT)
+            val layer = runCatching {
+                GlobalWorldLayer.valueOf(event.metadata["${slot}_layer"].orEmpty())
+            }.getOrDefault(if (slot == "state") GlobalWorldLayer.REALTIME else GlobalWorldLayer.USER)
+            add(GlobalWorldItem(
+                stableKey = stableKey,
+                kind = kind,
+                layer = layer,
+                topic = event.metadata["${slot}_topic"].orEmpty().ifBlank { "Available capabilities" },
+                value = value,
+                confidence = 0.96,
+                contextVisibility = contextVisibility(event),
+                conversationIds = setOf(event.conversationId),
+                evidenceEventIds = listOf(event.id),
+                evidenceProvenance = listOf(event.evidenceRef()),
+                firstSeenAtMillis = event.timestampMillis,
+                lastSeenAtMillis = event.timestampMillis,
+                expiresAtMillis = if (layer == GlobalWorldLayer.REALTIME) {
+                    event.timestampMillis + REALTIME_TTL_MILLIS
+                } else 0L
+            ))
+        }
         when (event.type) {
             GlobalConversationEventType.MEMORY_CREATED,
             GlobalConversationEventType.MEMORY_UPDATED,
@@ -691,6 +763,24 @@ object GlobalWorldModelReducer {
                 addKnowledge()
                 return@buildList
             }
+            GlobalConversationEventType.AUTHORIZATION_GRANTED,
+            GlobalConversationEventType.AUTHORIZATION_REVOKED,
+            GlobalConversationEventType.AUTHORIZATION_POLICY_CHANGED -> {
+                addCapabilityProjection("identity")
+                return@buildList
+            }
+            GlobalConversationEventType.RESOURCE_REGISTERED,
+            GlobalConversationEventType.RESOURCE_UPDATED -> {
+                addCapabilityProjection("identity")
+                addCapabilityProjection("state")
+                return@buildList
+            }
+            GlobalConversationEventType.RESOURCE_STATE_CHANGED -> {
+                addCapabilityProjection("state")
+                return@buildList
+            }
+            GlobalConversationEventType.RESOURCE_REMOVED,
+            GlobalConversationEventType.CAPABILITY_SNAPSHOT_RESET -> return@buildList
             GlobalConversationEventType.ATTACHMENT_ADDED -> {
                 addAll(
                     GlobalWorldItemKind.FACT,
@@ -943,12 +1033,20 @@ object GlobalWorldModelReducer {
         GlobalConversationEventType.MEMORY_CONFLICTED,
         GlobalConversationEventType.KNOWLEDGE_IMPORTED,
         GlobalConversationEventType.KNOWLEDGE_UPDATED,
-        GlobalConversationEventType.KNOWLEDGE_ACCESS_CHANGED
+        GlobalConversationEventType.KNOWLEDGE_ACCESS_CHANGED,
+        GlobalConversationEventType.AUTHORIZATION_GRANTED,
+        GlobalConversationEventType.AUTHORIZATION_REVOKED,
+        GlobalConversationEventType.AUTHORIZATION_POLICY_CHANGED,
+        GlobalConversationEventType.RESOURCE_REGISTERED,
+        GlobalConversationEventType.RESOURCE_UPDATED,
+        GlobalConversationEventType.RESOURCE_STATE_CHANGED
     )
     private val PERSISTENT_CONTEXT_DELETE_EVENTS = setOf(
         GlobalConversationEventType.MEMORY_DELETED,
-        GlobalConversationEventType.KNOWLEDGE_DELETED
+        GlobalConversationEventType.KNOWLEDGE_DELETED,
+        GlobalConversationEventType.RESOURCE_REMOVED
     )
+    private const val CAPABILITY_STABLE_KEY_PREFIX = "capability:"
     private const val MAX_EVIDENCE_PER_ITEM = 20
     private const val MAX_EVIDENCE_PER_LINK = 20
     private const val MAX_WORLD_ITEMS = 1_500

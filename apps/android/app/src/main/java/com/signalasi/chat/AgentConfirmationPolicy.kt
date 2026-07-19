@@ -11,19 +11,42 @@ enum class AgentConfirmationTier {
 
 interface AgentConfirmationConsentStore {
     fun isRemembered(consentKey: String): Boolean
+    fun rememberedKeys(): Set<String>
     fun remember(consentKey: String)
+    fun forget(consentKey: String): Boolean
     fun clear()
 }
 
 class SharedPreferencesAgentConfirmationConsentStore(context: Context) : AgentConfirmationConsentStore {
-    private val preferences = AgentEncryptedPreferences(context.applicationContext, PREFS)
+    private val appContext = context.applicationContext
+    private val preferences = AgentEncryptedPreferences(appContext, PREFS)
 
     override fun isRemembered(consentKey: String): Boolean = consentKey in readKeys()
 
+    override fun rememberedKeys(): Set<String> = readKeys()
+
     override fun remember(consentKey: String) {
         if (consentKey.isBlank()) return
-        val keys = readKeys() + consentKey
-        preferences.writeString(KEY_CONSENTS, JSONArray(keys.sorted()).toString())
+        val before = readKeys()
+        if (consentKey in before) return
+        val after = before + consentKey
+        preferences.writeString(KEY_CONSENTS, JSONArray(after.sorted()).toString())
+        GlobalConversationEventBus.publishCapabilityEvents(
+            appContext,
+            GlobalCapabilityObservationExtractor.authorizationMutations(before, after)
+        )
+    }
+
+    override fun forget(consentKey: String): Boolean {
+        val before = readKeys()
+        if (consentKey !in before) return false
+        val after = before - consentKey
+        preferences.writeString(KEY_CONSENTS, JSONArray(after.sorted()).toString())
+        GlobalConversationEventBus.publishCapabilityEvents(
+            appContext,
+            GlobalCapabilityObservationExtractor.authorizationMutations(before, after)
+        )
+        return true
     }
 
     override fun clear() = preferences.clear()

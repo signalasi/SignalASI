@@ -25,6 +25,20 @@ class SharedPreferencesAgentSafetySettingsStore(context: Context) : AgentSafetyS
 
     override fun load(): AgentSafetySettings {
         migrateLegacySettings()
+        return readStored()
+    }
+
+    override fun save(settings: AgentSafetySettings) {
+        migrateLegacySettings()
+        val before = readStored()
+        if (before == settings) return
+        writeStored(settings)
+        GlobalCapabilityObservationExtractor.safetyPolicyMutation(before, settings)?.let { event ->
+            GlobalConversationEventBus.publishCapabilityEvents(appContext, listOf(event))
+        }
+    }
+
+    private fun readStored(): AgentSafetySettings {
         val json = runCatching { JSONObject(prefs.readString(KEY_SETTINGS, "{}")) }.getOrDefault(JSONObject())
         return AgentSafetySettings(
             permissionMode = enumOrDefault(
@@ -41,7 +55,7 @@ class SharedPreferencesAgentSafetySettingsStore(context: Context) : AgentSafetyS
         )
     }
 
-    override fun save(settings: AgentSafetySettings) {
+    private fun writeStored(settings: AgentSafetySettings) {
         prefs.writeString(
             KEY_SETTINGS,
             JSONObject()
@@ -73,7 +87,7 @@ class SharedPreferencesAgentSafetySettingsStore(context: Context) : AgentSafetyS
             highRiskGuard = legacy.getBoolean(KEY_HIGH_RISK_GUARD, true),
             memoryCapture = legacy.getBoolean(KEY_MEMORY_CAPTURE, true)
         )
-        save(settings)
+        writeStored(settings)
         legacy.edit()
             .remove(KEY_PERMISSION_MODE)
             .remove(KEY_HIGH_RISK_GUARD)

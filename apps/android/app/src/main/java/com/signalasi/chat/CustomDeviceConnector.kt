@@ -62,16 +62,22 @@ data class CustomDeviceCommandResult(
 )
 
 class CustomDeviceConnectorStore(context: Context) {
-    private val preferences = AgentEncryptedPreferences(context.applicationContext, PREFS)
+    private val appContext = context.applicationContext
+    private val preferences = AgentEncryptedPreferences(appContext, PREFS)
 
     fun list(): List<CustomDeviceConnector> = decode(preferences.readString(KEY_ITEMS, "[]"))
 
     fun find(id: String): CustomDeviceConnector? = list().firstOrNull { it.id == id }
 
     fun upsert(connector: CustomDeviceConnector) {
+        val before = list()
         val clean = connector.sanitized()
-        val updated = (list().filterNot { it.id == clean.id } + clean).takeLast(MAX_CONNECTORS)
+        val updated = (before.filterNot { it.id == clean.id } + clean).takeLast(MAX_CONNECTORS)
         preferences.writeString(KEY_ITEMS, encode(updated).toString())
+        GlobalConversationEventBus.publishCapabilityEvents(
+            appContext,
+            GlobalCapabilityObservationExtractor.customDeviceMutations(before, updated)
+        )
     }
 
     fun delete(id: String): Boolean {
@@ -79,6 +85,10 @@ class CustomDeviceConnectorStore(context: Context) {
         val updated = existing.filterNot { it.id == id }
         if (updated.size == existing.size) return false
         preferences.writeString(KEY_ITEMS, encode(updated).toString())
+        GlobalConversationEventBus.publishCapabilityEvents(
+            appContext,
+            GlobalCapabilityObservationExtractor.customDeviceMutations(existing, updated)
+        )
         return true
     }
 
@@ -87,12 +97,17 @@ class CustomDeviceConnectorStore(context: Context) {
     fun exportJson(): JSONArray = encode(list())
 
     fun restoreJson(array: JSONArray) {
+        val before = list()
         val restored = buildList {
             for (index in 0 until array.length()) {
                 decodeItem(array.optJSONObject(index))?.let { add(it) }
             }
         }.distinctBy { it.id }.takeLast(MAX_CONNECTORS)
         preferences.writeString(KEY_ITEMS, encode(restored).toString())
+        GlobalConversationEventBus.publishCapabilityEvents(
+            appContext,
+            GlobalCapabilityObservationExtractor.customDeviceMutations(before, restored)
+        )
     }
 
     private fun CustomDeviceConnector.sanitized(): CustomDeviceConnector = copy(

@@ -576,8 +576,9 @@ object AgentRunRecoveryPolicy {
 }
 
 class EncryptedAgentRegistry(context: Context) {
+    private val appContext = context.applicationContext
     private val database = AgentEncryptedDatabase(
-        context.applicationContext,
+        appContext,
         DATABASE,
         legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
     )
@@ -587,7 +588,8 @@ class EncryptedAgentRegistry(context: Context) {
         require(registration.agentId.isNotBlank()) { "Agent id must not be blank" }
         require(registration.installationId.isNotBlank()) { "Installation id must not be blank" }
         require(registration.deviceId.isNotBlank()) { "Device id must not be blank" }
-        val records = list().toMutableList()
+        val existingRecords = list()
+        val records = existingRecords.toMutableList()
         val index = records.indexOfFirst { it.agentId == registration.agentId }
         val existing = records.getOrNull(index)
         val stable = registration.copy(
@@ -596,7 +598,12 @@ class EncryptedAgentRegistry(context: Context) {
             updatedAtMillis = System.currentTimeMillis()
         )
         if (index >= 0) records[index] = stable else records += stable
-        save(records.takeLast(MAX_AGENTS))
+        val after = records.takeLast(MAX_AGENTS)
+        save(after)
+        GlobalConversationEventBus.publishCapabilityEvents(
+            appContext,
+            GlobalCapabilityObservationExtractor.agentMutations(existingRecords, after)
+        )
         return stable
     }
 
@@ -608,7 +615,8 @@ class EncryptedAgentRegistry(context: Context) {
         capabilitiesHash: String = "",
         timestampMillis: Long = System.currentTimeMillis()
     ): AgentRegistration? {
-        val records = list().toMutableList()
+        val existingRecords = list()
+        val records = existingRecords.toMutableList()
         val index = records.indexOfFirst { it.agentId == agentId }
         if (index < 0) return null
         records[index] = records[index].copy(
@@ -619,6 +627,10 @@ class EncryptedAgentRegistry(context: Context) {
             updatedAtMillis = timestampMillis
         )
         save(records)
+        GlobalConversationEventBus.publishCapabilityEvents(
+            appContext,
+            GlobalCapabilityObservationExtractor.agentMutations(existingRecords, records, timestampMillis)
+        )
         return records[index]
     }
 
@@ -645,9 +657,16 @@ class EncryptedAgentRegistry(context: Context) {
 
     @Synchronized
     fun remove(agentId: String): Boolean {
-        val records = list().toMutableList()
+        val existingRecords = list()
+        val records = existingRecords.toMutableList()
         val removed = records.removeAll { it.agentId == agentId }
-        if (removed) save(records)
+        if (removed) {
+            save(records)
+            GlobalConversationEventBus.publishCapabilityEvents(
+                appContext,
+                GlobalCapabilityObservationExtractor.agentMutations(existingRecords, records)
+            )
+        }
         return removed
     }
 

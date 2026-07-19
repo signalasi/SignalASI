@@ -361,7 +361,8 @@ class EncryptedAgentMcpStore(
     context: Context,
     preferencesName: String = PREFERENCES_NAME
 ) : AgentMcpStore {
-    private val preferences = AgentEncryptedPreferences(context.applicationContext, preferencesName)
+    private val appContext = context.applicationContext
+    private val preferences = AgentEncryptedPreferences(appContext, preferencesName)
 
     @Synchronized
     override fun list(): List<AgentMcpConnection> = AgentMcpConnectionCodec.decode(
@@ -370,8 +371,13 @@ class EncryptedAgentMcpStore(
 
     @Synchronized
     override fun upsert(connection: AgentMcpConnection) {
-        val next = list().filterNot { it.id == connection.id } + connection
+        val before = list()
+        val next = before.filterNot { it.id == connection.id } + connection
         preferences.writeString(KEY_CONNECTIONS, AgentMcpConnectionCodec.encode(next))
+        GlobalConversationEventBus.publishCapabilityEvents(
+            appContext,
+            GlobalCapabilityObservationExtractor.mcpMutations(before, next)
+        )
     }
 
     @Synchronized
@@ -381,6 +387,10 @@ class EncryptedAgentMcpStore(
         if (next.size == current.size) return false
         preferences.writeString(KEY_CONNECTIONS, AgentMcpConnectionCodec.encode(next))
         clearSecrets(id)
+        GlobalConversationEventBus.publishCapabilityEvents(
+            appContext,
+            GlobalCapabilityObservationExtractor.mcpMutations(current, next)
+        )
         return true
     }
 

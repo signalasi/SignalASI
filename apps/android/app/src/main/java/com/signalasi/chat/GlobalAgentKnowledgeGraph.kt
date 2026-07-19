@@ -104,6 +104,15 @@ object GlobalTopicProjectGraphReducer {
             event.type == GlobalConversationEventType.KNOWLEDGE_DELETED ||
             event.metadata["projection"] == "retract_only"
         ) return retractedGraph
+        if (event.type.isCapabilityLifecycleEvent()) {
+            val activeWorldItemIds = reduction.world.items.map(GlobalWorldItem::id).toSet()
+            return retractedGraph.copy(
+                nodes = retractedGraph.nodes.map { node ->
+                    node.copy(worldItemIds = node.worldItemIds.intersect(activeWorldItemIds))
+                },
+                updatedAtMillis = event.timestampMillis
+            )
+        }
         if (event.type in setOf(
                 GlobalConversationEventType.CONVERSATION_CREATED,
                 GlobalConversationEventType.CONVERSATION_UPDATED

@@ -237,7 +237,7 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 9)
+            .put("version", 10)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("world", encodeWorld(loadWorld()))
             .put("topic_project_graph", topicGraphStore.export())
@@ -1274,7 +1274,47 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             emptyList(),
             knowledge,
             now
-        )
+        ) + buildList {
+            add(GlobalCapabilityObservationExtractor.snapshotReset(now))
+            addAll(GlobalCapabilityObservationExtractor.authorizationMutations(
+                emptySet(),
+                SharedPreferencesAgentConfirmationConsentStore(appContext).rememberedKeys(),
+                now
+            ))
+            GlobalCapabilityObservationExtractor.safetyPolicyMutation(
+                null,
+                SharedPreferencesAgentSafetySettingsStore(appContext).load(),
+                now
+            )?.let(::add)
+            addAll(GlobalCapabilityObservationExtractor.mcpMutations(
+                emptyList(),
+                EncryptedAgentMcpStore(appContext).list(),
+                now
+            ))
+            addAll(GlobalCapabilityObservationExtractor.agentMutations(
+                emptyList(),
+                EncryptedAgentRegistry(appContext).list(now),
+                now
+            ))
+            addAll(GlobalCapabilityObservationExtractor.homeAssistantMutations(
+                HomeAssistantSettings(),
+                HomeAssistantSettingsStore.load(appContext),
+                now
+            ))
+            addAll(GlobalCapabilityObservationExtractor.customDeviceMutations(
+                emptyList(),
+                CustomDeviceConnectorStore(appContext).list(),
+                now
+            ))
+            AgentResourceHealthStore(appContext).snapshots().forEach { (resourceId, health) ->
+                GlobalCapabilityObservationExtractor.resourceHealthTransition(
+                    resourceId,
+                    AgentResourceHealth(),
+                    health,
+                    now
+                )?.let(::add)
+            }
+        }
         repository.enqueueAll(events)
         repository.savePersistentContextSyncVersion(PERSISTENT_CONTEXT_SYNC_VERSION)
     }
@@ -1592,7 +1632,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         private const val MAX_DIGEST_CHARACTERS = 12_000
         private const val DIGEST_MAX_WAIT_MILLIS = 12L * 60L * 60L * 1_000L
         private const val MIN_WAKE_DELAY_MILLIS = 60_000L
-        private const val PERSISTENT_CONTEXT_SYNC_VERSION = 1
+        private const val PERSISTENT_CONTEXT_SYNC_VERSION = 2
         private val PROCESS_LOCK = Any()
         @Volatile private var instance: GlobalSuperAgentRuntime? = null
 
@@ -1603,6 +1643,18 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
 }
 
 object GlobalConversationEventBus {
+    fun publishCapabilityEvents(
+        context: Context,
+        events: List<GlobalConversationEvent>
+    ): Boolean {
+        if (events.isEmpty()) return false
+        val repository = GlobalAgentRepository(context)
+        if (!repository.settings().enabled) return false
+        val accepted = repository.enqueueAll(events) > 0
+        if (accepted) requestProcessing(context)
+        return accepted
+    }
+
     fun publishChatMessage(
         context: Context,
         contactId: String,

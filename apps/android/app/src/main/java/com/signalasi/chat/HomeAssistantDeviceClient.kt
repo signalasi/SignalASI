@@ -35,6 +35,27 @@ object HomeAssistantSettingsStore {
 
     fun load(context: Context): HomeAssistantSettings {
         migrateLegacySettings(context)
+        return readStored(context)
+    }
+
+    fun save(context: Context, settings: HomeAssistantSettings) {
+        val appContext = context.applicationContext
+        migrateLegacySettings(appContext)
+        val before = readStored(appContext)
+        val after = settings.copy(
+            baseUrl = settings.baseUrl.trim().trimEnd('/'),
+            accessToken = settings.accessToken.trim(),
+            defaultEntityId = settings.defaultEntityId.trim()
+        )
+        if (before == after) return
+        writeStored(appContext, after)
+        GlobalConversationEventBus.publishCapabilityEvents(
+            appContext,
+            GlobalCapabilityObservationExtractor.homeAssistantMutations(before, after)
+        )
+    }
+
+    private fun readStored(context: Context): HomeAssistantSettings {
         val raw = AgentEncryptedPreferences(context, PREFS).readString(KEY_SETTINGS, "{}")
         val json = runCatching { JSONObject(raw) }.getOrDefault(JSONObject())
         return HomeAssistantSettings(
@@ -45,15 +66,15 @@ object HomeAssistantSettingsStore {
         )
     }
 
-    fun save(context: Context, settings: HomeAssistantSettings) {
+    private fun writeStored(context: Context, settings: HomeAssistantSettings) {
         AgentEncryptedPreferences(context, PREFS).writeString(
             KEY_SETTINGS,
             JSONObject()
                 .put("version", 1)
                 .put("enabled", settings.enabled)
-                .put("base_url", settings.baseUrl.trim().trimEnd('/'))
-                .put("access_token", settings.accessToken.trim())
-                .put("default_entity_id", settings.defaultEntityId.trim())
+                .put("base_url", settings.baseUrl)
+                .put("access_token", settings.accessToken)
+                .put("default_entity_id", settings.defaultEntityId)
                 .toString()
         )
     }
@@ -87,7 +108,7 @@ object HomeAssistantSettingsStore {
             !legacy.contains(KEY_ACCESS_TOKEN) &&
             !legacy.contains(KEY_DEFAULT_ENTITY_ID)
         ) return
-        save(
+        writeStored(
             context,
             HomeAssistantSettings(
                 enabled = legacy.getBoolean(KEY_ENABLED, false),
