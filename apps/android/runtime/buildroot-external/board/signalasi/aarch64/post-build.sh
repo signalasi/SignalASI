@@ -9,3 +9,8 @@ install -D -m 0755 \
   "$TARGET_DIR/usr/libexec/signalasi_guest_agent.py"
 
 rm -rf "$TARGET_DIR/usr/libexec/__pycache__"
+
+# Ship SSH tooling without exposing a listening service by default. SignalASI may start sshd only
+# after an explicit user action provisions host keys and a key-only authentication policy.
+rm -f "$TARGET_DIR/etc/init.d/S50sshd"
+rm -f "$TARGET_DIR/etc/ssh/ssh_host_"*

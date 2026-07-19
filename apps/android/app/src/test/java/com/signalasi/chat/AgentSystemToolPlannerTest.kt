@@ -53,11 +53,31 @@ class AgentSystemToolPlannerTest {
         assertEquals("python", input.getString("language"))
         assertTrue(input.getString("source").contains("simple_average.py"))
         val wrappedSource = input.getString("source")
-        val encoded = wrappedSource.substringAfter("base64.b64decode(\"").substringBefore("\")")
-        assertEquals(generatedSource, String(java.util.Base64.getDecoder().decode(encoded), Charsets.UTF_8))
+        val encoded = java.util.Base64.getEncoder().encodeToString(generatedSource.toByteArray(Charsets.UTF_8))
+        assertTrue(wrappedSource.contains(encoded))
         assertFalse(wrappedSource.contains(generatedSource))
         assertEquals("simple_average.py", input.getJSONArray("artifact_paths").getString(0))
         assertEquals("simple_average.py", materialized.parameters[PHONE_DEVELOPMENT_FILE_PARAMETER])
+    }
+
+    @Test
+    fun materializesMultiFilePhoneProjectWithoutFlatteningDirectories() {
+        val manifest = JSONObject()
+            .put("schema", "signalasi.phone-development-manifest.v2")
+            .put("language", "python")
+            .put("entry_file", "src/main.py")
+            .put("files", org.json.JSONArray()
+                .put(JSONObject().put("path", "src/main.py").put("content", "from lib.maths import total\nprint(total([2, 3]))"))
+                .put(JSONObject().put("path", "src/lib/maths.py").put("content", "def total(values):\n    return sum(values)")))
+            .put("artifact_paths", org.json.JSONArray().put("README.md"))
+        val parsed = AgentPhoneDevelopmentManifestCodec.parse(manifest.toString()).getOrThrow()
+        val input = parsed.runtimeInput()
+
+        assertEquals("src/main.py", parsed.entryFile)
+        assertEquals(listOf("src/main.py", "src/lib/maths.py"), parsed.files.map { it.path })
+        assertEquals(3, input.getJSONArray("artifact_paths").length())
+        assertTrue(input.getString("source").contains("mkdir(parents=True"))
+        assertTrue(input.getString("source").contains("runpy.run_path"))
     }
 
     @Test

@@ -9,6 +9,8 @@ import java.nio.file.LinkOption
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.Locale
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 enum class AgentRuntimeReceiptStatus { RUNNING, COMPLETED, FAILED, CANCELLED, TIMED_OUT }
 
@@ -362,28 +364,134 @@ class AgentRuntimeWorkspaceManager private constructor(
     }
 
     @Synchronized
+    fun installArchiveCompatibilityTools(prepared: AgentRuntimePreparedWorkspace): File {
+        val bin = safeChild(prepared.directory, RUNTIME_TOOL_DIRECTORY)
+            ?: error("Runtime tool path is invalid")
+        check(bin.mkdirs() || bin.isDirectory) { "Runtime tool directory is unavailable" }
+        writeExecutable(File(bin, "zip"), ZIP_COMPATIBILITY_TOOL)
+        writeExecutable(File(bin, "unzip"), UNZIP_COMPATIBILITY_TOOL)
+        return bin
+    }
+
+    @Synchronized
     fun collectArtifacts(
         prepared: AgentRuntimePreparedWorkspace,
         request: AgentRuntimeExecutionRequest
     ): List<Map<String, Any?>> {
+        val requested = request.artifactPaths.mapNotNull { relative ->
+            val runtimeArtifact = safeChild(prepared.directory, relative) ?: return@mapNotNull null
+            val durableArtifact = safeChild(prepared.projectDirectory, relative)
+                ?.takeIf { it.exists() }
+                ?: runtimeArtifact.takeIf { it.exists() }
+                ?: return@mapNotNull null
+            relative.replace('\\', '/') to durableArtifact
+        }
+        if (requested.size > 1 || requested.any { it.second.isDirectory }) {
+            return listOf(packageProjectArtifacts(prepared, request, requested))
+        }
         var totalBytes = 0L
-        return request.artifactPaths.mapNotNull { relative ->
-            val artifact = safeChild(prepared.directory, relative) ?: return@mapNotNull null
+        return requested.mapNotNull { (relative, artifact) ->
             if (!artifact.isFile) return@mapNotNull null
             val bytes = artifact.length()
             check(bytes <= request.resourceLimits.maxArtifactBytes) { "Runtime artifact exceeds its size limit" }
             totalBytes += bytes
             check(totalBytes <= request.resourceLimits.diskBytes) { "Runtime artifacts exceed the workspace quota" }
-            val durableArtifact = safeChild(prepared.projectDirectory, relative)
-                ?.takeIf(File::isFile)
-                ?: artifact
             mapOf(
-                "relative_path" to relative.replace('\\', '/'),
+                "relative_path" to relative,
                 "size_bytes" to bytes,
                 "sha256" to sha256File(artifact),
-                "host_path" to durableArtifact.absolutePath
+                "host_path" to artifact.absolutePath,
+                "artifact_kind" to "file"
             )
         }
+    }
+
+    private fun packageProjectArtifacts(
+        prepared: AgentRuntimePreparedWorkspace,
+        request: AgentRuntimeExecutionRequest,
+        requested: List<Pair<String, File>>
+    ): Map<String, Any?> {
+        val exportDirectory = safeChild(File(root.parentFile, "exports").apply { mkdirs() }, sha256(prepared.workspaceId.toByteArray()).take(32))
+            ?: error("Runtime export path is invalid")
+        check(exportDirectory.mkdirs() || exportDirectory.isDirectory) { "Runtime export storage is unavailable" }
+        val baseName = requested.firstOrNull()?.first
+            ?.substringAfterLast('/')
+            ?.substringBeforeLast('.')
+            ?.replace(Regex("[^A-Za-z0-9._-]"), "-")
+            ?.take(48)
+            ?.ifBlank { "project" }
+            ?: "project"
+        val archive = File(exportDirectory, "$baseName-project.zip")
+        val temporary = File(exportDirectory, ".${archive.name}.${prepared.requestId}.tmp")
+        temporary.delete()
+        var fileCount = 0
+        var sourceBytes = 0L
+        val entryNames = linkedSetOf<String>()
+        try {
+            ZipOutputStream(temporary.outputStream().buffered()).use { zip ->
+                requested.forEach { (relative, source) ->
+                    if (source.isFile) {
+                        addProjectZipFile(zip, source, relative, request, entryNames).also { bytes ->
+                            sourceBytes += bytes
+                            fileCount++
+                        }
+                    } else {
+                        val rootPath = source.toPath()
+                        Files.walk(rootPath).use { paths ->
+                            paths.filter { path -> Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) }
+                                .forEach { path ->
+                                    check(!Files.isSymbolicLink(path)) { "Symbolic links are not allowed in runtime artifacts" }
+                                    val child = path.toFile()
+                                    val suffix = rootPath.relativize(path).toString().replace('\\', '/')
+                                    val entryName = listOf(relative.trimEnd('/'), suffix)
+                                        .filter(String::isNotBlank)
+                                        .joinToString("/")
+                                    addProjectZipFile(zip, child, entryName, request, entryNames).also { bytes ->
+                                        sourceBytes += bytes
+                                        fileCount++
+                                    }
+                                }
+                        }
+                    }
+                    check(fileCount <= MAX_PROJECT_ARCHIVE_FILES) { "Runtime project contains too many files" }
+                    check(sourceBytes <= request.resourceLimits.diskBytes) { "Runtime project exceeds the workspace quota" }
+                }
+            }
+            check(fileCount > 0) { "Runtime project does not contain exportable files" }
+            check(temporary.length() <= request.resourceLimits.maxArtifactBytes) { "Runtime project archive exceeds its size limit" }
+            if (archive.exists()) check(archive.delete()) { "Previous runtime project archive could not be replaced" }
+            check(temporary.renameTo(archive)) { "Runtime project archive could not be committed" }
+        } catch (error: Throwable) {
+            temporary.delete()
+            throw error
+        }
+        return mapOf(
+            "relative_path" to archive.name,
+            "size_bytes" to archive.length(),
+            "sha256" to sha256File(archive),
+            "host_path" to archive.absolutePath,
+            "artifact_kind" to "project_archive",
+            "file_count" to fileCount,
+            "source_bytes" to sourceBytes
+        )
+    }
+
+    private fun addProjectZipFile(
+        zip: ZipOutputStream,
+        source: File,
+        relativePath: String,
+        request: AgentRuntimeExecutionRequest,
+        entryNames: MutableSet<String>
+    ): Long {
+        val normalized = relativePath.replace('\\', '/').trimStart('/')
+        validateRelativePath(normalized)
+        if (!entryNames.add(normalized)) return 0L
+        val bytes = source.length()
+        check(bytes <= request.resourceLimits.maxArtifactBytes) { "Runtime project file exceeds its size limit" }
+        zip.putNextEntry(ZipEntry(normalized).apply { time = 0L })
+        source.inputStream().buffered().use { it.copyTo(zip) }
+        zip.closeEntry()
+        return bytes
     }
 
     @Synchronized
@@ -472,7 +580,13 @@ class AgentRuntimeWorkspaceManager private constructor(
     }
 
     private fun isRuntimeControlPath(path: String): Boolean =
-        path in RUNTIME_CONTROL_FILES || path == ".tmp" || path.startsWith(".tmp/")
+        path in RUNTIME_CONTROL_FILES || path == ".tmp" || path.startsWith(".tmp/") ||
+            path == RUNTIME_TOOL_DIRECTORY || path.startsWith("$RUNTIME_TOOL_DIRECTORY/")
+
+    private fun writeExecutable(file: File, source: String) {
+        file.writeText(source.trimIndent() + "\n", Charsets.UTF_8)
+        check(file.setExecutable(true, true) || file.canExecute()) { "Runtime compatibility tool is not executable" }
+    }
 
     private fun validateRelativePath(value: String) {
         require(value.isNotBlank() && value.length <= MAX_ARTIFACT_PATH_CHARS && !File(value).isAbsolute) {
@@ -497,6 +611,7 @@ class AgentRuntimeWorkspaceManager private constructor(
         AgentRuntimeLanguage.C -> "main.c"
         AgentRuntimeLanguage.CPP -> "main.cpp"
         AgentRuntimeLanguage.JAVA -> "Main.java"
+        AgentRuntimeLanguage.BROWSER -> "main.browser.js"
         AgentRuntimeLanguage.FFMPEG -> "main.ffmpeg.json"
         AgentRuntimeLanguage.FFPROBE -> "main.ffprobe.json"
     }
@@ -504,6 +619,8 @@ class AgentRuntimeWorkspaceManager private constructor(
     companion object {
         private const val MAX_WORKSPACE_ID_CHARS = 64
         private const val MAX_ARTIFACT_PATH_CHARS = 1_024
+        private const val MAX_PROJECT_ARCHIVE_FILES = 1_024
+        private const val RUNTIME_TOOL_DIRECTORY = ".signalasi-tools/bin"
         private const val WORKSPACE_TTL_MILLIS = 7L * 24L * 60L * 60L * 1_000L
         private val ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
         private val DOMAIN_PATTERN = Regex("(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
@@ -514,6 +631,76 @@ class AgentRuntimeWorkspaceManager private constructor(
             ".signalasi-stderr",
             ".signalasi-main"
         )
+        private val ZIP_COMPATIBILITY_TOOL = """
+            #!/usr/bin/env python3
+            import os
+            import sys
+            import zipfile
+
+            args = [arg for arg in sys.argv[1:] if not (arg.startswith("-") and arg != "-")]
+            if len(args) < 2:
+                raise SystemExit("usage: zip archive.zip PATH...")
+            archive = args[0] if args[0].lower().endswith(".zip") else args[0] + ".zip"
+            sources = args[1:]
+            try:
+                import zlib
+                compression = zipfile.ZIP_DEFLATED
+            except ImportError:
+                compression = zipfile.ZIP_STORED
+            with zipfile.ZipFile(archive, "w", compression=compression) as output:
+                for source in sources:
+                    if os.path.isdir(source):
+                        for root, directories, files in os.walk(source):
+                            directories.sort()
+                            files.sort()
+                            for name in files:
+                                path = os.path.join(root, name)
+                                output.write(path, os.path.normpath(path).replace(os.sep, "/"))
+                    elif os.path.isfile(source):
+                        output.write(source, os.path.normpath(source).replace(os.sep, "/"))
+                    else:
+                        raise SystemExit("zip source not found: " + source)
+        """
+        private val UNZIP_COMPATIBILITY_TOOL = """
+            #!/usr/bin/env python3
+            import os
+            import shutil
+            import stat
+            import sys
+            import zipfile
+
+            args = sys.argv[1:]
+            listing = "-l" in args
+            destination = "."
+            if "-d" in args:
+                index = args.index("-d")
+                destination = args[index + 1]
+                del args[index:index + 2]
+            args = [arg for arg in args if not arg.startswith("-")]
+            if not args:
+                raise SystemExit("usage: unzip archive.zip [-d DIRECTORY]")
+            archive = args[0]
+            destination_root = os.path.realpath(destination)
+            with zipfile.ZipFile(archive) as source:
+                if listing:
+                    for item in source.infolist():
+                        print(f"{item.file_size:10d}  {item.filename}")
+                    raise SystemExit(0)
+                for item in source.infolist():
+                    normalized = item.filename.replace("\\", "/")
+                    target = os.path.realpath(os.path.join(destination_root, normalized))
+                    if normalized.startswith("/") or target != destination_root and not target.startswith(destination_root + os.sep):
+                        raise SystemExit("unsafe archive entry: " + item.filename)
+                    mode = item.external_attr >> 16
+                    if stat.S_ISLNK(mode):
+                        raise SystemExit("archive links are not allowed: " + item.filename)
+                    if item.is_dir():
+                        os.makedirs(target, exist_ok=True)
+                    else:
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        with source.open(item) as input_file, open(target, "wb") as output_file:
+                            shutil.copyfileobj(input_file, output_file)
+        """
     }
 }
 

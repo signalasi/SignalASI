@@ -2,6 +2,7 @@ package com.signalasi.chat
 
 import java.io.File
 import java.nio.file.Files
+import java.util.zip.ZipFile
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -77,13 +78,44 @@ class AgentRuntimeProjectWorkspaceTest {
         assertEquals("notes.txt", bound["path"])
     }
 
-    private fun request(requestId: String, source: String) = AgentRuntimeExecutionRequest(
+    @Test
+    fun packagesMultipleFilesAndDirectoriesAsOneProjectArchive() {
+        val request = request(
+            requestId = "run-project",
+            source = "print('project')",
+            artifactPaths = listOf("src", "README.md")
+        )
+        val prepared = manager.prepare(request)
+        File(prepared.directory, "src/lib").mkdirs()
+        File(prepared.directory, "src/main.py").writeText("print('hello')")
+        File(prepared.directory, "src/lib/value.py").writeText("VALUE = 7")
+        File(prepared.directory, "README.md").writeText("# Sample")
+        manager.syncProject(prepared, 8L * 1024L * 1024L)
+
+        val artifact = manager.collectArtifacts(prepared, request).single()
+        assertEquals("project_archive", artifact["artifact_kind"])
+        assertEquals(3, artifact["file_count"])
+        val archive = File(artifact.getValue("host_path").toString())
+        assertTrue(archive.isFile)
+        ZipFile(archive).use { zip ->
+            assertEquals(
+                setOf("src/main.py", "src/lib/value.py", "README.md"),
+                zip.entries().asSequence().map { it.name }.toSet()
+            )
+        }
+    }
+
+    private fun request(
+        requestId: String,
+        source: String,
+        artifactPaths: List<String> = listOf("result.txt")
+    ) = AgentRuntimeExecutionRequest(
         language = AgentRuntimeLanguage.PYTHON,
         source = source,
         arguments = emptyList(),
         timeoutMillis = 1_000L,
         networkEnabled = false,
-        artifactPaths = listOf("result.txt"),
+        artifactPaths = artifactPaths,
         workspaceId = "workspace-one",
         requestId = requestId,
         resourceLimits = AgentRuntimeResourceLimits(

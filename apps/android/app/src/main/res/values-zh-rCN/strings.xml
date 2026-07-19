@@ -1310,4 +1310,9 @@
     <string name="rich_output_type_web">网页</string>
     <string name="rich_output_type_interactive">交互内容</string>
     <string name="rich_output_type_file">文件</string>
+    <string name="common_close">关闭</string>
+    <string name="agent_runtime_artifact_unavailable">运行文件不可用，或完整性校验未通过。</string>
+    <string name="agent_runtime_artifact_saved">已保存到 %1$s</string>
+    <string name="agent_runtime_artifact_saved_picker">文件已保存</string>
+    <string name="agent_runtime_artifact_save_failed">文件保存失败，请重试。</string>
 </resources>

@@ -29,6 +29,7 @@ export const PACK_ENTRYPOINTS = new Map([
   ['rust', ['bin/rustc']],
   ['cpp', ['bin/cc', 'bin/c++']],
   ['java', ['bin/java', 'bin/javac']],
+  ['browser-automation', ['bin/signalasi-browser', 'bin/playwright']],
   ['ffmpeg', ['bin/ffmpeg', 'bin/ffprobe']],
 ]);
 

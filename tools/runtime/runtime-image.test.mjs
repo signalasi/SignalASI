@@ -21,6 +21,7 @@ function fixture(packId = 'python-uv') {
   const names = {
     'python-uv': ['python3', 'uv'],
     'node-js': ['node', 'tsx'],
+    'browser-automation': ['signalasi-browser', 'playwright'],
     ffmpeg: ['ffmpeg', 'ffprobe'],
   }[packId];
   for (const name of names) {
@@ -137,6 +138,28 @@ test('runtime image builder normalizes and validates explicit dependencies', () 
       }),
       /dependency/,
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('browser automation pack requires its launcher and Playwright CLI', () => {
+  const { root, source } = fixture('browser-automation');
+  try {
+    const result = buildRuntimeImage({
+      packId: 'browser-automation',
+      version: '1.61.0',
+      sourceRoot: source,
+      outputPath: join(root, 'browser.img'),
+      license: 'Apache-2.0 AND BSD-3-Clause',
+      dependencies: ['node-js'],
+      platform: 'win32',
+      squashfsBuilder: (stagedRoot, stagedImage) => {
+        copyFileSync(join(stagedRoot, 'bin', 'signalasi-browser'), stagedImage);
+      },
+    });
+    assert.deepEqual(result.config.capabilities, ['browser.automation.execute']);
+    assert.deepEqual(result.config.dependencies, ['linux-base', 'node-js']);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

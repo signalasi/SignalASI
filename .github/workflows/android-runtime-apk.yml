@@ -49,6 +49,10 @@ jobs:
         with:
           node-version: 22
 
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -108,9 +112,11 @@ jobs:
             build/runtime/release/rust-*.img.config.json
             build/runtime/release/java-*.img
             build/runtime/release/java-*.img.config.json
+            build/runtime/release/browser-automation-*.img
+            build/runtime/release/browser-automation-*.img.config.json
             build/runtime/release/ffmpeg-*.img
             build/runtime/release/ffmpeg-*.img.config.json
-          key: android-runtime-software-images-v1-${{ runner.os }}-${{ hashFiles('tools/runtime/build-node-js-image.sh', 'tools/runtime/build-go-image.sh', 'tools/runtime/build-cpp-image.sh', 'tools/runtime/build-rust-image.sh', 'tools/runtime/build-java-image.sh', 'tools/runtime/build-ffmpeg-image.sh', 'tools/runtime/runtime-download.sh', 'tools/runtime/runtime-image.mjs', 'tools/runtime/build-runtime-image.mjs') }}
+          key: android-runtime-software-images-v2-${{ runner.os }}-${{ hashFiles('tools/runtime/build-node-js-image.sh', 'tools/runtime/build-go-image.sh', 'tools/runtime/build-cpp-image.sh', 'tools/runtime/build-rust-image.sh', 'tools/runtime/build-java-image.sh', 'tools/runtime/build-browser-automation-image.sh', 'tools/runtime/build-ffmpeg-image.sh', 'tools/runtime/runtime-download.sh', 'tools/runtime/runtime-image.mjs', 'tools/runtime/build-runtime-image.mjs') }}
 
       - name: Inspect restored optional software images
         id: optional-images-state
@@ -126,6 +132,8 @@ jobs:
             build/runtime/release/rust-1.97.1-arm64-v8a.img.config.json
             build/runtime/release/java-25.0.3_9-arm64-v8a.img
             build/runtime/release/java-25.0.3_9-arm64-v8a.img.config.json
+            build/runtime/release/browser-automation-playwright-1.61.0-arm64-v8a.img
+            build/runtime/release/browser-automation-playwright-1.61.0-arm64-v8a.img.config.json
             build/runtime/release/ffmpeg-8.1.2-arm64-v8a.img
             build/runtime/release/ffmpeg-8.1.2-arm64-v8a.img.config.json
           )
@@ -161,6 +169,7 @@ jobs:
           run_pack "C and C++" npm run runtime:build-cpp
           run_pack "Rust" npm run runtime:build-rust
           run_pack "Java" npm run runtime:build-java
+          run_pack "Browser automation" npm run runtime:build-browser-automation
           run_pack "FFmpeg" npm run runtime:build-ffmpeg
 
       - name: Save optional software image cache
@@ -178,6 +187,8 @@ jobs:
             build/runtime/release/rust-*.img.config.json
             build/runtime/release/java-*.img
             build/runtime/release/java-*.img.config.json
+            build/runtime/release/browser-automation-*.img
+            build/runtime/release/browser-automation-*.img.config.json
             build/runtime/release/ffmpeg-*.img
             build/runtime/release/ffmpeg-*.img.config.json
           key: ${{ steps.optional-images-cache.outputs.cache-primary-key }}
@@ -295,8 +306,8 @@ jobs:
         run: |
           shopt -s nullglob
           configs=(build/runtime/release/*.img.config.json)
-          if [[ ${#configs[@]} -ne 8 ]]; then
-            echo "Expected exactly eight runtime image configurations; found ${#configs[@]}." >&2
+          if [[ ${#configs[@]} -ne 9 ]]; then
+            echo "Expected exactly nine runtime image configurations; found ${#configs[@]}." >&2
             exit 2
           fi
           for config in "${configs[@]}"; do

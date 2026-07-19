@@ -148,6 +148,30 @@ class AgentRichContentTest {
     }
 
     @Test
+    fun phoneRuntimeResultIncludesOnePreviewableSavableArtifactCard() {
+        val rich = AgentRuntimeArtifactUi.richOutput(
+            output = mapOf(
+                "artifacts" to listOf(mapOf(
+                    "relative_path" to "sample.py",
+                    "host_path" to "C:/private/agent-native-workspaces/session/sample.py",
+                    "size_bytes" to 42L,
+                    "sha256" to "a".repeat(64),
+                    "artifact_kind" to "file"
+                ))
+            ),
+            responseText = "Written and verified.\n\nRun output:\n\n```text\n42\n```",
+            preferredFileName = "sample.py",
+            zh = false
+        )
+
+        val blocks = AgentRichContentCodec.decode(rich)
+        val file = blocks.single { it.type == AgentRichBlockType.FILE }
+        assertEquals("sample.py", file.title)
+        assertEquals(listOf("preview_runtime_artifact", "save_runtime_artifact"), file.actions.map { it.verb })
+        assertTrue(blocks.any { it.type == AgentRichBlockType.CODE && it.text == "42" })
+    }
+
+    @Test
     fun malformedOrFutureDocumentsFailClosed() {
         assertTrue(AgentRichContentCodec.decode("not-json").isEmpty())
         assertTrue(AgentRichContentCodec.decode("{\"version\":99,\"blocks\":[]}").isEmpty())

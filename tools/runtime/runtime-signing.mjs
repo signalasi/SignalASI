@@ -106,7 +106,7 @@ export function requireInteger(value, name, minimum, maximum) {
 }
 
 export const PACK_IDS = new Set([
-  'linux-base', 'python-uv', 'node-js', 'go', 'rust', 'cpp', 'java', 'ffmpeg',
+  'linux-base', 'python-uv', 'node-js', 'go', 'rust', 'cpp', 'java', 'browser-automation', 'ffmpeg',
 ]);
 export const PACK_REQUIRED_CAPABILITIES = new Map([
   ['linux-base', ['shell.execute']],
@@ -116,6 +116,7 @@ export const PACK_REQUIRED_CAPABILITIES = new Map([
   ['rust', ['rust.execute']],
   ['cpp', ['c.execute', 'cpp.execute']],
   ['java', ['java.execute']],
+  ['browser-automation', ['browser.automation.execute']],
   ['ffmpeg', ['ffmpeg.execute', 'ffprobe.inspect']],
 ]);
 export const VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?$/;

@@ -129,6 +129,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_CONTROL_CENTER_PERMISSION = 2016
         private const val REQUEST_IMPORT_MCP_PACKAGE = 2017
         private const val REQUEST_IMPORT_RUNTIME_PACK = 2018
+        private const val REQUEST_EXPORT_RUNTIME_ARTIFACT = 2019
         private const val EXTRA_REOPEN_CONTROL_CENTER_CHILD = "signalasi_reopen_control_center_child"
         private const val CONTROL_CENTER_CHILD_TEXT_SIZE = "text_size"
         private const val CAPABILITY_KIND_MCP = "mcp"
@@ -347,6 +348,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val directoryContacts = mutableListOf<Contact>()
     private var pendingExportPassword: String? = null
     private var pendingExportSkill: Pair<String, String>? = null
+    private var pendingRuntimeArtifactExport: AgentRuntimeArtifactActionPayload? = null
     private var pendingExportIncludeMessages = true
     private var pendingImportUri: Uri? = null
     private val agentInputAttachments = mutableListOf<AgentInputAttachment>()
@@ -1449,6 +1451,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         if (requestCode == REQUEST_IMPORT_RUNTIME_PACK && resultCode == RESULT_OK) {
             importRuntimePackFromUri(data?.data ?: return)
+            return
+        }
+        if (requestCode == REQUEST_EXPORT_RUNTIME_ARTIFACT) {
+            val pending = pendingRuntimeArtifactExport
+            pendingRuntimeArtifactExport = null
+            if (resultCode == RESULT_OK && data?.data != null && pending != null) {
+                exportRuntimeArtifactToUri(pending, data.data!!)
+            }
             return
         }
         if (requestCode == REQUEST_EXPORT_SKILL) {
@@ -5362,6 +5372,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         "rust" -> "Rust"
         "cpp" -> "C / C++"
         "java" -> "Java"
+        "browser-automation" -> getString(R.string.cc_runtime_pack_browser)
         "ffmpeg" -> "FFmpeg"
         else -> id
     }
@@ -5377,6 +5388,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         AgentRuntimeLanguage.C -> "C"
         AgentRuntimeLanguage.CPP -> "C++"
         AgentRuntimeLanguage.JAVA -> "Java"
+        AgentRuntimeLanguage.BROWSER -> getString(R.string.cc_runtime_pack_browser)
         AgentRuntimeLanguage.FFMPEG -> "FFmpeg"
         AgentRuntimeLanguage.FFPROBE -> "ffprobe"
     }
@@ -7638,7 +7650,112 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 entry,
                 approved = action.verb == "approve_task"
             )
+            "preview_runtime_artifact" -> previewRuntimeArtifact(action.value)
+            "save_runtime_artifact" -> saveRuntimeArtifact(action.value)
             else -> Toast.makeText(this, action.label, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun previewRuntimeArtifact(rawPayload: String) {
+        val payload = AgentRuntimeArtifactActionPayload.decode(rawPayload)
+        if (payload == null) {
+            Toast.makeText(this, R.string.agent_runtime_artifact_unavailable, Toast.LENGTH_SHORT).show()
+            return
+        }
+        thread(name = "signalasi-artifact-preview") {
+            val resolved = AgentRuntimeArtifactUi.resolve(this, payload)
+            val preview = resolved.mapCatching { file -> AgentRuntimeArtifactUi.preview(file).getOrThrow() }
+            runOnUiThread {
+                preview.fold(
+                    onSuccess = { source -> showRuntimeArtifactPreview(payload, source) },
+                    onFailure = {
+                        Toast.makeText(this, R.string.agent_runtime_artifact_unavailable, Toast.LENGTH_LONG).show()
+                    }
+                )
+            }
+        }
+    }
+
+    private fun showRuntimeArtifactPreview(payload: AgentRuntimeArtifactActionPayload, source: String) {
+        val content = TextView(this).apply {
+            text = source
+            textSize = 13.5f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(getColorCompat(R.color.text_primary))
+            setTextIsSelectable(true)
+            setPadding(dp(16), dp(12), dp(16), dp(18))
+        }
+        val viewport = ScrollView(this).apply {
+            isFillViewport = true
+            addView(HorizontalScrollView(this@MainActivity).apply {
+                isHorizontalScrollBarEnabled = true
+                addView(content, ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ))
+            })
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(payload.displayName)
+            .setView(viewport)
+            .setNegativeButton(R.string.common_close, null)
+            .setNeutralButton(R.string.common_copy) { _, _ ->
+                val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText(payload.displayName, source))
+                Toast.makeText(this, R.string.toast_copied, Toast.LENGTH_SHORT).show()
+            }
+            .setPositiveButton(R.string.common_save) { _, _ -> saveRuntimeArtifact(payload.encode()) }
+            .create()
+        dialog.setOnShowListener {
+            dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.94f).toInt(), (resources.displayMetrics.heightPixels * 0.82f).toInt())
+        }
+        dialog.show()
+    }
+
+    private fun saveRuntimeArtifact(rawPayload: String) {
+        val payload = AgentRuntimeArtifactActionPayload.decode(rawPayload)
+        if (payload == null) {
+            Toast.makeText(this, R.string.agent_runtime_artifact_unavailable, Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            pendingRuntimeArtifactExport = payload
+            startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = payload.mimeType
+                putExtra(Intent.EXTRA_TITLE, payload.displayName)
+            }, REQUEST_EXPORT_RUNTIME_ARTIFACT)
+            return
+        }
+        thread(name = "signalasi-artifact-save") {
+            val result = AgentRuntimeArtifactUi.resolve(this, payload).mapCatching { source ->
+                AgentRuntimeArtifactExporter(this).saveToDownloads(source, payload).getOrThrow()
+            }
+            runOnUiThread {
+                result.fold(
+                    onSuccess = { path ->
+                        Toast.makeText(this, getString(R.string.agent_runtime_artifact_saved, path), Toast.LENGTH_LONG).show()
+                    },
+                    onFailure = {
+                        Toast.makeText(this, R.string.agent_runtime_artifact_save_failed, Toast.LENGTH_LONG).show()
+                    }
+                )
+            }
+        }
+    }
+
+    private fun exportRuntimeArtifactToUri(payload: AgentRuntimeArtifactActionPayload, destination: Uri) {
+        thread(name = "signalasi-artifact-export") {
+            val result = AgentRuntimeArtifactUi.resolve(this, payload).mapCatching { source ->
+                AgentRuntimeArtifactExporter(this).copyToUri(source, destination).getOrThrow()
+            }
+            runOnUiThread {
+                Toast.makeText(
+                    this,
+                    if (result.isSuccess) R.string.agent_runtime_artifact_saved_picker else R.string.agent_runtime_artifact_save_failed,
+                    Toast.LENGTH_LONG
+                ).show()
+            }
         }
     }
 

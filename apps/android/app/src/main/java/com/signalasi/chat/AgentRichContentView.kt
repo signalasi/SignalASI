@@ -798,10 +798,15 @@ class AgentRichContentView(
 
     private fun artifactBlock(block: AgentRichBlock): View {
         val descriptor = AgentRichFormatRegistry.describe(block)
-        val canOpen = isOpenableUri(block.uri)
+        val previewAction = block.actions.firstOrNull { it.verb == "preview_runtime_artifact" }
+        val saveAction = block.actions.firstOrNull { it.verb == "save_runtime_artifact" }
+        val canOpen = previewAction == null && saveAction == null && isOpenableUri(block.uri)
         val detailParts = buildList {
-            add(formatLabel(descriptor))
-            block.metadata["size"]?.takeIf(String::isNotBlank)?.let(::add)
+            val customDetail = block.metadata["detail"].orEmpty()
+            if (customDetail.isNotBlank()) add(customDetail) else {
+                add(formatLabel(descriptor))
+                block.metadata["size"]?.takeIf(String::isNotBlank)?.let(::add)
+            }
             block.mimeType.takeIf(String::isNotBlank)?.let(::add)
             if (descriptor.family == AgentRichFormatFamily.UNKNOWN) {
                 add(activity.getString(R.string.rich_output_unknown_file))
@@ -848,9 +853,31 @@ class AgentRichContentView(
                 R.drawable.ic_rich_open,
                 activity.getString(R.string.rich_output_open)
             ) { openUri(block.uri, block.mimeType) }, LinearLayout.LayoutParams(dp(40), dp(40)))
-            isClickable = canOpen
-            isFocusable = canOpen
-            if (canOpen) setOnClickListener { openUri(block.uri, block.mimeType) }
+            saveAction?.let { action ->
+                addView(Button(activity).apply {
+                    text = action.label
+                    textSize = 13f
+                    isAllCaps = false
+                    minWidth = 0
+                    minimumWidth = 0
+                    setPadding(dp(12), 0, dp(12), 0)
+                    setTextColor(Color.parseColor("#087F69"))
+                    background = roundedBackground("#EFFAF8", 6f, "#BFE7DB")
+                    setOnClickListener { onAction(action) }
+                }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(38)).apply {
+                    marginStart = dp(7)
+                })
+            }
+            val primaryAction = previewAction
+            isClickable = primaryAction != null || canOpen
+            isFocusable = isClickable
+            when {
+                primaryAction != null -> {
+                    contentDescription = primaryAction.label
+                    setOnClickListener { onAction(primaryAction) }
+                }
+                canOpen -> setOnClickListener { openUri(block.uri, block.mimeType) }
+            }
         }
     }
 

@@ -956,4 +956,9 @@
     <string name="common_test">测试</string>
     <string name="common_enabled">已启用</string>
     <string name="status_connected">已连接</string>
+    <string name="common_close">关闭</string>
+    <string name="agent_runtime_artifact_unavailable">运行文件不可用，或完整性校验未通过。</string>
+    <string name="agent_runtime_artifact_saved">已保存到 %1$s</string>
+    <string name="agent_runtime_artifact_saved_picker">文件已保存</string>
+    <string name="agent_runtime_artifact_save_failed">文件保存失败，请重试。</string>
 </resources>

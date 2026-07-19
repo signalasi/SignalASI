@@ -48,6 +48,7 @@ PACK_ENTRYPOINTS = {
     "rust": ("bin/rustc",),
     "cpp": ("bin/cc", "bin/c++"),
     "java": ("bin/java", "bin/javac"),
+    "browser-automation": ("bin/signalasi-browser", "bin/playwright"),
     "ffmpeg": ("bin/ffmpeg", "bin/ffprobe"),
 }
 PACK_REQUIRED_CAPABILITIES = {
@@ -57,6 +58,7 @@ PACK_REQUIRED_CAPABILITIES = {
     "rust": {"rust.execute"},
     "cpp": {"c.execute", "cpp.execute"},
     "java": {"java.execute"},
+    "browser-automation": {"browser.automation.execute"},
     "ffmpeg": {"ffmpeg.execute", "ffprobe.inspect"},
 }
 
@@ -264,6 +266,8 @@ def command_plan(
             [executable("javac", search_path), str(workspace / "Main.java")],
             [executable("java", search_path), "-cp", str(workspace), "Main", *arguments],
         ]
+    if language == "browser":
+        return [[executable("signalasi-browser", search_path), str(workspace / "main.browser.js"), *arguments]]
     if language == "ffmpeg":
         return [[executable("ffmpeg", search_path), "-nostdin", *arguments]]
     if language == "ffprobe":

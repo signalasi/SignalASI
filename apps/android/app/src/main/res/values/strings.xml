@@ -1400,4 +1400,9 @@
     <string name="rich_output_type_web">Web</string>
     <string name="rich_output_type_interactive">Interactive</string>
     <string name="rich_output_type_file">File</string>
+    <string name="common_close">Close</string>
+    <string name="agent_runtime_artifact_unavailable">This runtime file is unavailable or failed its integrity check.</string>
+    <string name="agent_runtime_artifact_saved">Saved to %1$s</string>
+    <string name="agent_runtime_artifact_saved_picker">File saved</string>
+    <string name="agent_runtime_artifact_save_failed">The file could not be saved. Try again.</string>
 </resources>

@@ -32,7 +32,7 @@
     <string name="cc_section_execution_devices">Execution &amp; Devices</string>
     <string name="cc_phone_title">Phone Capabilities</string>
     <string name="cc_runtime_title">On-device Linux Runtime</string>
-    <string name="cc_runtime_subtitle">Python, uv, Node.js, Go, Rust, C/C++, Java, and FFmpeg</string>
+    <string name="cc_runtime_subtitle">Python, uv, Node.js, Go, Rust, C/C++, Java, browser automation, and FFmpeg</string>
     <string name="cc_phone_subtitle">%1$d native tools · %2$d need attention</string>
     <string name="cc_apps_title">Apps &amp; Tools</string>
     <string name="cc_apps_subtitle">Messaging, calendar, browser, files, and adapters</string>
@@ -221,8 +221,9 @@
     <string name="cc_runtime_pack_linux">Linux Base</string>
     <string name="cc_runtime_pack_python">Python &amp; uv</string>
     <string name="cc_runtime_pack_node">Node.js &amp; JavaScript</string>
+    <string name="cc_runtime_pack_browser">Browser Automation</string>
     <string name="cc_runtime_software_center_title">Software Center</string>
-    <string name="cc_runtime_software_center_subtitle">Find and install verified language and media tools automatically</string>
+    <string name="cc_runtime_software_center_subtitle">Find and install verified language, browser, and media tools automatically</string>
     <string name="cc_runtime_software_center_status">%1$d/%2$d installed</string>
     <string name="cc_runtime_software_banner_title">One-tap verified installation</string>
     <string name="cc_runtime_software_banner_subtitle">SignalASI selects the source, downloads dependencies, verifies signatures, and activates each tool atomically</string>
@@ -236,7 +237,7 @@
     <string name="cc_runtime_software_section_catalog">Compatible Software</string>
     <string name="cc_runtime_software_section_advanced">Advanced Installation</string>
     <string name="cc_runtime_software_search_title">Search software</string>
-    <string name="cc_runtime_software_search_subtitle">Search Node.js, Go, Rust, C/C++, Java, FFmpeg, and future compatible tools</string>
+    <string name="cc_runtime_software_search_subtitle">Search Node.js, Go, Rust, C/C++, Java, browser automation, FFmpeg, and future compatible tools</string>
     <string name="cc_runtime_software_search_active">Showing results for "%1$s"</string>
     <string name="cc_runtime_software_search_hint">Software name</string>
     <string name="cc_runtime_software_search_action">Search</string>

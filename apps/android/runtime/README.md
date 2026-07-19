@@ -22,15 +22,33 @@ Required entrypoints are:
 | `rust` | `bin/rustc` |
 | `cpp` | `bin/cc`, `bin/c++` |
 | `java` | `bin/java`, `bin/javac` |
+| `browser-automation` | `bin/signalasi-browser`, `bin/playwright` |
 | `ffmpeg` | `bin/ffmpeg`, `bin/ffprobe` |
 
-Pinned builders cover `python-uv`, `node-js`, `go`, `rust`, `cpp`, `java`, and `ffmpeg`; run the
+Pinned builders cover `python-uv`, `node-js`, `go`, `rust`, `cpp`, `java`, browser automation, and
+`ffmpeg`; run the
 matching `npm run runtime:build-*` command on Linux to produce an unsigned image and signing
 config. These source recipes do not mean the binary packs have been published or installed.
 
 Entrypoints must be relocatable files or wrappers whose dependencies remain inside the signed pack
 or the matching `linux-base`. Absolute symlinks, setuid/setgid files, world-writable files, device
 nodes, and escaping symlinks are rejected by the image builder.
+
+The `linux-base` image intentionally includes a bounded non-interactive Agent toolbox:
+
+- shell and text processing: Bash, findutils, grep, sed, gawk, diffutils, patch, less, file, and tree;
+- archive and compression: tar, gzip, bzip2, xz, zstd, cpio, zip, and unzip;
+- structured data and transport: jq, curl, wget, CA certificates, and OpenSSL command-line tools;
+- project and local data work: Git, SQLite, nano, and Vim;
+- secure transport: OpenSSH client, server, SFTP, and key utilities, with the server disabled by default;
+- process and filesystem inspection: procps-ng and the selected util-linux binaries.
+
+Compilers, browser automation, and media toolchains remain signed, independently updateable
+runtime packs. The browser pack contains pinned Playwright and headless Chromium builds, depends
+on the Node.js pack, and is never downloaded without an explicit user install action. Guest
+networking remains disabled unless a task receives an explicit domain allowlist; bundling network
+clients does not grant network access. The image never starts sshd automatically and contains no
+pre-generated host key or password credential.
 
 The standard Android APK bundles the native QEMU engine plus signed `linux-base` and `python-uv`
 archives. On first launch, the app verifies and installs both default packs into private storage.

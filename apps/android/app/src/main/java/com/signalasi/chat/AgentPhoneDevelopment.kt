@@ -48,13 +48,15 @@ internal object AgentPhoneDevelopmentPolicy {
         append("Act only as a code author for SignalASI's Android-local Linux runtime. ")
         append("Do not run commands, create files, or modify anything on this desktop. ")
         append("Return exactly one JSON object and no markdown or commentary. ")
-        append("Schema: {\"schema\":\"signalasi.phone-development-manifest.v1\",")
-        append("\"language\":\"python\",\"file_name\":\"meaningful_name.py\",")
-        append("\"source\":\"complete Python source\",\"artifact_paths\":[]}. ")
-        append("The source must be self-contained, deterministic, print its useful result, verify the requested behavior ")
+        append("Schema: {\"schema\":\"signalasi.phone-development-manifest.v2\",")
+        append("\"language\":\"python\",\"entry_file\":\"meaningful_name.py\",")
+        append("\"files\":[{\"path\":\"meaningful_name.py\",\"content\":\"complete source\"}],")
+        append("\"artifact_paths\":[]}. Include every source, configuration, asset, and test file needed by the project in files. ")
+        append("Use one file for a simple program and multiple files with relative directory paths for a project. ")
+        append("The entry program must be deterministic, print its useful result, verify the requested behavior ")
         append("with assertions or equivalent checks, and exit non-zero if verification fails. ")
         append("Do not use network access or external packages unless the user explicitly requires them. ")
-        append("Keep file_name to one safe relative Python filename. ")
+        append("Keep all paths safe and relative. Do not return archives or binary data when text project files are sufficient. ")
         append("User goal: ").append(goal.trim().take(4_000))
     }
 
@@ -62,21 +64,30 @@ internal object AgentPhoneDevelopmentPolicy {
 }
 
 internal data class AgentPhoneDevelopmentManifest(
-    val fileName: String,
-    val source: String,
+    val entryFile: String,
+    val files: List<AgentPhoneDevelopmentFile>,
     val artifactPaths: List<String>
 ) {
+    val source: String get() = files.firstOrNull { it.path == entryFile }?.content.orEmpty()
+
     fun runtimeInput(): JSONObject {
-        val encodedSource = Base64.getEncoder().encodeToString(source.toByteArray(Charsets.UTF_8))
+        val encodedFiles = files.map { file ->
+            mapOf(
+                "path" to file.path,
+                "data" to Base64.getEncoder().encodeToString(file.content.toByteArray(Charsets.UTF_8))
+            )
+        }
         val wrappedSource = buildString {
-            append("import base64\n")
+            append("import base64, json, runpy, sys\n")
             append("from pathlib import Path\n")
-            append("_signalasi_source = base64.b64decode(\"").append(encodedSource)
-                .append("\").decode(\"utf-8\")\n")
-            append("_signalasi_file = Path(").append(JSONObject.quote(fileName)).append(")\n")
-            append("_signalasi_file.write_text(_signalasi_source, encoding=\"utf-8\")\n")
-            append("_signalasi_globals = {\"__name__\": \"__main__\", \"__file__\": str(_signalasi_file)}\n")
-            append("exec(compile(_signalasi_source, str(_signalasi_file), \"exec\"), _signalasi_globals)\n")
+            append("_signalasi_files = json.loads(")
+                .append(JSONObject.quote(JSONArray(encodedFiles).toString())).append(")\n")
+            append("for _signalasi_item in _signalasi_files:\n")
+            append("    _signalasi_path = Path(_signalasi_item[\"path\"])\n")
+            append("    _signalasi_path.parent.mkdir(parents=True, exist_ok=True)\n")
+            append("    _signalasi_path.write_bytes(base64.b64decode(_signalasi_item[\"data\"]))\n")
+            append("sys.path.insert(0, str(Path.cwd()))\n")
+            append("runpy.run_path(").append(JSONObject.quote(entryFile)).append(", run_name=\"__main__\")\n")
         }
         return JSONObject()
             .put("language", AgentRuntimeLanguage.PYTHON.wireValue)
@@ -85,34 +96,58 @@ internal data class AgentPhoneDevelopmentManifest(
             .put("timeout_ms", 180_000L)
             .put("network_enabled", false)
             .put("allowed_network_domains", JSONArray())
-            .put("artifact_paths", JSONArray((listOf(fileName) + artifactPaths).distinct()))
+            .put("artifact_paths", JSONArray((files.map { it.path } + artifactPaths).distinct()))
     }
 }
+
+internal data class AgentPhoneDevelopmentFile(val path: String, val content: String)
 
 internal object AgentPhoneDevelopmentManifestCodec {
     fun parse(raw: String): Result<AgentPhoneDevelopmentManifest> = runCatching {
         val json = JSONObject(extractObject(raw))
-        require(json.optString("schema") == SCHEMA) { "The code planner returned an unsupported manifest" }
+        val schema = json.optString("schema")
+        require(schema == SCHEMA || schema == LEGACY_SCHEMA) { "The code planner returned an unsupported manifest" }
         require(json.optString("language").equals("python", ignoreCase = true)) {
             "The phone development manifest must use Python"
         }
-        val fileName = json.optString("file_name").trim()
-        require(FILE_NAME_PATTERN.matches(fileName) && fileName.endsWith(".py", ignoreCase = true)) {
-            "The code planner returned an unsafe Python filename"
+        val entryFile = json.optString(if (schema == LEGACY_SCHEMA) "file_name" else "entry_file").trim()
+        require(SAFE_RELATIVE_PATH.matches(entryFile) && entryFile.endsWith(".py", ignoreCase = true)) {
+            "The code planner returned an unsafe Python entry filename"
         }
-        val source = json.optString("source")
-        require(source.isNotBlank()) { "The code planner did not return Python source" }
-        require(source.toByteArray(Charsets.UTF_8).size <= MAX_SOURCE_BYTES) {
-            "The generated Python source is too large for the phone runtime"
+        val files = if (schema == LEGACY_SCHEMA) {
+            listOf(AgentPhoneDevelopmentFile(entryFile, json.optString("source")))
+        } else {
+            val sourceFiles = json.optJSONArray("files") ?: JSONArray()
+            buildList {
+                for (index in 0 until sourceFiles.length()) {
+                    val item = sourceFiles.optJSONObject(index) ?: continue
+                    val path = item.optString("path").trim()
+                    val content = item.optString("content")
+                    require(SAFE_RELATIVE_PATH.matches(path)) { "The code planner returned an unsafe project path" }
+                    require(content.toByteArray(Charsets.UTF_8).size <= MAX_SOURCE_BYTES) {
+                        "A generated project file is too large for the phone runtime"
+                    }
+                    add(AgentPhoneDevelopmentFile(path, content))
+                }
+            }
+        }
+        require(files.isNotEmpty() && files.any { it.path == entryFile && it.content.isNotBlank() }) {
+            "The code planner did not return the Python entry source"
+        }
+        require(files.map { it.path }.distinct().size == files.size && files.size <= MAX_PROJECT_FILES) {
+            "The generated project contains duplicate or too many files"
+        }
+        require(files.sumOf { it.content.toByteArray(Charsets.UTF_8).size } <= MAX_PROJECT_SOURCE_BYTES) {
+            "The generated project is too large for the phone runtime"
         }
         val artifacts = json.optJSONArray("artifact_paths") ?: JSONArray()
         val artifactPaths = buildList {
             for (index in 0 until artifacts.length()) {
                 val path = artifacts.optString(index).trim()
-                if (SAFE_RELATIVE_PATH.matches(path) && path != fileName) add(path)
+                if (SAFE_RELATIVE_PATH.matches(path) && files.none { it.path == path }) add(path)
             }
         }.distinct().take(MAX_ARTIFACTS)
-        AgentPhoneDevelopmentManifest(fileName, source, artifactPaths)
+        AgentPhoneDevelopmentManifest(entryFile, files, artifactPaths)
     }
 
     private fun extractObject(raw: String): String {
@@ -125,10 +160,12 @@ internal object AgentPhoneDevelopmentManifestCodec {
         return clean.substring(start, end + 1)
     }
 
-    private const val SCHEMA = "signalasi.phone-development-manifest.v1"
+    private const val SCHEMA = "signalasi.phone-development-manifest.v2"
+    private const val LEGACY_SCHEMA = "signalasi.phone-development-manifest.v1"
     private const val MAX_SOURCE_BYTES = 128 * 1024
+    private const val MAX_PROJECT_SOURCE_BYTES = 512 * 1024
+    private const val MAX_PROJECT_FILES = 64
     private const val MAX_ARTIFACTS = 16
-    private val FILE_NAME_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
     private val SAFE_RELATIVE_PATH = Regex("[A-Za-z0-9][A-Za-z0-9._/-]{0,159}")
 }
 
@@ -143,7 +180,7 @@ internal fun AgentAction.materializePhoneDevelopmentRuntime(sourceResult: String
         onSuccess = { manifest ->
             copy(parameters = parameters + mapOf(
                 "input_json" to manifest.runtimeInput().toString(),
-                PHONE_DEVELOPMENT_FILE_PARAMETER to manifest.fileName,
+                PHONE_DEVELOPMENT_FILE_PARAMETER to manifest.entryFile,
                 PHONE_DEVELOPMENT_ERROR_PARAMETER to ""
             ))
         },

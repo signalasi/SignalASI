@@ -29,6 +29,7 @@ jobs:
           bash -n tools/runtime/build-rust-image.sh
           bash -n tools/runtime/build-cpp-image.sh
           bash -n tools/runtime/build-java-image.sh
+          bash -n tools/runtime/build-browser-automation-image.sh
           bash -n tools/runtime/build-ffmpeg-image.sh
           bash -n apps/android/runtime/qemu/termux-build.sh
           bash -n apps/android/runtime/buildroot-external/board/signalasi/aarch64/post-build.sh

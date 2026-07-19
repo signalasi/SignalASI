@@ -32,7 +32,7 @@
     <string name="cc_section_execution_devices">执行与设备</string>
     <string name="cc_phone_title">手机能力</string>
     <string name="cc_runtime_title">本机 Linux 运行环境</string>
-    <string name="cc_runtime_subtitle">Python、uv、Node.js、Go、Rust、C/C++、Java 与 FFmpeg</string>
+    <string name="cc_runtime_subtitle">Python、uv、Node.js、Go、Rust、C/C++、Java、浏览器自动化与 FFmpeg</string>
     <string name="cc_phone_subtitle">%1$d 项原生工具 · %2$d 项需处理</string>
     <string name="cc_apps_title">应用与工具</string>
     <string name="cc_apps_subtitle">消息、日历、浏览器、文件与应用适配器</string>
@@ -221,8 +221,9 @@
     <string name="cc_runtime_pack_linux">Linux 基础环境</string>
     <string name="cc_runtime_pack_python">Python 与 uv</string>
     <string name="cc_runtime_pack_node">Node.js 与 JavaScript</string>
+    <string name="cc_runtime_pack_browser">浏览器自动化</string>
     <string name="cc_runtime_software_center_title">软件中心</string>
-    <string name="cc_runtime_software_center_subtitle">查找并自动安装经过验证的语言和媒体工具</string>
+    <string name="cc_runtime_software_center_subtitle">查找并自动安装经过验证的语言、浏览器和媒体工具</string>
     <string name="cc_runtime_software_center_status">已安装 %1$d/%2$d</string>
     <string name="cc_runtime_software_banner_title">一键可信安装</string>
     <string name="cc_runtime_software_banner_subtitle">SignalASI 自动选择下载源、下载依赖、验证签名并原子启用工具</string>
@@ -236,7 +237,7 @@
     <string name="cc_runtime_software_section_catalog">兼容软件</string>
     <string name="cc_runtime_software_section_advanced">高级安装</string>
     <string name="cc_runtime_software_search_title">搜索软件</string>
-    <string name="cc_runtime_software_search_subtitle">搜索 Node.js、Go、Rust、C/C++、Java、FFmpeg 及后续兼容工具</string>
+    <string name="cc_runtime_software_search_subtitle">搜索 Node.js、Go、Rust、C/C++、Java、浏览器自动化、FFmpeg 及后续兼容工具</string>
     <string name="cc_runtime_software_search_active">正在显示“%1$s”的结果</string>
     <string name="cc_runtime_software_search_hint">软件名称</string>
     <string name="cc_runtime_software_search_action">搜索</string>

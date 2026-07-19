@@ -379,10 +379,15 @@ class MobileNativeAgent(
         val zh = responseLanguage == "zh" || (responseLanguage.isBlank() && currentGoal.any { it in '\u3400'..'\u9fff' })
         val developmentFile = action.parameters[PHONE_DEVELOPMENT_FILE_PARAMETER].orEmpty()
         val userMessage = if (toolId == AgentOnDeviceRuntimeTools.EXECUTE && developmentFile.isNotBlank()) {
-            renderPhoneDevelopmentExecution(result.output, nativeMessage, developmentFile, zh)
+            renderPhoneDevelopmentExecution(result.output, nativeMessage, zh)
         } else {
             renderNativeToolResult(toolId, nativeMessage, result.output, zh)
                 .ifBlank { renderedOutput }
+        }
+        val richOutput = if (toolId == AgentOnDeviceRuntimeTools.EXECUTE && developmentFile.isNotBlank()) {
+            AgentRuntimeArtifactUi.richOutput(result.output, userMessage, developmentFile, zh)
+        } else {
+            ""
         }
         return AgentActionResult(
             actionId = action.id,
@@ -396,7 +401,7 @@ class MobileNativeAgent(
                 "started_at_millis" to result.receipt.startedAtEpochMillis.toString(),
                 "completed_at_millis" to result.receipt.finishedAtEpochMillis.toString(),
                 "provenance" to result.provenance.executorId
-            )
+            ) + richOutput.takeIf(String::isNotBlank)?.let { mapOf("rich_output" to it) }.orEmpty()
         )
     }
 
@@ -613,7 +618,6 @@ class MobileNativeAgent(
     private fun renderPhoneDevelopmentExecution(
         output: AgentNativeJsonObject,
         message: String,
-        fileName: String,
         zh: Boolean
     ): String {
         val exitCode = (output["exit_code"] as? Number)?.toInt()
@@ -629,7 +633,6 @@ class MobileNativeAgent(
                     else -> "The program was saved on the phone, but verification did not pass."
                 }
             )
-            add((if (zh) "\u7a0b\u5e8f\u6587\u4ef6\uff1a" else "Program: ") + "`$fileName`")
             if (stdout.isNotBlank()) {
                 add((if (zh) "\u8fd0\u884c\u7ed3\u679c\uff1a" else "Run output:") + "\n\n```text\n$stdout\n```")
             }

@@ -120,6 +120,27 @@ class GuestProtocolTest(unittest.TestCase):
             plan,
         )
 
+    def test_command_plan_executes_browser_source_with_the_installed_launcher(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pack_bin = Path(directory) / "browser-automation" / "bin"
+            pack_bin.mkdir(parents=True)
+            launcher = pack_bin / "signalasi-browser"
+            launcher.touch(mode=0o755)
+            launcher.chmod(0o755)
+            with mock.patch.object(guest, "PACK_ROOT", Path(directory)):
+                environment = guest.runtime_environment()
+                plan = guest.command_plan(
+                    "browser",
+                    Path("/work"),
+                    ["--trace"],
+                    environment["PATH"],
+                )
+
+        self.assertEqual(
+            [[str(launcher), str(Path("/work") / "main.browser.js"), "--trace"]],
+            plan,
+        )
+
     def test_runtime_environment_keeps_mutable_language_caches_in_private_task_temp(self):
         environment = guest.runtime_environment()
         task_temp = guest.ISOLATED_WORKSPACE_ROOT / ".tmp"

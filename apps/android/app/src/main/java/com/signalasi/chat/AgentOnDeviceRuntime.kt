@@ -42,6 +42,7 @@ enum class AgentRuntimeLanguage(
     C("c", "cpp", "c.execute"),
     CPP("cpp", "cpp", "cpp.execute"),
     JAVA("java", "java", "java.execute"),
+    BROWSER("browser", "browser-automation", "browser.automation.execute"),
     FFMPEG("ffmpeg", "ffmpeg", "ffmpeg.execute"),
     FFPROBE("ffprobe", "ffmpeg", "ffprobe.inspect")
 }
@@ -377,13 +378,25 @@ class AgentOnDeviceRuntimeManager(
             ?: AgentOnDeviceRuntimeSupervisor.discover(appContext)
             ?: error("The on-device guest bridge is not connected")
         val prepared = workspaceManager.prepare(request)
-        val normalizedRequest = request.copy(guestWorkspacePath = prepared.guestPath)
+        val archiveToolBin = workspaceManager.installArchiveCompatibilityTools(prepared)
+        val normalizedRequest = request.copy(
+            source = if (request.language == AgentRuntimeLanguage.SHELL) {
+                "export PATH=\"\$HOME/${archiveToolBin.relativeTo(prepared.directory).path.replace('\\', '/')}:\$PATH\"\n${request.source}"
+            } else {
+                request.source
+            },
+            guestWorkspacePath = prepared.guestPath
+        )
+        if (normalizedRequest.source != request.source) {
+            prepared.sourceFile.writeText(normalizedRequest.source, Charsets.UTF_8)
+        }
         val packVersions = current.packs.mapNotNull { pack ->
             pack.manifest?.version?.takeIf(String::isNotBlank)?.let { version -> pack.id to version }
         }.toMap()
         receiptStore.begin(normalizedRequest, packVersions)
         return try {
             val rawResponse = activeBridge.execute(normalizedRequest)
+            if (normalizedRequest.source != request.source) prepared.sourceFile.writeText(request.source, Charsets.UTF_8)
             val project = workspaceManager.syncProject(prepared, normalizedRequest.resourceLimits.diskBytes)
             val artifacts = workspaceManager.collectArtifacts(prepared, normalizedRequest)
             val response = rawResponse.copy(
@@ -399,6 +412,9 @@ class AgentOnDeviceRuntimeManager(
             )
             response.copy(executionReceipt = receipt)
         } catch (error: Throwable) {
+            if (normalizedRequest.source != request.source) {
+                runCatching { prepared.sourceFile.writeText(request.source, Charsets.UTF_8) }
+            }
             runCatching { workspaceManager.syncProject(prepared, normalizedRequest.resourceLimits.diskBytes) }
             receiptStore.fail(normalizedRequest.requestId, error)
             workspaceManager.markFinished(
@@ -637,7 +653,17 @@ class AgentOnDeviceRuntimeManager(
     }
 
     companion object {
-        val REQUIRED_PACKS = listOf("linux-base", "python-uv", "node-js", "go", "rust", "cpp", "java", "ffmpeg")
+        val REQUIRED_PACKS = listOf(
+            "linux-base",
+            "python-uv",
+            "node-js",
+            "go",
+            "rust",
+            "cpp",
+            "java",
+            "browser-automation",
+            "ffmpeg"
+        )
         val REQUIRED_PACK_CAPABILITIES: Map<String, Set<String>> = AgentRuntimeLanguage.entries
             .groupBy(AgentRuntimeLanguage::requiredPack)
             .mapValues { (_, languages) ->
