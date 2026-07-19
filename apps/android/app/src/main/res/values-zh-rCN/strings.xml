@@ -1360,8 +1360,8 @@
     <string name="cc_global_tasks_subtitle">从当前与历史主题中提取的未完成事项</string>
     <string name="cc_global_conflicts_title">冲突</string>
     <string name="cc_global_conflicts_subtitle">需要统一的决定、约束或偏好</string>
-    <string name="cc_global_links_title">会话关联</string>
-    <string name="cc_global_links_subtitle">不同话题工作区之间发现的关系</string>
+    <string name="cc_global_links_title">话题与项目图谱</string>
+    <string name="cc_global_links_subtitle">查看项目、话题工作区及有证据的跨会话关系</string>
     <string name="cc_global_conflicts_banner">有 %1$d 个未解决冲突需要关注</string>
     <string name="cc_global_conflicts_banner_subtitle">继续自主处理前，建议先统一相互矛盾的决定。</string>
     <string name="cc_global_section_intelligence">智能信息获取</string>
@@ -1431,4 +1431,18 @@
     <string name="cc_global_status_blocked">受阻</string>
     <string name="cc_global_status_active">进行中</string>
     <string name="cc_global_status_in_progress">正在推进</string>
+    <string name="cc_global_status_waiting_dependency">等待前置目标</string>
+    <string name="cc_global_topic_kind_project">项目</string>
+    <string name="cc_global_topic_kind_topic">话题</string>
+    <string name="cc_global_relation_contains">包含</string>
+    <string name="cc_global_relation_related">关联</string>
+    <string name="cc_global_relation_supports">支持</string>
+    <string name="cc_global_relation_conflicts">冲突</string>
+    <string name="cc_global_dependency_count">%1$d 个前置步骤</string>
+    <string name="cc_global_verification_label">证据：%1$s</string>
+    <string name="cc_global_verification_pending">等待中</string>
+    <string name="cc_global_verification_supported">已支持</string>
+    <string name="cc_global_verification_verified">已验证</string>
+    <string name="cc_global_verification_insufficient">证据不足</string>
+    <string name="cc_global_verification_contested">存在争议</string>
 </resources>

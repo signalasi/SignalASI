@@ -4953,12 +4953,28 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun showGlobalConversationLinksDialog() {
-        val links = globalSuperAgentRuntime.worldSnapshot().links
-            .sortedByDescending(GlobalConversationLink::strength)
-            .take(30)
-        val message = links.takeIf(List<GlobalConversationLink>::isNotEmpty)?.joinToString("\n\n") {
-            "\u2022 ${it.topic}\n${(it.strength * 100).toInt()}% \u00b7 ${it.evidenceCount}"
-        } ?: getString(R.string.cc_global_empty)
+        val graph = globalSuperAgentRuntime.topicGraphSnapshot()
+        val nodesById = graph.nodes.associateBy(GlobalTopicNode::id)
+        val nodeLines = graph.activeNodes()
+            .sortedWith(compareByDescending<GlobalTopicNode> { it.kind == GlobalTopicNodeKind.PROJECT }
+                .thenByDescending { it.lastSeenAtMillis })
+            .take(20)
+            .map { node ->
+                val kind = getString(if (node.kind == GlobalTopicNodeKind.PROJECT) {
+                    R.string.cc_global_topic_kind_project
+                } else R.string.cc_global_topic_kind_topic)
+                "\u2022 $kind \u00b7 ${node.name}\n${node.conversationIds.size} \u00b7 ${(node.confidence * 100).toInt()}%"
+            }
+        val relationLines = graph.relations
+            .sortedByDescending(GlobalTopicRelation::strength)
+            .take(20)
+            .mapNotNull { relation ->
+                val from = nodesById[relation.fromNodeId]?.name ?: return@mapNotNull null
+                val to = nodesById[relation.toNodeId]?.name ?: return@mapNotNull null
+                "$from ${globalTopicRelationLabel(relation.kind)} $to \u00b7 ${(relation.strength * 100).toInt()}%"
+            }
+        val message = (nodeLines + relationLines).takeIf(List<String>::isNotEmpty)
+            ?.joinToString("\n\n") ?: getString(R.string.cc_global_empty)
         AlertDialog.Builder(this)
             .setTitle(R.string.cc_global_links_title)
             .setMessage(message)
@@ -5056,7 +5072,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun showGlobalAutonomousRunDialog(run: GlobalAutonomousRun) {
         val details = run.actions.joinToString("\n\n") { action ->
             "\u2022 ${action.goal}\n${globalAutonomousActionStatusLabel(action.status)}" +
+                action.dependsOnActionIds.takeIf(Set<String>::isNotEmpty)?.let {
+                    " \u00b7 ${getString(R.string.cc_global_dependency_count, it.size)}"
+                }.orEmpty() +
+                "\n${getString(R.string.cc_global_verification_label, globalActionVerificationLabel(action.verificationStatus))}" +
                 action.result.takeIf(String::isNotBlank)?.let { "\n${it.take(300)}" }.orEmpty() +
+                action.evidence.takeIf(List<GlobalActionEvidence>::isNotEmpty)?.let { evidence ->
+                    "\n" + evidence.take(3).joinToString("\n") { "${it.kind.name.lowercase()}: ${it.summary.take(180)}" }
+                }.orEmpty() +
                 action.lastError.takeIf(String::isNotBlank)?.let { "\n${it.take(160)}" }.orEmpty()
         }
         val builder = AlertDialog.Builder(this)
@@ -5112,6 +5135,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             append(" \u00b7 ").append((goal.priority * 100).toInt()).append('%')
             if (goal.progressSummary.isNotBlank()) append("\n\n").append(goal.progressSummary.take(1_000))
             if (goal.blocker.isNotBlank()) append("\n\n").append(goal.blocker.take(600))
+            if (goal.dependencyGoalIds.isNotEmpty()) {
+                append("\n\n").append(getString(R.string.cc_global_dependency_count, goal.dependencyGoalIds.size))
+            }
+            if (goal.verificationSummary.isNotBlank()) {
+                append("\n\n").append(goal.verificationSummary.take(1_000))
+            }
             if (goal.nextCheckAtMillis > 0L) {
                 append("\n\n")
                 append(SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(goal.nextCheckAtMillis)))
@@ -5161,6 +5190,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun globalLongHorizonStatusLabel(status: GlobalLongHorizonGoalStatus): String = getString(when (status) {
         GlobalLongHorizonGoalStatus.ACTIVE -> R.string.cc_global_status_active
         GlobalLongHorizonGoalStatus.IN_PROGRESS -> R.string.cc_global_status_in_progress
+        GlobalLongHorizonGoalStatus.WAITING_DEPENDENCY -> R.string.cc_global_status_waiting_dependency
         GlobalLongHorizonGoalStatus.WAITING_CONFIRMATION -> R.string.cc_global_status_confirmation
         GlobalLongHorizonGoalStatus.BLOCKED -> R.string.cc_global_status_blocked
         GlobalLongHorizonGoalStatus.COMPLETED -> R.string.cc_global_status_completed
@@ -5174,6 +5204,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         GlobalAutonomousActionStatus.COMPLETED -> R.string.cc_global_status_completed
         GlobalAutonomousActionStatus.FAILED -> R.string.cc_global_status_failed
         GlobalAutonomousActionStatus.SKIPPED -> R.string.cc_global_status_skipped
+    })
+
+    private fun globalActionVerificationLabel(status: GlobalActionVerificationStatus): String = getString(when (status) {
+        GlobalActionVerificationStatus.PENDING -> R.string.cc_global_verification_pending
+        GlobalActionVerificationStatus.SUPPORTED -> R.string.cc_global_verification_supported
+        GlobalActionVerificationStatus.VERIFIED -> R.string.cc_global_verification_verified
+        GlobalActionVerificationStatus.INSUFFICIENT -> R.string.cc_global_verification_insufficient
+        GlobalActionVerificationStatus.CONTESTED -> R.string.cc_global_verification_contested
+    })
+
+    private fun globalTopicRelationLabel(kind: GlobalTopicRelationKind): String = getString(when (kind) {
+        GlobalTopicRelationKind.CONTAINS -> R.string.cc_global_relation_contains
+        GlobalTopicRelationKind.RELATED_TO -> R.string.cc_global_relation_related
+        GlobalTopicRelationKind.SUPPORTS -> R.string.cc_global_relation_supports
+        GlobalTopicRelationKind.CONFLICTS_WITH -> R.string.cc_global_relation_conflicts
     })
 
     private fun showGlobalInsightsDialog() {

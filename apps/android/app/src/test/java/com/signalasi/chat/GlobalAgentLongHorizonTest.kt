@@ -244,7 +244,8 @@ class GlobalAgentLongHorizonTest {
         val completed = goal("Build the persistent global Agent", 0.9, 0L).copy(
             topic = "SignalASI",
             status = GlobalLongHorizonGoalStatus.COMPLETED,
-            confidence = 0.9
+            confidence = 0.9,
+            verifiedAtMillis = 1_500L
         )
 
         val world = GlobalLongHorizonGoalPolicy.applyGoalStatesToWorld(
@@ -260,7 +261,8 @@ class GlobalAgentLongHorizonTest {
     fun `completed goal decision skips unnecessary remaining work`() {
         val completed = action(GlobalAutonomousActionKind.READ_ONLY_CHECK, "Verify completion").copy(
             status = GlobalAutonomousActionStatus.COMPLETED,
-            result = "Goal is already satisfied"
+            result = "Goal is already satisfied",
+            verificationStatus = GlobalActionVerificationStatus.SUPPORTED
         )
         val remaining = action(GlobalAutonomousActionKind.DRAFT, "Prepare another draft")
         val source = GlobalAutonomousReplanPolicy.requestReview(run(listOf(completed, remaining)), "Verify completion", 10L)

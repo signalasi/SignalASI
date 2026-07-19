@@ -24,6 +24,16 @@ The global runtime must:
 
 Model output never owns lifecycle or safety state. The Android host validates structured cognition, action vocabularies, plan revisions, resource routes, confirmations, retries, and completion evidence before persistence or execution.
 
+### Durable Knowledge and Execution Graphs
+
+The global runtime stores three related encrypted graphs rather than treating conversation history as one flat prompt:
+
+- The topic and project graph links conversations, topics, projects, supporting evidence, and conflicts. Topic nodes can be promoted into durable projects as work becomes substantial.
+- The long-horizon goal graph records prerequisite goals, project ownership, checkpoints, completion criteria, and verified completion evidence.
+- The autonomous action graph records stable step keys, prerequisite steps, independent branches, leases, retries, and result evidence.
+
+Ready action branches are reserved atomically before execution so multiple background workers may run independent work without dispatching the same step twice. A failed prerequisite blocks only its dependent branch. Completion is accepted only when the host-side verification contract has sufficient evidence; delegated model text alone cannot verify research, device changes, or other objective effects.
+
 ## Core Capability Pillars
 
 ### 1. Goal and Context Understanding

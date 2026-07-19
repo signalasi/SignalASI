@@ -135,11 +135,15 @@ class GlobalCognitionExecutor(context: Context) {
             metadata = task.sourceEvent.metadata + mapOf(
                 "cognition_task_id" to task.id,
                 "model_confidence" to task.result.confidence.toString(),
-                "resource_id" to task.resourceId
+                "resource_id" to task.resourceId,
+                "project" to task.result.project
             )
         )
         val reduction = GlobalWorldModelReducer.reduce(repository.loadWorld(), cognitionEvent, merged)
         repository.saveWorld(reduction.world)
+        repository.saveTopicGraph(
+            GlobalTopicProjectGraphReducer.reduce(repository.topicGraph(), cognitionEvent, merged, reduction)
+        )
         enqueueResearch(task, merged)
         var plannedRun: GlobalAutonomousRun? = null
         if (settings.autonomousPreparationEnabled) {
@@ -159,20 +163,26 @@ class GlobalCognitionExecutor(context: Context) {
         }
         if (settings.longHorizonPlanningEnabled) {
             if (task.longHorizonGoalId.isBlank()) {
-                val mergedGoals = GlobalLongHorizonGoalPolicy.mergeCognition(
-                    task,
-                    goalStore.goals(),
+                val linkedGoals = GlobalLongHorizonGoalGraphPolicy.assignProjects(
+                    GlobalLongHorizonGoalPolicy.mergeCognition(
+                        task,
+                        goalStore.goals(),
+                        task.updatedAtMillis
+                    ),
+                    repository.topicGraph(),
                     task.updatedAtMillis
-                ).map { goal ->
+                )
+                val mergedGoals = linkedGoals.map { goal ->
                     if (plannedRun != null && task.sourceEvent.id in goal.sourceEventIds &&
-                        goal.status != GlobalLongHorizonGoalStatus.COMPLETED
+                        goal.status != GlobalLongHorizonGoalStatus.COMPLETED &&
+                        GlobalLongHorizonGoalGraphPolicy.ready(goal, linkedGoals)
                     ) goal.copy(
                         status = GlobalLongHorizonGoalStatus.IN_PROGRESS,
                         activeRunId = plannedRun?.id.orEmpty(),
                         updatedAtMillis = task.updatedAtMillis
                     ) else goal
                 }
-                goalStore.save(mergedGoals)
+                goalStore.save(GlobalLongHorizonGoalGraphPolicy.reconcile(mergedGoals, task.updatedAtMillis))
             } else {
                 applyLongHorizonCheckpoint(task, plannedRun)
             }
@@ -212,8 +222,16 @@ class GlobalCognitionExecutor(context: Context) {
         val now = task.updatedAtMillis
         goalStore.update(task.longHorizonGoalId) { goal ->
             val state = task.result.goalState
+            val completionEvidence = GlobalLongHorizonGoalPolicy.completionEvidence(
+                repository.loadWorld(),
+                goal,
+                task.result.progressSummary
+            )
+            val runEvidenceAccepted = run?.let { GlobalAutonomousRunPolicy.completionSupported(it.actions) } == true
+            val completionAccepted = state == GlobalGoalProgressState.COMPLETED &&
+                (runEvidenceAccepted || completionEvidence.isNotEmpty())
             val status = when {
-                state == GlobalGoalProgressState.COMPLETED -> GlobalLongHorizonGoalStatus.COMPLETED
+                completionAccepted -> GlobalLongHorizonGoalStatus.COMPLETED
                 state == GlobalGoalProgressState.PAUSED -> GlobalLongHorizonGoalStatus.PAUSED
                 state == GlobalGoalProgressState.BLOCKED -> GlobalLongHorizonGoalStatus.BLOCKED
                 run != null -> GlobalLongHorizonGoalStatus.IN_PROGRESS
@@ -237,7 +255,15 @@ class GlobalCognitionExecutor(context: Context) {
                 },
                 blocker = if (status == GlobalLongHorizonGoalStatus.BLOCKED) {
                     task.result.progressSummary.ifBlank { task.lastError }
+                } else if (state == GlobalGoalProgressState.COMPLETED && !completionAccepted) {
+                    "Completion is awaiting evidence that satisfies the goal criteria"
                 } else "",
+                verificationSummary = if (completionAccepted) {
+                    if (completionEvidence.isNotEmpty()) {
+                        "Completion is supported by ${completionEvidence.size} world-model evidence item(s)"
+                    } else "Completion is supported by verified autonomous action evidence"
+                } else goal.verificationSummary,
+                verifiedAtMillis = if (completionAccepted) now else goal.verifiedAtMillis,
                 updatedAtMillis = now
             )
         }
@@ -319,8 +345,9 @@ class GlobalCognitionExecutor(context: Context) {
         "Privately reason about cross-conversation goals, risks, contradictions, and safe next actions. ${task.sourceEvent.content}"
 
     private fun buildPrompt(task: GlobalCognitionTask): String {
-        val context = GlobalAgentContextSelector.build(
+        val context = GlobalAgentContextSelector.buildWithGraph(
             repository.loadWorld(),
+            repository.topicGraph(),
             task.sourceEvent.content,
             task.sourceEvent.conversationId,
             maxCharacters = 5_000
@@ -347,7 +374,7 @@ class GlobalCognitionExecutor(context: Context) {
         const val RESOURCE_RETRY_MILLIS = 15L * 60L * 1_000L
         const val MAX_COGNITION_PROMPT_CHARACTERS = 16_000
         const val COGNITION_SYSTEM_PROMPT = """
-You are the private deliberation layer of a persistent Personal ASI. Infer only what the supplied evidence supports. Find durable goals, tasks, decisions, preferences, risks, opportunities, cross-topic implications, and the smallest useful next actions. Never execute an external side effect. Propose at most six actions using only ANALYZE, DRAFT, READ_ONLY_CHECK, CREATE_TOPIC, START_RESEARCH, or START_MONITOR. Mark external_effect true for anything that changes an external system or communicates to another person, and reversible false for irreversible actions. The host, not you, makes all safety and intervention decisions. Return JSON only with this schema: {"topic":"","intent":"","entities":[],"goals":[],"tasks":[],"decisions":[],"preferences":[],"risks":[],"opportunities":[],"research_questions":[],"actions":[{"kind":"ANALYZE","goal":"","rationale":"","expected_result":"","target_topic":"","priority":0.5,"external_effect":false,"reversible":true}],"user_insight":"","goal_state":"ACTIVE","progress_summary":"","next_check_hours":24,"confidence":0.0}. Keep user_insight blank unless there is a timely, non-obvious, high-value point worth interrupting the user for. For a long-horizon checkpoint, set goal_state and progress_summary from evidence, not optimism.
+You are the private deliberation layer of a persistent Personal ASI. Infer only what the supplied evidence supports. Find the containing project, related topics, durable goals, dependencies between goals, tasks, decisions, preferences, risks, opportunities, cross-topic implications, and the smallest useful next actions. Never execute an external side effect. Propose at most six actions using only ANALYZE, DRAFT, READ_ONLY_CHECK, CREATE_TOPIC, START_RESEARCH, or START_MONITOR. Give every action a unique stable key and list prerequisite action keys in depends_on; independent branches should have no dependency and may run concurrently. Mark external_effect true for anything that changes an external system or communicates to another person, and reversible false for irreversible actions. The host, not you, makes all safety and intervention decisions. Return JSON only with this schema: {"topic":"","project":"","related_topics":[],"intent":"","entities":[],"goals":[],"goal_dependencies":[{"goal":"","depends_on":""}],"tasks":[],"decisions":[],"preferences":[],"risks":[],"opportunities":[],"research_questions":[],"actions":[{"key":"step_1","depends_on":[],"kind":"ANALYZE","goal":"","rationale":"","expected_result":"","target_topic":"","priority":0.5,"external_effect":false,"reversible":true}],"user_insight":"","goal_state":"ACTIVE","progress_summary":"","next_check_hours":24,"confidence":0.0}. Use goal_dependencies only when the evidence requires one goal to finish before another can proceed. Keep user_insight blank unless there is a timely, non-obvious, high-value point worth interrupting the user for. For a long-horizon checkpoint, set goal_state and progress_summary from evidence, not optimism.
 """
     }
 }
@@ -359,45 +386,61 @@ class GlobalAutonomousRunExecutor(context: Context) {
     private val resources = GlobalAgentResourceResolver(appContext)
 
     fun executeNext(): GlobalAutonomousExecutionResult? {
-        var run = store.claimAutonomousRun() ?: return null
-        if (run.review.status in setOf(
-                GlobalRunReviewStatus.PENDING,
-                GlobalRunReviewStatus.WAITING_FOR_RESOURCE
-            )
-        ) return dispatchPlanReview(run)
-        repeat(MAX_LOCAL_STEPS_PER_CYCLE) {
-            val action = run.actions.firstOrNull { it.status == GlobalAutonomousActionStatus.PENDING }
-                ?: return finishOrWait(run)
-            if (action.requiresConfirmation) {
-                run = updateAction(run, action.copy(status = GlobalAutonomousActionStatus.WAITING_CONFIRMATION))
-                return@repeat
+        val claim = store.claimAutonomousWork() ?: return null
+        var run = claim.run
+        val reconciledActions = GlobalAutonomousActionGraphPolicy.reconcile(run.actions)
+        if (reconciledActions != run.actions) {
+            run = run.copy(actions = reconciledActions, updatedAtMillis = System.currentTimeMillis())
+                .also(store::upsertAutonomousRun)
+        }
+        if (claim.planReview) return dispatchPlanReview(run)
+        val action = run.actions.firstOrNull {
+            it.id == claim.actionId && it.status == GlobalAutonomousActionStatus.RUNNING
+        } ?: return finishOrWait(run)
+        if (action.requiresConfirmation) {
+            run = updateAction(run, action.copy(
+                status = GlobalAutonomousActionStatus.WAITING_CONFIRMATION,
+                leaseExpiresAtMillis = 0L
+            ))
+            return finishOrWait(run)
+        }
+        when (action.kind) {
+            GlobalAutonomousActionKind.START_RESEARCH -> {
+                val research = queueResearch(run, action, continuous = false)
+                run = if (research != null) {
+                    markActionAwaitingEvidence(run, action, research)
+                } else failActionWithoutRetry(run, action, "The research task could not be queued")
             }
-            when (action.kind) {
-                GlobalAutonomousActionKind.START_RESEARCH -> {
-                    queueResearch(run, action, continuous = false)
-                    run = completeAction(run, action, "Deep research was queued")
-                }
-                GlobalAutonomousActionKind.START_MONITOR -> {
-                    queueResearch(run, action, continuous = true)
-                    run = completeAction(run, action, "Continuous monitoring was scheduled")
-                }
-                GlobalAutonomousActionKind.CREATE_TOPIC -> {
-                    repository.appendProactiveMessage(GlobalProactiveMessage(
-                        sourceEventId = "autonomous-topic:${run.id}:${action.id}",
-                        sourceConversationId = run.sourceConversationId,
-                        target = GlobalProactiveTarget.NEW_CONVERSATION,
-                        title = action.targetTopic.ifBlank { run.topic },
-                        content = action.goal,
-                        topic = action.targetTopic.ifBlank { run.topic },
-                        urgent = false
-                    ))
-                    run = completeAction(run, action, "A focused topic workspace was prepared")
-                }
-                GlobalAutonomousActionKind.ANALYZE,
-                GlobalAutonomousActionKind.DRAFT,
-                GlobalAutonomousActionKind.READ_ONLY_CHECK -> {
-                    return dispatchReasoningAction(run, action)
-                }
+            GlobalAutonomousActionKind.START_MONITOR -> {
+                val research = queueResearch(run, action, continuous = true)
+                run = if (research != null) completeAction(
+                    run,
+                    action,
+                    "Continuous monitoring was scheduled",
+                    listOf(localReceipt("research:${research.id}", "Continuous monitoring was scheduled"))
+                ) else failActionWithoutRetry(run, action, "The monitoring task could not be scheduled")
+            }
+            GlobalAutonomousActionKind.CREATE_TOPIC -> {
+                repository.appendProactiveMessage(GlobalProactiveMessage(
+                    sourceEventId = "autonomous-topic:${run.id}:${action.id}",
+                    sourceConversationId = run.sourceConversationId,
+                    target = GlobalProactiveTarget.NEW_CONVERSATION,
+                    title = action.targetTopic.ifBlank { run.topic },
+                    content = action.goal,
+                    topic = action.targetTopic.ifBlank { run.topic },
+                    urgent = false
+                ))
+                run = completeAction(
+                    run,
+                    action,
+                    "A focused topic workspace was prepared",
+                    listOf(localReceipt("topic:${run.id}:${action.id}", "A focused topic workspace was prepared"))
+                )
+            }
+            GlobalAutonomousActionKind.ANALYZE,
+            GlobalAutonomousActionKind.DRAFT,
+            GlobalAutonomousActionKind.READ_ONLY_CHECK -> {
+                return dispatchReasoningAction(run, action)
             }
         }
         return finishOrWait(run)
@@ -448,16 +491,39 @@ class GlobalAutonomousRunExecutor(context: Context) {
         val result = event.content.trim().take(12_000)
         if (result.isBlank() || action.result == result) return false
         val now = event.timestampMillis
+        val ledger = research.evidenceLedger
+        val evidence = GlobalActionEvidence(
+            kind = GlobalActionEvidenceKind.RESEARCH_LEDGER,
+            summary = result.take(2_000),
+            sourceRef = "encrypted://global-agent/research/${research.id}",
+            confidence = ledger.overallConfidence.coerceIn(0.0, 1.0),
+            verified = ledger.verified,
+            createdAtMillis = now
+        )
+        val contract = action.verificationContract.takeIf { it.criteria.isNotEmpty() }
+            ?: GlobalActionVerificationPolicy.defaultContract(action)
+        val verification = GlobalActionVerificationPolicy.evaluate(contract, action.evidence + evidence)
+        val accepted = verification in setOf(
+            GlobalActionVerificationStatus.SUPPORTED,
+            GlobalActionVerificationStatus.VERIFIED
+        )
         var updated = store.updateAutonomousRun(run.id) { current ->
+            val actions = GlobalAutonomousActionGraphPolicy.reconcile(current.actions.map {
+                if (it.id == action.id) it.copy(
+                    status = if (accepted) {
+                        GlobalAutonomousActionStatus.COMPLETED
+                    } else GlobalAutonomousActionStatus.FAILED,
+                    result = result,
+                    verificationContract = contract,
+                    evidence = (it.evidence + evidence).distinctBy(GlobalActionEvidence::id).takeLast(24),
+                    verificationStatus = verification,
+                    lastError = if (accepted) "" else "Research evidence did not satisfy the step contract",
+                    completedAtMillis = now
+                ) else it
+            })
             current.copy(
-                actions = current.actions.map {
-                    if (it.id == action.id) it.copy(
-                        status = GlobalAutonomousActionStatus.COMPLETED,
-                        result = result,
-                        lastError = "",
-                        completedAtMillis = now
-                    ) else it
-                },
+                actions = actions,
+                status = GlobalAutonomousRunPolicy.terminalStatus(actions) ?: GlobalAutonomousRunStatus.RUNNING,
                 updatedAtMillis = now
             )
         } ?: return false
@@ -545,10 +611,12 @@ class GlobalAutonomousRunExecutor(context: Context) {
                         status = GlobalAutonomousActionStatus.RUNNING,
                         resourceId = resourceId,
                         sourceMessageId = sourceMessageId,
-                        attemptCount = it.attemptCount + 1,
+                        attemptCount = if (it.status == GlobalAutonomousActionStatus.RUNNING) {
+                            it.attemptCount
+                        } else it.attemptCount + 1,
                         leaseExpiresAtMillis = lease,
                         lastError = "",
-                        startedAtMillis = now
+                        startedAtMillis = it.startedAtMillis.takeIf { value -> value > 0L } ?: now
                     ) else it
                 },
                 status = GlobalAutonomousRunStatus.RUNNING,
@@ -574,20 +642,44 @@ class GlobalAutonomousRunExecutor(context: Context) {
     private fun completeAction(
         run: GlobalAutonomousRun,
         action: GlobalAutonomousAction,
-        result: String
+        result: String,
+        suppliedEvidence: List<GlobalActionEvidence> = emptyList()
     ): GlobalAutonomousRun {
         val now = System.currentTimeMillis()
+        val contract = action.verificationContract.takeIf { it.criteria.isNotEmpty() }
+            ?: GlobalActionVerificationPolicy.defaultContract(action)
+        val evidence = if (suppliedEvidence.isNotEmpty()) suppliedEvidence else listOf(
+            GlobalActionEvidence(
+                kind = GlobalActionEvidenceKind.DELEGATED_RESULT,
+                summary = result.take(2_000),
+                sourceRef = action.resourceId.take(1_000),
+                confidence = 0.68,
+                verified = false,
+                createdAtMillis = now
+            )
+        )
+        val combinedEvidence = (action.evidence + evidence).distinctBy(GlobalActionEvidence::id).takeLast(24)
+        val verification = GlobalActionVerificationPolicy.evaluate(contract, combinedEvidence)
+        val accepted = verification in setOf(
+            GlobalActionVerificationStatus.SUPPORTED,
+            GlobalActionVerificationStatus.VERIFIED
+        )
         var updated = store.updateAutonomousRun(run.id) { current ->
-            val actions = current.actions.map {
+            val actions = GlobalAutonomousActionGraphPolicy.reconcile(current.actions.map {
                 if (it.id == action.id) it.copy(
-                    status = GlobalAutonomousActionStatus.COMPLETED,
+                    status = if (accepted) {
+                        GlobalAutonomousActionStatus.COMPLETED
+                    } else GlobalAutonomousActionStatus.FAILED,
                     sourceMessageId = 0L,
                     leaseExpiresAtMillis = 0L,
                     result = result.take(12_000),
-                    lastError = "",
+                    verificationContract = contract,
+                    evidence = combinedEvidence,
+                    verificationStatus = verification,
+                    lastError = if (accepted) "" else "The result did not satisfy the step evidence contract",
                     completedAtMillis = now
                 ) else it
-            }
+            })
             current.copy(
                 actions = actions,
                 status = GlobalAutonomousRunPolicy.terminalStatus(actions) ?: GlobalAutonomousRunStatus.RUNNING,
@@ -601,7 +693,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
         if (GlobalAutonomousReplanPolicy.shouldReview(
                 updated,
                 completedAction,
-                succeeded = true,
+                succeeded = accepted,
                 result = result,
                 enabled = settings.dynamicAutonomousReplanningEnabled,
                 maxReplans = settings.maxAutonomousReplans
@@ -609,7 +701,9 @@ class GlobalAutonomousRunExecutor(context: Context) {
         ) {
             updated = GlobalAutonomousReplanPolicy.requestReview(
                 updated,
-                "The completed discovery step may change the remaining plan",
+                if (accepted) {
+                    "The completed discovery step may change the remaining plan"
+                } else "The step result did not satisfy its evidence contract",
                 now
             )
             store.upsertAutonomousRun(updated)
@@ -629,6 +723,66 @@ class GlobalAutonomousRunExecutor(context: Context) {
         } ?: run
     }
 
+    private fun markActionAwaitingEvidence(
+        run: GlobalAutonomousRun,
+        action: GlobalAutonomousAction,
+        research: GlobalResearchTask
+    ): GlobalAutonomousRun {
+        val now = System.currentTimeMillis()
+        val contract = action.verificationContract.takeIf { it.criteria.isNotEmpty() }
+            ?: GlobalActionVerificationPolicy.defaultContract(action)
+        return store.updateAutonomousRun(run.id) { current ->
+            current.copy(
+                actions = current.actions.map {
+                    if (it.id == action.id) it.copy(
+                        status = GlobalAutonomousActionStatus.RUNNING,
+                        result = "Deep research is collecting evidence",
+                        verificationContract = contract,
+                        evidence = (it.evidence + localReceipt(
+                            "research:${research.id}",
+                            "The evidence collection task was queued"
+                        )).takeLast(24),
+                        verificationStatus = GlobalActionVerificationStatus.PENDING,
+                        sourceMessageId = 0L,
+                        leaseExpiresAtMillis = 0L,
+                        startedAtMillis = it.startedAtMillis.takeIf { value -> value > 0L } ?: now,
+                        lastError = ""
+                    ) else it
+                },
+                status = GlobalAutonomousRunStatus.RUNNING,
+                leaseExpiresAtMillis = 0L,
+                lastError = "",
+                updatedAtMillis = now
+            )
+        } ?: run
+    }
+
+    private fun failActionWithoutRetry(
+        run: GlobalAutonomousRun,
+        action: GlobalAutonomousAction,
+        reason: String
+    ): GlobalAutonomousRun {
+        val now = System.currentTimeMillis()
+        return store.updateAutonomousRun(run.id) { current ->
+            val actions = GlobalAutonomousActionGraphPolicy.reconcile(current.actions.map {
+                if (it.id == action.id) it.copy(
+                    status = GlobalAutonomousActionStatus.FAILED,
+                    sourceMessageId = 0L,
+                    leaseExpiresAtMillis = 0L,
+                    verificationStatus = GlobalActionVerificationStatus.INSUFFICIENT,
+                    lastError = reason.take(600),
+                    completedAtMillis = now
+                ) else it
+            })
+            current.copy(
+                actions = actions,
+                status = GlobalAutonomousRunPolicy.terminalStatus(actions) ?: GlobalAutonomousRunStatus.RUNNING,
+                lastError = reason.take(600),
+                updatedAtMillis = now
+            )
+        } ?: run
+    }
+
     private fun failOrRetryAction(
         run: GlobalAutonomousRun,
         action: GlobalAutonomousAction,
@@ -637,17 +791,20 @@ class GlobalAutonomousRunExecutor(context: Context) {
         val now = System.currentTimeMillis()
         val retry = action.attemptCount < GlobalAutonomousRunPolicy.MAX_ACTION_ATTEMPTS
         var updated = store.updateAutonomousRun(run.id) { current ->
-            val actions = current.actions.map {
+            val actions = GlobalAutonomousActionGraphPolicy.reconcile(current.actions.map {
                 if (it.id == action.id) it.copy(
                     status = if (retry) GlobalAutonomousActionStatus.PENDING else GlobalAutonomousActionStatus.FAILED,
                     attemptedResourceIds = (it.attemptedResourceIds + it.resourceId)
                         .filter(String::isNotBlank).distinct(),
                     sourceMessageId = 0L,
                     leaseExpiresAtMillis = 0L,
+                    verificationStatus = if (retry) {
+                        GlobalActionVerificationStatus.PENDING
+                    } else GlobalActionVerificationStatus.INSUFFICIENT,
                     lastError = reason.take(600),
                     completedAtMillis = if (retry) 0L else now
                 ) else it
-            }
+            })
             current.copy(
                 actions = actions,
                 status = GlobalAutonomousRunPolicy.terminalStatus(actions)
@@ -683,7 +840,12 @@ class GlobalAutonomousRunExecutor(context: Context) {
     }
 
     private fun finishOrWait(run: GlobalAutonomousRun): GlobalAutonomousExecutionResult {
-        val latest = store.autonomousRuns().firstOrNull { it.id == run.id } ?: run
+        var latest = store.autonomousRuns().firstOrNull { it.id == run.id } ?: run
+        val reconciled = GlobalAutonomousActionGraphPolicy.reconcile(latest.actions)
+        if (reconciled != latest.actions) {
+            latest = latest.copy(actions = reconciled, updatedAtMillis = System.currentTimeMillis())
+                .also(store::upsertAutonomousRun)
+        }
         if (latest.review.status in setOf(
                 GlobalRunReviewStatus.PENDING,
                 GlobalRunReviewStatus.RUNNING,
@@ -768,7 +930,9 @@ class GlobalAutonomousRunExecutor(context: Context) {
                     status = GlobalRunReviewStatus.RUNNING,
                     resourceId = resourceId,
                     sourceMessageId = sourceMessageId,
-                    attemptCount = current.review.attemptCount + 1,
+                    attemptCount = if (current.review.status == GlobalRunReviewStatus.RUNNING) {
+                        current.review.attemptCount
+                    } else current.review.attemptCount + 1,
                     leaseExpiresAtMillis = now + GlobalAutonomousReplanPolicy.LEASE_MILLIS,
                     lastError = "",
                     updatedAtMillis = now
@@ -847,16 +1011,19 @@ class GlobalAutonomousRunExecutor(context: Context) {
         return GlobalAutonomousExecutionResult(updated.id, updated.status, review.resourceId, reason)
     }
 
-    private fun queueResearch(run: GlobalAutonomousRun, action: GlobalAutonomousAction, continuous: Boolean) {
+    private fun queueResearch(
+        run: GlobalAutonomousRun,
+        action: GlobalAutonomousAction,
+        continuous: Boolean
+    ): GlobalResearchTask? {
         val existing = repository.researchTasks()
-        if (existing.any {
-                it.status != GlobalResearchTaskStatus.FAILED &&
-                    GlobalAgentText.overlap(GlobalAgentText.tokens(it.question), GlobalAgentText.tokens(action.goal)) >= 0.74
-            }
-        ) return
+        val sourceEventId = "autonomous:${run.id}:${action.id}"
+        existing.firstOrNull {
+            it.sourceEventId == sourceEventId && it.status != GlobalResearchTaskStatus.FAILED
+        }?.let { return it }
         val now = System.currentTimeMillis()
-        repository.saveResearchTasks(existing + GlobalResearchTask(
-            sourceEventId = "autonomous:${run.id}:${action.id}",
+        val task = GlobalResearchTask(
+            sourceEventId = sourceEventId,
             sourceConversationId = run.sourceConversationId,
             topic = action.targetTopic.ifBlank { run.topic },
             question = action.goal,
@@ -866,8 +1033,18 @@ class GlobalAutonomousRunExecutor(context: Context) {
             monitorIntervalMillis = if (continuous) repository.settings().monitorIntervalMillis else 0L,
             createdAtMillis = now,
             updatedAtMillis = now
-        ))
+        )
+        repository.saveResearchTasks(existing + task)
+        return task
     }
+
+    private fun localReceipt(sourceRef: String, summary: String): GlobalActionEvidence = GlobalActionEvidence(
+        kind = GlobalActionEvidenceKind.LOCAL_RECEIPT,
+        summary = summary,
+        sourceRef = sourceRef,
+        confidence = 1.0,
+        verified = true
+    )
 
     private fun publishRunResult(run: GlobalAutonomousRun) {
         val sourceId = "autonomous-result:${run.id}:${run.updatedAtMillis}"
@@ -883,6 +1060,9 @@ class GlobalAutonomousRunExecutor(context: Context) {
             val heading = action.expectedResult.ifBlank { action.goal }.take(160)
             "$heading\n${action.result.trim()}"
         }.take(16_000)
+        val fullyVerified = completed.isNotEmpty() && completed.all {
+            it.verificationStatus == GlobalActionVerificationStatus.VERIFIED
+        }
         repository.appendProactiveMessage(GlobalProactiveMessage(
             sourceEventId = sourceId,
             sourceConversationId = run.sourceConversationId,
@@ -907,14 +1087,21 @@ class GlobalAutonomousRunExecutor(context: Context) {
             metadata = mapOf(
                 "autonomous_run_id" to run.id,
                 "run_status" to run.status.name,
-                "verified" to "false"
+                "verified" to fullyVerified.toString(),
+                "verified_action_count" to completed.count {
+                    it.verificationStatus == GlobalActionVerificationStatus.VERIFIED
+                }.toString(),
+                "supported_action_count" to completed.count {
+                    it.verificationStatus == GlobalActionVerificationStatus.SUPPORTED
+                }.toString()
             )
         ))
     }
 
     private fun buildActionPrompt(run: GlobalAutonomousRun, action: GlobalAutonomousAction): String {
-        val context = GlobalAgentContextSelector.build(
+        val context = GlobalAgentContextSelector.buildWithGraph(
             repository.loadWorld(),
+            repository.topicGraph(),
             action.goal,
             run.sourceConversationId,
             maxCharacters = 4_000
@@ -923,14 +1110,21 @@ class GlobalAutonomousRunExecutor(context: Context) {
             append("Authorized reversible preparation task:\n").append(action.goal).append("\n\n")
             if (action.rationale.isNotBlank()) append("Why now: ").append(action.rationale).append("\n")
             if (action.expectedResult.isNotBlank()) append("Expected result: ").append(action.expectedResult).append("\n")
+            val contract = action.verificationContract.takeIf { it.criteria.isNotEmpty() }
+                ?: GlobalActionVerificationPolicy.defaultContract(action)
+            if (contract.criteria.isNotEmpty()) {
+                append("Success criteria:\n")
+                contract.criteria.forEach { append("- ").append(it.take(600)).append('\n') }
+            }
             if (context.isNotBlank()) append('\n').append(context).append('\n')
-            append("\nComplete the task directly. Do not contact third parties, publish, purchase, delete irreversible data, change account permissions, or upload sensitive data. Return the useful result and artifacts, not internal orchestration logs.")
+            append("\nComplete the task directly. Report concrete evidence or artifact references that satisfy the success criteria, plus material uncertainty. Do not contact third parties, publish, purchase, delete irreversible data, change account permissions, or upload sensitive data. Return the useful result and artifacts, not internal orchestration logs.")
         }.take(16_000)
     }
 
     private fun buildPlanReviewPrompt(run: GlobalAutonomousRun): String {
-        val context = GlobalAgentContextSelector.build(
+        val context = GlobalAgentContextSelector.buildWithGraph(
             repository.loadWorld(),
+            repository.topicGraph(),
             run.goal,
             run.sourceConversationId,
             maxCharacters = 4_000
@@ -942,6 +1136,8 @@ class GlobalAutonomousRunExecutor(context: Context) {
             append("Current steps:\n")
             run.actions.take(12).forEach { action ->
                 append("- id=").append(action.id)
+                    .append("; key=").append(action.planKey)
+                    .append("; depends_on=").append(action.dependencyKeys.joinToString(","))
                     .append("; kind=").append(action.kind.name)
                     .append("; status=").append(action.status.name)
                     .append("; goal=").append(action.goal.take(500)).append('\n')
@@ -951,14 +1147,19 @@ class GlobalAutonomousRunExecutor(context: Context) {
                 if (action.lastError.isNotBlank()) {
                     append("  error=").append(action.lastError.take(500)).append('\n')
                 }
+                if (action.evidence.isNotEmpty()) {
+                    append("  evidence=").append(action.evidence.joinToString(" | ") {
+                        "${it.kind.name}:${it.summary.replace(Regex("\\s+"), " ").take(400)}"
+                    }).append('\n')
+                }
+                append("  verification=").append(action.verificationStatus.name).append('\n')
             }
             if (context.isNotBlank()) append('\n').append(context).append('\n')
-            append("\nReturn only the review JSON. Cancel only pending action IDs that are obsolete. Add at most six necessary actions. Never turn an external or irreversible action into an unconfirmed action.")
+            append("\nReturn only the review JSON. Cancel only pending action IDs that are obsolete. Add at most six necessary actions with unique key and depends_on fields. Never turn an external or irreversible action into an unconfirmed action, and never claim completion without evidence satisfying the listed criteria.")
         }.take(18_000)
     }
 
     private companion object {
-        const val MAX_LOCAL_STEPS_PER_CYCLE = 6
         val TERMINAL_RUN_STATUSES = setOf(
             GlobalAutonomousRunStatus.COMPLETED,
             GlobalAutonomousRunStatus.PARTIAL,
@@ -968,7 +1169,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
 You are an execution worker for a persistent Personal ASI. Perform only the supplied reversible preparation, analysis, draft, or read-only check. Do not create unrelated work. Never contact third parties, publish, purchase, delete irreversible data, change account permissions, or upload sensitive data. Clearly report the result, material uncertainty, and any artifact paths. Do not expose hidden chain of thought or internal orchestration logs.
 """
         const val REPLAN_SYSTEM_PROMPT = """
-You are the plan review layer of a persistent Personal ASI. Review actual step outcomes against the goal. Preserve completed evidence, cancel only obsolete pending steps, and propose the smallest useful next steps. Use only ANALYZE, DRAFT, READ_ONLY_CHECK, CREATE_TOPIC, START_RESEARCH, or START_MONITOR. Mark external_effect true for anything that changes an external system or communicates to another person, and reversible false for irreversible effects. Never claim completion without evidence. Return JSON only: {"goal_state":"ACTIVE","summary":"","cancel_action_ids":[],"actions":[{"kind":"ANALYZE","goal":"","rationale":"","expected_result":"","target_topic":"","priority":0.5,"external_effect":false,"reversible":true}],"next_check_hours":24,"confidence":0.0}.
+You are the plan review layer of a persistent Personal ASI. Review actual step outcomes and evidence contracts against the goal. Preserve completed evidence, cancel only obsolete pending steps, and propose the smallest useful next steps. Use only ANALYZE, DRAFT, READ_ONLY_CHECK, CREATE_TOPIC, START_RESEARCH, or START_MONITOR. Give every new action a unique key and list prerequisite action keys in depends_on. Mark external_effect true for anything that changes an external system or communicates to another person, and reversible false for irreversible effects. Never claim completion without evidence. Return JSON only: {"goal_state":"ACTIVE","summary":"","cancel_action_ids":[],"actions":[{"key":"step_1","depends_on":[],"kind":"ANALYZE","goal":"","rationale":"","expected_result":"","target_topic":"","priority":0.5,"external_effect":false,"reversible":true}],"next_check_hours":24,"confidence":0.0}.
 """
     }
 }

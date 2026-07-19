@@ -33,6 +33,8 @@ data class GlobalCognitionTask(
 
 data class GlobalModelUnderstanding(
     val topic: String = "",
+    val project: String = "",
+    val relatedTopics: List<String> = emptyList(),
     val intent: String = "",
     val entities: Set<String> = emptySet(),
     val goals: List<String> = emptyList(),
@@ -42,6 +44,7 @@ data class GlobalModelUnderstanding(
     val risks: List<String> = emptyList(),
     val opportunities: List<String> = emptyList(),
     val researchQuestions: List<String> = emptyList(),
+    val goalDependencies: List<GlobalGoalDependencyProposal> = emptyList(),
     val actions: List<GlobalAutonomousAction> = emptyList(),
     val userInsight: String = "",
     val goalState: GlobalGoalProgressState = GlobalGoalProgressState.ACTIVE,
@@ -50,12 +53,19 @@ data class GlobalModelUnderstanding(
     val confidence: Double = 0.0
 ) {
     val meaningful: Boolean
-        get() = topic.isNotBlank() || goals.isNotEmpty() || tasks.isNotEmpty() ||
+        get() = topic.isNotBlank() || project.isNotBlank() || relatedTopics.isNotEmpty() ||
+            goals.isNotEmpty() || tasks.isNotEmpty() ||
             decisions.isNotEmpty() || preferences.isNotEmpty() || risks.isNotEmpty() ||
             opportunities.isNotEmpty() || researchQuestions.isNotEmpty() ||
+            goalDependencies.isNotEmpty() ||
             actions.isNotEmpty() || userInsight.isNotBlank() || progressSummary.isNotBlank() ||
             goalState != GlobalGoalProgressState.ACTIVE
 }
+
+data class GlobalGoalDependencyProposal(
+    val goal: String,
+    val dependsOn: String
+)
 
 enum class GlobalAutonomousActionKind {
     ANALYZE,
@@ -75,8 +85,45 @@ enum class GlobalAutonomousActionStatus {
     SKIPPED
 }
 
+enum class GlobalActionEvidenceKind {
+    DELEGATED_RESULT,
+    LOCAL_RECEIPT,
+    RESEARCH_LEDGER,
+    ARTIFACT,
+    USER_CONFIRMATION
+}
+
+enum class GlobalActionVerificationStatus {
+    PENDING,
+    SUPPORTED,
+    VERIFIED,
+    INSUFFICIENT,
+    CONTESTED
+}
+
+data class GlobalActionEvidence(
+    val id: String = UUID.randomUUID().toString(),
+    val kind: GlobalActionEvidenceKind,
+    val summary: String,
+    val sourceRef: String = "",
+    val confidence: Double = 0.5,
+    val verified: Boolean = false,
+    val createdAtMillis: Long = System.currentTimeMillis()
+)
+
+data class GlobalActionVerificationContract(
+    val criteria: List<String> = emptyList(),
+    val acceptedEvidenceKinds: Set<GlobalActionEvidenceKind> = emptySet(),
+    val minimumEvidenceCount: Int = 1,
+    val minimumConfidence: Double = 0.5,
+    val requireVerifiedEvidence: Boolean = false
+)
+
 data class GlobalAutonomousAction(
     val id: String = UUID.randomUUID().toString(),
+    val planKey: String = "",
+    val dependencyKeys: Set<String> = emptySet(),
+    val dependsOnActionIds: Set<String> = emptySet(),
     val kind: GlobalAutonomousActionKind,
     val goal: String,
     val rationale: String = "",
@@ -93,11 +140,205 @@ data class GlobalAutonomousAction(
     val attemptCount: Int = 0,
     val leaseExpiresAtMillis: Long = 0L,
     val result: String = "",
+    val verificationContract: GlobalActionVerificationContract = GlobalActionVerificationContract(),
+    val evidence: List<GlobalActionEvidence> = emptyList(),
+    val verificationStatus: GlobalActionVerificationStatus = GlobalActionVerificationStatus.PENDING,
     val lastError: String = "",
     val startedAtMillis: Long = 0L,
     val completedAtMillis: Long = 0L
 ) {
     val requiresConfirmation: Boolean get() = (externalEffect || !reversible) && !confirmationGranted
+}
+
+object GlobalAutonomousActionGraphPolicy {
+    fun prepare(actions: List<GlobalAutonomousAction>): List<GlobalAutonomousAction> {
+        if (actions.isEmpty()) return emptyList()
+        val keyed = actions.mapIndexed { index, action ->
+            action.copy(
+                planKey = action.planKey.ifBlank {
+                    "step-${index + 1}-${GlobalAgentText.stableKey(action.kind.name, action.goal).take(8)}"
+                }.take(80),
+                verificationContract = if (action.verificationContract.criteria.isEmpty()) {
+                    GlobalActionVerificationPolicy.defaultContract(action)
+                } else action.verificationContract
+            )
+        }.distinctBy(GlobalAutonomousAction::planKey)
+        val byKey = keyed.associateBy(GlobalAutonomousAction::planKey)
+        val resolved = keyed.map { action ->
+            val unknown = action.dependencyKeys.filterNot(byKey::containsKey)
+            if (unknown.isNotEmpty()) action.copy(
+                status = GlobalAutonomousActionStatus.SKIPPED,
+                lastError = "Unknown prerequisite step: ${unknown.joinToString(", ").take(300)}"
+            ) else action.copy(
+                dependsOnActionIds = action.dependencyKeys.mapNotNull { byKey[it]?.id }.toSet()
+            )
+        }
+        return if (isAcyclic(resolved)) resolved else resolved.map { action ->
+            if (action.dependsOnActionIds.isNotEmpty()) action.copy(
+                status = GlobalAutonomousActionStatus.SKIPPED,
+                lastError = "The proposed step dependencies contain a cycle"
+            ) else action
+        }
+    }
+
+    fun resolveAgainst(
+        existing: List<GlobalAutonomousAction>,
+        proposed: List<GlobalAutonomousAction>
+    ): List<GlobalAutonomousAction> {
+        val keyed = (existing + proposed).mapIndexed { index, action ->
+            if (action.planKey.isNotBlank()) action else action.copy(
+                planKey = "step-${index + 1}-${GlobalAgentText.stableKey(action.kind.name, action.goal).take(8)}"
+            )
+        }
+        val byKey = keyed.associateBy(GlobalAutonomousAction::planKey)
+        val resolved = proposed.map { action ->
+            val source = keyed.first { it.id == action.id }
+            val unknown = source.dependencyKeys.filterNot(byKey::containsKey)
+            if (unknown.isNotEmpty()) source.copy(
+                status = GlobalAutonomousActionStatus.SKIPPED,
+                lastError = "Unknown prerequisite step: ${unknown.joinToString(", ").take(300)}"
+            ) else source.copy(
+                dependsOnActionIds = source.dependencyKeys.mapNotNull { byKey[it]?.id }.toSet(),
+                verificationContract = if (source.verificationContract.criteria.isEmpty()) {
+                    GlobalActionVerificationPolicy.defaultContract(source)
+                } else source.verificationContract
+            )
+        }
+        return if (isAcyclic(existing + resolved)) resolved else resolved.map { action ->
+            if (action.dependsOnActionIds.isNotEmpty()) action.copy(
+                status = GlobalAutonomousActionStatus.SKIPPED,
+                lastError = "The proposed step dependencies contain a cycle"
+            ) else action
+        }
+    }
+
+    fun reconcile(actions: List<GlobalAutonomousAction>): List<GlobalAutonomousAction> {
+        val byId = actions.associateBy(GlobalAutonomousAction::id)
+        return actions.map { action ->
+            if (action.status !in setOf(
+                    GlobalAutonomousActionStatus.PENDING,
+                    GlobalAutonomousActionStatus.WAITING_CONFIRMATION
+                )
+            ) return@map action
+            val failedDependencies = action.dependsOnActionIds.mapNotNull(byId::get).filter {
+                it.status in setOf(GlobalAutonomousActionStatus.FAILED, GlobalAutonomousActionStatus.SKIPPED)
+            }
+            val missingDependencies = action.dependsOnActionIds.filterNot(byId::containsKey)
+            if (failedDependencies.isEmpty() && missingDependencies.isEmpty()) action else action.copy(
+                status = GlobalAutonomousActionStatus.SKIPPED,
+                lastError = "A prerequisite step did not complete",
+                completedAtMillis = maxOf(action.completedAtMillis, System.currentTimeMillis())
+            )
+        }
+    }
+
+    fun readyActions(actions: List<GlobalAutonomousAction>): List<GlobalAutonomousAction> {
+        val byId = actions.associateBy(GlobalAutonomousAction::id)
+        return actions.filter { action ->
+            action.status == GlobalAutonomousActionStatus.PENDING && action.dependsOnActionIds.all {
+                byId[it]?.status == GlobalAutonomousActionStatus.COMPLETED
+            }
+        }.sortedByDescending(GlobalAutonomousAction::priority)
+    }
+
+    fun reserveNext(
+        actions: List<GlobalAutonomousAction>,
+        nowMillis: Long,
+        leaseExpiresAtMillis: Long
+    ): GlobalActionReservation? {
+        val action = readyActions(actions).firstOrNull() ?: return null
+        return GlobalActionReservation(
+            actionId = action.id,
+            actions = actions.map {
+                if (it.id == action.id) it.copy(
+                    status = GlobalAutonomousActionStatus.RUNNING,
+                    attemptCount = it.attemptCount + 1,
+                    leaseExpiresAtMillis = leaseExpiresAtMillis,
+                    lastError = "",
+                    startedAtMillis = nowMillis
+                ) else it
+            }
+        )
+    }
+
+    private fun isAcyclic(actions: List<GlobalAutonomousAction>): Boolean {
+        val byId = actions.associateBy(GlobalAutonomousAction::id)
+        val visiting = mutableSetOf<String>()
+        val visited = mutableSetOf<String>()
+        fun visit(id: String): Boolean {
+            if (id in visited) return true
+            if (!visiting.add(id)) return false
+            val valid = byId[id]?.dependsOnActionIds.orEmpty().all(::visit)
+            visiting.remove(id)
+            if (valid) visited += id
+            return valid
+        }
+        return actions.all { visit(it.id) }
+    }
+}
+
+data class GlobalActionReservation(
+    val actionId: String,
+    val actions: List<GlobalAutonomousAction>
+)
+
+object GlobalActionVerificationPolicy {
+    fun defaultContract(action: GlobalAutonomousAction): GlobalActionVerificationContract {
+        val criteria = listOf(action.expectedResult.ifBlank { action.goal }.take(600))
+        return when (action.kind) {
+            GlobalAutonomousActionKind.ANALYZE,
+            GlobalAutonomousActionKind.DRAFT -> GlobalActionVerificationContract(
+                criteria = criteria,
+                acceptedEvidenceKinds = setOf(
+                    GlobalActionEvidenceKind.DELEGATED_RESULT,
+                    GlobalActionEvidenceKind.ARTIFACT
+                ),
+                minimumConfidence = 0.50
+            )
+            GlobalAutonomousActionKind.READ_ONLY_CHECK -> GlobalActionVerificationContract(
+                criteria = criteria,
+                acceptedEvidenceKinds = setOf(
+                    GlobalActionEvidenceKind.DELEGATED_RESULT,
+                    GlobalActionEvidenceKind.LOCAL_RECEIPT,
+                    GlobalActionEvidenceKind.RESEARCH_LEDGER
+                ),
+                minimumConfidence = 0.58
+            )
+            GlobalAutonomousActionKind.CREATE_TOPIC,
+            GlobalAutonomousActionKind.START_MONITOR -> GlobalActionVerificationContract(
+                criteria = criteria,
+                acceptedEvidenceKinds = setOf(GlobalActionEvidenceKind.LOCAL_RECEIPT),
+                minimumConfidence = 0.90,
+                requireVerifiedEvidence = true
+            )
+            GlobalAutonomousActionKind.START_RESEARCH -> GlobalActionVerificationContract(
+                criteria = criteria,
+                acceptedEvidenceKinds = setOf(GlobalActionEvidenceKind.RESEARCH_LEDGER),
+                minimumConfidence = 0.56,
+                requireVerifiedEvidence = true
+            )
+        }
+    }
+
+    fun evaluate(
+        contract: GlobalActionVerificationContract,
+        evidence: List<GlobalActionEvidence>
+    ): GlobalActionVerificationStatus {
+        if (contract.criteria.isEmpty()) return GlobalActionVerificationStatus.INSUFFICIENT
+        val accepted = evidence.filter { item ->
+            (contract.acceptedEvidenceKinds.isEmpty() || item.kind in contract.acceptedEvidenceKinds) &&
+                item.confidence >= contract.minimumConfidence
+        }
+        if (accepted.size < contract.minimumEvidenceCount.coerceAtLeast(1)) {
+            return GlobalActionVerificationStatus.INSUFFICIENT
+        }
+        if (contract.requireVerifiedEvidence && accepted.none(GlobalActionEvidence::verified)) {
+            return GlobalActionVerificationStatus.INSUFFICIENT
+        }
+        return if (accepted.any(GlobalActionEvidence::verified)) {
+            GlobalActionVerificationStatus.VERIFIED
+        } else GlobalActionVerificationStatus.SUPPORTED
+    }
 }
 
 enum class GlobalAutonomousRunStatus {
@@ -133,13 +374,19 @@ data class GlobalAutonomousRun(
     val updatedAtMillis: Long = System.currentTimeMillis()
 ) {
     fun activeAction(): GlobalAutonomousAction? = actions.firstOrNull {
-        it.status in setOf(GlobalAutonomousActionStatus.PENDING, GlobalAutonomousActionStatus.RUNNING)
+        it.status == GlobalAutonomousActionStatus.RUNNING
     }
 
     fun completedActions(): List<GlobalAutonomousAction> = actions.filter {
         it.status == GlobalAutonomousActionStatus.COMPLETED
     }
 }
+
+data class GlobalAutonomousWorkClaim(
+    val run: GlobalAutonomousRun,
+    val actionId: String = "",
+    val planReview: Boolean = false
+)
 
 object GlobalCognitionTaskPolicy {
     fun shouldDeliberate(
@@ -200,6 +447,13 @@ object GlobalCognitionMerger {
                 .take(limit)
         return baseline.copy(
             topic = result.topic.ifBlank { baseline.topic }.take(120),
+            project = result.project.ifBlank { baseline.project }.take(160),
+            relatedTopics = (baseline.relatedTopics + result.relatedTopics)
+                .map { it.replace(Regex("\\s+"), " ").trim().take(160) }
+                .filter(String::isNotBlank)
+                .distinctBy(GlobalAgentText::normalize)
+                .take(16)
+                .toSet(),
             intent = result.intent.ifBlank { baseline.intent }.take(80),
             entities = (baseline.entities + result.entities).take(32).toSet(),
             goalCandidates = mergeValues(baseline.goalCandidates, result.goals, 8),
@@ -229,6 +483,8 @@ object GlobalModelUnderstandingParser {
                 val goal = clean(item.optString("goal"), 1_000)
                 if (goal.isBlank()) continue
                 add(GlobalAutonomousAction(
+                    planKey = clean(item.optString("key"), 80),
+                    dependencyKeys = strings(item.optJSONArray("depends_on"), 8, 80).toSet(),
                     kind = kind,
                     goal = goal,
                     rationale = clean(item.optString("rationale"), 600),
@@ -240,8 +496,21 @@ object GlobalModelUnderstandingParser {
                 ))
             }
         }
+        val goalDependencies = buildList {
+            val array = json.optJSONArray("goal_dependencies") ?: JSONArray()
+            for (index in 0 until minOf(array.length(), MAX_GOAL_DEPENDENCIES)) {
+                val item = array.optJSONObject(index) ?: continue
+                val goal = clean(item.optString("goal"), 1_000)
+                val dependsOn = clean(item.optString("depends_on"), 1_000)
+                if (goal.isNotBlank() && dependsOn.isNotBlank() &&
+                    GlobalAgentText.normalize(goal) != GlobalAgentText.normalize(dependsOn)
+                ) add(GlobalGoalDependencyProposal(goal, dependsOn))
+            }
+        }.distinctBy { GlobalAgentText.stableKey(it.goal, it.dependsOn) }
         return GlobalModelUnderstanding(
             topic = clean(json.optString("topic"), 120),
+            project = clean(json.optString("project"), 160),
+            relatedTopics = strings(json.optJSONArray("related_topics"), 16, 160),
             intent = clean(json.optString("intent"), 80),
             entities = strings(json.optJSONArray("entities"), 32, 120).toSet(),
             goals = strings(json.optJSONArray("goals"), 8, 1_000),
@@ -251,7 +520,10 @@ object GlobalModelUnderstandingParser {
             risks = strings(json.optJSONArray("risks"), 8, 1_000),
             opportunities = strings(json.optJSONArray("opportunities"), 8, 1_000),
             researchQuestions = strings(json.optJSONArray("research_questions"), 6, 1_000),
-            actions = actions.distinctBy { GlobalAgentText.stableKey(it.kind.name, it.goal) },
+            goalDependencies = goalDependencies,
+            actions = GlobalAutonomousActionGraphPolicy.prepare(
+                actions.distinctBy { GlobalAgentText.stableKey(it.kind.name, it.goal) }
+            ),
             userInsight = clean(json.optString("user_insight"), 2_000),
             goalState = enumValue(json.optString("goal_state"), GlobalGoalProgressState.ACTIVE),
             progressSummary = clean(json.optString("progress_summary"), 2_000),
@@ -295,6 +567,7 @@ object GlobalModelUnderstandingParser {
     }
 
     private const val MAX_ACTIONS = 6
+    private const val MAX_GOAL_DEPENDENCIES = 12
 }
 
 object GlobalAutonomousRunPlanner {
@@ -305,7 +578,7 @@ object GlobalAutonomousRunPlanner {
                 GlobalGoalProgressState.PAUSED
             )
         ) return null
-        val actions = result.actions
+        val actions = GlobalAutonomousActionGraphPolicy.prepare(result.actions)
             .sortedByDescending(GlobalAutonomousAction::priority)
             .distinctBy { GlobalAgentText.stableKey(it.kind.name, it.goal) }
             .take(MAX_ACTIONS)
@@ -315,9 +588,9 @@ object GlobalAutonomousRunPlanner {
                 } else action
             }
         if (actions.isEmpty()) return null
-        val status = if (actions.all { it.status == GlobalAutonomousActionStatus.WAITING_CONFIRMATION }) {
-            GlobalAutonomousRunStatus.WAITING_CONFIRMATION
-        } else GlobalAutonomousRunStatus.QUEUED
+        val status = GlobalAutonomousRunPolicy.terminalStatus(actions) ?: if (
+            actions.all { it.status == GlobalAutonomousActionStatus.WAITING_CONFIRMATION }
+        ) GlobalAutonomousRunStatus.WAITING_CONFIRMATION else GlobalAutonomousRunStatus.QUEUED
         return GlobalAutonomousRun(
             sourceCognitionTaskId = task.id,
             sourceEventId = task.sourceEvent.id,
@@ -338,9 +611,6 @@ object GlobalAutonomousRunPolicy {
     fun recoverIfStale(run: GlobalAutonomousRun, nowMillis: Long): GlobalAutonomousRun {
         val recoveredReview = GlobalAutonomousReplanPolicy.recoverIfStale(run, nowMillis)
         if (recoveredReview != run) return recoveredReview
-        if (run.status != GlobalAutonomousRunStatus.RUNNING ||
-            run.leaseExpiresAtMillis <= 0L || run.leaseExpiresAtMillis > nowMillis
-        ) return run
         val actions = run.actions.map { action ->
             if (action.status == GlobalAutonomousActionStatus.RUNNING &&
                 action.leaseExpiresAtMillis in 1..nowMillis
@@ -355,13 +625,20 @@ object GlobalAutonomousRunPolicy {
                 )
             } else action
         }
+        if (actions == run.actions) return run
+        val activeLease = actions.asSequence()
+            .filter { it.status == GlobalAutonomousActionStatus.RUNNING }
+            .map(GlobalAutonomousAction::leaseExpiresAtMillis)
+            .filter { it > 0L }
+            .maxOrNull() ?: 0L
+        val terminal = terminalStatus(actions)
         return run.copy(
             actions = actions,
-            status = if (actions.any { it.status == GlobalAutonomousActionStatus.PENDING }) {
+            status = terminal ?: if (actions.any { it.status == GlobalAutonomousActionStatus.PENDING }) {
                 GlobalAutonomousRunStatus.WAITING_FOR_RESOURCE
-            } else GlobalAutonomousRunStatus.WAITING_CONFIRMATION,
+            } else GlobalAutonomousRunStatus.RUNNING,
             nextAttemptAtMillis = nowMillis,
-            leaseExpiresAtMillis = 0L,
+            leaseExpiresAtMillis = activeLease,
             updatedAtMillis = nowMillis
         )
     }
@@ -378,6 +655,16 @@ object GlobalAutonomousRunPolicy {
             completed > 0 && failed > 0 -> GlobalAutonomousRunStatus.PARTIAL
             completed > 0 -> GlobalAutonomousRunStatus.COMPLETED
             else -> GlobalAutonomousRunStatus.FAILED
+        }
+    }
+
+    fun completionSupported(actions: List<GlobalAutonomousAction>): Boolean {
+        val completed = actions.filter { it.status == GlobalAutonomousActionStatus.COMPLETED }
+        return completed.isNotEmpty() && completed.all {
+            it.verificationStatus in setOf(
+                GlobalActionVerificationStatus.SUPPORTED,
+                GlobalActionVerificationStatus.VERIFIED
+            )
         }
     }
 
@@ -467,35 +754,66 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
         updated
     }
 
-    fun claimAutonomousRun(nowMillis: Long = System.currentTimeMillis()): GlobalAutonomousRun? = synchronized(STORE_LOCK) {
+    fun claimAutonomousWork(nowMillis: Long = System.currentTimeMillis()): GlobalAutonomousWorkClaim? = synchronized(STORE_LOCK) {
         val runs = loadAutonomousRuns().map { GlobalAutonomousRunPolicy.recoverIfStale(it, nowMillis) }.toMutableList()
-        val index = runs.indexOfFirst {
-            it.status in setOf(
+        val index = runs.indexOfFirst { run ->
+            val reviewReady = run.status == GlobalAutonomousRunStatus.REPLANNING &&
+                run.review.status in setOf(
+                    GlobalRunReviewStatus.PENDING,
+                    GlobalRunReviewStatus.WAITING_FOR_RESOURCE
+                ) && run.review.nextAttemptAtMillis <= nowMillis
+            val actionReady = run.status in setOf(
                 GlobalAutonomousRunStatus.QUEUED,
-                GlobalAutonomousRunStatus.REPLANNING,
                 GlobalAutonomousRunStatus.WAITING_FOR_RESOURCE,
                 GlobalAutonomousRunStatus.RUNNING
-            ) && it.nextAttemptAtMillis <= nowMillis && (
-                it.actions.any { action -> action.status == GlobalAutonomousActionStatus.PENDING } ||
-                    it.review.status in setOf(
-                        GlobalRunReviewStatus.PENDING,
-                        GlobalRunReviewStatus.WAITING_FOR_RESOURCE
-                    ) && it.review.nextAttemptAtMillis <= nowMillis
-                )
+            ) && run.nextAttemptAtMillis <= nowMillis &&
+                GlobalAutonomousActionGraphPolicy.readyActions(run.actions).isNotEmpty()
+            reviewReady || actionReady
         }
         if (index < 0) {
             saveAutonomousRuns(runs)
             return@synchronized null
         }
-        val claimed = runs[index].copy(
-            status = GlobalAutonomousRunStatus.RUNNING,
-            attemptCount = runs[index].attemptCount + 1,
-            leaseExpiresAtMillis = nowMillis + GlobalAutonomousRunPolicy.LEASE_MILLIS,
-            updatedAtMillis = nowMillis
-        )
+        val source = runs[index]
+        val lease = nowMillis + GlobalAutonomousRunPolicy.LEASE_MILLIS
+        val reviewReady = source.status == GlobalAutonomousRunStatus.REPLANNING &&
+            source.review.status in setOf(
+                GlobalRunReviewStatus.PENDING,
+                GlobalRunReviewStatus.WAITING_FOR_RESOURCE
+            ) && source.review.nextAttemptAtMillis <= nowMillis
+        val reservation = if (reviewReady) null else {
+            GlobalAutonomousActionGraphPolicy.reserveNext(source.actions, nowMillis, lease)
+        }
+        val claimed = if (reviewReady) {
+            source.copy(
+                status = GlobalAutonomousRunStatus.REPLANNING,
+                review = source.review.copy(
+                    status = GlobalRunReviewStatus.RUNNING,
+                    attemptCount = source.review.attemptCount + 1,
+                    leaseExpiresAtMillis = lease,
+                    lastError = "",
+                    updatedAtMillis = nowMillis
+                ),
+                attemptCount = source.attemptCount + 1,
+                leaseExpiresAtMillis = lease,
+                updatedAtMillis = nowMillis
+            )
+        } else {
+            source.copy(
+                status = GlobalAutonomousRunStatus.RUNNING,
+                actions = reservation?.actions ?: source.actions,
+                attemptCount = source.attemptCount + 1,
+                leaseExpiresAtMillis = maxOf(source.leaseExpiresAtMillis, lease),
+                updatedAtMillis = nowMillis
+            )
+        }
         runs[index] = claimed
         saveAutonomousRuns(runs)
-        claimed
+        GlobalAutonomousWorkClaim(
+            run = claimed,
+            actionId = reservation?.actionId.orEmpty(),
+            planReview = reviewReady
+        )
     }
 
     fun exportCognitionTasks(): JSONArray = synchronized(STORE_LOCK) {
@@ -624,6 +942,8 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
 
     private fun encodeModelUnderstanding(result: GlobalModelUnderstanding): JSONObject = JSONObject()
         .put("topic", result.topic)
+        .put("project", result.project)
+        .put("related_topics", JSONArray(result.relatedTopics))
         .put("intent", result.intent)
         .put("entities", JSONArray(result.entities.toList()))
         .put("goals", JSONArray(result.goals))
@@ -633,6 +953,13 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
         .put("risks", JSONArray(result.risks))
         .put("opportunities", JSONArray(result.opportunities))
         .put("research_questions", JSONArray(result.researchQuestions))
+        .put("goal_dependencies", JSONArray().apply {
+            result.goalDependencies.forEach { dependency ->
+                put(JSONObject()
+                    .put("goal", dependency.goal)
+                    .put("depends_on", dependency.dependsOn))
+            }
+        })
         .put("actions", JSONArray().apply { result.actions.forEach { put(encodeAction(it)) } })
         .put("user_insight", result.userInsight)
         .put("goal_state", result.goalState.name)
@@ -644,6 +971,8 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
         if (json == null) return GlobalModelUnderstanding()
         return GlobalModelUnderstanding(
             topic = json.optString("topic").take(120),
+            project = json.optString("project").take(160),
+            relatedTopics = strings(json.optJSONArray("related_topics")).take(16),
             intent = json.optString("intent").take(80),
             entities = strings(json.optJSONArray("entities")).take(32).toSet(),
             goals = strings(json.optJSONArray("goals")).take(8),
@@ -653,6 +982,17 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
             risks = strings(json.optJSONArray("risks")).take(8),
             opportunities = strings(json.optJSONArray("opportunities")).take(8),
             researchQuestions = strings(json.optJSONArray("research_questions")).take(6),
+            goalDependencies = buildList {
+                val array = json.optJSONArray("goal_dependencies") ?: JSONArray()
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index) ?: continue
+                    val goal = item.optString("goal").take(1_000)
+                    val dependsOn = item.optString("depends_on").take(1_000)
+                    if (goal.isNotBlank() && dependsOn.isNotBlank()) {
+                        add(GlobalGoalDependencyProposal(goal, dependsOn))
+                    }
+                }
+            }.take(12),
             actions = buildList {
                 val array = json.optJSONArray("actions") ?: JSONArray()
                 for (index in 0 until array.length()) decodeAction(array.optJSONObject(index))?.let(::add)
@@ -722,6 +1062,9 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
 
     private fun encodeAction(action: GlobalAutonomousAction): JSONObject = JSONObject()
         .put("id", action.id)
+        .put("plan_key", action.planKey)
+        .put("dependency_keys", JSONArray(action.dependencyKeys.toList()))
+        .put("depends_on_action_ids", JSONArray(action.dependsOnActionIds.toList()))
         .put("kind", action.kind.name)
         .put("goal", action.goal)
         .put("rationale", action.rationale)
@@ -738,6 +1081,9 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
         .put("attempt_count", action.attemptCount)
         .put("lease_expires_at_millis", action.leaseExpiresAtMillis)
         .put("result", action.result.take(12_000))
+        .put("verification_contract", encodeVerificationContract(action.verificationContract))
+        .put("evidence", JSONArray().apply { action.evidence.forEach { put(encodeActionEvidence(it)) } })
+        .put("verification_status", action.verificationStatus.name)
         .put("last_error", action.lastError.take(600))
         .put("started_at_millis", action.startedAtMillis)
         .put("completed_at_millis", action.completedAtMillis)
@@ -748,6 +1094,9 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
         if (goal.isBlank()) return null
         return GlobalAutonomousAction(
             id = json.optString("id").ifBlank { UUID.randomUUID().toString() },
+            planKey = json.optString("plan_key").take(80),
+            dependencyKeys = strings(json.optJSONArray("dependency_keys")).take(8).toSet(),
+            dependsOnActionIds = strings(json.optJSONArray("depends_on_action_ids")).take(8).toSet(),
             kind = enumValue(json.optString("kind"), GlobalAutonomousActionKind.ANALYZE),
             goal = goal,
             rationale = json.optString("rationale").take(600),
@@ -764,9 +1113,62 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
             attemptCount = json.optInt("attempt_count").coerceAtLeast(0),
             leaseExpiresAtMillis = json.optLong("lease_expires_at_millis"),
             result = json.optString("result").take(12_000),
+            verificationContract = decodeVerificationContract(json.optJSONObject("verification_contract")),
+            evidence = buildList {
+                val array = json.optJSONArray("evidence") ?: JSONArray()
+                for (index in 0 until array.length()) decodeActionEvidence(array.optJSONObject(index))?.let(::add)
+            }.take(24),
+            verificationStatus = enumValue(
+                json.optString("verification_status"),
+                GlobalActionVerificationStatus.PENDING
+            ),
             lastError = json.optString("last_error").take(600),
             startedAtMillis = json.optLong("started_at_millis"),
             completedAtMillis = json.optLong("completed_at_millis")
+        )
+    }
+
+    private fun encodeVerificationContract(contract: GlobalActionVerificationContract): JSONObject = JSONObject()
+        .put("criteria", JSONArray(contract.criteria))
+        .put("accepted_evidence_kinds", JSONArray(contract.acceptedEvidenceKinds.map(Enum<*>::name)))
+        .put("minimum_evidence_count", contract.minimumEvidenceCount)
+        .put("minimum_confidence", contract.minimumConfidence)
+        .put("require_verified_evidence", contract.requireVerifiedEvidence)
+
+    private fun decodeVerificationContract(json: JSONObject?): GlobalActionVerificationContract {
+        if (json == null) return GlobalActionVerificationContract()
+        return GlobalActionVerificationContract(
+            criteria = strings(json.optJSONArray("criteria")).take(8),
+            acceptedEvidenceKinds = strings(json.optJSONArray("accepted_evidence_kinds"))
+                .mapNotNull { value -> enumValues<GlobalActionEvidenceKind>().firstOrNull { it.name == value } }
+                .toSet(),
+            minimumEvidenceCount = json.optInt("minimum_evidence_count", 1).coerceIn(1, 8),
+            minimumConfidence = json.optDouble("minimum_confidence", 0.5).coerceIn(0.0, 1.0),
+            requireVerifiedEvidence = json.optBoolean("require_verified_evidence")
+        )
+    }
+
+    private fun encodeActionEvidence(evidence: GlobalActionEvidence): JSONObject = JSONObject()
+        .put("id", evidence.id)
+        .put("kind", evidence.kind.name)
+        .put("summary", evidence.summary)
+        .put("source_ref", evidence.sourceRef)
+        .put("confidence", evidence.confidence)
+        .put("verified", evidence.verified)
+        .put("created_at_millis", evidence.createdAtMillis)
+
+    private fun decodeActionEvidence(json: JSONObject?): GlobalActionEvidence? {
+        if (json == null) return null
+        val summary = json.optString("summary").take(2_000)
+        if (summary.isBlank()) return null
+        return GlobalActionEvidence(
+            id = json.optString("id").ifBlank { UUID.randomUUID().toString() },
+            kind = enumValue(json.optString("kind"), GlobalActionEvidenceKind.DELEGATED_RESULT),
+            summary = summary,
+            sourceRef = json.optString("source_ref").take(1_000),
+            confidence = json.optDouble("confidence", 0.5).coerceIn(0.0, 1.0),
+            verified = json.optBoolean("verified"),
+            createdAtMillis = json.optLong("created_at_millis")
         )
     }
 
@@ -808,6 +1210,8 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
     private fun encodeUnderstanding(value: GlobalUnderstanding): JSONObject = JSONObject()
         .put("event_id", value.eventId)
         .put("topic", value.topic)
+        .put("project", value.project)
+        .put("related_topics", JSONArray(value.relatedTopics.toList()))
         .put("intent", value.intent)
         .put("entities", JSONArray(value.entities.toList()))
         .put("goals", JSONArray(value.goalCandidates))
@@ -831,6 +1235,8 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
         return GlobalUnderstanding(
             eventId = eventId,
             topic = json.optString("topic").take(120),
+            project = json.optString("project").take(160),
+            relatedTopics = strings(json.optJSONArray("related_topics")).take(16).toSet(),
             intent = json.optString("intent").take(80),
             entities = strings(json.optJSONArray("entities")).take(32).toSet(),
             goalCandidates = strings(json.optJSONArray("goals")).take(8),

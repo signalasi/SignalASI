@@ -47,6 +47,7 @@ class GlobalAgentRepository(context: Context) {
     private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE_NAME)
     private val deliberationStore = GlobalAgentDeliberationStore(context.applicationContext)
     private val longHorizonStore = GlobalLongHorizonGoalStore(context.applicationContext)
+    private val topicGraphStore = GlobalTopicProjectGraphStore(context.applicationContext)
 
     fun enqueue(event: GlobalConversationEvent): Boolean = synchronized(STORE_LOCK) {
         val events = loadEvents().toMutableList()
@@ -72,6 +73,10 @@ class GlobalAgentRepository(context: Context) {
     fun saveWorld(world: PersonalWorldModel) = synchronized(STORE_LOCK) {
         database.writeString(KEY_WORLD, encodeWorld(world).toString())
     }
+
+    fun topicGraph(): GlobalTopicProjectGraph = topicGraphStore.load()
+
+    fun saveTopicGraph(graph: GlobalTopicProjectGraph) = topicGraphStore.save(graph)
 
     fun researchTasks(): List<GlobalResearchTask> = synchronized(STORE_LOCK) { loadResearchTasks() }
 
@@ -151,8 +156,8 @@ class GlobalAgentRepository(context: Context) {
         transform: (GlobalAutonomousRun) -> GlobalAutonomousRun
     ): GlobalAutonomousRun? = deliberationStore.updateAutonomousRun(runId, transform)
 
-    fun claimAutonomousRun(nowMillis: Long = System.currentTimeMillis()): GlobalAutonomousRun? =
-        deliberationStore.claimAutonomousRun(nowMillis)
+    fun claimAutonomousWork(nowMillis: Long = System.currentTimeMillis()): GlobalAutonomousWorkClaim? =
+        deliberationStore.claimAutonomousWork(nowMillis)
 
     fun longHorizonGoals(): List<GlobalLongHorizonGoal> = longHorizonStore.goals()
 
@@ -210,9 +215,10 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 5)
+            .put("version", 6)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("world", encodeWorld(loadWorld()))
+            .put("topic_project_graph", topicGraphStore.export())
             .put("research_tasks", JSONArray().apply {
                 loadResearchTasks().forEach { put(encodeResearchTask(it)) }
             })
@@ -234,6 +240,7 @@ class GlobalAgentRepository(context: Context) {
             }.takeLast(MAX_PENDING_EVENTS))
         }
         payload.optJSONObject("world")?.let { saveWorld(decodeWorld(it.toString())) }
+        payload.optJSONObject("topic_project_graph")?.let(topicGraphStore::restore)
         payload.optJSONArray("research_tasks")?.let { array ->
             saveResearchTasks(buildList {
                 for (index in 0 until array.length()) decodeResearchTask(array.optJSONObject(index))?.let(::add)
@@ -805,6 +812,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         val events = repository.pendingEvents(maxEvents)
         if (events.isEmpty()) return@synchronized GlobalAgentProcessingBatch(0, 0, emptyList(), emptyList())
         var world = repository.loadWorld()
+        var topicGraph = repository.topicGraph()
         val history = repository.interventionHistory()
         val adaptiveProfile = if (settings.adaptiveLearningEnabled) {
             GlobalAgentLearningPolicy.profile(repository.feedback())
@@ -830,6 +838,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             val understanding = understandingPipeline.understand(event, world)
             val reduction = GlobalWorldModelReducer.reduce(world, event, understanding)
             world = reduction.world
+            topicGraph = GlobalTopicProjectGraphReducer.reduce(topicGraph, event, understanding, reduction)
             changedItems += reduction.changedItems.size
             val decision = GlobalInterventionPolicy.decide(
                 event,
@@ -895,6 +904,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             }
         }
         repository.saveWorld(world)
+        repository.saveTopicGraph(topicGraph)
         if (newTasks.isNotEmpty()) repository.saveResearchTasks(existingTasks + newTasks)
         if (newCognitionTasks.isNotEmpty()) deliberationStore.saveCognitionTasks(existingCognitionTasks + newCognitionTasks)
         if (newMessages.isNotEmpty()) repository.saveProactiveMessages(existingMessages + newMessages)
@@ -904,11 +914,18 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
 
     fun augmentContext(context: AgentConversationContext, query: String): AgentConversationContext {
         if (context.privateMode) return context.copy(globalContext = "")
-        val block = GlobalAgentContextSelector.build(repository.loadWorld(), query, context.conversationId)
+        val block = GlobalAgentContextSelector.buildWithGraph(
+            repository.loadWorld(),
+            repository.topicGraph(),
+            query,
+            context.conversationId
+        )
         return context.copy(globalContext = block)
     }
 
     fun worldSnapshot(): PersonalWorldModel = repository.loadWorld()
+
+    fun topicGraphSnapshot(): GlobalTopicProjectGraph = repository.topicGraph()
 
     fun researchTasks(): List<GlobalResearchTask> = repository.researchTasks()
 
@@ -1099,7 +1116,16 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             deliberationStore.autonomousRuns().forEach { run ->
                 when (run.status) {
                     GlobalAutonomousRunStatus.QUEUED -> add(nowMillis + MIN_WAKE_DELAY_MILLIS)
-                    GlobalAutonomousRunStatus.RUNNING -> run.leaseExpiresAtMillis.takeIf { it > 0L }?.let(::add)
+                    GlobalAutonomousRunStatus.RUNNING -> {
+                        if (GlobalAutonomousActionGraphPolicy.readyActions(run.actions).isNotEmpty()) {
+                            add(nowMillis + MIN_WAKE_DELAY_MILLIS)
+                        }
+                        run.actions.asSequence()
+                            .filter { it.status == GlobalAutonomousActionStatus.RUNNING }
+                            .map(GlobalAutonomousAction::leaseExpiresAtMillis)
+                            .filter { it > 0L }
+                            .forEach(::add)
+                    }
                     GlobalAutonomousRunStatus.REPLANNING -> {
                         val at = when (run.review.status) {
                             GlobalRunReviewStatus.RUNNING -> run.review.leaseExpiresAtMillis
@@ -1302,6 +1328,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
 
     fun dashboard(): GlobalAgentDashboardSnapshot {
         val world = repository.loadWorld()
+        val topicGraph = repository.topicGraph()
         val active = world.items.filter { it.status == GlobalWorldItemStatus.ACTIVE }
         val profile = adaptiveProfile()
         val cognition = deliberationStore.cognitionTasks()
@@ -1310,8 +1337,10 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         return GlobalAgentDashboardSnapshot(
             pendingEventCount = repository.pendingEvents(250).size,
             worldItemCount = active.size,
-            topicCount = active.map { GlobalAgentText.normalize(it.topic) }.filter(String::isNotBlank).distinct().size,
-            crossConversationLinkCount = world.links.size,
+            topicCount = topicGraph.activeNodes().size.coerceAtLeast(
+                active.map { GlobalAgentText.normalize(it.topic) }.filter(String::isNotBlank).distinct().size
+            ),
+            crossConversationLinkCount = topicGraph.relations.size.coerceAtLeast(world.links.size),
             activeGoalCount = active.count { it.kind == GlobalWorldItemKind.GOAL },
             activeTaskCount = active.count { it.kind == GlobalWorldItemKind.TASK },
             unresolvedConflictCount = world.items.count { it.status == GlobalWorldItemStatus.CONFLICTED } / 2,

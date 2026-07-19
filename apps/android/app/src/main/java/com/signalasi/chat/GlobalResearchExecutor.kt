@@ -705,8 +705,9 @@ class GlobalResearchExecutor(context: Context) {
     }
 
     private fun buildUnitPrompt(task: GlobalResearchTask, unit: GlobalResearchUnit): String {
-        val worldContext = GlobalAgentContextSelector.build(
+        val worldContext = GlobalAgentContextSelector.buildWithGraph(
             repository.loadWorld(),
+            repository.topicGraph(),
             unit.question,
             task.sourceConversationId,
             maxCharacters = 3_000
@@ -724,8 +725,9 @@ class GlobalResearchExecutor(context: Context) {
     }
 
     private fun buildSynthesisPrompt(task: GlobalResearchTask, ledger: GlobalEvidenceLedger): String {
-        val worldContext = GlobalAgentContextSelector.build(
+        val worldContext = GlobalAgentContextSelector.buildWithGraph(
             repository.loadWorld(),
+            repository.topicGraph(),
             task.question,
             task.sourceConversationId,
             maxCharacters = 4_000

@@ -68,6 +68,8 @@ object GlobalRunReplanParser {
                 val goal = cleanText(item.optString("goal"), 1_000)
                 if (goal.isBlank()) continue
                 add(GlobalAutonomousAction(
+                    planKey = cleanText(item.optString("key"), 80),
+                    dependencyKeys = strings(item.optJSONArray("depends_on"), 8, 80).toSet(),
                     kind = kind,
                     goal = goal,
                     rationale = cleanText(item.optString("rationale"), 600),
@@ -173,16 +175,21 @@ object GlobalAutonomousReplanPolicy {
             ) else action
         }
         val existingKeys = cancelled.map { GlobalAgentText.stableKey(it.kind.name, it.goal) }.toSet()
-        val additions = decision.actions
+        val proposedAdditions = decision.actions
             .filterNot { GlobalAgentText.stableKey(it.kind.name, it.goal) in existingKeys }
+            .take((MAX_RUN_ACTIONS - cancelled.size).coerceAtLeast(0))
+        val additions = GlobalAutonomousActionGraphPolicy.resolveAgainst(cancelled, proposedAdditions)
             .map { action ->
-                if (action.requiresConfirmation) {
+                if (action.status == GlobalAutonomousActionStatus.SKIPPED) action else if (action.requiresConfirmation) {
                     action.copy(status = GlobalAutonomousActionStatus.WAITING_CONFIRMATION)
                 } else action.copy(status = GlobalAutonomousActionStatus.PENDING)
             }
-            .take((MAX_RUN_ACTIONS - cancelled.size).coerceAtLeast(0))
-        var actions = cancelled + additions
-        if (decision.goalState == GlobalGoalProgressState.COMPLETED) {
+        var actions = GlobalAutonomousActionGraphPolicy.reconcile(cancelled + additions)
+        val effectiveGoalState = if (
+            decision.goalState == GlobalGoalProgressState.COMPLETED &&
+            !GlobalAutonomousRunPolicy.completionSupported(cancelled)
+        ) GlobalGoalProgressState.ACTIVE else decision.goalState
+        if (effectiveGoalState == GlobalGoalProgressState.COMPLETED) {
             actions = actions.map { action ->
                 if (action.status in setOf(
                         GlobalAutonomousActionStatus.PENDING,
@@ -195,7 +202,7 @@ object GlobalAutonomousReplanPolicy {
                 ) else action
             }
         }
-        val nextStatus = when (decision.goalState) {
+        val nextStatus = when (effectiveGoalState) {
             GlobalGoalProgressState.COMPLETED -> GlobalAutonomousRunStatus.COMPLETED
             GlobalGoalProgressState.BLOCKED,
             GlobalGoalProgressState.PAUSED -> GlobalAutonomousRunStatus.PAUSED
@@ -209,18 +216,33 @@ object GlobalAutonomousReplanPolicy {
             status = nextStatus,
             revision = run.revision + 1,
             replanCount = run.replanCount + 1,
-            outcomeSummary = decision.summary,
+            outcomeSummary = if (decision.goalState == GlobalGoalProgressState.COMPLETED &&
+                effectiveGoalState != GlobalGoalProgressState.COMPLETED
+            ) "Completion was not accepted because the action evidence contract was not satisfied. ${decision.summary}".take(2_000)
+            else decision.summary,
             review = run.review.copy(
                 status = GlobalRunReviewStatus.COMPLETED,
                 sourceMessageId = 0L,
                 leaseExpiresAtMillis = 0L,
                 lastError = "",
-                decision = decision,
+                decision = decision.copy(
+                    goalState = effectiveGoalState,
+                    summary = if (decision.goalState == GlobalGoalProgressState.COMPLETED &&
+                        effectiveGoalState != GlobalGoalProgressState.COMPLETED
+                    ) "Completion was not accepted because the action evidence contract was not satisfied. ${decision.summary}".take(2_000)
+                    else decision.summary
+                ),
                 updatedAtMillis = nowMillis
             ),
             nextAttemptAtMillis = if (nextStatus == GlobalAutonomousRunStatus.QUEUED) nowMillis else 0L,
             leaseExpiresAtMillis = 0L,
-            lastError = if (decision.goalState == GlobalGoalProgressState.BLOCKED) decision.summary else "",
+            lastError = when {
+                decision.goalState == GlobalGoalProgressState.BLOCKED -> decision.summary
+                decision.goalState == GlobalGoalProgressState.COMPLETED &&
+                    effectiveGoalState != GlobalGoalProgressState.COMPLETED ->
+                    "The completion claim did not have sufficient action evidence"
+                else -> ""
+            },
             updatedAtMillis = nowMillis
         )
     }
@@ -262,6 +284,7 @@ object GlobalAutonomousReplanPolicy {
 enum class GlobalLongHorizonGoalStatus {
     ACTIVE,
     IN_PROGRESS,
+    WAITING_DEPENDENCY,
     WAITING_CONFIRMATION,
     BLOCKED,
     COMPLETED,
@@ -279,6 +302,9 @@ data class GlobalLongHorizonGoal(
     val confidence: Double = 0.5,
     val sourceConversationIds: Set<String> = emptySet(),
     val sourceEventIds: List<String> = emptyList(),
+    val projectNodeId: String = "",
+    val dependencyGoalIds: Set<String> = emptySet(),
+    val completionCriteria: List<String> = emptyList(),
     val checkpointIntervalMillis: Long = DEFAULT_CHECKPOINT_MILLIS,
     val nextCheckAtMillis: Long = System.currentTimeMillis() + DEFAULT_CHECKPOINT_MILLIS,
     val lastCheckAtMillis: Long = 0L,
@@ -288,6 +314,8 @@ data class GlobalLongHorizonGoal(
     val activeRunId: String = "",
     val progressSummary: String = "",
     val blocker: String = "",
+    val verificationSummary: String = "",
+    val verifiedAtMillis: Long = 0L,
     val createdAtMillis: Long = System.currentTimeMillis(),
     val updatedAtMillis: Long = System.currentTimeMillis()
 ) {
@@ -366,7 +394,11 @@ object GlobalLongHorizonGoalPolicy {
                 )
             }
         }
-        return mutable.sortedBy(GlobalLongHorizonGoal::createdAtMillis).takeLast(MAX_GOALS)
+        return GlobalLongHorizonGoalGraphPolicy.applyDependencies(
+            mutable.sortedBy(GlobalLongHorizonGoal::createdAtMillis).takeLast(MAX_GOALS),
+            task.result.goalDependencies,
+            nowMillis
+        )
     }
 
     fun checkpointInterval(priority: Double): Long = when {
@@ -473,7 +505,8 @@ object GlobalLongHorizonGoalPolicy {
         nowMillis: Long = System.currentTimeMillis()
     ): PersonalWorldModel {
         val completed = goals.filter {
-            it.status == GlobalLongHorizonGoalStatus.COMPLETED && it.confidence >= 0.65
+            it.status == GlobalLongHorizonGoalStatus.COMPLETED &&
+                it.confidence >= 0.65 && it.verifiedAtMillis > 0L
         }
         if (completed.isEmpty()) return world
         var changed = false
@@ -496,6 +529,31 @@ object GlobalLongHorizonGoalPolicy {
         return if (changed) world.copy(items = items, updatedAtMillis = nowMillis) else world
     }
 
+    fun completionEvidence(
+        world: PersonalWorldModel,
+        goal: GlobalLongHorizonGoal,
+        progressSummary: String = "",
+        limit: Int = 8
+    ): List<GlobalWorldItem> {
+        val query = GlobalAgentText.tokens("${goal.topic} ${goal.title} $progressSummary")
+        return world.items.asSequence()
+            .filter { item ->
+                item.evidenceEventIds.isNotEmpty() && (
+                    item.status == GlobalWorldItemStatus.COMPLETED ||
+                        item.kind == GlobalWorldItemKind.FACT && item.confidence >= 0.75
+                    )
+            }
+            .map { item ->
+                item to GlobalAgentText.overlap(query, GlobalAgentText.tokens("${item.topic} ${item.value}"))
+            }
+            .filter { it.second >= 0.24 }
+            .sortedWith(compareByDescending<Pair<GlobalWorldItem, Double>> { it.second }
+                .thenByDescending { it.first.confidence })
+            .map(Pair<GlobalWorldItem, Double>::first)
+            .take(limit.coerceIn(1, 16))
+            .toList()
+    }
+
     private const val MAX_GOALS_PER_COGNITION = 4
     private const val MAX_WORLD_GOALS = 80
     private const val MAX_GOALS = 200
@@ -504,6 +562,128 @@ object GlobalLongHorizonGoalPolicy {
         "long term", "ongoing", "project", "roadmap", "monitor", "track",
         "\u957f\u671f", "\u6301\u7eed", "\u9879\u76ee", "\u8def\u7ebf\u56fe", "\u76d1\u63a7", "\u8ddf\u8e2a"
     )
+}
+
+object GlobalLongHorizonGoalGraphPolicy {
+    fun applyDependencies(
+        goals: List<GlobalLongHorizonGoal>,
+        proposals: List<GlobalGoalDependencyProposal>,
+        nowMillis: Long = System.currentTimeMillis()
+    ): List<GlobalLongHorizonGoal> {
+        if (goals.isEmpty() || proposals.isEmpty()) return reconcile(goals, nowMillis)
+        var updated = goals
+        proposals.take(MAX_DEPENDENCY_PROPOSALS).forEach { proposal ->
+            val target = bestMatch(updated, proposal.goal) ?: return@forEach
+            val prerequisite = bestMatch(updated, proposal.dependsOn) ?: return@forEach
+            if (target.id == prerequisite.id || prerequisite.id in target.dependencyGoalIds) return@forEach
+            if (wouldCreateCycle(updated, target.id, prerequisite.id)) return@forEach
+            updated = updated.map { goal ->
+                if (goal.id == target.id) goal.copy(
+                    dependencyGoalIds = (goal.dependencyGoalIds + prerequisite.id).take(MAX_DEPENDENCIES_PER_GOAL).toSet(),
+                    completionCriteria = goal.completionCriteria.ifEmpty {
+                        listOf("Verified evidence that ${goal.title.take(500)} is complete")
+                    },
+                    updatedAtMillis = nowMillis
+                ) else goal
+            }
+        }
+        return reconcile(updated, nowMillis)
+    }
+
+    fun assignProjects(
+        goals: List<GlobalLongHorizonGoal>,
+        graph: GlobalTopicProjectGraph,
+        nowMillis: Long = System.currentTimeMillis()
+    ): List<GlobalLongHorizonGoal> {
+        val projects = graph.activeNodes().filter { it.kind == GlobalTopicNodeKind.PROJECT }
+        if (projects.isEmpty()) return goals
+        return goals.map { goal ->
+            val best = projects.maxByOrNull { project ->
+                val topicOverlap = GlobalAgentText.overlap(
+                    GlobalAgentText.tokens(goal.topic),
+                    GlobalAgentText.tokens(project.name)
+                )
+                val conversationOverlap = if (project.conversationIds.any { it in goal.sourceConversationIds }) 0.45 else 0.0
+                topicOverlap + conversationOverlap
+            } ?: return@map goal
+            val score = GlobalAgentText.overlap(
+                GlobalAgentText.tokens(goal.topic),
+                GlobalAgentText.tokens(best.name)
+            ) + if (best.conversationIds.any { it in goal.sourceConversationIds }) 0.45 else 0.0
+            if (score < 0.40 || goal.projectNodeId == best.id) goal else goal.copy(
+                projectNodeId = best.id,
+                updatedAtMillis = nowMillis
+            )
+        }
+    }
+
+    fun reconcile(
+        goals: List<GlobalLongHorizonGoal>,
+        nowMillis: Long = System.currentTimeMillis()
+    ): List<GlobalLongHorizonGoal> {
+        val byId = goals.associateBy(GlobalLongHorizonGoal::id)
+        return goals.map { goal ->
+            if (goal.status in setOf(
+                    GlobalLongHorizonGoalStatus.COMPLETED,
+                    GlobalLongHorizonGoalStatus.PAUSED,
+                    GlobalLongHorizonGoalStatus.IN_PROGRESS,
+                    GlobalLongHorizonGoalStatus.WAITING_CONFIRMATION
+                )
+            ) return@map goal
+            val incomplete = goal.dependencyGoalIds.mapNotNull(byId::get)
+                .filter { it.status != GlobalLongHorizonGoalStatus.COMPLETED }
+            when {
+                incomplete.isNotEmpty() && goal.status != GlobalLongHorizonGoalStatus.WAITING_DEPENDENCY -> goal.copy(
+                    status = GlobalLongHorizonGoalStatus.WAITING_DEPENDENCY,
+                    blocker = "Waiting for ${incomplete.size} prerequisite goal(s)",
+                    nextCheckAtMillis = 0L,
+                    updatedAtMillis = nowMillis
+                )
+                incomplete.isEmpty() && goal.status == GlobalLongHorizonGoalStatus.WAITING_DEPENDENCY -> goal.copy(
+                    status = GlobalLongHorizonGoalStatus.ACTIVE,
+                    blocker = "",
+                    nextCheckAtMillis = nowMillis,
+                    updatedAtMillis = nowMillis
+                )
+                else -> goal
+            }
+        }
+    }
+
+    fun ready(goal: GlobalLongHorizonGoal, goals: List<GlobalLongHorizonGoal>): Boolean {
+        if (goal.dependencyGoalIds.isEmpty()) return true
+        val byId = goals.associateBy(GlobalLongHorizonGoal::id)
+        return goal.dependencyGoalIds.all { byId[it]?.status == GlobalLongHorizonGoalStatus.COMPLETED }
+    }
+
+    private fun bestMatch(goals: List<GlobalLongHorizonGoal>, value: String): GlobalLongHorizonGoal? {
+        val normalized = GlobalAgentText.normalize(value)
+        goals.firstOrNull { GlobalAgentText.normalize(it.title) == normalized }?.let { return it }
+        val tokens = GlobalAgentText.tokens(value)
+        return goals.map { goal -> goal to GlobalAgentText.overlap(tokens, GlobalAgentText.tokens(goal.title)) }
+            .filter { it.second >= MIN_GOAL_MATCH }
+            .maxByOrNull(Pair<GlobalLongHorizonGoal, Double>::second)
+            ?.first
+    }
+
+    private fun wouldCreateCycle(
+        goals: List<GlobalLongHorizonGoal>,
+        targetId: String,
+        prerequisiteId: String
+    ): Boolean {
+        val byId = goals.associateBy(GlobalLongHorizonGoal::id)
+        val visited = mutableSetOf<String>()
+        fun reaches(currentId: String): Boolean {
+            if (currentId == targetId) return true
+            if (!visited.add(currentId)) return false
+            return byId[currentId]?.dependencyGoalIds.orEmpty().any(::reaches)
+        }
+        return reaches(prerequisiteId)
+    }
+
+    private const val MIN_GOAL_MATCH = 0.52
+    private const val MAX_DEPENDENCY_PROPOSALS = 12
+    private const val MAX_DEPENDENCIES_PER_GOAL = 8
 }
 
 class GlobalLongHorizonGoalStore(context: Context) {
@@ -566,6 +746,9 @@ class GlobalLongHorizonGoalStore(context: Context) {
         .put("confidence", goal.confidence)
         .put("source_conversation_ids", JSONArray(goal.sourceConversationIds.toList()))
         .put("source_event_ids", JSONArray(goal.sourceEventIds))
+        .put("project_node_id", goal.projectNodeId)
+        .put("dependency_goal_ids", JSONArray(goal.dependencyGoalIds.toList()))
+        .put("completion_criteria", JSONArray(goal.completionCriteria))
         .put("checkpoint_interval_millis", goal.checkpointIntervalMillis)
         .put("next_check_at_millis", goal.nextCheckAtMillis)
         .put("last_check_at_millis", goal.lastCheckAtMillis)
@@ -575,6 +758,8 @@ class GlobalLongHorizonGoalStore(context: Context) {
         .put("active_run_id", goal.activeRunId)
         .put("progress_summary", goal.progressSummary)
         .put("blocker", goal.blocker)
+        .put("verification_summary", goal.verificationSummary)
+        .put("verified_at_millis", goal.verifiedAtMillis)
         .put("created_at_millis", goal.createdAtMillis)
         .put("updated_at_millis", goal.updatedAtMillis)
 
@@ -595,6 +780,9 @@ class GlobalLongHorizonGoalStore(context: Context) {
             confidence = json.optDouble("confidence", 0.5).coerceIn(0.0, 1.0),
             sourceConversationIds = strings(json.optJSONArray("source_conversation_ids")).take(20).toSet(),
             sourceEventIds = strings(json.optJSONArray("source_event_ids")).takeLast(30),
+            projectNodeId = json.optString("project_node_id"),
+            dependencyGoalIds = strings(json.optJSONArray("dependency_goal_ids")).take(8).toSet(),
+            completionCriteria = strings(json.optJSONArray("completion_criteria")).take(8),
             checkpointIntervalMillis = json.optLong(
                 "checkpoint_interval_millis",
                 GlobalLongHorizonGoal.DEFAULT_CHECKPOINT_MILLIS
@@ -607,6 +795,8 @@ class GlobalLongHorizonGoalStore(context: Context) {
             activeRunId = json.optString("active_run_id"),
             progressSummary = json.optString("progress_summary").take(2_000),
             blocker = json.optString("blocker").take(600),
+            verificationSummary = json.optString("verification_summary").take(2_000),
+            verifiedAtMillis = json.optLong("verified_at_millis"),
             createdAtMillis = json.optLong("created_at_millis", System.currentTimeMillis()),
             updatedAtMillis = json.optLong("updated_at_millis", System.currentTimeMillis())
         )
@@ -652,9 +842,19 @@ class GlobalLongHorizonCoordinator(context: Context) {
             return GlobalLongHorizonCycleResult(0, 0, 0L)
         }
         val before = goalStore.goals()
-        val synchronized = GlobalLongHorizonGoalPolicy.mergeWorld(repository.loadWorld(), before, nowMillis)
+        val synchronized = GlobalLongHorizonGoalGraphPolicy.reconcile(
+            GlobalLongHorizonGoalGraphPolicy.assignProjects(
+                GlobalLongHorizonGoalPolicy.mergeWorld(repository.loadWorld(), before, nowMillis),
+                repository.topicGraph(),
+                nowMillis
+            ),
+            nowMillis
+        )
         if (synchronized != before) goalStore.save(synchronized)
-        val reconciled = reconcile(synchronized, nowMillis)
+        val reconciled = GlobalLongHorizonGoalGraphPolicy.reconcile(
+            reconcile(synchronized, nowMillis),
+            nowMillis
+        )
         if (reconciled != synchronized) goalStore.save(reconciled)
         val world = repository.loadWorld()
         val updatedWorld = GlobalLongHorizonGoalPolicy.applyGoalStatesToWorld(world, reconciled, nowMillis)
@@ -760,7 +960,8 @@ class GlobalLongHorizonCoordinator(context: Context) {
                     updatedAtMillis = maxOf(goal.updatedAtMillis, run.updatedAtMillis)
                 )
                 GlobalAutonomousRunStatus.COMPLETED -> {
-                    val completedGoal = run.review.decision.goalState == GlobalGoalProgressState.COMPLETED
+                    val completedGoal = run.review.decision.goalState == GlobalGoalProgressState.COMPLETED &&
+                        GlobalAutonomousRunPolicy.completionSupported(run.actions)
                     goal.copy(
                         status = if (completedGoal) {
                             GlobalLongHorizonGoalStatus.COMPLETED
@@ -772,6 +973,10 @@ class GlobalLongHorizonCoordinator(context: Context) {
                         },
                         nextCheckAtMillis = if (completedGoal) 0L else nowMillis + goal.checkpointIntervalMillis,
                         blocker = "",
+                        verificationSummary = if (completedGoal) {
+                            "Completion is supported by ${run.completedActions().size} action evidence contract(s)"
+                        } else goal.verificationSummary,
+                        verifiedAtMillis = if (completedGoal) nowMillis else goal.verifiedAtMillis,
                         updatedAtMillis = nowMillis
                     )
                 }
