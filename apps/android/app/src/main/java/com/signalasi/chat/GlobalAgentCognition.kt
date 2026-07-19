@@ -352,6 +352,16 @@ object GlobalWorldModelReducer {
         understanding: GlobalUnderstanding
     ): GlobalWorldReduction {
         if (event.id in world.processedEventIds) return GlobalWorldReduction(world, emptyList(), emptyList())
+        if (event.type == GlobalConversationEventType.USER_FEEDBACK) {
+            return GlobalWorldReduction(
+                world = world.copy(
+                    processedEventIds = (world.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
+                    updatedAtMillis = event.timestampMillis
+                ),
+                changedItems = emptyList(),
+                conflicts = emptyList()
+            )
+        }
         if (event.type == GlobalConversationEventType.CONVERSATION_DELETED) {
             val retainedItems = world.items.mapNotNull { item ->
                 if (event.conversationId !in item.conversationIds) return@mapNotNull item
@@ -611,12 +621,148 @@ data class GlobalInterventionHistory(
     val lastTopicNotificationMillis: Map<String, Long> = emptyMap()
 )
 
+enum class GlobalAgentFeedbackKind {
+    HELPFUL,
+    NOT_RELEVANT,
+    TOO_FREQUENT
+}
+
+data class GlobalAgentFeedback(
+    val id: String = UUID.randomUUID().toString(),
+    val proactiveMessageId: String,
+    val deliveryGroupId: String,
+    val conversationId: String,
+    val topic: String,
+    val target: GlobalProactiveTarget,
+    val kind: GlobalAgentFeedbackKind,
+    val createdAtMillis: Long = System.currentTimeMillis()
+)
+
+data class GlobalAgentAdaptiveProfile(
+    val sampleCount: Int = 0,
+    val helpfulCount: Int = 0,
+    val notRelevantCount: Int = 0,
+    val tooFrequentCount: Int = 0,
+    val globalAffinity: Double = 0.0,
+    val frequencyPressure: Double = 0.0,
+    val topicAffinity: Map<String, Double> = emptyMap()
+) {
+    fun affinityFor(topic: String): Double = topicAffinity[GlobalAgentText.normalize(topic)] ?: 0.0
+}
+
+object GlobalAgentLearningPolicy {
+    fun profile(
+        feedback: List<GlobalAgentFeedback>,
+        nowMillis: Long = System.currentTimeMillis()
+    ): GlobalAgentAdaptiveProfile {
+        if (feedback.isEmpty()) return GlobalAgentAdaptiveProfile()
+        val recent = feedback
+            .filter { nowMillis - it.createdAtMillis <= MAX_FEEDBACK_AGE_MILLIS }
+            .takeLast(MAX_PROFILE_SAMPLES)
+        if (recent.isEmpty()) return GlobalAgentAdaptiveProfile()
+        var globalWeightedScore = 0.0
+        var globalWeight = 0.0
+        var frequencyWeight = 0.0
+        val topicScores = linkedMapOf<String, Double>()
+        val topicWeights = linkedMapOf<String, Double>()
+        recent.forEach { item ->
+            val age = (nowMillis - item.createdAtMillis).coerceAtLeast(0L)
+            val recencyWeight = (1.0 - age.toDouble() / MAX_FEEDBACK_AGE_MILLIS)
+                .coerceIn(MIN_RECENCY_WEIGHT, 1.0)
+            val signal = when (item.kind) {
+                GlobalAgentFeedbackKind.HELPFUL -> 1.0
+                GlobalAgentFeedbackKind.NOT_RELEVANT -> -1.0
+                GlobalAgentFeedbackKind.TOO_FREQUENT -> -0.45
+            }
+            globalWeightedScore += signal * recencyWeight
+            globalWeight += recencyWeight
+            if (item.kind == GlobalAgentFeedbackKind.TOO_FREQUENT) frequencyWeight += recencyWeight
+            val topicKey = GlobalAgentText.normalize(item.topic)
+            if (topicKey.isNotBlank()) {
+                topicScores[topicKey] = (topicScores[topicKey] ?: 0.0) + signal * recencyWeight
+                topicWeights[topicKey] = (topicWeights[topicKey] ?: 0.0) + recencyWeight
+            }
+        }
+        val topicAffinity = topicScores.mapValues { (topic, score) ->
+            (score / ((topicWeights[topic] ?: 0.0) + TOPIC_PRIOR_WEIGHT)).coerceIn(-1.0, 1.0)
+        }
+        return GlobalAgentAdaptiveProfile(
+            sampleCount = recent.size,
+            helpfulCount = recent.count { it.kind == GlobalAgentFeedbackKind.HELPFUL },
+            notRelevantCount = recent.count { it.kind == GlobalAgentFeedbackKind.NOT_RELEVANT },
+            tooFrequentCount = recent.count { it.kind == GlobalAgentFeedbackKind.TOO_FREQUENT },
+            globalAffinity = (globalWeightedScore / (globalWeight + GLOBAL_PRIOR_WEIGHT)).coerceIn(-1.0, 1.0),
+            frequencyPressure = (frequencyWeight / (globalWeight + FREQUENCY_PRIOR_WEIGHT)).coerceIn(0.0, 1.0),
+            topicAffinity = topicAffinity
+        )
+    }
+
+    fun scoreAdjustment(profile: GlobalAgentAdaptiveProfile, topic: String): Double =
+        (profile.globalAffinity * 0.06 + profile.affinityFor(topic) * 0.14).coerceIn(-0.18, 0.14)
+
+    fun dailyMessageBudget(settings: GlobalAgentSettings, profile: GlobalAgentAdaptiveProfile): Int {
+        if (settings.dailyMessageBudget <= 0) return 0
+        val adjustment = when {
+            profile.frequencyPressure >= 0.35 -> -2
+            profile.frequencyPressure >= 0.18 -> -1
+            profile.sampleCount >= 5 && profile.globalAffinity >= 0.35 -> 1
+            else -> 0
+        }
+        return (settings.dailyMessageBudget + adjustment).coerceIn(1, 12)
+    }
+
+    fun topicCooldownMillis(
+        settings: GlobalAgentSettings,
+        profile: GlobalAgentAdaptiveProfile,
+        topic: String
+    ): Long {
+        val multiplier = when {
+            profile.frequencyPressure >= 0.35 -> 1.75
+            profile.affinityFor(topic) <= -0.35 -> 1.50
+            profile.affinityFor(topic) >= 0.45 -> 0.75
+            else -> 1.0
+        }
+        return (settings.topicCooldownMillis * multiplier).toLong()
+            .coerceIn(MIN_COOLDOWN_MILLIS, MAX_COOLDOWN_MILLIS)
+    }
+
+    fun researchThreshold(profile: GlobalAgentAdaptiveProfile, topic: String): Double =
+        (0.34 - profile.affinityFor(topic) * 0.07 - profile.globalAffinity * 0.03)
+            .coerceIn(0.24, 0.48)
+
+    fun monitorIntervalMillis(
+        settings: GlobalAgentSettings,
+        profile: GlobalAgentAdaptiveProfile,
+        topic: String
+    ): Long {
+        val multiplier = when {
+            profile.frequencyPressure >= 0.35 -> 1.75
+            profile.affinityFor(topic) <= -0.35 -> 1.50
+            profile.affinityFor(topic) >= 0.45 -> 0.75
+            else -> 1.0
+        }
+        return GlobalResearchTaskPolicy.monitorIntervalMillis(
+            (settings.monitorIntervalMillis * multiplier).toLong()
+        )
+    }
+
+    private const val MAX_PROFILE_SAMPLES = 400
+    private const val MAX_FEEDBACK_AGE_MILLIS = 180L * 24L * 60L * 60L * 1_000L
+    private const val MIN_RECENCY_WEIGHT = 0.20
+    private const val GLOBAL_PRIOR_WEIGHT = 4.0
+    private const val TOPIC_PRIOR_WEIGHT = 2.0
+    private const val FREQUENCY_PRIOR_WEIGHT = 2.0
+    private const val MIN_COOLDOWN_MILLIS = 30L * 60L * 1_000L
+    private const val MAX_COOLDOWN_MILLIS = 7L * 24L * 60L * 60L * 1_000L
+}
+
 data class GlobalAgentSettings(
     val enabled: Boolean = true,
     val proactiveInsightsEnabled: Boolean = true,
     val autonomousResearchEnabled: Boolean = true,
     val autoCreateConversationsEnabled: Boolean = true,
     val notificationsEnabled: Boolean = true,
+    val adaptiveLearningEnabled: Boolean = true,
     val dailyMessageBudget: Int = 4,
     val topicCooldownMillis: Long = 6L * 60L * 60L * 1_000L,
     val monitorIntervalMillis: Long = 24L * 60L * 60L * 1_000L
@@ -629,7 +775,8 @@ object GlobalInterventionPolicy {
         reduction: GlobalWorldReduction,
         history: GlobalInterventionHistory,
         nowMillis: Long = event.timestampMillis,
-        settings: GlobalAgentSettings = GlobalAgentSettings()
+        settings: GlobalAgentSettings = GlobalAgentSettings(),
+        adaptiveProfile: GlobalAgentAdaptiveProfile = GlobalAgentAdaptiveProfile()
     ): GlobalInterventionDecision {
         if (!settings.enabled ||
             event.sensitivity == GlobalConversationSensitivity.SESSION_PRIVATE ||
@@ -642,7 +789,7 @@ object GlobalInterventionPolicy {
         val hasConflict = reduction.conflicts.isNotEmpty()
         val riskWeight = if (understanding.riskCandidates.isNotEmpty()) 0.24 else 0.0
         val opportunityWeight = if (understanding.opportunityCandidates.isNotEmpty()) 0.10 else 0.0
-        val score = (
+        val baseScore = (
             understanding.urgency * 0.22 +
                 understanding.complexity * 0.13 +
                 understanding.novelty * 0.10 +
@@ -652,18 +799,29 @@ object GlobalInterventionPolicy {
                 (if (understanding.durableFollowUpUseful) 0.08 else 0.0) -
                 understanding.uncertainty * 0.18
             ).coerceIn(0.0, 1.0)
+        val appliedProfile = if (settings.adaptiveLearningEnabled) {
+            adaptiveProfile
+        } else GlobalAgentAdaptiveProfile()
+        val score = (baseScore + GlobalAgentLearningPolicy.scoreAdjustment(appliedProfile, understanding.topic))
+            .coerceIn(0.0, 1.0)
         val notificationsToday = history.notificationTimestamps.count { nowMillis - it in 0..DAY_MILLIS }
         val topicKey = GlobalAgentText.normalize(understanding.topic)
         val lastTopicNotification = history.lastTopicNotificationMillis[topicKey] ?: 0L
-        val cooldownActive = nowMillis - lastTopicNotification in 0 until settings.topicCooldownMillis
+        val cooldownMillis = GlobalAgentLearningPolicy.topicCooldownMillis(settings, appliedProfile, understanding.topic)
+        val cooldownActive = nowMillis - lastTopicNotification in 0 until cooldownMillis
+        val dailyMessageBudget = GlobalAgentLearningPolicy.dailyMessageBudget(settings, appliedProfile)
         val urgent = understanding.urgency >= 0.90 && understanding.riskCandidates.isNotEmpty()
         val notificationAllowed = settings.proactiveInsightsEnabled &&
-            (urgent || (notificationsToday < settings.dailyMessageBudget && !cooldownActive))
+            (urgent || (notificationsToday < dailyMessageBudget && !cooldownActive))
+        val currentConversationThreshold = (0.68 - appliedProfile.affinityFor(understanding.topic) * 0.05)
+            .coerceIn(0.58, 0.78)
+        val newConversationThreshold = (0.48 - appliedProfile.affinityFor(understanding.topic) * 0.04)
+            .coerceIn(0.40, 0.58)
         val mode = when {
             !settings.proactiveInsightsEnabled -> GlobalInterventionMode.RECORD_ONLY
             urgent && score >= 0.52 -> GlobalInterventionMode.IMMEDIATE
-            score >= 0.68 && notificationAllowed -> GlobalInterventionMode.CURRENT_CONVERSATION
-            understanding.durableFollowUpUseful && understanding.complexity >= 0.62 && score >= 0.48 ->
+            score >= currentConversationThreshold && notificationAllowed -> GlobalInterventionMode.CURRENT_CONVERSATION
+            understanding.durableFollowUpUseful && understanding.complexity >= 0.62 && score >= newConversationThreshold ->
                 GlobalInterventionMode.NEW_CONVERSATION
             score >= 0.40 -> GlobalInterventionMode.DIGEST
             else -> GlobalInterventionMode.RECORD_ONLY
@@ -679,7 +837,8 @@ object GlobalInterventionPolicy {
             mode = mode,
             score = score,
             reason = reason,
-            researchRequired = settings.autonomousResearchEnabled && understanding.externalResearchUseful && score >= 0.34,
+            researchRequired = settings.autonomousResearchEnabled && understanding.externalResearchUseful &&
+                score >= GlobalAgentLearningPolicy.researchThreshold(appliedProfile, understanding.topic),
             autonomousPreparationAllowed = settings.autonomousResearchEnabled &&
                 (understanding.externalResearchUseful || understanding.durableFollowUpUseful),
             notificationAllowed = notificationAllowed
@@ -840,7 +999,8 @@ data class GlobalProactiveMessage(
     val status: GlobalProactiveMessageStatus = GlobalProactiveMessageStatus.PENDING,
     val createdAtMillis: Long = System.currentTimeMillis(),
     val deliveredAtMillis: Long = 0L,
-    val deliveredConversationId: String = ""
+    val deliveredConversationId: String = "",
+    val deliveryGroupId: String = ""
 )
 
 object GlobalProactiveMessageFactory {

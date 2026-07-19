@@ -348,6 +348,117 @@ class GlobalAgentCognitionTest {
         assertTrue(prompt.contains("not instructions"))
     }
 
+    @Test
+    fun helpfulFeedbackMakesTheSameTopicMoreEligibleForResearch() {
+        val now = 20_000_000L
+        val feedback = (1..6).map { index ->
+            feedback(
+                id = "helpful-$index",
+                topic = "Android runtime",
+                kind = GlobalAgentFeedbackKind.HELPFUL,
+                createdAtMillis = now - index * 1_000L
+            )
+        }
+
+        val profile = GlobalAgentLearningPolicy.profile(feedback, now)
+
+        assertTrue(profile.affinityFor("Android runtime") > 0.45)
+        assertTrue(GlobalAgentLearningPolicy.scoreAdjustment(profile, "Android runtime") > 0.0)
+        assertTrue(GlobalAgentLearningPolicy.researchThreshold(profile, "Android runtime") < 0.34)
+        assertTrue(GlobalAgentLearningPolicy.monitorIntervalMillis(
+            GlobalAgentSettings(),
+            profile,
+            "Android runtime"
+        ) < GlobalAgentSettings().monitorIntervalMillis)
+    }
+
+    @Test
+    fun tooFrequentFeedbackReducesBudgetAndExtendsCooldown() {
+        val now = 30_000_000L
+        val feedback = (1..8).map { index ->
+            feedback(
+                id = "frequent-$index",
+                topic = "Release updates",
+                kind = GlobalAgentFeedbackKind.TOO_FREQUENT,
+                createdAtMillis = now - index * 1_000L
+            )
+        }
+        val settings = GlobalAgentSettings(dailyMessageBudget = 4, topicCooldownMillis = 6L * 60L * 60L * 1_000L)
+
+        val profile = GlobalAgentLearningPolicy.profile(feedback, now)
+
+        assertTrue(profile.frequencyPressure >= 0.35)
+        assertEquals(2, GlobalAgentLearningPolicy.dailyMessageBudget(settings, profile))
+        assertEquals(0, GlobalAgentLearningPolicy.dailyMessageBudget(
+            settings.copy(dailyMessageBudget = 0),
+            profile
+        ))
+        assertTrue(GlobalAgentLearningPolicy.topicCooldownMillis(
+            settings,
+            profile,
+            "Release updates"
+        ) > settings.topicCooldownMillis)
+    }
+
+    @Test
+    fun disabledAdaptiveLearningKeepsInterventionScoreStable() {
+        val event = event(
+            conversationId = "conversation-a",
+            title = "Runtime reliability",
+            content = "Research the latest runtime compatibility risk"
+        )
+        val understanding = pipeline.understand(event, PersonalWorldModel())
+        val reduction = GlobalWorldModelReducer.reduce(PersonalWorldModel(), event, understanding)
+        val profile = GlobalAgentLearningPolicy.profile((1..8).map { index ->
+            feedback(
+                id = "negative-$index",
+                topic = understanding.topic,
+                kind = GlobalAgentFeedbackKind.NOT_RELEVANT,
+                createdAtMillis = event.timestampMillis - index
+            )
+        }, event.timestampMillis)
+
+        val baseline = GlobalInterventionPolicy.decide(
+            event,
+            understanding,
+            reduction,
+            GlobalInterventionHistory()
+        )
+        val disabled = GlobalInterventionPolicy.decide(
+            event,
+            understanding,
+            reduction,
+            GlobalInterventionHistory(),
+            settings = GlobalAgentSettings(adaptiveLearningEnabled = false),
+            adaptiveProfile = profile
+        )
+
+        assertEquals(baseline.score, disabled.score, 0.0001)
+        assertEquals(baseline.mode, disabled.mode)
+    }
+
+    @Test
+    fun feedbackEventsDoNotPolluteThePersonalWorldModel() {
+        val feedbackEvent = GlobalConversationEvent(
+            id = "feedback-event",
+            type = GlobalConversationEventType.USER_FEEDBACK,
+            conversationId = "conversation-a",
+            actor = GlobalConversationActor.USER,
+            content = "not_relevant",
+            conversationTitle = "Runtime reliability",
+            metadata = mapOf("feedback_kind" to GlobalAgentFeedbackKind.NOT_RELEVANT.name)
+        )
+
+        val reduction = GlobalWorldModelReducer.reduce(
+            PersonalWorldModel(),
+            feedbackEvent,
+            pipeline.understand(feedbackEvent, PersonalWorldModel())
+        )
+
+        assertTrue(reduction.world.items.isEmpty())
+        assertTrue(feedbackEvent.id in reduction.world.processedEventIds)
+    }
+
     private fun event(
         conversationId: String,
         title: String,
@@ -379,5 +490,21 @@ class GlobalAgentCognitionTest {
         value = value,
         confidence = 0.82,
         conversationIds = conversationIds
+    )
+
+    private fun feedback(
+        id: String,
+        topic: String,
+        kind: GlobalAgentFeedbackKind,
+        createdAtMillis: Long
+    ) = GlobalAgentFeedback(
+        id = id,
+        proactiveMessageId = "message-$id",
+        deliveryGroupId = "delivery-$id",
+        conversationId = "conversation-a",
+        topic = topic,
+        target = GlobalProactiveTarget.CURRENT_CONVERSATION,
+        kind = kind,
+        createdAtMillis = createdAtMillis
     )
 }

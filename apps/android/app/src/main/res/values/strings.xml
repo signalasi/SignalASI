@@ -1473,4 +1473,18 @@
     <string name="agent_session_pause_tracking">Pause global tracking</string>
     <string name="agent_session_resume_tracking">Resume global tracking</string>
     <string name="agent_session_tracking_paused">Tracking paused</string>
+    <string name="agent_global_feedback_helpful">Helpful</string>
+    <string name="agent_global_feedback_not_relevant">Not relevant</string>
+    <string name="agent_global_feedback_too_frequent">Too frequent</string>
+    <string name="agent_global_feedback_saved">Feedback saved. Signal will adapt future insights.</string>
+    <string name="agent_global_feedback_unavailable">This insight can no longer be linked to its source.</string>
+    <string name="cc_global_learning_toggle_title">Adaptive autonomy</string>
+    <string name="cc_global_learning_toggle_subtitle">Learn when, where, and how often proactive help is useful</string>
+    <string name="cc_global_learning_title">Learned behavior</string>
+    <string name="cc_global_learning_subtitle">Review feedback shaping proactive research and delivery</string>
+    <string name="cc_global_learning_status">%1$d signals &#183; %2$d topics</string>
+    <string name="cc_global_learning_summary">Feedback signals: %1$d\nHelpful: %2$d\nNot relevant: %3$d\nToo frequent: %4$d</string>
+    <string name="cc_global_learning_topics">Strongest learned topic preferences</string>
+    <string name="cc_global_learning_reset">Reset learning</string>
+    <string name="cc_global_learning_reset_confirm">Clear learned proactive-help preferences? Conversation memory and other data will remain unchanged.</string>
 </resources>

@@ -1383,4 +1383,18 @@
     <string name="agent_session_pause_tracking">暂停全局跟踪</string>
     <string name="agent_session_resume_tracking">恢复全局跟踪</string>
     <string name="agent_session_tracking_paused">已暂停跟踪</string>
+    <string name="agent_global_feedback_helpful">有帮助</string>
+    <string name="agent_global_feedback_not_relevant">不相关</string>
+    <string name="agent_global_feedback_too_frequent">太频繁</string>
+    <string name="agent_global_feedback_saved">已记住，Signal 会调整后续的主动帮助。</string>
+    <string name="agent_global_feedback_unavailable">这条发现已无法关联原始记录。</string>
+    <string name="cc_global_learning_toggle_title">自适应自主性</string>
+    <string name="cc_global_learning_toggle_subtitle">学习何时、在哪里以及多久主动帮助一次</string>
+    <string name="cc_global_learning_title">已学习行为</string>
+    <string name="cc_global_learning_subtitle">查看正在影响主动研究与投递的反馈</string>
+    <string name="cc_global_learning_status">%1$d 条反馈 &#183; %2$d 个主题</string>
+    <string name="cc_global_learning_summary">反馈信号：%1$d\n有帮助：%2$d\n不相关：%3$d\n太频繁：%4$d</string>
+    <string name="cc_global_learning_topics">影响最强的主题偏好</string>
+    <string name="cc_global_learning_reset">重置学习</string>
+    <string name="cc_global_learning_reset_confirm">清除主动帮助的已学习偏好？会话记忆和其他数据不会受影响。</string>
 </resources>

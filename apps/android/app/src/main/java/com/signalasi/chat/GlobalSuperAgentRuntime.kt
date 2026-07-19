@@ -24,6 +24,8 @@ data class GlobalAgentDashboardSnapshot(
     val unresolvedConflictCount: Int,
     val queuedResearchCount: Int,
     val pendingInsightCount: Int,
+    val feedbackCount: Int,
+    val learnedTopicCount: Int,
     val updatedAtMillis: Long
 )
 
@@ -139,9 +141,22 @@ class GlobalAgentRepository(context: Context) {
         database.writeString(KEY_SETTINGS, encodeSettings(settings).toString())
     }
 
+    fun feedback(): List<GlobalAgentFeedback> = synchronized(STORE_LOCK) { loadFeedback() }
+
+    fun saveFeedback(feedback: List<GlobalAgentFeedback>) = synchronized(STORE_LOCK) {
+        val array = JSONArray()
+        feedback.sortedBy(GlobalAgentFeedback::createdAtMillis).takeLast(MAX_FEEDBACK_ITEMS)
+            .forEach { array.put(encodeFeedback(it)) }
+        database.writeString(KEY_FEEDBACK, array.toString())
+    }
+
+    fun replaceFeedback(item: GlobalAgentFeedback) = synchronized(STORE_LOCK) {
+        saveFeedback(loadFeedback().filterNot { it.proactiveMessageId == item.proactiveMessageId } + item)
+    }
+
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 1)
+            .put("version", 2)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("world", encodeWorld(loadWorld()))
             .put("research_tasks", JSONArray().apply {
@@ -152,6 +167,7 @@ class GlobalAgentRepository(context: Context) {
             })
             .put("intervention_history", encodeInterventionHistory(interventionHistory()))
             .put("settings", encodeSettings(settings()))
+            .put("feedback", JSONArray().apply { loadFeedback().forEach { put(encodeFeedback(it)) } })
     }
 
     fun restoreSnapshot(payload: JSONObject) = synchronized(STORE_LOCK) {
@@ -175,6 +191,11 @@ class GlobalAgentRepository(context: Context) {
             saveInterventionHistory(decodeInterventionHistory(it.toString()))
         }
         payload.optJSONObject("settings")?.let { saveSettings(decodeSettings(it.toString())) }
+        payload.optJSONArray("feedback")?.let { array ->
+            saveFeedback(buildList {
+                for (index in 0 until array.length()) decodeFeedback(array.optJSONObject(index))?.let(::add)
+            }.takeLast(MAX_FEEDBACK_ITEMS))
+        }
     }
 
     fun clear() = synchronized(STORE_LOCK) { database.clear() }
@@ -203,6 +224,13 @@ class GlobalAgentRepository(context: Context) {
         val array = JSONArray(database.readString(KEY_PROACTIVE_MESSAGES, "[]"))
         buildList {
             for (index in 0 until array.length()) decodeProactiveMessage(array.optJSONObject(index))?.let(::add)
+        }
+    }.getOrDefault(emptyList())
+
+    private fun loadFeedback(): List<GlobalAgentFeedback> = runCatching {
+        val array = JSONArray(database.readString(KEY_FEEDBACK, "[]"))
+        buildList {
+            for (index in 0 until array.length()) decodeFeedback(array.optJSONObject(index))?.let(::add)
         }
     }.getOrDefault(emptyList())
 
@@ -400,6 +428,7 @@ class GlobalAgentRepository(context: Context) {
         .put("created_at_millis", message.createdAtMillis)
         .put("delivered_at_millis", message.deliveredAtMillis)
         .put("delivered_conversation_id", message.deliveredConversationId)
+        .put("delivery_group_id", message.deliveryGroupId)
 
     private fun decodeProactiveMessage(json: JSONObject?): GlobalProactiveMessage? {
         if (json == null) return null
@@ -417,7 +446,34 @@ class GlobalAgentRepository(context: Context) {
             status = enumValue(json.optString("status"), GlobalProactiveMessageStatus.PENDING),
             createdAtMillis = json.optLong("created_at_millis"),
             deliveredAtMillis = json.optLong("delivered_at_millis"),
-            deliveredConversationId = json.optString("delivered_conversation_id")
+            deliveredConversationId = json.optString("delivered_conversation_id"),
+            deliveryGroupId = json.optString("delivery_group_id")
+        )
+    }
+
+    private fun encodeFeedback(feedback: GlobalAgentFeedback): JSONObject = JSONObject()
+        .put("id", feedback.id)
+        .put("proactive_message_id", feedback.proactiveMessageId)
+        .put("delivery_group_id", feedback.deliveryGroupId)
+        .put("conversation_id", feedback.conversationId)
+        .put("topic", feedback.topic)
+        .put("target", feedback.target.name)
+        .put("kind", feedback.kind.name)
+        .put("created_at_millis", feedback.createdAtMillis)
+
+    private fun decodeFeedback(json: JSONObject?): GlobalAgentFeedback? {
+        if (json == null) return null
+        val messageId = json.optString("proactive_message_id")
+        if (messageId.isBlank()) return null
+        return GlobalAgentFeedback(
+            id = json.optString("id").ifBlank { UUID.randomUUID().toString() },
+            proactiveMessageId = messageId,
+            deliveryGroupId = json.optString("delivery_group_id"),
+            conversationId = json.optString("conversation_id"),
+            topic = json.optString("topic"),
+            target = enumValue(json.optString("target"), GlobalProactiveTarget.CURRENT_CONVERSATION),
+            kind = enumValue(json.optString("kind"), GlobalAgentFeedbackKind.HELPFUL),
+            createdAtMillis = json.optLong("created_at_millis")
         )
     }
 
@@ -447,6 +503,7 @@ class GlobalAgentRepository(context: Context) {
         .put("autonomous_research_enabled", settings.autonomousResearchEnabled)
         .put("auto_create_conversations_enabled", settings.autoCreateConversationsEnabled)
         .put("notifications_enabled", settings.notificationsEnabled)
+        .put("adaptive_learning_enabled", settings.adaptiveLearningEnabled)
         .put("daily_message_budget", settings.dailyMessageBudget)
         .put("topic_cooldown_millis", settings.topicCooldownMillis)
         .put("monitor_interval_millis", settings.monitorIntervalMillis)
@@ -460,6 +517,7 @@ class GlobalAgentRepository(context: Context) {
             autonomousResearchEnabled = json.optBoolean("autonomous_research_enabled", true),
             autoCreateConversationsEnabled = json.optBoolean("auto_create_conversations_enabled", true),
             notificationsEnabled = json.optBoolean("notifications_enabled", true),
+            adaptiveLearningEnabled = json.optBoolean("adaptive_learning_enabled", true),
             dailyMessageBudget = json.optInt("daily_message_budget", 4).coerceIn(0, 20),
             topicCooldownMillis = json.optLong("topic_cooldown_millis", 6L * 60L * 60L * 1_000L)
                 .coerceIn(15L * 60L * 1_000L, 7L * 24L * 60L * 60L * 1_000L),
@@ -499,10 +557,12 @@ class GlobalAgentRepository(context: Context) {
         private const val KEY_PROACTIVE_MESSAGES = "proactive_messages"
         private const val KEY_INTERVENTION_HISTORY = "intervention_history"
         private const val KEY_SETTINGS = "settings"
+        private const val KEY_FEEDBACK = "feedback"
         private const val MAX_PENDING_EVENTS = 2_000
         private const val MAX_PROCESS_BATCH = 250
         private const val MAX_RESEARCH_TASKS = 300
         private const val MAX_PROACTIVE_MESSAGES = 300
+        private const val MAX_FEEDBACK_ITEMS = 800
         private const val MAX_EVENT_CONTENT_CHARACTERS = 12_000
         private val STORE_LOCK = Any()
     }
@@ -523,6 +583,9 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         if (events.isEmpty()) return@synchronized GlobalAgentProcessingBatch(0, 0, emptyList(), emptyList())
         var world = repository.loadWorld()
         val history = repository.interventionHistory()
+        val adaptiveProfile = if (settings.adaptiveLearningEnabled) {
+            GlobalAgentLearningPolicy.profile(repository.feedback())
+        } else GlobalAgentAdaptiveProfile()
         val existingTasks = repository.researchTasks().toMutableList()
         val existingMessages = repository.proactiveMessages().toMutableList()
         val newTasks = mutableListOf<GlobalResearchTask>()
@@ -540,11 +603,24 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             val reduction = GlobalWorldModelReducer.reduce(world, event, understanding)
             world = reduction.world
             changedItems += reduction.changedItems.size
-            val decision = GlobalInterventionPolicy.decide(event, understanding, reduction, history, settings = settings)
+            val decision = GlobalInterventionPolicy.decide(
+                event,
+                understanding,
+                reduction,
+                history,
+                settings = settings,
+                adaptiveProfile = adaptiveProfile
+            )
             val plannedTask = if (decision.researchRequired || decision.autonomousPreparationAllowed) {
                 GlobalResearchPlanner.plan(event, understanding)?.let { candidate ->
                     if (candidate.depth == GlobalResearchDepth.CONTINUOUS_MONITOR) {
-                        candidate.copy(monitorIntervalMillis = settings.monitorIntervalMillis)
+                        candidate.copy(
+                            monitorIntervalMillis = GlobalAgentLearningPolicy.monitorIntervalMillis(
+                                settings,
+                                adaptiveProfile,
+                                candidate.topic
+                            )
+                        )
                     } else candidate
                 }?.takeIf { candidate ->
                     (existingTasks + newTasks).none { task ->
@@ -594,6 +670,75 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     fun researchTasks(): List<GlobalResearchTask> = repository.researchTasks()
 
     fun settings(): GlobalAgentSettings = repository.settings()
+
+    fun adaptiveProfile(): GlobalAgentAdaptiveProfile =
+        GlobalAgentLearningPolicy.profile(repository.feedback())
+
+    fun recordProactiveFeedback(dedupeKey: String, kind: GlobalAgentFeedbackKind): Int {
+        val normalizedKey = dedupeKey.trim()
+        val digestPrefix = "global-agent-digest:"
+        val messagePrefix = "global-agent:"
+        val groupId = when {
+            normalizedKey.startsWith(digestPrefix) -> normalizedKey.removePrefix(digestPrefix)
+            normalizedKey.startsWith(messagePrefix) -> normalizedKey.removePrefix(messagePrefix)
+            else -> return 0
+        }
+        if (groupId.isBlank()) return 0
+        val allMessages = repository.proactiveMessages()
+        val targets = if (normalizedKey.startsWith(digestPrefix)) {
+            allMessages.filter { it.deliveryGroupId == groupId }
+        } else {
+            allMessages.filter { it.id == groupId }
+        }
+        if (targets.isEmpty()) return 0
+        val now = System.currentTimeMillis()
+        targets.forEach { message ->
+            val feedback = GlobalAgentFeedback(
+                proactiveMessageId = message.id,
+                deliveryGroupId = message.deliveryGroupId.ifBlank { groupId },
+                conversationId = message.deliveredConversationId.ifBlank { message.sourceConversationId },
+                topic = message.topic,
+                target = message.target,
+                kind = kind,
+                createdAtMillis = now
+            )
+            repository.replaceFeedback(feedback)
+            repository.enqueue(GlobalConversationEvent(
+                id = "global-feedback:${message.id}:${feedback.id}",
+                type = GlobalConversationEventType.USER_FEEDBACK,
+                conversationId = feedback.conversationId,
+                messageId = message.id,
+                actor = GlobalConversationActor.USER,
+                timestampMillis = now,
+                content = kind.name.lowercase(),
+                contentRef = "encrypted://global-agent-feedback/${feedback.id}",
+                conversationTitle = message.topic,
+                topicHints = setOf(message.topic).filter(String::isNotBlank).toSet(),
+                metadata = mapOf(
+                    "feedback_kind" to kind.name,
+                    "proactive_message_id" to message.id,
+                    "delivery_group_id" to feedback.deliveryGroupId
+                )
+            ))
+        }
+        val ids = targets.map(GlobalProactiveMessage::id).toSet()
+        repository.saveProactiveMessages(allMessages.map { message ->
+            if (message.id !in ids) return@map message
+            message.copy(status = when (kind) {
+                GlobalAgentFeedbackKind.HELPFUL -> if (message.deliveredAtMillis > 0L) {
+                    GlobalProactiveMessageStatus.DELIVERED
+                } else GlobalProactiveMessageStatus.PENDING
+                GlobalAgentFeedbackKind.NOT_RELEVANT,
+                GlobalAgentFeedbackKind.TOO_FREQUENT -> GlobalProactiveMessageStatus.DISMISSED
+            })
+        })
+        GlobalConversationEventBus.requestProcessing(appContext)
+        return targets.size
+    }
+
+    fun clearAdaptiveFeedback() {
+        repository.saveFeedback(emptyList())
+    }
 
     fun updateSettings(transform: (GlobalAgentSettings) -> GlobalAgentSettings): GlobalAgentSettings {
         val updated = transform(repository.settings())
@@ -681,7 +826,8 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                 delivered += message.copy(
                     status = GlobalProactiveMessageStatus.DELIVERED,
                     deliveredAtMillis = System.currentTimeMillis(),
-                    deliveredConversationId = targetConversationId
+                    deliveredConversationId = targetConversationId,
+                    deliveryGroupId = message.id
                 )
             }
         }
@@ -720,7 +866,8 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                     message.copy(
                         status = GlobalProactiveMessageStatus.DELIVERED,
                         deliveredAtMillis = deliveredAt,
-                        deliveredConversationId = targetConversationId
+                        deliveredConversationId = targetConversationId,
+                        deliveryGroupId = digestKey
                     )
                 }
             }
@@ -728,6 +875,18 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         if (delivered.isNotEmpty()) {
             val deliveredById = delivered.associateBy(GlobalProactiveMessage::id)
             repository.saveProactiveMessages(repository.proactiveMessages().map { deliveredById[it.id] ?: it })
+            val countedOnDelivery = delivered.filter { deliveredMessage ->
+                messages.firstOrNull { it.id == deliveredMessage.id }?.status == GlobalProactiveMessageStatus.PENDING
+            }
+            if (countedOnDelivery.isNotEmpty()) {
+                val now = countedOnDelivery.maxOf(GlobalProactiveMessage::deliveredAtMillis)
+                val previous = repository.interventionHistory()
+                repository.saveInterventionHistory(previous.copy(
+                    notificationTimestamps = (previous.notificationTimestamps + now).takeLast(100),
+                    lastTopicNotificationMillis = previous.lastTopicNotificationMillis +
+                        countedOnDelivery.associate { GlobalAgentText.normalize(it.topic) to now }
+                ))
+            }
         }
         delivered
     }
@@ -766,6 +925,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     fun dashboard(): GlobalAgentDashboardSnapshot {
         val world = repository.loadWorld()
         val active = world.items.filter { it.status == GlobalWorldItemStatus.ACTIVE }
+        val profile = adaptiveProfile()
         return GlobalAgentDashboardSnapshot(
             pendingEventCount = repository.pendingEvents(250).size,
             worldItemCount = active.size,
@@ -778,6 +938,8 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                 it.status in setOf(GlobalResearchTaskStatus.QUEUED, GlobalResearchTaskStatus.RUNNING, GlobalResearchTaskStatus.WAITING_FOR_RESOURCE)
             },
             pendingInsightCount = pendingProactiveMessages().size,
+            feedbackCount = profile.sampleCount,
+            learnedTopicCount = profile.topicAffinity.size,
             updatedAtMillis = world.updatedAtMillis
         )
     }

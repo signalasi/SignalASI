@@ -4474,6 +4474,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "global.toggle_proactive" -> updateGlobalAgentSettings {
                 it.copy(proactiveInsightsEnabled = !it.proactiveInsightsEnabled)
             }
+            "global.toggle_learning" -> updateGlobalAgentSettings {
+                it.copy(adaptiveLearningEnabled = !it.adaptiveLearningEnabled)
+            }
             "global.toggle_research" -> updateGlobalAgentSettings {
                 it.copy(autonomousResearchEnabled = !it.autonomousResearchEnabled)
             }
@@ -4490,6 +4493,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "global.world.links" -> showGlobalConversationLinksDialog()
             "global.research" -> showGlobalResearchTasksDialog()
             "global.insights" -> showGlobalInsightsDialog()
+            "global.learning" -> showGlobalLearningDialog()
             "profile.nickname" -> openExistingControlCenterPage { showEditNicknameDialog() }
             "profile.copy_id" -> copyText(SignalASICrypto.localSignalasiId(), getString(R.string.security_copied_signalasi_id))
             "profile.copy_fingerprint" -> copyText(SignalASICrypto.localIdentitySha256(), getString(R.string.security_copied_phone_fingerprint))
@@ -4810,6 +4814,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         listOf(
                             ControlCenterRowSpec("global.toggle_enabled", getString(R.string.cc_global_master_title), getString(R.string.cc_global_master_subtitle), R.drawable.ic_agent_node, switchValue = settings.enabled, showChevron = false),
                             ControlCenterRowSpec("global.toggle_proactive", getString(R.string.cc_global_proactive_title), getString(R.string.cc_global_proactive_subtitle), R.drawable.ic_agent_memory, switchValue = settings.proactiveInsightsEnabled, showChevron = false, enabled = settings.enabled),
+                            ControlCenterRowSpec("global.toggle_learning", getString(R.string.cc_global_learning_toggle_title), getString(R.string.cc_global_learning_toggle_subtitle), R.drawable.ic_agent_skill, switchValue = settings.adaptiveLearningEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_research", getString(R.string.cc_global_research_title), getString(R.string.cc_global_research_subtitle), R.drawable.ic_agent_knowledge, switchValue = settings.autonomousResearchEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_auto_conversations", getString(R.string.cc_global_topics_title), getString(R.string.cc_global_topics_subtitle), R.drawable.ic_agent_history, switchValue = settings.autoCreateConversationsEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_notifications", getString(R.string.cc_global_notifications_title), getString(R.string.cc_global_notifications_subtitle), R.drawable.ic_settings_notification, switchValue = settings.notificationsEnabled, showChevron = false, enabled = settings.enabled)
@@ -4829,6 +4834,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         listOf(
                             ControlCenterRowSpec("global.research", getString(R.string.cc_global_research_queue_title), getString(R.string.cc_global_research_queue_subtitle), R.drawable.ic_agent_knowledge, activeResearch.toString(), if (activeResearch > 0) ControlCenterTone.BLUE else ControlCenterTone.NEUTRAL),
                             ControlCenterRowSpec("global.insights", getString(R.string.cc_global_pending_insights_title), getString(R.string.cc_global_pending_insights_subtitle), R.drawable.ic_agent_memory, dashboard.pendingInsightCount.toString(), if (dashboard.pendingInsightCount > 0) ControlCenterTone.VIOLET else ControlCenterTone.NEUTRAL),
+                            ControlCenterRowSpec("global.learning", getString(R.string.cc_global_learning_title), getString(R.string.cc_global_learning_subtitle), R.drawable.ic_agent_skill, getString(R.string.cc_global_learning_status, dashboard.feedbackCount, dashboard.learnedTopicCount), if (dashboard.feedbackCount > 0) ControlCenterTone.GREEN else ControlCenterTone.NEUTRAL),
                             ControlCenterRowSpec("global.process_now", getString(R.string.cc_global_process_now_title), getString(R.string.cc_global_process_now_subtitle), R.drawable.ic_reset_data, getString(R.string.cc_global_process_now_action), ControlCenterTone.GREEN, showChevron = false, enabled = settings.enabled)
                         )
                     ),
@@ -4940,6 +4946,50 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .setTitle(R.string.cc_global_pending_insights_title)
             .setMessage(message)
             .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun showGlobalLearningDialog() {
+        val runtime = if (::globalSuperAgentRuntime.isInitialized) {
+            globalSuperAgentRuntime
+        } else GlobalSuperAgentRuntime.get(this)
+        val profile = runtime.adaptiveProfile()
+        val topicSummary = profile.topicAffinity.entries
+            .sortedByDescending { kotlin.math.abs(it.value) }
+            .take(8)
+            .joinToString("\n") { (topic, affinity) ->
+                "\u2022 $topic \u00b7 ${if (affinity >= 0.0) "+" else ""}${(affinity * 100).toInt()}%"
+            }
+        val message = buildString {
+            append(getString(
+                R.string.cc_global_learning_summary,
+                profile.sampleCount,
+                profile.helpfulCount,
+                profile.notRelevantCount,
+                profile.tooFrequentCount
+            ))
+            if (topicSummary.isNotBlank()) {
+                append("\n\n")
+                append(getString(R.string.cc_global_learning_topics))
+                append("\n")
+                append(topicSummary)
+            }
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.cc_global_learning_title)
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, null)
+            .setNeutralButton(R.string.cc_global_learning_reset) { _, _ ->
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.cc_global_learning_reset)
+                    .setMessage(R.string.cc_global_learning_reset_confirm)
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setPositiveButton(R.string.cc_global_learning_reset) { _, _ ->
+                        runtime.clearAdaptiveFeedback()
+                        renderControlCenterGlobalAgentPage()
+                    }
+                    .show()
+            }
             .show()
     }
 
@@ -8101,25 +8151,42 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun attachAgentTranscriptActions(textView: TextView, entry: AgentTranscriptEntry) {
         textView.setOnLongClickListener {
-            val labels = arrayOf(
-                getString(R.string.common_copy),
-                getString(R.string.common_select_all),
-                getString(R.string.common_delete)
-            )
+            val feedbackEntry = entry.role == AgentTranscriptRole.ASSISTANT &&
+                (entry.dedupeKey.startsWith("global-agent:") ||
+                    entry.dedupeKey.startsWith("global-agent-digest:"))
+            val helpfulLabel = getString(R.string.agent_global_feedback_helpful)
+            val notRelevantLabel = getString(R.string.agent_global_feedback_not_relevant)
+            val tooFrequentLabel = getString(R.string.agent_global_feedback_too_frequent)
+            val copyLabel = getString(R.string.common_copy)
+            val selectAllLabel = getString(R.string.common_select_all)
+            val deleteLabel = getString(R.string.common_delete)
+            val labels = buildList {
+                if (feedbackEntry) {
+                    add(helpfulLabel)
+                    add(notRelevantLabel)
+                    add(tooFrequentLabel)
+                }
+                add(copyLabel)
+                add(selectAllLabel)
+                add(deleteLabel)
+            }.toTypedArray()
             android.app.AlertDialog.Builder(this)
                 .setItems(labels) { _, which ->
-                    when (which) {
-                        0 -> {
+                    when (labels[which]) {
+                        helpfulLabel -> recordGlobalInsightFeedback(entry, GlobalAgentFeedbackKind.HELPFUL)
+                        notRelevantLabel -> recordGlobalInsightFeedback(entry, GlobalAgentFeedbackKind.NOT_RELEVANT)
+                        tooFrequentLabel -> recordGlobalInsightFeedback(entry, GlobalAgentFeedbackKind.TOO_FREQUENT)
+                        copyLabel -> {
                             val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
                             clipboard.setPrimaryClip(ClipData.newPlainText(getString(R.string.app_name), entry.text))
                             Toast.makeText(this, getString(R.string.toast_copied), Toast.LENGTH_SHORT).show()
                         }
-                        1 -> {
+                        selectAllLabel -> {
                             textView.requestFocus()
                             (textView.text as? android.text.Spannable)?.let(android.text.Selection::selectAll)
                             Toast.makeText(this, getString(R.string.agent_message_all_selected), Toast.LENGTH_SHORT).show()
                         }
-                        2 -> {
+                        deleteLabel -> {
                             if (agentTranscriptStore.deleteEntry(entry.id)) {
                                 renderedAgentTranscriptIds.clear()
                                 agentOutputList.removeAllViews()
@@ -8131,6 +8198,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 .show()
             true
         }
+    }
+
+    private fun recordGlobalInsightFeedback(entry: AgentTranscriptEntry, kind: GlobalAgentFeedbackKind) {
+        val runtime = if (::globalSuperAgentRuntime.isInitialized) {
+            globalSuperAgentRuntime
+        } else GlobalSuperAgentRuntime.get(this)
+        val count = runtime.recordProactiveFeedback(entry.dedupeKey, kind)
+        Toast.makeText(
+            this,
+            getString(
+                if (count > 0) R.string.agent_global_feedback_saved
+                else R.string.agent_global_feedback_unavailable
+            ),
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     private fun handleAgentRichAction(entry: AgentTranscriptEntry, action: AgentRichAction) {
