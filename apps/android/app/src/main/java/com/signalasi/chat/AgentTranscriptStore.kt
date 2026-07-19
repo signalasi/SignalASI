@@ -257,6 +257,7 @@ class AgentTranscriptStore(context: Context) {
         )
         val all = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]"))
         saveConversations((all + conversation).takeLast(MAX_CONVERSATIONS))
+        GlobalConversationEventBus.publishConversationCreated(appContext, conversation)
         return conversation
     }
 
@@ -367,6 +368,9 @@ class AgentTranscriptStore(context: Context) {
         if (cleanTurnId.isBlank()) return null
         return allEntries().lastOrNull { it.turnId == cleanTurnId }?.conversationId
     }
+
+    @Synchronized
+    fun conversation(conversationId: String): AgentConversation? = conversationForEvent(conversationId)
 
     @Synchronized
     fun deleteEntry(entryId: String): Boolean {
@@ -592,13 +596,16 @@ class AgentTranscriptStore(context: Context) {
     private fun persistDraftIfNeeded(conversationId: String) {
         val draft = draftConversation?.takeIf { it.id == conversationId } ?: return
         val all = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]")).toMutableList()
+        var created = false
         if (all.none { it.id == draft.id }) {
             all += draft
             saveConversations(all)
+            created = true
         }
         preferences.writeString(KEY_ACTIVE_CONVERSATION, draft.id)
         draftConversation = null
         preferences.remove(KEY_DRAFT_CONVERSATION)
+        if (created) GlobalConversationEventBus.publishConversationCreated(appContext, draft)
     }
 
     private fun saveDraftConversation(conversation: AgentConversation) {
@@ -658,8 +665,11 @@ class AgentTranscriptStore(context: Context) {
         val all = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]")).toMutableList()
         val index = all.indexOfFirst { it.id == id }
         if (index < 0) return false
-        all[index] = transform(all[index]).copy(updatedAt = System.currentTimeMillis())
+        val previous = all[index]
+        val current = transform(previous).copy(updatedAt = System.currentTimeMillis())
+        all[index] = current
         saveConversations(all)
+        GlobalConversationEventBus.publishConversationUpdated(appContext, previous, current)
         return true
     }
 

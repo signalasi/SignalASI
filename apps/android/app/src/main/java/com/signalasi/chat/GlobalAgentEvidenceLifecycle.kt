@@ -3,6 +3,34 @@ package com.signalasi.chat
 object GlobalAgentEvidenceLifecyclePolicy {
     private const val INVALIDATED_REASON = "Source evidence was revised or deleted"
 
+    fun evidenceIdsForConversation(
+        conversationId: String,
+        cognitionTasks: List<GlobalCognitionTask>,
+        researchTasks: List<GlobalResearchTask>,
+        autonomousRuns: List<GlobalAutonomousRun>,
+        proactiveMessages: List<GlobalProactiveMessage>,
+        longHorizonGoals: List<GlobalLongHorizonGoal>
+    ): Set<String> {
+        if (conversationId.isBlank()) return emptySet()
+        return buildSet {
+            cognitionTasks.asSequence()
+                .filter { it.sourceEvent.conversationId == conversationId }
+                .forEach { addAll(it.sourceEvent.evidenceRoots()) }
+            researchTasks.asSequence()
+                .filter { it.sourceConversationId == conversationId }
+                .forEach { addAll(it.causalEventIds.ifEmpty { setOf(it.sourceEventId) }) }
+            autonomousRuns.asSequence()
+                .filter { it.sourceConversationId == conversationId }
+                .forEach { addAll(it.causalEventIds.ifEmpty { setOf(it.sourceEventId) }) }
+            proactiveMessages.asSequence()
+                .filter { it.sourceConversationId == conversationId }
+                .forEach { addAll(it.causalEventIds.ifEmpty { setOf(it.sourceEventId) }) }
+            longHorizonGoals.asSequence()
+                .filter { conversationId in it.sourceConversationIds }
+                .forEach { addAll(it.sourceEventIds) }
+        }
+    }
+
     fun invalidateCognitionTasks(
         tasks: List<GlobalCognitionTask>,
         eventIds: Set<String>,

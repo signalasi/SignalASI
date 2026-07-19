@@ -43,7 +43,8 @@ data class AgentTaskThreadContext(
 )
 
 class AgentRunRecorder(context: Context) {
-    private val database = AgentEncryptedDatabase(context.applicationContext, PREFERENCES_NAME)
+    private val appContext = context.applicationContext
+    private val database = AgentEncryptedDatabase(appContext, PREFERENCES_NAME)
 
     @Synchronized
     fun begin(
@@ -79,6 +80,7 @@ class AgentRunRecorder(context: Context) {
                 revisionNumber = run.revisionNumber
             )
         )
+        GlobalConversationEventBus.publishRecordedRunStarted(appContext, run)
         return run
     }
 
@@ -93,27 +95,35 @@ class AgentRunRecorder(context: Context) {
         artifacts: List<AgentArtifactReference>,
         success: Boolean = true,
         finalStatus: AgentRecordedRunStatus? = null
-    ): AgentRecordedRun? = update(runId) { current ->
-        current.copy(
-            normalizedIntent = normalizeIntent(current.originalRequest),
-            extractedInputsJson = inferInputs(current.originalRequest),
-            agentPlanJson = safeJson(planJson, "[]", MAX_PLAN_CHARS),
-            toolCalls = toolCalls.take(MAX_TOOL_CALLS),
-            sourcesJson = sanitizeSecrets(safeJson(sourcesJson, "[]", MAX_RESULT_CHARS)),
-            finalOutputJson = sanitizeSecrets(safeJson(finalOutputJson, "{}", MAX_RESULT_CHARS)),
-            renderSpecJson = sanitizeSecrets(safeJson(renderSpecJson, "{}", MAX_RENDER_CHARS)),
-            artifacts = artifacts.take(MAX_ARTIFACTS),
-            status = finalStatus ?: if (success) AgentRecordedRunStatus.COMPLETED else AgentRecordedRunStatus.FAILED,
-            completedAtMillis = System.currentTimeMillis()
-        )
+    ): AgentRecordedRun? {
+        val completed = update(runId) { current ->
+            current.copy(
+                normalizedIntent = normalizeIntent(current.originalRequest),
+                extractedInputsJson = inferInputs(current.originalRequest),
+                agentPlanJson = safeJson(planJson, "[]", MAX_PLAN_CHARS),
+                toolCalls = toolCalls.take(MAX_TOOL_CALLS),
+                sourcesJson = sanitizeSecrets(safeJson(sourcesJson, "[]", MAX_RESULT_CHARS)),
+                finalOutputJson = sanitizeSecrets(safeJson(finalOutputJson, "{}", MAX_RESULT_CHARS)),
+                renderSpecJson = sanitizeSecrets(safeJson(renderSpecJson, "{}", MAX_RENDER_CHARS)),
+                artifacts = artifacts.take(MAX_ARTIFACTS),
+                status = finalStatus ?: if (success) AgentRecordedRunStatus.COMPLETED else AgentRecordedRunStatus.FAILED,
+                completedAtMillis = System.currentTimeMillis()
+            )
+        } ?: return null
+        GlobalConversationEventBus.publishRecordedRunCompleted(appContext, completed)
+        return completed
     }
 
     @Synchronized
     fun addFeedback(conversationId: String, feedback: String): AgentRecordedRun? {
+        val cleanFeedback = feedback.trim().take(MAX_FEEDBACK_CHARS)
+        if (cleanFeedback.isBlank()) return null
         val active = activeRun(conversationId) ?: return null
-        return update(active.runId) { run ->
-            run.copy(userFeedback = (run.userFeedback + feedback.trim().take(MAX_FEEDBACK_CHARS)).takeLast(32))
-        }
+        val updated = update(active.runId) { run ->
+            run.copy(userFeedback = (run.userFeedback + cleanFeedback).takeLast(32))
+        } ?: return null
+        GlobalConversationEventBus.publishRecordedRunFeedback(appContext, updated, cleanFeedback)
+        return updated
     }
 
     @Synchronized
@@ -148,15 +158,22 @@ class AgentRunRecorder(context: Context) {
         .sortedBy { it.createdAtMillis }
 
     @Synchronized
-    fun markInterrupted(runId: String, reason: String): AgentRecordedRun? = update(runId) { current ->
-        if (current.status != AgentRecordedRunStatus.RUNNING) current else current.copy(
-            finalOutputJson = JSONObject()
-                .put("error", reason.trim().take(1_024))
-                .put("recoverable", false)
-                .toString(),
-            status = AgentRecordedRunStatus.FAILED,
-            completedAtMillis = System.currentTimeMillis()
-        )
+    fun markInterrupted(runId: String, reason: String): AgentRecordedRun? {
+        val previous = run(runId) ?: return null
+        val interrupted = update(runId) { current ->
+            if (current.status != AgentRecordedRunStatus.RUNNING) current else current.copy(
+                finalOutputJson = JSONObject()
+                    .put("error", reason.trim().take(1_024))
+                    .put("recoverable", false)
+                    .toString(),
+                status = AgentRecordedRunStatus.FAILED,
+                completedAtMillis = System.currentTimeMillis()
+            )
+        } ?: return null
+        if (previous.status != interrupted.status) {
+            GlobalConversationEventBus.publishRecordedRunCompleted(appContext, interrupted)
+        }
+        return interrupted
     }
 
     @Synchronized

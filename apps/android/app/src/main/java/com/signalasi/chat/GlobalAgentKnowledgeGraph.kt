@@ -96,10 +96,18 @@ object GlobalTopicProjectGraphReducer {
             retractedEventIds = retractedEventIds
         )
         if (event.evidenceRoots().any(retractedEventIds::contains)) return retractedGraph
-        if (event.type == GlobalConversationEventType.CONVERSATION_DELETED) {
+        if (event.excludesConversationFromGlobalModel()) {
             return removeConversation(retractedGraph, event.conversationId, event.timestampMillis)
         }
         if (event.type == GlobalConversationEventType.MESSAGE_DELETED) return retractedGraph
+        if (event.type in setOf(
+                GlobalConversationEventType.CONVERSATION_CREATED,
+                GlobalConversationEventType.CONVERSATION_UPDATED
+            ) && (
+                event.conversationTitle.isBlank() ||
+                    event.conversationTitle.equals("New session", ignoreCase = true)
+                )
+        ) return retractedGraph
         val topicName = cleanName(understanding.topic)
         if (topicName.isBlank()) return retractedGraph
         val now = event.timestampMillis

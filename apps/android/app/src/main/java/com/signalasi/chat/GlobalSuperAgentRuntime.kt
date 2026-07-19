@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 import java.util.UUID
 
 data class GlobalAgentProcessingBatch(
@@ -50,11 +51,24 @@ class GlobalAgentRepository(context: Context) {
     private val topicGraphStore = GlobalTopicProjectGraphStore(context.applicationContext)
 
     fun enqueue(event: GlobalConversationEvent): Boolean = synchronized(STORE_LOCK) {
+        enqueueAllLocked(listOf(event)) > 0
+    }
+
+    fun enqueueAll(incoming: List<GlobalConversationEvent>): Int = synchronized(STORE_LOCK) {
+        enqueueAllLocked(incoming)
+    }
+
+    private fun enqueueAllLocked(incoming: List<GlobalConversationEvent>): Int {
+        if (incoming.isEmpty()) return 0
         val events = loadEvents().toMutableList()
-        if (events.any { it.id == event.id }) return@synchronized false
-        events += event
+        val knownIds = events.mapTo(mutableSetOf(), GlobalConversationEvent::id)
+        val additions = incoming.asSequence()
+            .filter { it.id.isNotBlank() && knownIds.add(it.id) }
+            .toList()
+        if (additions.isEmpty()) return 0
+        events += additions
         saveEvents(events.takeLast(MAX_PENDING_EVENTS))
-        true
+        return additions.size
     }
 
     fun pendingEvents(limit: Int = 100): List<GlobalConversationEvent> = synchronized(STORE_LOCK) {
@@ -215,7 +229,7 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 7)
+            .put("version", 8)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("world", encodeWorld(loadWorld()))
             .put("topic_project_graph", topicGraphStore.export())
@@ -873,7 +887,23 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         var proactiveMessagesInvalidated = false
         var changedItems = 0
         events.forEach { event ->
-            val retractedEvidence = event.effectiveRetractions()
+            val currentRunsForLifecycle = if (event.excludesConversationFromGlobalModel()) {
+                deliberationStore.autonomousRuns()
+            } else emptyList()
+            val currentGoalsForLifecycle = if (event.excludesConversationFromGlobalModel()) {
+                longHorizonStore.goals()
+            } else emptyList()
+            val conversationEvidence = if (event.excludesConversationFromGlobalModel()) {
+                GlobalAgentEvidenceLifecyclePolicy.evidenceIdsForConversation(
+                    conversationId = event.conversationId,
+                    cognitionTasks = existingCognitionTasks + newCognitionTasks,
+                    researchTasks = existingTasks + newTasks,
+                    autonomousRuns = currentRunsForLifecycle,
+                    proactiveMessages = existingMessages + newMessages,
+                    longHorizonGoals = currentGoalsForLifecycle
+                )
+            } else emptySet()
+            val retractedEvidence = event.effectiveRetractions() + conversationEvidence
             if (retractedEvidence.isNotEmpty()) {
                 fun <T> replaceIfChanged(target: MutableList<T>, updated: List<T>): Boolean {
                     if (target == updated) return false
@@ -927,14 +957,14 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                         retractedEvidence
                     )
                 )
-                val currentRuns = deliberationStore.autonomousRuns()
+                val currentRuns = currentRunsForLifecycle.ifEmpty { deliberationStore.autonomousRuns() }
                 val invalidatedRuns = GlobalAgentEvidenceLifecyclePolicy.invalidateAutonomousRuns(
                     currentRuns,
                     retractedEvidence,
                     event.timestampMillis
                 )
                 if (invalidatedRuns != currentRuns) deliberationStore.saveAutonomousRuns(invalidatedRuns)
-                val currentGoals = longHorizonStore.goals()
+                val currentGoals = currentGoalsForLifecycle.ifEmpty { longHorizonStore.goals() }
                 val invalidatedGoals = GlobalAgentEvidenceLifecyclePolicy.invalidateLongHorizonGoals(
                     currentGoals,
                     retractedEvidence,
@@ -943,7 +973,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                 if (invalidatedGoals != currentGoals) longHorizonStore.save(invalidatedGoals)
             }
             val lifecycleRetraction = event.effectiveRetractions().isNotEmpty() ||
-                event.type == GlobalConversationEventType.CONVERSATION_DELETED
+                event.excludesConversationFromGlobalModel()
             if (event.sensitivity == GlobalConversationSensitivity.SESSION_PRIVATE && !lifecycleRetraction) {
                 world = world.copy(
                     processedEventIds = (world.processedEventIds + event.id).takeLast(4_000),
@@ -1624,7 +1654,7 @@ object GlobalConversationEventBus {
         updated: Boolean = false,
         supersededEntryId: String = ""
     ): Boolean {
-        if (conversation.trackingPaused) return false
+        if (conversation.trackingPaused || conversation.privateMode) return false
         val repository = GlobalAgentRepository(context)
         if (!repository.settings().enabled) return false
         val privateMode = conversation.privateMode
@@ -1634,9 +1664,17 @@ object GlobalConversationEventBus {
             entry.role == AgentTranscriptRole.ASSISTANT -> GlobalConversationActor.ASSISTANT
             else -> GlobalConversationActor.TOOL
         }
+        val eventType = GlobalRichObservationExtractor.transcriptEventType(entry, updated)
+        val toolStatus = when (eventType) {
+            GlobalConversationEventType.TOOL_STARTED -> "started"
+            GlobalConversationEventType.TOOL_COMPLETED -> "completed"
+            GlobalConversationEventType.TOOL_CANCELLED -> "cancelled"
+            GlobalConversationEventType.TOOL_FAILED -> "failed"
+            else -> ""
+        }
         val event = GlobalConversationEvent(
             id = "transcript:${entry.id}",
-            type = if (updated) GlobalConversationEventType.MESSAGE_UPDATED else GlobalConversationEventType.MESSAGE_CREATED,
+            type = eventType,
             conversationId = entry.conversationId,
             messageId = entry.id,
             actor = actor,
@@ -1654,13 +1692,16 @@ object GlobalConversationEventBus {
                 "role" to entry.role.name,
                 "superseded_event_id" to supersededEntryId.takeIf(String::isNotBlank)
                     ?.let { "transcript:$it" }.orEmpty(),
+                "tool_status" to toolStatus,
+                "tool_key" to entry.taskId.ifBlank { entry.dedupeKey }.take(160),
                 "origin" to if (actor == GlobalConversationActor.GLOBAL_AGENT) "global_agent" else "conversation"
             ),
             retractedEventIds = supersededEntryId.takeIf(String::isNotBlank)
                 ?.let { setOf("transcript:$it") }
                 .orEmpty()
         )
-        val enqueued = repository.enqueue(event)
+        val observations = GlobalRichObservationExtractor.extract(conversation, entry, event.id)
+        val enqueued = repository.enqueueAll(listOf(event) + observations) > 0
         if (enqueued) requestProcessing(context)
         return enqueued
     }
@@ -1671,7 +1712,7 @@ object GlobalConversationEventBus {
         entry: AgentTranscriptEntry,
         timestampMillis: Long = System.currentTimeMillis()
     ): Boolean {
-        if (conversation.trackingPaused) return false
+        if (conversation.trackingPaused || conversation.privateMode) return false
         val repository = GlobalAgentRepository(context)
         if (!repository.settings().enabled) return false
         val deletedEventId = "transcript:${entry.id}"
@@ -1709,7 +1750,7 @@ object GlobalConversationEventBus {
             conversationId = conversation.id,
             actor = GlobalConversationActor.SYSTEM,
             content = "",
-            conversationTitle = conversation.title,
+            conversationTitle = if (conversation.privateMode) "" else conversation.title,
             sensitivity = if (conversation.privateMode) {
                 GlobalConversationSensitivity.SESSION_PRIVATE
             } else GlobalConversationSensitivity.PERSONAL
@@ -1717,6 +1758,169 @@ object GlobalConversationEventBus {
         val enqueued = repository.enqueue(event)
         if (enqueued) requestProcessing(context)
         return enqueued
+    }
+
+    fun publishConversationCreated(context: Context, conversation: AgentConversation): Boolean {
+        if (conversation.privateMode || conversation.trackingPaused) return false
+        val repository = GlobalAgentRepository(context)
+        if (!repository.settings().enabled) return false
+        val privateMode = conversation.privateMode
+        val event = GlobalConversationEvent(
+            id = "conversation-created:${conversation.id}",
+            type = GlobalConversationEventType.CONVERSATION_CREATED,
+            conversationId = conversation.id,
+            actor = GlobalConversationActor.SYSTEM,
+            timestampMillis = conversation.createdAt,
+            content = if (privateMode) "" else "Conversation created: ${conversation.title}",
+            contentRef = "encrypted://agent-conversations/${conversation.id}",
+            conversationTitle = if (privateMode) "" else conversation.title,
+            topicHints = if (privateMode || conversation.title.equals("New session", ignoreCase = true)) {
+                emptySet()
+            } else {
+                setOf(conversation.title)
+            },
+            sensitivity = conversationSensitivity(conversation),
+            metadata = conversationMetadata(conversation) + mapOf("origin" to "conversation_lifecycle")
+        )
+        val enqueued = repository.enqueue(event)
+        if (enqueued) requestProcessing(context)
+        return enqueued
+    }
+
+    fun publishConversationUpdated(
+        context: Context,
+        previous: AgentConversation,
+        current: AgentConversation
+    ): Boolean {
+        val changes = conversationChanges(previous, current)
+        if (changes.isEmpty()) return false
+        val repository = GlobalAgentRepository(context)
+        if (!repository.settings().enabled) return false
+        val privateMode = current.privateMode
+        val fingerprint = GlobalAgentText.stableKey(
+            current.id,
+            changes.sorted().joinToString(","),
+            current.title,
+            current.status.name,
+            current.pinned.toString(),
+            current.privateMode.toString(),
+            current.trackingPaused.toString(),
+            current.selectedModelOrAgent,
+            current.contextPolicy,
+            current.updatedAt.toString()
+        )
+        val content = when {
+            privateMode -> ""
+            "title" in changes -> "Conversation renamed: ${previous.title} -> ${current.title}"
+            else -> "Conversation updated: ${changes.sorted().joinToString(", ")}"
+        }
+        val event = GlobalConversationEvent(
+            id = "conversation-updated:${current.id}:$fingerprint",
+            type = GlobalConversationEventType.CONVERSATION_UPDATED,
+            conversationId = current.id,
+            actor = GlobalConversationActor.SYSTEM,
+            timestampMillis = current.updatedAt,
+            content = content,
+            contentRef = "encrypted://agent-conversations/${current.id}",
+            conversationTitle = if (privateMode) "" else current.title,
+            topicHints = if (privateMode || current.title.equals("New session", ignoreCase = true)) {
+                emptySet()
+            } else {
+                setOf(current.title)
+            },
+            sensitivity = conversationSensitivity(current),
+            metadata = conversationMetadata(current) + mapOf(
+                "origin" to "conversation_lifecycle",
+                "changed_fields" to changes.sorted().joinToString(",")
+            )
+        )
+        val enqueued = repository.enqueue(event)
+        if (enqueued) requestProcessing(context)
+        return enqueued
+    }
+
+    fun publishRecordedRunStarted(
+        context: Context,
+        run: AgentRecordedRun,
+        conversationTitle: String = ""
+    ): Boolean {
+        val conversation = AgentTranscriptStore(context).conversation(run.conversationId) ?: return false
+        if (conversation.privateMode || conversation.trackingPaused) return false
+        val repository = GlobalAgentRepository(context)
+        if (!repository.settings().enabled) return false
+        val title = conversationTitle.ifBlank { conversation.title }
+        val enqueued = repository.enqueue(GlobalRecordedRunObservationExtractor.started(run, title))
+        if (enqueued) requestProcessing(context)
+        return enqueued
+    }
+
+    fun publishRecordedRunCompleted(
+        context: Context,
+        run: AgentRecordedRun,
+        conversationTitle: String = ""
+    ): Boolean {
+        val conversation = AgentTranscriptStore(context).conversation(run.conversationId) ?: return false
+        if (conversation.privateMode || conversation.trackingPaused) return false
+        val repository = GlobalAgentRepository(context)
+        if (!repository.settings().enabled) return false
+        val title = conversationTitle.ifBlank { conversation.title }
+        val enqueued = repository.enqueueAll(
+            GlobalRecordedRunObservationExtractor.completed(run, title)
+        ) > 0
+        if (enqueued) requestProcessing(context)
+        return enqueued
+    }
+
+    fun publishRecordedRunFeedback(
+        context: Context,
+        run: AgentRecordedRun,
+        feedback: String,
+        conversationTitle: String = ""
+    ): Boolean {
+        if (feedback.isBlank()) return false
+        val conversation = AgentTranscriptStore(context).conversation(run.conversationId) ?: return false
+        if (conversation.privateMode || conversation.trackingPaused) return false
+        val repository = GlobalAgentRepository(context)
+        if (!repository.settings().enabled) return false
+        val title = conversationTitle.ifBlank { conversation.title }
+        val event = GlobalRecordedRunObservationExtractor.feedback(run, feedback, conversationTitle = title)
+        val enqueued = repository.enqueue(event)
+        if (enqueued) requestProcessing(context)
+        return enqueued
+    }
+
+    private fun conversationSensitivity(conversation: AgentConversation): GlobalConversationSensitivity =
+        if (conversation.privateMode) {
+            GlobalConversationSensitivity.SESSION_PRIVATE
+        } else {
+            GlobalConversationSensitivity.PERSONAL
+        }
+
+    private fun conversationMetadata(conversation: AgentConversation): Map<String, String> = mapOf(
+        "conversation_status" to conversation.status.name.lowercase(Locale.ROOT),
+        "pinned" to conversation.pinned.toString(),
+        "private_mode" to conversation.privateMode.toString(),
+        "tracking_paused" to conversation.trackingPaused.toString(),
+        "global_visibility" to if (conversation.privateMode || conversation.trackingPaused) "excluded" else "included",
+        "created_by_agent" to conversation.createdByAgent.toString(),
+        "parent_conversation_id" to conversation.parentConversationId,
+        "selected_resource" to conversation.selectedModelOrAgent,
+        "context_policy" to conversation.contextPolicy
+    )
+
+    private fun conversationChanges(
+        previous: AgentConversation,
+        current: AgentConversation
+    ): Set<String> = buildSet {
+        if (previous.title != current.title) add("title")
+        if (previous.status != current.status) add("status")
+        if (previous.pinned != current.pinned) add("pinned")
+        if (previous.privateMode != current.privateMode) add("private_mode")
+        if (previous.trackingPaused != current.trackingPaused) add("tracking_paused")
+        if (previous.selectedModelOrAgent != current.selectedModelOrAgent) add("selected_resource")
+        if (previous.contextPolicy != current.contextPolicy) add("context_policy")
+        if (previous.createdByAgent != current.createdByAgent) add("created_by_agent")
+        if (previous.parentConversationId != current.parentConversationId) add("parent_conversation_id")
     }
 
     fun requestProcessing(context: Context) {

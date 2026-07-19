@@ -12,7 +12,13 @@ enum class GlobalConversationEventType {
     CONVERSATION_CREATED,
     CONVERSATION_UPDATED,
     CONVERSATION_DELETED,
+    ATTACHMENT_ADDED,
+    ARTIFACT_CREATED,
     TASK_UPDATED,
+    TOOL_STARTED,
+    TOOL_COMPLETED,
+    TOOL_CANCELLED,
+    TOOL_FAILED,
     TOOL_RESULT,
     COGNITION_RESULT,
     USER_FEEDBACK
@@ -69,6 +75,11 @@ fun GlobalConversationEvent.effectiveRetractions(): Set<String> = buildSet {
         .filter(String::isNotBlank)
         .forEach(::add)
 }
+
+fun GlobalConversationEvent.excludesConversationFromGlobalModel(): Boolean =
+    type == GlobalConversationEventType.CONVERSATION_DELETED ||
+        (type == GlobalConversationEventType.CONVERSATION_UPDATED &&
+            metadata["global_visibility"] == "excluded")
 
 fun PersonalWorldModel.hasRetractedEvidence(eventIds: Set<String>): Boolean =
     eventIds.any(retractedEventIds::contains)
@@ -423,7 +434,7 @@ object GlobalWorldModelReducer {
                 conflicts = emptyList()
             )
         }
-        if (event.type == GlobalConversationEventType.CONVERSATION_DELETED) {
+        if (event.excludesConversationFromGlobalModel()) {
             val retainedItems = retractedWorld.items.mapNotNull { item ->
                 if (event.conversationId !in item.conversationIds) return@mapNotNull item
                 val remainingConversations = item.conversationIds - event.conversationId
@@ -550,6 +561,82 @@ object GlobalWorldModelReducer {
                     } else 0L
                 ))
             }
+        }
+        fun addToolState(status: GlobalWorldItemStatus, confidence: Double) {
+            val value = event.content.replace(Regex("\\s+"), " ").trim().take(1_200)
+            if (value.isBlank()) return
+            add(GlobalWorldItem(
+                stableKey = GlobalAgentText.stableKey(
+                    "tool-state",
+                    event.conversationId,
+                    event.metadata["tool_key"].orEmpty().ifBlank {
+                        event.metadata["tool_call_id"].orEmpty().ifBlank { event.messageId }
+                    }
+                ),
+                kind = GlobalWorldItemKind.STATE,
+                layer = GlobalWorldLayer.REALTIME,
+                topic = understanding.topic,
+                value = value,
+                confidence = confidence,
+                conversationIds = setOf(event.conversationId),
+                evidenceEventIds = listOf(event.id),
+                evidenceProvenance = listOf(event.evidenceRef()),
+                status = status,
+                firstSeenAtMillis = event.timestampMillis,
+                lastSeenAtMillis = event.timestampMillis,
+                expiresAtMillis = event.timestampMillis + REALTIME_TTL_MILLIS
+            ))
+        }
+        when (event.type) {
+            GlobalConversationEventType.ATTACHMENT_ADDED -> {
+                addAll(
+                    GlobalWorldItemKind.FACT,
+                    GlobalWorldLayer.TOPIC,
+                    event.content.takeIf(String::isNotBlank)?.let(::listOf).orEmpty(),
+                    0.92
+                )
+                return@buildList
+            }
+            GlobalConversationEventType.ARTIFACT_CREATED -> {
+                addAll(
+                    GlobalWorldItemKind.FACT,
+                    GlobalWorldLayer.TOPIC,
+                    event.content.takeIf(String::isNotBlank)?.let(::listOf).orEmpty(),
+                    0.90
+                )
+                return@buildList
+            }
+            GlobalConversationEventType.TOOL_STARTED -> {
+                addToolState(GlobalWorldItemStatus.ACTIVE, 0.80)
+                return@buildList
+            }
+            GlobalConversationEventType.TOOL_COMPLETED -> {
+                addToolState(GlobalWorldItemStatus.COMPLETED, 0.90)
+                if (event.metadata["verified"] == "true") {
+                    addAll(
+                        GlobalWorldItemKind.FACT,
+                        GlobalWorldLayer.TOPIC,
+                        event.content.takeIf(String::isNotBlank)?.let(::listOf).orEmpty(),
+                        0.84
+                    )
+                }
+                return@buildList
+            }
+            GlobalConversationEventType.TOOL_CANCELLED -> {
+                addToolState(GlobalWorldItemStatus.COMPLETED, 0.88)
+                return@buildList
+            }
+            GlobalConversationEventType.TOOL_FAILED -> {
+                addToolState(GlobalWorldItemStatus.COMPLETED, 0.94)
+                addAll(
+                    GlobalWorldItemKind.RISK,
+                    GlobalWorldLayer.TOPIC,
+                    event.content.takeIf(String::isNotBlank)?.let(::listOf).orEmpty(),
+                    0.88
+                )
+                return@buildList
+            }
+            else -> Unit
         }
         if (event.type == GlobalConversationEventType.COGNITION_RESULT &&
             event.actor == GlobalConversationActor.GLOBAL_AGENT
