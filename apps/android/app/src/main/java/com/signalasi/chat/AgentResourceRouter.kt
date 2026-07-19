@@ -166,7 +166,11 @@ object AgentTaskRequirementAnalyzer {
         "\u5929\u6c14", "\u9884\u62a5", "\u4eca\u5929", "\u5f53\u524d", "\u6700\u65b0", "\u65b0\u95fb", "\u4ef7\u683c", "\u8def\u51b5", "\u6bd4\u5206", "\u73b0\u5728", "\u5b9e\u65f6",
         "\u8054\u7f51\u641c\u7d22", "\u7f51\u4e0a\u641c\u7d22", "\u7f51\u7edc\u641c\u7d22"
     )
-    private val codeTerms = listOf("code", "debug", "repository", "compile", "build", "codex", "\u4ee3\u7801", "\u7f16\u8bd1", "\u9879\u76ee", "\u4fee\u590d bug")
+    private val codeTerms = listOf(
+        "code", "python", "program", "script", "debug", "repository", "compile", "build", "codex",
+        "verify the program", "test the program", "\u4ee3\u7801", "\u7a0b\u5e8f", "\u811a\u672c", "\u7f16\u7a0b", "\u5f00\u53d1",
+        "\u8fd0\u884c\u9a8c\u8bc1", "\u7f16\u8bd1", "\u9879\u76ee", "\u4fee\u590d bug"
+    )
     private val deviceTerms = listOf("home assistant", "smart home", "light", "scene", "device", "\u667a\u80fd\u5bb6\u5c45", "\u5f00\u706f", "\u5173\u706f", "\u8bbe\u5907", "\u573a\u666f")
     private val screenTerms = listOf("screen", "tap", "click", "swipe", "open app", "\u5c4f\u5e55", "\u70b9\u51fb", "\u6ed1\u52a8", "\u6253\u5f00 app")
     private val knowledgeTerms = listOf("knowledge", "memory", "document", "pdf", "\u77e5\u8bc6\u5e93", "\u8bb0\u5fc6", "\u6587\u6863")

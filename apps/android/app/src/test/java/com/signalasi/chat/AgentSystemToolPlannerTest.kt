@@ -9,6 +9,66 @@ import org.junit.Test
 
 class AgentSystemToolPlannerTest {
     @Test
+    fun routesSmallChinesePythonWorkToThePhoneRuntime() {
+        val screen = ScreenContext(foregroundApp = "com.signalasi.chat", pageTitle = "SignalASI")
+        val runtime = nativeDescriptor(
+            AgentOnDeviceRuntimeTools.EXECUTE,
+            "Execute in the on-device Linux sandbox",
+            AgentNativeToolRisk.MEDIUM
+        )
+        val codex = AgentCallableTarget(
+            id = "codex",
+            title = "Codex",
+            kind = AgentConnectorKind.AGENT,
+            status = AgentConnectorStatus.AVAILABLE,
+            capabilities = listOf(AgentCapability.CHAT, AgentCapability.CODE, AgentCapability.REASONING)
+        )
+        val plan = RuleBasedAgentPlanner().plan(
+            request("\u8bf7\u5199\u4e00\u4e2a\u7b80\u5355\u7684python\u7a0b\u5e8f\uff0c\u5e76\u9a8c\u8bc1", screen, listOf(runtime), listOf(codex))
+        )
+
+        assertTrue(plan.validation.valid)
+        assertEquals(listOf(AgentActionKind.CALL_CONNECTOR, AgentActionKind.CALL_NATIVE_TOOL), plan.actions.map { it.kind })
+        val author = plan.actions.first()
+        val execute = plan.actions.last()
+        assertEquals(PHONE_DEVELOPMENT_CONNECTOR_MODE, author.parameters["connector_task_mode"])
+        assertTrue(author.parameters["prompt"].orEmpty().contains("Do not run commands"))
+        assertEquals(author.id, execute.parameters["depends_on"])
+        assertEquals(author.id, execute.parameters["use_outputs_from"])
+        assertTrue(execute.isPhoneDevelopmentRuntimeHandoff())
+        assertEquals(AgentConfirmationTier.DIRECT, AgentConfirmationPolicy.tier(execute))
+
+        val generatedSource = "values = [1, 2, 3]\n    # preserve indentation and / characters\nprint(sum(values) / len(values))\nassert sum(values) == 6"
+        val manifest = JSONObject()
+            .put("schema", "signalasi.phone-development-manifest.v1")
+            .put("language", "python")
+            .put("file_name", "simple_average.py")
+            .put("source", generatedSource)
+            .put("artifact_paths", emptyList<String>())
+            .toString()
+        val completed = plan.markAction(author.id, AgentActionStatus.COMPLETED, AgentActionResult(author.id, true, manifest))
+        val materialized = completed.materializeToolInput(execute, allowOutputHandoff = false)
+        val input = JSONObject(materialized.parameters.getValue("input_json"))
+
+        assertEquals("python", input.getString("language"))
+        assertTrue(input.getString("source").contains("simple_average.py"))
+        val wrappedSource = input.getString("source")
+        val encoded = wrappedSource.substringAfter("base64.b64decode(\"").substringBefore("\")")
+        assertEquals(generatedSource, String(java.util.Base64.getDecoder().decode(encoded), Charsets.UTF_8))
+        assertFalse(wrappedSource.contains(generatedSource))
+        assertEquals("simple_average.py", input.getJSONArray("artifact_paths").getString(0))
+        assertEquals("simple_average.py", materialized.parameters[PHONE_DEVELOPMENT_FILE_PARAMETER])
+    }
+
+    @Test
+    fun keepsLargeOrExplicitDesktopDevelopmentTasksOnDesktop() {
+        assertFalse(AgentPhoneDevelopmentPolicy.shouldUsePhoneRuntime("Build the entire Android repository with Gradle"))
+        assertFalse(AgentPhoneDevelopmentPolicy.shouldUsePhoneRuntime("Write a Python program on the desktop"))
+        assertTrue(AgentPhoneDevelopmentPolicy.shouldUsePhoneRuntime("Write a simple Python program and verify it"))
+        assertTrue(AgentPhoneDevelopmentPolicy.shouldUsePhoneRuntime("\u5728\u624b\u673a\u672c\u673a\u5199\u4e00\u4e2a Python \u811a\u672c\u5e76\u6d4b\u8bd5"))
+    }
+
+    @Test
     fun rendersUnavailablePackageAsNaturalActionableFailure() {
         val english = renderPackageUnavailable("com.signalasi.missing", zh = false)
         assertTrue(english.contains("com.signalasi.missing"))

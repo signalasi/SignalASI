@@ -11142,7 +11142,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             val content = getString(R.string.system_profile_updated, newName.ifBlank { senderId })
             return ChatMessage(newMessageId(), content, false, CONTACT_SYSTEM, deliveryTrace = incomingTrace)
         }
-        val content = json?.optString("content", payload)?.takeIf { it.isNotBlank() } ?: payload
+        val content = exactConnectorContent(json)
+            ?: json?.optString("content", payload)?.takeIf { it.isNotBlank() }
+            ?: payload
         val sender = json?.optString("sender", "hermes") ?: "hermes"
         val contactId = json?.optString("contact_id", CONTACT_HERMES.id)?.takeIf { it.isNotBlank() } ?: CONTACT_HERMES.id
         val contact = contactById(if (sender == "system") CONTACT_SYSTEM.id else contactId)
@@ -11155,6 +11157,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             taskId = json?.optString("task_id").orEmpty(),
             taskStatus = json?.optString("task_status").orEmpty()
         )
+    }
+
+    private fun exactConnectorContent(json: JSONObject?): String? {
+        if (json?.optString("exact_content_encoding") != "base64-utf8") return null
+        val encoded = json.optString("exact_content_b64")
+        if (encoded.isBlank() || encoded.length > 256 * 1024) return null
+        return runCatching {
+            String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8)
+                .takeIf { value -> value.toByteArray(Charsets.UTF_8).size <= 128 * 1024 }
+        }.getOrNull()
     }
 
     // ===== Recording =====

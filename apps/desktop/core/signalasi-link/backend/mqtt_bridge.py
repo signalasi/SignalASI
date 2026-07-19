@@ -1087,6 +1087,10 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         }
         if rich_output:
             reply_payload["rich_output"] = rich_output
+        raw_result = str(task.get("result") or "")
+        if '"schema":"signalasi.phone-development-manifest.v1"' in raw_result:
+            reply_payload["exact_content_encoding"] = "base64-utf8"
+            reply_payload["exact_content_b64"] = base64.b64encode(raw_result.encode("utf-8")).decode("ascii")
         reply_payload["latency"] = _trace_metrics(reply_payload["delivery_trace"])
         _publish_phone_payload(mqttc, wire_payload, reply_payload)
         _log_task_latency(str(task.get("task_id") or ""), reply_payload["delivery_trace"])

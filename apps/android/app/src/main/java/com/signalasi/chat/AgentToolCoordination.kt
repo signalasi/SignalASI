@@ -71,6 +71,16 @@ fun AgentPlan.materializeToolInput(
     action: AgentAction,
     allowOutputHandoff: Boolean
 ): AgentAction {
+    if (action.isPhoneDevelopmentRuntimeHandoff()) {
+        val known = (actionHistory + actions).associateBy { it.id }
+        val sourceResult = action.outputSourceIds()
+            .asSequence()
+            .mapNotNull(known::get)
+            .firstOrNull { it.status == AgentActionStatus.COMPLETED && it.result.isNotBlank() }
+            ?.result
+            .orEmpty()
+        return action.materializePhoneDevelopmentRuntime(sourceResult)
+    }
     if (!allowOutputHandoff || action.kind != AgentActionKind.CALL_CONNECTOR) return action
     val sourceIds = action.outputSourceIds()
     if (sourceIds.isEmpty()) return action

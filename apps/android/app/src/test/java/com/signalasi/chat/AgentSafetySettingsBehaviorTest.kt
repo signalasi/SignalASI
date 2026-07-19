@@ -68,6 +68,21 @@ class AgentSafetySettingsBehaviorTest {
     }
 
     @Test
+    fun phoneDevelopmentRuntimeContinuesWithoutASecondConfirmation() {
+        val runtimeAction = action(AgentActionKind.CALL_NATIVE_TOOL).copy(
+            parameters = mapOf(
+                "tool_id" to AgentOnDeviceRuntimeTools.EXECUTE,
+                PHONE_DEVELOPMENT_MANIFEST_PARAMETER to "true"
+            )
+        )
+
+        val result = review(settings(PermissionMode.ASK_BEFORE_ACTION), runtimeAction)
+
+        assertFalse(result.blocked)
+        assertFalse(result.requiresConfirmation)
+    }
+
+    @Test
     fun highRiskGuardBlocksExplicitlyBlockedActions() {
         val blockedAction = action(AgentActionKind.LOCK_SCREEN, AgentRisk.BLOCKED)
         assertTrue(

@@ -19,6 +19,12 @@ class GuardedModelAgentPlanner(
         val fallbackPlan = fallback.plan(request)
         val requirements = AgentTaskRequirementAnalyzer.analyze(request.goal)
         if (fallbackPlan.plannerProfile.startsWith("specialized-adapter:")) return fallbackPlan
+        if (fallbackPlan.actions.any(AgentAction::isPhoneDevelopmentRuntimeHandoff)) {
+            return fallbackPlan.copy(
+                plannerProfile = "phone-development-manifest-v1",
+                routeRationale = "A reasoning resource authors code while the phone Linux runtime owns file creation, execution, verification, and artifacts."
+            )
+        }
         val deterministicLocalAction = RuleBasedAgentPlanner(appContext).deterministicLocalAction(request)
         if (deterministicLocalAction != null && fallbackPlan.actions.any {
                 it.id == deterministicLocalAction.id && it.kind == deterministicLocalAction.kind

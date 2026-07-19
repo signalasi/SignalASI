@@ -318,6 +318,20 @@ class MobileNativeAgent(
         turnIdOverride: String = ""
     ): AgentActionResult {
         if (action.kind != AgentActionKind.CALL_NATIVE_TOOL) return actionExecutor.execute(action, screen)
+        action.parameters[PHONE_DEVELOPMENT_ERROR_PARAMETER]
+            ?.takeIf(String::isNotBlank)
+            ?.let { error ->
+                val zh = currentGoal.any { it in '\u3400'..'\u9fff' }
+                return AgentActionResult(
+                    actionId = action.id,
+                    success = false,
+                    message = if (zh) {
+                        "\u6ca1\u6709\u6267\u884c\u4ee3\u7801\uff1a${error.take(500)}\u3002\n\n\u8bf7\u91cd\u65b0\u53d1\u9001\u4efb\u52a1\uff0c\u6211\u4f1a\u91cd\u65b0\u751f\u6210\u5e76\u9a8c\u8bc1\u3002"
+                    } else {
+                        "The code was not executed: ${error.take(500)}.\n\nSend the task again to regenerate and verify it."
+                    }
+                )
+            }
         val toolId = action.parameters["tool_id"].orEmpty()
         val descriptor = nativeToolRegistry.lookup(toolId)?.descriptor
             ?: return AgentActionResult(action.id, false, "Native tool is not registered: $toolId")
@@ -363,8 +377,13 @@ class MobileNativeAgent(
         val nativeMessage = result.message.ifBlank { result.error?.message.orEmpty() }
         val responseLanguage = action.parameters["response_language"].orEmpty()
         val zh = responseLanguage == "zh" || (responseLanguage.isBlank() && currentGoal.any { it in '\u3400'..'\u9fff' })
-        val userMessage = renderNativeToolResult(toolId, nativeMessage, result.output, zh)
-            .ifBlank { renderedOutput }
+        val developmentFile = action.parameters[PHONE_DEVELOPMENT_FILE_PARAMETER].orEmpty()
+        val userMessage = if (toolId == AgentOnDeviceRuntimeTools.EXECUTE && developmentFile.isNotBlank()) {
+            renderPhoneDevelopmentExecution(result.output, nativeMessage, developmentFile, zh)
+        } else {
+            renderNativeToolResult(toolId, nativeMessage, result.output, zh)
+                .ifBlank { renderedOutput }
+        }
         return AgentActionResult(
             actionId = action.id,
             success = result.isSuccess,
@@ -588,6 +607,45 @@ class MobileNativeAgent(
                 add((if (zh) "\u4ea7\u7269\uff1a" else "Artifacts:") + "\n" + artifacts.joinToString("\n") { "- $it" })
             }
             if (duration != null) add(if (zh) "\u8017\u65f6\uff1a${duration} ms" else "Duration: ${duration} ms")
+        }.joinToString("\n\n")
+    }
+
+    private fun renderPhoneDevelopmentExecution(
+        output: AgentNativeJsonObject,
+        message: String,
+        fileName: String,
+        zh: Boolean
+    ): String {
+        val exitCode = (output["exit_code"] as? Number)?.toInt()
+        val stdout = output["stdout"]?.toString().orEmpty().trim().take(8_000)
+        val stderr = output["stderr"]?.toString().orEmpty().trim().take(4_000)
+        val passed = exitCode == 0
+        return buildList {
+            add(
+                when {
+                    passed && zh -> "\u5df2\u5199\u597d\u5e76\u5728\u624b\u673a\u672c\u673a Linux \u4e2d\u9a8c\u8bc1\u901a\u8fc7\u3002"
+                    passed -> "Written and verified in the phone's on-device Linux runtime."
+                    zh -> "\u7a0b\u5e8f\u5df2\u4fdd\u5b58\u5728\u624b\u673a\u672c\u673a\uff0c\u4f46\u9a8c\u8bc1\u6ca1\u6709\u901a\u8fc7\u3002"
+                    else -> "The program was saved on the phone, but verification did not pass."
+                }
+            )
+            add((if (zh) "\u7a0b\u5e8f\u6587\u4ef6\uff1a" else "Program: ") + "`$fileName`")
+            if (stdout.isNotBlank()) {
+                add((if (zh) "\u8fd0\u884c\u7ed3\u679c\uff1a" else "Run output:") + "\n\n```text\n$stdout\n```")
+            }
+            if (stderr.isNotBlank()) {
+                add((if (zh) "\u9519\u8bef\u4fe1\u606f\uff1a" else "Error output:") + "\n\n```text\n$stderr\n```")
+            }
+            val verification = when {
+                passed && zh -> "\u901a\u8fc7\uff08\u9000\u51fa\u7801 0\uff09"
+                passed -> "Passed (exit code 0)"
+                zh -> "\u672a\u901a\u8fc7\uff08\u9000\u51fa\u7801 ${exitCode ?: "\u672a\u77e5"}\uff09"
+                else -> "Failed (exit code ${exitCode ?: "unknown"})"
+            }
+            add((if (zh) "\u9a8c\u8bc1\u7ed3\u679c\uff1a" else "Verification:") + "\n\n```text\n$verification\n```")
+            if (!passed && stderr.isBlank() && message.isNotBlank()) {
+                add((if (zh) "\u4e0b\u4e00\u6b65\uff1a" else "Next step: ") + message.take(1_000))
+            }
         }.joinToString("\n\n")
     }
 
@@ -5527,12 +5585,89 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             ?: directDeviceStatusAction(request)
 
     private fun actionsFor(request: AgentRequest): List<AgentAction> {
+        phoneDevelopmentActions(request)?.let { return it }
         genericWebResearchActions(request)?.let { return it }
         val segments = splitGoalSegments(request.goal)
         if (segments.size <= 1) return listOf(actionFor(request))
         return segments.mapIndexed { index, segment ->
             actionFor(request.copy(goal = segment)).copy(id = "queue-${index + 1}-${segment.stableActionId()}")
         }
+    }
+
+    private fun phoneDevelopmentActions(request: AgentRequest): List<AgentAction>? {
+        if (!AgentPhoneDevelopmentPolicy.shouldUsePhoneRuntime(request.goal)) return null
+        val runtime = request.runtimeContext.nativeTools.firstOrNull { descriptor ->
+            descriptor.id == AgentOnDeviceRuntimeTools.EXECUTE &&
+                (descriptor.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE ||
+                    installedPhoneRuntimeCanWarm())
+        } ?: return null
+        val plannerTarget = request.targets
+            .filter { target ->
+                target.status == AgentConnectorStatus.AVAILABLE &&
+                    target.kind != AgentConnectorKind.DEVICE &&
+                    (AgentCapability.CODE in target.capabilities ||
+                        AgentCapability.REASONING in target.capabilities ||
+                        AgentCapability.CHAT in target.capabilities)
+            }
+            .minByOrNull { target ->
+                when {
+                    target.id.equals("codex", ignoreCase = true) -> 0
+                    target.kind == AgentConnectorKind.MODEL -> 1
+                    target.id.equals("claude-code", ignoreCase = true) -> 2
+                    else -> 3
+                }
+            } ?: return null
+        val manifestAction = connectorAction(
+            request = request,
+            connectorId = plannerTarget.id,
+            description = "Prepare code for phone execution"
+        ).copy(
+            id = "prepare-phone-development-${request.goal.hashCode().toUInt()}",
+            risk = AgentRisk.LOW,
+            parameters = mapOf(
+                "connector_id" to plannerTarget.id,
+                "prompt" to AgentPhoneDevelopmentPolicy.planningPrompt(request.goal),
+                "connector_task_mode" to PHONE_DEVELOPMENT_CONNECTOR_MODE
+            )
+        )
+        val runtimeInput = JSONObject()
+            .put("language", AgentRuntimeLanguage.PYTHON.wireValue)
+            .put("source", "")
+            .put("arguments", JSONArray())
+            .put("timeout_ms", 180_000L)
+            .put("network_enabled", false)
+            .put("allowed_network_domains", JSONArray())
+            .put("artifact_paths", JSONArray())
+        val runtimeAction = AgentAction(
+            id = "execute-phone-development-${request.goal.hashCode().toUInt()}",
+            kind = AgentActionKind.CALL_NATIVE_TOOL,
+            target = runtime.title,
+            risk = AgentRisk.MEDIUM,
+            status = AgentActionStatus.PENDING_CONFIRMATION,
+            description = "Run and verify in the phone's on-device Linux runtime",
+            parameters = mapOf(
+                "tool_id" to runtime.id,
+                "tool_version" to runtime.version,
+                "native_tool_risk" to runtime.risk.wireValue,
+                "response_language" to if (request.goal.any { it in '\u3400'..'\u9fff' }) "zh" else "en",
+                "input_json" to runtimeInput.toString(),
+                "depends_on" to manifestAction.id,
+                "use_outputs_from" to manifestAction.id,
+                PHONE_DEVELOPMENT_MANIFEST_PARAMETER to "true"
+            )
+        )
+        return listOf(manifestAction, runtimeAction)
+    }
+
+    private fun installedPhoneRuntimeCanWarm(): Boolean {
+        val appContext = context?.applicationContext ?: return false
+        val status = AgentOnDeviceRuntimeManager(appContext).status()
+        val pythonPackReady = status.packs.any { pack ->
+            pack.id == AgentRuntimeLanguage.PYTHON.requiredPack &&
+                pack.state == AgentRuntimePackState.READY &&
+                AgentRuntimeLanguage.PYTHON.requiredCapability in pack.manifest?.capabilities.orEmpty()
+        }
+        return status.backend != AgentOnDeviceRuntimeBackend.NONE && pythonPackReady
     }
 
     private fun genericWebResearchActions(request: AgentRequest): List<AgentAction>? {
@@ -6861,7 +6996,10 @@ object AgentPlanValidator {
             if (outputSources.any { it !in action.dependencyIds() }) {
                 issues += "action_output_source_not_dependency:${action.id}"
             }
-            if (outputSources.isNotEmpty() && action.kind != AgentActionKind.CALL_CONNECTOR) {
+            if (outputSources.isNotEmpty() &&
+                action.kind != AgentActionKind.CALL_CONNECTOR &&
+                !action.isPhoneDevelopmentRuntimeHandoff()
+            ) {
                 issues += "action_output_handoff_not_connector:${action.id}"
             }
         }
@@ -6974,7 +7112,8 @@ class DefaultAgentSafetyPolicy(
             PermissionMode.ASK_BEFORE_ACTION -> pendingActions.any {
                 it.kind != AgentActionKind.READ_SCREEN &&
                     it.kind != AgentActionKind.DRAFT_PLAN &&
-                    it.kind != AgentActionKind.CALL_CONNECTOR
+                    it.kind != AgentActionKind.CALL_CONNECTOR &&
+                    !it.isPhoneDevelopmentRuntimeHandoff()
             }
             PermissionMode.AUTO_LOW_RISK -> requiresTierConfirmation
         }
@@ -7492,7 +7631,9 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
     }
 
     private fun dispatchConnectorTask(action: AgentAction): AgentActionResult {
-        val prompt = if (action.id == "knowledge-answer") {
+        val prompt = if (action.parameters["connector_task_mode"] == PHONE_DEVELOPMENT_CONNECTOR_MODE) {
+            action.parameters["prompt"].orEmpty()
+        } else if (action.id == "knowledge-answer") {
             buildKnowledgeAnswerPrompt(action)
                 ?: return AgentActionResult(action.id, false, "Knowledge evidence is no longer available")
         } else if (action.outputSourceIds().isNotEmpty() && action.parameters["prompt"].orEmpty().isNotBlank()) {
