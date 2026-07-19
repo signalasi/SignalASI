@@ -88,6 +88,8 @@ Ready action branches are reserved atomically before execution so multiple backg
 
 - Maintain user-controlled identity, preference, relationship, task, workflow, and knowledge memories.
 - Support local semantic retrieval with source-level citations and access control.
+- Project memory and knowledge mutations into the global event stream with causal retraction, so edits, conflicts, access changes, and deletion update the personal world model instead of leaving stale facts.
+- Keep local-only knowledge available to on-device cognition while excluding it and its topic graph evidence from generic remote model prompts.
 - Separate ephemeral context, task memory, and durable personal memory.
 - Allow review, edit, deletion, export, encrypted backup, private mode, and retention policies.
 - Learn low-risk preferences only when enabled and never learn secrets by default.

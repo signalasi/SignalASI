@@ -73,6 +73,7 @@ interface AgentKnowledgeStore {
 }
 
 class SharedPreferencesAgentKnowledgeStore(context: Context) : AgentKnowledgeStore {
+    private val appContext = context.applicationContext
     private val prefs = AgentEncryptedPreferences(context, PREFS)
 
     override fun upsert(item: AgentKnowledgeItem) {
@@ -88,18 +89,21 @@ class SharedPreferencesAgentKnowledgeStore(context: Context) : AgentKnowledgeSto
             chunkIndex = item.chunkIndex.coerceAtLeast(0),
             chunkCount = item.chunkCount.coerceAtLeast(1)
         )
-        val items = loadItems()
+        val previous = loadItems()
+        val items = previous
             .filterNot { it.id == next.id || (it.kind == next.kind && it.title.equals(next.title, ignoreCase = true)) }
             .plus(next)
             .sortedBy { it.updatedAtMillis }
             .takeLast(MAX_ITEMS)
         saveItems(items)
+        publishMutation(previous, items)
     }
 
     override fun replaceSource(source: String, items: List<AgentKnowledgeItem>) {
         val cleanSource = source.trim()
         if (cleanSource.isBlank() || items.isEmpty()) return
-        val previousPolicy = loadItems().firstOrNull { it.source == cleanSource }
+        val previous = loadItems()
+        val previousPolicy = previous.firstOrNull { it.source == cleanSource }
         val replacements = items
             .filter { it.source == cleanSource && it.title.isNotBlank() && it.content.isNotBlank() }
             .map { item ->
@@ -112,12 +116,13 @@ class SharedPreferencesAgentKnowledgeStore(context: Context) : AgentKnowledgeSto
             }
             .distinctBy { it.id }
         if (replacements.isEmpty()) return
-        val next = loadItems()
+        val next = previous
             .filterNot { it.source == cleanSource }
             .plus(replacements)
             .sortedBy { it.updatedAtMillis }
             .takeLast(MAX_ITEMS)
         saveItems(next)
+        publishMutation(previous, next)
     }
 
     override fun search(query: String, limit: Int): List<AgentKnowledgeItem> {
@@ -164,7 +169,8 @@ class SharedPreferencesAgentKnowledgeStore(context: Context) : AgentKnowledgeSto
         if (itemIds.isEmpty()) return 0
         val normalizedAgents = allowedAgentIds.map { it.trim() }.filter { it.isNotBlank() }.distinct().take(MAX_ALLOWED_AGENTS)
         var updated = 0
-        val items = loadItems().map { item ->
+        val previous = loadItems()
+        val items = previous.map { item ->
             if (item.id !in itemIds) item else {
                 updated += 1
                 item.copy(
@@ -175,7 +181,10 @@ class SharedPreferencesAgentKnowledgeStore(context: Context) : AgentKnowledgeSto
                 )
             }
         }
-        if (updated > 0) saveItems(items)
+        if (updated > 0) {
+            saveItems(items)
+            publishMutation(previous, items)
+        }
         return updated
     }
 
@@ -187,7 +196,10 @@ class SharedPreferencesAgentKnowledgeStore(context: Context) : AgentKnowledgeSto
         val kept = items.filter { item ->
             semanticScore(item, cleanQuery, tokens, AgentKnowledgeTextAnalyzer.trigrams(cleanQuery)) < MIN_SEARCH_SCORE
         }
-        if (kept.size != items.size) saveItems(kept)
+        if (kept.size != items.size) {
+            saveItems(kept)
+            publishMutation(items, kept)
+        }
         return items.size - kept.size
     }
 
@@ -272,6 +284,10 @@ class SharedPreferencesAgentKnowledgeStore(context: Context) : AgentKnowledgeSto
         val array = JSONArray()
         items.forEach { array.put(encodeItem(it)) }
         prefs.writeString(KEY_ITEMS, array.toString())
+    }
+
+    private fun publishMutation(before: List<AgentKnowledgeItem>, after: List<AgentKnowledgeItem>) {
+        GlobalConversationEventBus.publishKnowledgeMutations(appContext, before, after)
     }
 
     private fun encodeItem(item: AgentKnowledgeItem): JSONObject = JSONObject()

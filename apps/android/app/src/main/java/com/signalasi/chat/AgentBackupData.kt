@@ -5,7 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 object AgentBackupData {
-    private const val MEMORY_PREFS = "signalasi_agent_memory"
+    private const val MEMORY_DATABASE = "signalasi_agent_memory_v2"
     private const val KNOWLEDGE_PREFS = "signalasi_agent_knowledge"
     private const val TASK_PREFS = "signalasi_agent_tasks"
     private const val WORKFLOW_PREFS = "signalasi_agent_workflows"
@@ -22,8 +22,8 @@ object AgentBackupData {
         val homeAssistant = HomeAssistantSettingsStore.load(context)
         val customDevices = CustomDeviceConnectorStore(context).exportJson()
         return JSONObject()
-            .put("version", 18)
-            .put("memory", readArray(context, MEMORY_PREFS, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS))
+            .put("version", 19)
+            .put("memory", readDatabaseArray(context, MEMORY_DATABASE, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS))
             .put("knowledge", readArray(context, KNOWLEDGE_PREFS, MAX_KNOWLEDGE_ITEMS, MAX_KNOWLEDGE_ITEM_CHARACTERS))
             .put("tasks", if (includeSessionHistory) readArray(context, TASK_PREFS, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS) else JSONArray())
             .put("transcript", if (includeSessionHistory) readAgentTranscriptArray(context) else JSONArray())
@@ -106,7 +106,11 @@ object AgentBackupData {
     fun restore(context: Context, payload: JSONObject) {
         payload.optJSONArray("memory")?.let { input ->
             val sanitized = sanitizeArray(input, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS)
-            AgentEncryptedPreferences(context, MEMORY_PREFS).writeString(ITEMS_KEY, sanitized.toString())
+            AgentEncryptedDatabase(
+                context,
+                MEMORY_DATABASE,
+                legacyPreferencesName = "signalasi_agent_memory_v2_no_legacy"
+            ).writeString(ITEMS_KEY, sanitized.toString())
         }
         payload.optJSONArray("knowledge")?.let { input ->
             val sanitized = sanitizeArray(input, MAX_KNOWLEDGE_ITEMS, MAX_KNOWLEDGE_ITEM_CHARACTERS)
@@ -220,6 +224,7 @@ object AgentBackupData {
             VoiceAssistantSettings.setSpeakReplies(context, json.optBoolean("speak_replies", true))
             VoiceAssistantSettings.setRoutingMode(context, json.optString("routing_mode"))
         }
+        GlobalConversationEventBus.requestProcessing(context)
     }
 
     private fun decodeStringList(array: JSONArray?): List<String> {
@@ -235,6 +240,20 @@ object AgentBackupData {
         val raw = AgentEncryptedPreferences(context, preferencesName).readString(ITEMS_KEY, "[]")
         val array = runCatching { JSONArray(raw) }.getOrDefault(JSONArray())
         return sanitizeArray(array, maxItems, maxItemCharacters)
+    }
+
+    private fun readDatabaseArray(
+        context: Context,
+        databaseName: String,
+        maxItems: Int,
+        maxItemCharacters: Int
+    ): JSONArray {
+        val raw = AgentEncryptedDatabase(
+            context,
+            databaseName,
+            legacyPreferencesName = "${databaseName}_no_legacy"
+        ).readString(ITEMS_KEY, "[]")
+        return sanitizeArray(runCatching { JSONArray(raw) }.getOrDefault(JSONArray()), maxItems, maxItemCharacters)
     }
 
     private fun readAgentConversationArray(context: Context): JSONArray {

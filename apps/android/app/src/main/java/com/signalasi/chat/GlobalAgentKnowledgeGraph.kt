@@ -99,7 +99,11 @@ object GlobalTopicProjectGraphReducer {
         if (event.excludesConversationFromGlobalModel()) {
             return removeConversation(retractedGraph, event.conversationId, event.timestampMillis)
         }
-        if (event.type == GlobalConversationEventType.MESSAGE_DELETED) return retractedGraph
+        if (event.type == GlobalConversationEventType.MESSAGE_DELETED ||
+            event.type == GlobalConversationEventType.MEMORY_DELETED ||
+            event.type == GlobalConversationEventType.KNOWLEDGE_DELETED ||
+            event.metadata["projection"] == "retract_only"
+        ) return retractedGraph
         if (event.type in setOf(
                 GlobalConversationEventType.CONVERSATION_CREATED,
                 GlobalConversationEventType.CONVERSATION_UPDATED

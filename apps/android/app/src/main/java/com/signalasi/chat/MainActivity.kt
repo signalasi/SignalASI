@@ -1937,7 +1937,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     forcedAction = if (staged.isEmpty()) attachmentConnectorAction(executionGoal) else null
                 )
             }
-            if (goal.isNotBlank()) {
+            if (goal.isNotBlank() && !conversation.privateMode && !conversation.trackingPaused) {
                 attachments.filterNot { attachment ->
                     attachment.mimeType.startsWith("image/") ||
                         attachment.mimeType.startsWith("video/") ||

@@ -285,6 +285,207 @@ class GlobalAgentObservationsTest {
         assertEquals(setOf("conversation-b"), retained.conversationIds)
     }
 
+    @Test
+    fun persistentMemoryCreateUpdateAndDeleteReplaceWorldEvidence() {
+        val original = AgentMemoryItem(
+            id = "memory-1",
+            kind = AgentMemoryKind.PREFERENCE,
+            value = "Prefer concise engineering answers",
+            key = "response style",
+            confidence = 0.82,
+            timestampMillis = 1_000L
+        )
+        val created = GlobalPersistentContextObservationExtractor.memoryMutations(
+            emptyList(),
+            listOf(original),
+            1_000L
+        ).single()
+        val firstWorld = reduce(PersonalWorldModel(), created)
+
+        assertEquals(GlobalConversationEventType.MEMORY_CREATED, created.type)
+        assertTrue(firstWorld.items.any {
+            it.kind == GlobalWorldItemKind.PREFERENCE &&
+                it.layer == GlobalWorldLayer.USER &&
+                it.value == original.value
+        })
+
+        val edited = original.copy(
+            value = "Prefer short answers with concrete verification",
+            version = 2,
+            timestampMillis = 2_000L
+        )
+        val updated = GlobalPersistentContextObservationExtractor.memoryMutations(
+            listOf(original),
+            listOf(edited),
+            2_000L
+        ).single()
+        val secondWorld = reduce(firstWorld, updated)
+
+        assertEquals(GlobalConversationEventType.MEMORY_UPDATED, updated.type)
+        assertTrue(updated.retractedEventIds.contains(created.id))
+        assertFalse(secondWorld.items.any { it.value == original.value })
+        assertTrue(secondWorld.items.any { it.value == edited.value })
+
+        val deleted = GlobalPersistentContextObservationExtractor.memoryMutations(
+            listOf(edited),
+            emptyList(),
+            3_000L
+        ).single()
+        val finalWorld = reduce(secondWorld, deleted)
+
+        assertEquals(GlobalConversationEventType.MEMORY_DELETED, deleted.type)
+        assertFalse(finalWorld.items.any { it.value == edited.value })
+    }
+
+    @Test
+    fun memoryConflictProducesTwoConflictedWorldCandidates() {
+        val existing = AgentMemoryItem(
+            id = "memory-a",
+            kind = AgentMemoryKind.PREFERENCE,
+            value = "Use dark mode",
+            key = "theme",
+            timestampMillis = 1_000L
+        )
+        val groupId = "conflict-theme"
+        val conflictedExisting = existing.copy(
+            status = AgentMemoryStatus.CONFLICTED,
+            conflictGroupId = groupId
+        )
+        val competing = existing.copy(
+            id = "memory-b",
+            value = "Use light mode",
+            version = 2,
+            status = AgentMemoryStatus.CONFLICTED,
+            conflictGroupId = groupId,
+            timestampMillis = 2_000L
+        )
+        var world = reduce(
+            PersonalWorldModel(),
+            GlobalPersistentContextObservationExtractor.memoryMutations(
+                emptyList(),
+                listOf(existing),
+                1_000L
+            ).single()
+        )
+
+        GlobalPersistentContextObservationExtractor.memoryMutations(
+            listOf(existing),
+            listOf(conflictedExisting, competing),
+            2_000L
+        ).forEach { event -> world = reduce(world, event) }
+
+        val conflicts = world.items.filter { it.conflictGroupId == groupId }
+        assertEquals(2, conflicts.size)
+        assertTrue(conflicts.all { it.status == GlobalWorldItemStatus.CONFLICTED })
+    }
+
+    @Test
+    fun localOnlyKnowledgeStaysInWorldButCannotEnterSharedPromptContext() {
+        val item = knowledgeItem(
+            cloudAccess = AgentKnowledgeCloudAccess.DENY,
+            agentAccess = AgentKnowledgeAgentAccess.LOCAL_ONLY
+        )
+        val imported = GlobalPersistentContextObservationExtractor.knowledgeMutations(
+            emptyList(),
+            listOf(item),
+            1_000L
+        ).single()
+        val world = reduce(PersonalWorldModel(), imported)
+
+        assertEquals(GlobalConversationEventType.KNOWLEDGE_IMPORTED, imported.type)
+        assertFalse(imported.metadata.values.any { it.contains("content://private.provider") })
+        assertFalse(imported.content.contains("FULL_PRIVATE_DOCUMENT_BODY"))
+        assertEquals(GlobalWorldContextVisibility.LOCAL_ONLY, world.items.single().contextVisibility)
+        assertEquals("", GlobalAgentContextSelector.build(world, "runtime architecture", "conversation-a"))
+        val graph = GlobalTopicProjectGraph(
+            nodes = listOf(
+                GlobalTopicNode(
+                    stableKey = "runtime-notes",
+                    name = "Runtime architecture notes",
+                    worldItemIds = setOf(world.items.single().id),
+                    confidence = 0.9
+                )
+            )
+        )
+        assertEquals(
+            "",
+            GlobalAgentContextSelector.buildWithGraph(world, graph, "runtime architecture", "conversation-a")
+        )
+    }
+
+    @Test
+    fun knowledgeAccessChangeMakesOnlyTheApprovedSummaryShareable() {
+        val local = knowledgeItem(
+            cloudAccess = AgentKnowledgeCloudAccess.DENY,
+            agentAccess = AgentKnowledgeAgentAccess.LOCAL_ONLY
+        )
+        val shared = local.copy(
+            cloudAccess = AgentKnowledgeCloudAccess.SUMMARY_ONLY,
+            agentAccess = AgentKnowledgeAgentAccess.ANY_PAIRED_AGENT,
+            updatedAtMillis = 2_000L
+        )
+        val imported = GlobalPersistentContextObservationExtractor.knowledgeMutations(
+            emptyList(),
+            listOf(local),
+            1_000L
+        ).single()
+        val accessChanged = GlobalPersistentContextObservationExtractor.knowledgeMutations(
+            listOf(local),
+            listOf(shared),
+            2_000L
+        ).single()
+        val world = reduce(reduce(PersonalWorldModel(), imported), accessChanged)
+        val prompt = GlobalAgentContextSelector.build(world, "runtime architecture", "conversation-a")
+
+        assertEquals(GlobalConversationEventType.KNOWLEDGE_ACCESS_CHANGED, accessChanged.type)
+        assertTrue(accessChanged.retractedEventIds.contains(imported.id))
+        assertEquals(GlobalWorldContextVisibility.SHAREABLE, world.items.single().contextVisibility)
+        assertTrue(prompt.contains("Runtime architecture notes"))
+        assertTrue(prompt.contains("Verified runtime design summary"))
+        assertFalse(prompt.contains("FULL_PRIVATE_DOCUMENT_BODY"))
+    }
+
+    @Test
+    fun chunkedKnowledgeSourceProducesOneLifecycleEventAndDeletionRetractsIt() {
+        val first = knowledgeItem().copy(id = "chunk-1", title = "Runtime guide [1/2]", chunkIndex = 0, chunkCount = 2)
+        val second = knowledgeItem().copy(id = "chunk-2", title = "Runtime guide [2/2]", chunkIndex = 1, chunkCount = 2)
+        val imported = GlobalPersistentContextObservationExtractor.knowledgeMutations(
+            emptyList(),
+            listOf(first, second),
+            1_000L
+        )
+
+        assertEquals(1, imported.size)
+        val withKnowledge = reduce(PersonalWorldModel(), imported.single())
+        val deleted = GlobalPersistentContextObservationExtractor.knowledgeMutations(
+            listOf(first, second),
+            emptyList(),
+            2_000L
+        ).single()
+        val finalWorld = reduce(withKnowledge, deleted)
+
+        assertEquals(GlobalConversationEventType.KNOWLEDGE_DELETED, deleted.type)
+        assertTrue(finalWorld.items.isEmpty())
+    }
+
+    @Test
+    fun knowledgeBodyChangeProducesAnUpdateEvenWhenSummaryAndAccessStayTheSame() {
+        val original = knowledgeItem()
+        val changed = original.copy(
+            content = "A completely different document body beyond the retained summary",
+            updatedAtMillis = 2_000L
+        )
+
+        val events = GlobalPersistentContextObservationExtractor.knowledgeMutations(
+            listOf(original),
+            listOf(changed),
+            2_000L
+        )
+
+        assertEquals(1, events.size)
+        assertEquals(GlobalConversationEventType.KNOWLEDGE_UPDATED, events.single().type)
+    }
+
     private fun reduce(world: PersonalWorldModel, event: GlobalConversationEvent): PersonalWorldModel =
         GlobalWorldModelReducer.reduce(world, event, pipeline.understand(event, world)).world
 
@@ -310,5 +511,21 @@ class GlobalAgentObservationsTest {
         turnId = "turn-1",
         taskId = "task-1",
         richOutputJson = AgentRichContentCodec.encode(richBlocks)
+    )
+
+    private fun knowledgeItem(
+        cloudAccess: AgentKnowledgeCloudAccess = AgentKnowledgeCloudAccess.DENY,
+        agentAccess: AgentKnowledgeAgentAccess = AgentKnowledgeAgentAccess.LOCAL_ONLY
+    ) = AgentKnowledgeItem(
+        id = "knowledge-1",
+        kind = AgentKnowledgeKind.DOCUMENT,
+        title = "Runtime architecture notes",
+        content = "FULL_PRIVATE_DOCUMENT_BODY",
+        source = "content://private.provider/documents/runtime-notes",
+        tags = listOf("runtime", "architecture"),
+        summary = "Verified runtime design summary",
+        cloudAccess = cloudAccess,
+        agentAccess = agentAccess,
+        updatedAtMillis = 1_000L
     )
 }

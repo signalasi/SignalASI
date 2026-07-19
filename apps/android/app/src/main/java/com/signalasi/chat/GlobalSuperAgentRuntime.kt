@@ -214,6 +214,14 @@ class GlobalAgentRepository(context: Context) {
         database.writeString(KEY_SETTINGS, encodeSettings(settings).toString())
     }
 
+    fun persistentContextSyncVersion(): Int = synchronized(STORE_LOCK) {
+        database.readString(KEY_PERSISTENT_CONTEXT_SYNC_VERSION, "0").toIntOrNull()?.coerceAtLeast(0) ?: 0
+    }
+
+    fun savePersistentContextSyncVersion(version: Int) = synchronized(STORE_LOCK) {
+        database.writeString(KEY_PERSISTENT_CONTEXT_SYNC_VERSION, version.coerceAtLeast(0).toString())
+    }
+
     fun feedback(): List<GlobalAgentFeedback> = synchronized(STORE_LOCK) { loadFeedback() }
 
     fun saveFeedback(feedback: List<GlobalAgentFeedback>) = synchronized(STORE_LOCK) {
@@ -229,7 +237,7 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 8)
+            .put("version", 9)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("world", encodeWorld(loadWorld()))
             .put("topic_project_graph", topicGraphStore.export())
@@ -244,6 +252,7 @@ class GlobalAgentRepository(context: Context) {
             })
             .put("intervention_history", encodeInterventionHistory(interventionHistory()))
             .put("settings", encodeSettings(settings()))
+            .put("persistent_context_sync_version", persistentContextSyncVersion())
             .put("feedback", JSONArray().apply { loadFeedback().forEach { put(encodeFeedback(it)) } })
     }
 
@@ -272,6 +281,7 @@ class GlobalAgentRepository(context: Context) {
             saveInterventionHistory(decodeInterventionHistory(it.toString()))
         }
         payload.optJSONObject("settings")?.let { saveSettings(decodeSettings(it.toString())) }
+        savePersistentContextSyncVersion(0)
         payload.optJSONArray("feedback")?.let { array ->
             saveFeedback(buildList {
                 for (index in 0 until array.length()) decodeFeedback(array.optJSONObject(index))?.let(::add)
@@ -387,6 +397,7 @@ class GlobalAgentRepository(context: Context) {
         .put("topic", item.topic)
         .put("value", item.value)
         .put("confidence", item.confidence)
+        .put("context_visibility", item.contextVisibility.name)
         .put("evidence_count", item.evidenceCount)
         .put("conversation_ids", JSONArray(item.conversationIds.toList()))
         .put("evidence_event_ids", JSONArray(item.evidenceEventIds))
@@ -412,6 +423,10 @@ class GlobalAgentRepository(context: Context) {
             topic = json.optString("topic").take(160),
             value = value.take(1_200),
             confidence = json.optDouble("confidence", 0.5).coerceIn(0.0, 1.0),
+            contextVisibility = enumValue(
+                json.optString("context_visibility"),
+                GlobalWorldContextVisibility.SHAREABLE
+            ),
             evidenceCount = json.optInt("evidence_count", 1).coerceAtLeast(1),
             conversationIds = json.optJSONArray("conversation_ids").strings().toSet(),
             evidenceEventIds = json.optJSONArray("evidence_event_ids").strings().takeLast(20),
@@ -841,6 +856,7 @@ class GlobalAgentRepository(context: Context) {
         private const val KEY_PROACTIVE_MESSAGES = "proactive_messages"
         private const val KEY_INTERVENTION_HISTORY = "intervention_history"
         private const val KEY_SETTINGS = "settings"
+        private const val KEY_PERSISTENT_CONTEXT_SYNC_VERSION = "persistent_context_sync_version"
         private const val KEY_FEEDBACK = "feedback"
         private const val MAX_PENDING_EVENTS = 2_000
         private const val MAX_PROCESS_BATCH = 250
@@ -863,11 +879,20 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     private val longHorizonCoordinator by lazy { GlobalLongHorizonCoordinator(appContext) }
     private val longHorizonStore by lazy { GlobalLongHorizonGoalStore(appContext) }
 
+    init {
+        if (repository.settings().enabled &&
+            repository.persistentContextSyncVersion() < PERSISTENT_CONTEXT_SYNC_VERSION
+        ) {
+            GlobalConversationEventBus.requestProcessing(appContext)
+        }
+    }
+
     fun processPending(maxEvents: Int = 100): GlobalAgentProcessingBatch = synchronized(PROCESS_LOCK) {
         val settings = repository.settings()
         if (!settings.enabled) {
             return@synchronized GlobalAgentProcessingBatch(0, 0, emptyList(), emptyList())
         }
+        synchronizePersistentContext()
         val events = repository.pendingEvents(maxEvents)
         if (events.isEmpty()) return@synchronized GlobalAgentProcessingBatch(0, 0, emptyList(), emptyList())
         var world = repository.loadWorld()
@@ -1219,11 +1244,39 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     }
 
     fun updateSettings(transform: (GlobalAgentSettings) -> GlobalAgentSettings): GlobalAgentSettings {
-        val updated = transform(repository.settings())
+        val previous = repository.settings()
+        val updated = transform(previous)
         repository.saveSettings(updated)
-        if (updated.enabled) GlobalConversationEventBus.requestProcessing(appContext)
+        if (updated.enabled) {
+            if (!previous.enabled) repository.savePersistentContextSyncVersion(0)
+            GlobalConversationEventBus.requestProcessing(appContext)
+        }
         scheduleNextWake()
         return updated
+    }
+
+    private fun synchronizePersistentContext() {
+        if (!repository.settings().enabled) return
+        if (repository.persistentContextSyncVersion() >= PERSISTENT_CONTEXT_SYNC_VERSION) return
+        val memorySnapshot = EncryptedAgentMemoryStore(appContext).snapshot()
+        val memories = (
+            memorySnapshot.activeItems +
+                memorySnapshot.conflicts.flatMap(AgentMemoryConflict::candidates) +
+                memorySnapshot.historyItems
+            ).distinctBy(AgentMemoryItem::id)
+        val knowledge = SharedPreferencesAgentKnowledgeStore(appContext).list(limit = 500)
+        val now = System.currentTimeMillis()
+        val events = GlobalPersistentContextObservationExtractor.memoryMutations(
+            emptyList(),
+            memories,
+            now
+        ) + GlobalPersistentContextObservationExtractor.knowledgeMutations(
+            emptyList(),
+            knowledge,
+            now
+        )
+        repository.enqueueAll(events)
+        repository.savePersistentContextSyncVersion(PERSISTENT_CONTEXT_SYNC_VERSION)
     }
 
     fun executeResearchCycle(): GlobalResearchExecutionResult? {
@@ -1539,6 +1592,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         private const val MAX_DIGEST_CHARACTERS = 12_000
         private const val DIGEST_MAX_WAIT_MILLIS = 12L * 60L * 60L * 1_000L
         private const val MIN_WAKE_DELAY_MILLIS = 60_000L
+        private const val PERSISTENT_CONTEXT_SYNC_VERSION = 1
         private val PROCESS_LOCK = Any()
         @Volatile private var instance: GlobalSuperAgentRuntime? = null
 
@@ -1885,6 +1939,48 @@ object GlobalConversationEventBus {
         val title = conversationTitle.ifBlank { conversation.title }
         val event = GlobalRecordedRunObservationExtractor.feedback(run, feedback, conversationTitle = title)
         val enqueued = repository.enqueue(event)
+        if (enqueued) requestProcessing(context)
+        return enqueued
+    }
+
+    fun publishMemoryMutations(
+        context: Context,
+        before: List<AgentMemoryItem>,
+        after: List<AgentMemoryItem>,
+        timestampMillis: Long = System.currentTimeMillis()
+    ): Boolean {
+        if (before == after) return false
+        val repository = GlobalAgentRepository(context)
+        if (!repository.settings().enabled) return false
+        val transcriptStore by lazy { AgentTranscriptStore(context) }
+        val events = GlobalPersistentContextObservationExtractor
+            .memoryMutations(before, after, timestampMillis)
+            .filterNot { event ->
+                if (event.metadata["memory_scope"] != AgentMemoryScope.CONVERSATION.name) return@filterNot false
+                val scopeId = event.metadata["memory_scope_id"].orEmpty()
+                val conversation = transcriptStore.conversation(scopeId) ?: return@filterNot true
+                conversation.privateMode || conversation.trackingPaused
+            }
+        val enqueued = repository.enqueueAll(events) > 0
+        if (enqueued) requestProcessing(context)
+        return enqueued
+    }
+
+    fun publishKnowledgeMutations(
+        context: Context,
+        before: List<AgentKnowledgeItem>,
+        after: List<AgentKnowledgeItem>,
+        timestampMillis: Long = System.currentTimeMillis()
+    ): Boolean {
+        if (before == after) return false
+        val repository = GlobalAgentRepository(context)
+        if (!repository.settings().enabled) return false
+        val events = GlobalPersistentContextObservationExtractor.knowledgeMutations(
+            before,
+            after,
+            timestampMillis
+        )
+        val enqueued = repository.enqueueAll(events) > 0
         if (enqueued) requestProcessing(context)
         return enqueued
     }

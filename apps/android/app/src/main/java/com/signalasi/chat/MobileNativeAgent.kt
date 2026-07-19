@@ -38,6 +38,7 @@ private const val INTERNAL_MEMORY_CONTEXT = "_signalasi_memory_context"
 private const val INTERNAL_CLOUD_KNOWLEDGE_CONTEXT = "_signalasi_cloud_knowledge_context"
 private const val INTERNAL_AGENT_KNOWLEDGE_CONTEXT = "_signalasi_agent_knowledge_context"
 private const val INTERNAL_SCREEN_CONTEXT = "_signalasi_screen_context"
+private const val INTERNAL_LONG_TERM_WRITE_ALLOWED = "_signalasi_long_term_write_allowed"
 
 private val SENSITIVE_MEMORY_TERMS = listOf(
     "password",
@@ -1268,7 +1269,8 @@ class MobileNativeAgent(
                     INTERNAL_CLOUD_KNOWLEDGE_CONTEXT to cloudKnowledgePrompt,
                     INTERNAL_AGENT_KNOWLEDGE_CONTEXT to listOf(agentKnowledgePrompt, selectedKnowledgePrompt)
                         .filter(String::isNotBlank).joinToString("\n"),
-                    INTERNAL_SCREEN_CONTEXT to screenPrompt
+                    INTERNAL_SCREEN_CONTEXT to screenPrompt,
+                    INTERNAL_LONG_TERM_WRITE_ALLOWED to (!activeConversationContext.privateMode).toString()
                 ))
             }
         )
@@ -3193,7 +3195,11 @@ class MobileNativeAgent(
     }
 
     private fun saveMemoryCommand(value: String): AgentUiState {
-        val blockReason = memoryBlockReason(value, currentScreen)
+        val blockReason = if (activeConversationContext.privateMode) {
+            "Private sessions cannot write long-term memory"
+        } else {
+            memoryBlockReason(value, currentScreen)
+        }
         var writeResult: AgentMemoryWriteResult? = null
         val resultMessage = if (blockReason == null) "Saved personal memory" else blockReason
         val action = AgentAction(
@@ -7326,6 +7332,9 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
     }
 
     private fun importWebKnowledge(action: AgentAction): AgentActionResult {
+        if (action.parameters[INTERNAL_LONG_TERM_WRITE_ALLOWED] == "false") {
+            return AgentActionResult(action.id, false, "Private sessions cannot import long-term knowledge")
+        }
         val url = action.parameters["url"].orEmpty()
         if (url.isBlank()) return AgentActionResult(action.id, false, "No web page URL was provided")
         val result = AgentKnowledgeImporter(context).importWebPage(url)
@@ -7333,6 +7342,9 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
     }
 
     private fun saveScreenKnowledge(action: AgentAction, screen: ScreenContext): AgentActionResult {
+        if (action.parameters[INTERNAL_LONG_TERM_WRITE_ALLOWED] == "false") {
+            return AgentActionResult(action.id, false, "Private sessions cannot save long-term screen knowledge")
+        }
         if (screen.sensitiveFlagCount > 0) {
             return AgentActionResult(action.id, false, "Screen contains sensitive content; knowledge save skipped")
         }
@@ -8400,11 +8412,13 @@ class InMemoryAgentMemoryStore : AgentMemoryStore {
 }
 
 class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
+    private val appContext = context.applicationContext
     private val database = AgentEncryptedDatabase(
         context,
         DATABASE,
         legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
     )
+    private var suppressObservations = false
 
     @Synchronized
     override fun remember(item: AgentMemoryItem): AgentMemoryWriteResult {
@@ -8417,7 +8431,8 @@ class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
             status = AgentMemoryStatus.ACTIVE,
             conflictGroupId = ""
         )
-        val items = loadItems().toMutableList()
+        val previous = loadItems()
+        val items = previous.toMutableList()
         val sameValue = items.firstOrNull { existing ->
             existing.status != AgentMemoryStatus.SUPERSEDED &&
                 existing.kind == nextItem.kind &&
@@ -8436,12 +8451,16 @@ class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
                 expiresAtMillis = maxOf(sameValue.expiresAtMillis, nextItem.expiresAtMillis)
             )
             items[items.indexOfFirst { it.id == sameValue.id }] = merged
-            saveItems(trimHistory(items))
+            val stored = trimHistory(items)
+            saveItems(stored)
+            publishMutation(previous, stored)
             return AgentMemoryWriteResult(merged, duplicate = true)
         }
         if (normalizedKey.isBlank()) {
             items.add(nextItem)
-            saveItems(trimHistory(items))
+            val stored = trimHistory(items)
+            saveItems(stored)
+            publishMutation(previous, stored)
             return AgentMemoryWriteResult(nextItem)
         }
 
@@ -8452,7 +8471,9 @@ class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
         }
         if (competing.isEmpty()) {
             items.add(nextItem)
-            saveItems(trimHistory(items))
+            val stored = trimHistory(items)
+            saveItems(stored)
+            publishMutation(previous, stored)
             return AgentMemoryWriteResult(nextItem)
         }
 
@@ -8478,7 +8499,9 @@ class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
             conflictGroupId = groupId
         )
         items.add(conflictedItem)
-        saveItems(trimHistory(items))
+        val stored = trimHistory(items)
+        saveItems(stored)
+        publishMutation(previous, stored)
         return AgentMemoryWriteResult(
             item = conflictedItem,
             conflict = buildConflict(groupId, items)
@@ -8526,7 +8549,10 @@ class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
         if (cleanQuery.isBlank()) return 0
         val items = loadItems()
         val kept = items.filter { item -> score(item, cleanQuery) <= 0 }
-        if (kept.size != items.size) saveItems(kept)
+        if (kept.size != items.size) {
+            saveItems(kept)
+            publishMutation(items, kept)
+        }
         return items.size - kept.size
     }
 
@@ -8561,30 +8587,42 @@ class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
     override fun update(itemId: String, value: String, key: String): AgentMemoryWriteResult? {
         val cleanValue = value.trim()
         if (cleanValue.isBlank()) return null
-        val items = loadItems().toMutableList()
+        val previousItems = loadItems()
+        val items = previousItems.toMutableList()
         val index = items.indexOfFirst { it.id == itemId && it.status == AgentMemoryStatus.ACTIVE }
         if (index < 0) return null
         val previous = items[index]
         items[index] = previous.copy(status = AgentMemoryStatus.SUPERSEDED)
         saveItems(trimHistory(items))
-        return remember(
-            previous.copy(
-                id = UUID.randomUUID().toString(),
-                value = cleanValue,
-                key = key.trim().ifBlank { previous.key },
-                timestampMillis = System.currentTimeMillis(),
-                version = previous.version + 1,
-                supersedesId = previous.id,
-                source = "memory_edit",
-                status = AgentMemoryStatus.ACTIVE,
-                conflictGroupId = ""
+        suppressObservations = true
+        val result = try {
+            remember(
+                previous.copy(
+                    id = UUID.randomUUID().toString(),
+                    value = cleanValue,
+                    key = key.trim().ifBlank { previous.key },
+                    timestampMillis = System.currentTimeMillis(),
+                    version = previous.version + 1,
+                    supersedesId = previous.id,
+                    source = "memory_edit",
+                    status = AgentMemoryStatus.ACTIVE,
+                    conflictGroupId = ""
+                )
             )
-        )
+        } catch (error: Throwable) {
+            saveItems(previousItems)
+            throw error
+        } finally {
+            suppressObservations = false
+        }
+        publishMutation(previousItems, loadItems())
+        return result
     }
 
     @Synchronized
     override fun deleteById(itemId: String): Boolean {
-        val items = loadItems().toMutableList()
+        val previous = loadItems()
+        val items = previous.toMutableList()
         val target = items.firstOrNull { it.id == itemId } ?: return false
         val relatedIds = memoryLineageIds(items, target)
         items.removeAll { candidate ->
@@ -8603,7 +8641,9 @@ class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
                 )
             }
         }
-        saveItems(trimHistory(items))
+        val stored = trimHistory(items)
+        saveItems(stored)
+        publishMutation(previous, stored)
         return true
     }
 
@@ -8626,11 +8666,13 @@ class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
 
     @Synchronized
     override fun setImportant(itemId: String, important: Boolean): Boolean {
-        val items = loadItems().toMutableList()
+        val previous = loadItems()
+        val items = previous.toMutableList()
         val index = items.indexOfFirst { it.id == itemId && it.status == AgentMemoryStatus.ACTIVE }
         if (index < 0) return false
         items[index] = items[index].copy(important = important)
         saveItems(items)
+        publishMutation(previous, items)
         return true
     }
 
@@ -8640,7 +8682,8 @@ class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
         selectedItemId: String,
         mergedValue: String?
     ): AgentMemoryItem? {
-        val items = loadItems().toMutableList()
+        val previous = loadItems()
+        val items = previous.toMutableList()
         val candidates = items.filter {
             it.conflictGroupId == groupId && it.status == AgentMemoryStatus.CONFLICTED
         }
@@ -8663,7 +8706,9 @@ class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
             conflictGroupId = ""
         )
         items.add(resolved)
-        saveItems(trimHistory(items))
+        val stored = trimHistory(items)
+        saveItems(stored)
+        publishMutation(previous, stored)
         return resolved
     }
 
@@ -8704,6 +8749,11 @@ class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
         val array = JSONArray()
         items.forEach { array.put(encodeMemoryItem(it)) }
         database.writeString(KEY_ITEMS, array.toString())
+    }
+
+    private fun publishMutation(before: List<AgentMemoryItem>, after: List<AgentMemoryItem>) {
+        if (suppressObservations || before == after) return
+        GlobalConversationEventBus.publishMemoryMutations(appContext, before, after)
     }
 
     private fun encodeMemoryItem(item: AgentMemoryItem): JSONObject = JSONObject()
