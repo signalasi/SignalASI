@@ -78,6 +78,19 @@ The global Agent may invoke phone-native tools, MCP capabilities, device integra
 - Accept completion only when the action verification contract is satisfied by a native receipt or stronger evidence. A model summary cannot substitute for observed tool execution.
 - Retracting any source event invalidates pending derived tool work and proactive output through the same causal evidence lifecycle used by cognition, research, and long-horizon goals.
 
+### Bounded Conversational Continuity
+
+The global Agent must resolve references inside a topic workspace without resending an entire transcript or relying only on lossy world-model summaries:
+
+- Append authorized semantic events to an encrypted rolling context journal while keeping the normal event queue focused on pending processing.
+- Retain only recent user, assistant, attachment, artifact, task-result, tool-result, cognition-result, and feedback evidence. Exclude process chatter, system status noise, private conversations, and paused tracking.
+- Limit retention globally and per conversation, truncate individual event payloads, and keep only an explicit metadata allowlist so credentials and transport internals cannot enter a model prompt.
+- Select a causal same-conversation window ending at the source event. Exclude the source event itself and any later event so delayed workers cannot reinterpret a request using future instructions.
+- Preserve the selected events in chronological order and stop at the first character-budget boundary instead of creating gaps in recent context.
+- Mark the entire window as untrusted evidence rather than instructions, then combine it with only the relevant topic graph and shareable world-model layers.
+- Purge retracted messages immediately. Deleting a conversation or changing its global visibility to excluded removes its complete journal window before another model call.
+- Use the same bounded window for private cognition, research assignments, reversible autonomous preparation, and dynamic plan review.
+
 ## Core Capability Pillars
 
 ### 1. Goal and Context Understanding

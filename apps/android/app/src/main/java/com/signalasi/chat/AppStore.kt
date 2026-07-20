@@ -216,14 +216,18 @@ object AppStore {
             SignalASICrypto.clearPeerTrust(context, hermesId)
         }
         val contacts = contacts(context)
+        val deletedContactIds = linkedSetOf<String>()
         for (i in 0 until contacts.length()) {
             val contact = contacts.optJSONObject(i) ?: continue
             val isTarget = signalasiIdOf(contact) == hermesId || contact.optString("id") == hermesId
             val isChildOfHermes = hermesId == "hermes" && (
                 contact.optString("parent_contact") == "hermes" ||
                     contact.optString("delivery_mode") == "pc_connector"
-                )
+            )
             if (isTarget || isChildOfHermes) {
+                contact.optString("id").ifBlank { signalasiIdOf(contact) }
+                    .takeIf(String::isNotBlank)
+                    ?.let(deletedContactIds::add)
                 contact.put("deleted", true)
                 contact.put("trust_state", "deleted")
                 contact.put("deleted_at", System.currentTimeMillis())
@@ -243,7 +247,9 @@ object AppStore {
         }
         if (requestsChanged) writeArray(context, KEY_FRIEND_REQUESTS, requests)
         if (deleteMessages) {
-            removeChatHistory(context, hermesId)
+            deletedContactIds.ifEmpty { setOf(hermesId) }.forEach { contactId ->
+                removeChatHistory(context, contactId)
+            }
         }
     }
 
@@ -1427,10 +1433,15 @@ object AppStore {
     }
 
     private fun removeChatHistory(context: Context, contactId: String) {
+        val contactName = contactById(context, contactId)
+            ?.optString("name")
+            .orEmpty()
+            .ifBlank { contactId }
         val prefs = context.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
         val root = runCatching { JSONObject(prefs.getString("messages", "{}") ?: "{}") }.getOrDefault(JSONObject())
         root.remove(contactId)
         prefs.edit().putString("messages", root.toString()).apply()
+        GlobalConversationEventBus.publishContactHistoryCleared(context, contactId, contactName)
     }
 
     private fun ByteArray.b64(): String =

@@ -67,6 +67,9 @@ class GlobalAgentRepository(context: Context) {
             .filter { it.id.isNotBlank() && knownIds.add(it.id) }
             .toList()
         if (additions.isEmpty()) return 0
+        saveContextJournal(
+            GlobalConversationContextJournalPolicy.apply(loadContextJournal(), additions)
+        )
         events += additions
         saveEvents(events.takeLast(MAX_PENDING_EVENTS))
         return additions.size
@@ -79,6 +82,38 @@ class GlobalAgentRepository(context: Context) {
     fun removeEvents(eventIds: Set<String>) = synchronized(STORE_LOCK) {
         if (eventIds.isEmpty()) return@synchronized
         saveEvents(loadEvents().filterNot { it.id in eventIds })
+    }
+
+    fun recentConversationContext(
+        event: GlobalConversationEvent,
+        maximumEvents: Int = GlobalConversationContextJournalPolicy.DEFAULT_SELECTION_EVENTS,
+        maximumCharacters: Int = GlobalConversationContextJournalPolicy.DEFAULT_SELECTION_CHARACTERS
+    ): String = recentConversationContext(
+        conversationId = event.conversationId,
+        beforeOrAtMillis = event.timestampMillis,
+        excludedEventIds = setOf(event.id),
+        maximumEvents = maximumEvents,
+        maximumCharacters = maximumCharacters
+    )
+
+    fun recentConversationContext(
+        conversationId: String,
+        beforeOrAtMillis: Long,
+        excludedEventIds: Set<String> = emptySet(),
+        maximumEvents: Int = GlobalConversationContextJournalPolicy.DEFAULT_SELECTION_EVENTS,
+        maximumCharacters: Int = GlobalConversationContextJournalPolicy.DEFAULT_SELECTION_CHARACTERS
+    ): String = synchronized(STORE_LOCK) {
+        GlobalConversationContextJournalPolicy.render(
+            GlobalConversationContextJournalPolicy.select(
+                events = loadContextJournal(),
+                conversationId = conversationId,
+                beforeOrAtMillis = beforeOrAtMillis,
+                excludedEventIds = excludedEventIds,
+                maximumEvents = maximumEvents,
+                maximumCharacters = maximumCharacters
+            ),
+            maximumCharacters
+        )
     }
 
     fun loadWorld(): PersonalWorldModel = synchronized(STORE_LOCK) {
@@ -416,8 +451,11 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 13)
+            .put("version", 14)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
+            .put("context_journal", JSONArray().apply {
+                loadContextJournal().forEach { put(encodeEvent(it)) }
+            })
             .put("world", encodeWorld(loadWorld()))
             .put("topic_project_graph", topicGraphStore.export())
             .put("research_tasks", JSONArray().apply {
@@ -443,6 +481,19 @@ class GlobalAgentRepository(context: Context) {
                 for (index in 0 until array.length()) decodeEvent(array.optJSONObject(index))?.let(::add)
             }.takeLast(MAX_PENDING_EVENTS))
         }
+        val contextJournal = payload.optJSONArray("context_journal")
+        saveContextJournal(if (contextJournal == null) {
+            emptyList()
+        } else {
+            GlobalConversationContextJournalPolicy.apply(
+                existing = emptyList(),
+                incoming = buildList {
+                    for (index in 0 until contextJournal.length()) {
+                        decodeEvent(contextJournal.optJSONObject(index))?.let(::add)
+                    }
+                }
+            )
+        })
         payload.optJSONObject("world")?.let { saveWorld(decodeWorld(it.toString())) }
         payload.optJSONObject("topic_project_graph")?.let(topicGraphStore::restore)
         payload.optJSONArray("research_tasks")?.let { array ->
@@ -487,6 +538,19 @@ class GlobalAgentRepository(context: Context) {
         val array = JSONArray()
         events.forEach { array.put(encodeEvent(it)) }
         database.writeString(KEY_EVENTS, array.toString())
+    }
+
+    private fun loadContextJournal(): List<GlobalConversationEvent> = runCatching {
+        val array = JSONArray(database.readString(KEY_CONTEXT_JOURNAL, "[]"))
+        buildList {
+            for (index in 0 until array.length()) decodeEvent(array.optJSONObject(index))?.let(::add)
+        }
+    }.getOrDefault(emptyList())
+
+    private fun saveContextJournal(events: List<GlobalConversationEvent>) {
+        val array = JSONArray()
+        events.forEach { array.put(encodeEvent(it)) }
+        database.writeString(KEY_CONTEXT_JOURNAL, array.toString())
     }
 
     private fun loadResearchTasks(): List<GlobalResearchTask> = runCatching {
@@ -1092,6 +1156,7 @@ class GlobalAgentRepository(context: Context) {
     companion object {
         const val DATABASE_NAME = "signalasi_global_super_agent"
         private const val KEY_EVENTS = "conversation_events"
+        private const val KEY_CONTEXT_JOURNAL = "conversation_context_journal"
         private const val KEY_WORLD = "personal_world_model"
         private const val KEY_RESEARCH_TASKS = "research_tasks"
         private const val KEY_PROACTIVE_MESSAGES = "proactive_messages"
@@ -2167,6 +2232,35 @@ object GlobalConversationEventBus {
                 "origin" to "contact_chat"
             ),
             retractedEventIds = setOf("chat:$contactId:$messageId")
+        )
+        val enqueued = repository.enqueue(event)
+        if (enqueued) requestProcessing(context)
+        return enqueued
+    }
+
+    fun publishContactHistoryCleared(
+        context: Context,
+        contactId: String,
+        contactName: String = "",
+        timestampMillis: Long = System.currentTimeMillis()
+    ): Boolean {
+        if (contactId.isBlank()) return false
+        val repository = GlobalAgentRepository(context)
+        if (!repository.settings().enabled) return false
+        val event = GlobalConversationEvent(
+            id = "contact-history-cleared:$contactId:$timestampMillis",
+            type = GlobalConversationEventType.CONVERSATION_UPDATED,
+            conversationId = "contact:${contactId.take(160)}",
+            actor = GlobalConversationActor.SYSTEM,
+            timestampMillis = timestampMillis,
+            content = "",
+            conversationTitle = contactName.ifBlank { contactId }.take(160),
+            metadata = mapOf(
+                "contact_id" to contactId,
+                "origin" to "contact_history_lifecycle",
+                "changed_fields" to "history",
+                "global_visibility" to "excluded"
+            )
         )
         val enqueued = repository.enqueue(event)
         if (enqueued) requestProcessing(context)

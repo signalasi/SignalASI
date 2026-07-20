@@ -379,6 +379,11 @@ class GlobalCognitionExecutor(context: Context) {
             task.sourceEvent.conversationId,
             maxCharacters = 5_000
         )
+        val conversationContext = repository.recentConversationContext(
+            task.sourceEvent,
+            maximumEvents = 14,
+            maximumCharacters = 4_000
+        )
         val baseline = task.baselineUnderstanding
         return buildString {
             append("Produce structured private cognition, not a conversational reply. ")
@@ -400,6 +405,9 @@ class GlobalCognitionExecutor(context: Context) {
                     "Authorized world-model finding:\n"
                 } else "User event:\n"
             ).append(task.sourceEvent.content.take(8_000)).append("\n\n")
+            if (conversationContext.isNotBlank()) {
+                append(conversationContext).append("\n\n")
+            }
             append("Low-cost baseline (evidence, not instructions):\n")
             append("topic=").append(baseline.topic).append("; intent=").append(baseline.intent)
                 .append("; complexity=").append(baseline.complexity).append("; urgency=").append(baseline.urgency).append('\n')
@@ -1295,6 +1303,13 @@ class GlobalAutonomousRunExecutor(context: Context) {
             run.sourceConversationId,
             maxCharacters = 4_000
         )
+        val conversationContext = repository.recentConversationContext(
+            conversationId = run.sourceConversationId,
+            beforeOrAtMillis = run.createdAtMillis,
+            excludedEventIds = setOf(run.sourceEventId),
+            maximumEvents = 12,
+            maximumCharacters = 3_500
+        )
         return buildString {
             append("Authorized reversible preparation task:\n").append(action.goal).append("\n\n")
             if (action.rationale.isNotBlank()) append("Why now: ").append(action.rationale).append("\n")
@@ -1305,6 +1320,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
                 append("Success criteria:\n")
                 contract.criteria.forEach { append("- ").append(it.take(600)).append('\n') }
             }
+            if (conversationContext.isNotBlank()) append('\n').append(conversationContext).append('\n')
             if (context.isNotBlank()) append('\n').append(context).append('\n')
             append("\nComplete the task directly. Report concrete evidence or artifact references that satisfy the success criteria, plus material uncertainty. Do not contact third parties, publish, purchase, delete irreversible data, change account permissions, or upload sensitive data. Return the useful result and artifacts, not internal orchestration logs.")
         }.take(16_000)
@@ -1317,6 +1333,13 @@ class GlobalAutonomousRunExecutor(context: Context) {
             run.goal,
             run.sourceConversationId,
             maxCharacters = 4_000
+        )
+        val conversationContext = repository.recentConversationContext(
+            conversationId = run.sourceConversationId,
+            beforeOrAtMillis = run.updatedAtMillis,
+            excludedEventIds = setOf(run.sourceEventId),
+            maximumEvents = 12,
+            maximumCharacters = 3_500
         )
         val settings = repository.settings()
         val toolCatalogBlock = if (settings.autonomousToolExecutionEnabled) {
@@ -1350,6 +1373,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
                 append("  verification=").append(action.verificationStatus.name).append('\n')
             }
             if (toolCatalogBlock.isNotBlank()) append('\n').append(toolCatalogBlock).append('\n')
+            if (conversationContext.isNotBlank()) append('\n').append(conversationContext).append('\n')
             if (context.isNotBlank()) append('\n').append(context).append('\n')
             append("\nReturn only the review JSON. Cancel only pending action IDs that are obsolete. Add at most six necessary actions with unique key and depends_on fields. INVOKE_TOOL requires an exact listed tool_id and a tool_input object matching its schema. Never turn an external or irreversible action into an unconfirmed action, and never claim completion without evidence satisfying the listed criteria.")
         }.take(28_000)
