@@ -119,9 +119,14 @@ object GlobalAgentEvidenceLifecyclePolicy {
         val roots = message.causalEventIds.ifEmpty { setOf(message.sourceEventId) }
         if (roots.intersects(eventIds) && message.status in setOf(
                 GlobalProactiveMessageStatus.PENDING,
-                GlobalProactiveMessageStatus.NOTIFIED
+                GlobalProactiveMessageStatus.NOTIFIED,
+                GlobalProactiveMessageStatus.DELIVERING
             )
-        ) message.copy(status = GlobalProactiveMessageStatus.DISMISSED) else message
+        ) message.copy(
+            status = GlobalProactiveMessageStatus.DISMISSED,
+            deliveryLeaseExpiresAtMillis = 0L,
+            lastDeliveryError = INVALIDATED_REASON
+        ) else message
     }
 
     fun invalidateLongHorizonGoals(

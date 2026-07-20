@@ -169,7 +169,8 @@ data class AgentConversation(
     val costMicros: Long = 0L,
     val createdByAgent: Boolean = false,
     val parentConversationId: String = "",
-    val trackingPaused: Boolean = false
+    val trackingPaused: Boolean = false,
+    val globalTopicKey: String = ""
 )
 
 data class AgentConversationContext(
@@ -245,7 +246,11 @@ class AgentTranscriptStore(context: Context) {
     }
 
     @Synchronized
-    fun createAgentConversation(title: String, parentConversationId: String = ""): AgentConversation {
+    fun createAgentConversation(
+        title: String,
+        parentConversationId: String = "",
+        globalTopicKey: String = ""
+    ): AgentConversation {
         val now = System.currentTimeMillis()
         val conversation = AgentConversation(
             id = UUID.randomUUID().toString(),
@@ -253,7 +258,8 @@ class AgentTranscriptStore(context: Context) {
             createdAt = now,
             updatedAt = now,
             createdByAgent = true,
-            parentConversationId = parentConversationId.trim().take(120)
+            parentConversationId = parentConversationId.trim().take(120),
+            globalTopicKey = globalTopicKey.trim().take(MAX_GLOBAL_TOPIC_KEY_CHARACTERS)
         )
         val all = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]"))
         saveConversations((all + conversation).takeLast(MAX_CONVERSATIONS))
@@ -289,16 +295,37 @@ class AgentTranscriptStore(context: Context) {
         updateConversation(conversationId) { it.copy(trackingPaused = paused) }
 
     @Synchronized
-    fun agentConversationForTopic(title: String, parentConversationId: String = ""): AgentConversation? {
+    fun agentConversationForTopic(
+        title: String,
+        parentConversationId: String = "",
+        globalTopicKey: String = ""
+    ): AgentConversation? {
         val normalizedTitle = GlobalAgentText.normalize(title)
         val normalizedParent = parentConversationId.trim()
+        val normalizedTopicKey = globalTopicKey.trim()
         return conversations(includeArchived = true).firstOrNull { conversation ->
             conversation.createdByAgent &&
                 conversation.status == AgentConversationStatus.ACTIVE &&
+                !conversation.privateMode &&
                 !conversation.trackingPaused &&
-                GlobalAgentText.normalize(conversation.title) == normalizedTitle &&
+                (
+                    normalizedTopicKey.isNotBlank() && conversation.globalTopicKey == normalizedTopicKey ||
+                        GlobalAgentText.normalize(conversation.title) == normalizedTitle
+                    ) &&
                 (normalizedParent.isBlank() || conversation.parentConversationId == normalizedParent)
         }
+    }
+
+    @Synchronized
+    fun bindGlobalTopic(conversationId: String, globalTopicKey: String): Boolean {
+        val cleanKey = globalTopicKey.trim().take(MAX_GLOBAL_TOPIC_KEY_CHARACTERS)
+        if (cleanKey.isBlank()) return false
+        val all = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]")).toMutableList()
+        val index = all.indexOfFirst { it.id == conversationId }
+        if (index < 0 || all[index].globalTopicKey == cleanKey) return index >= 0
+        all[index] = all[index].copy(globalTopicKey = cleanKey)
+        saveConversations(all)
+        return true
     }
 
     @Synchronized
@@ -765,7 +792,8 @@ class AgentTranscriptStore(context: Context) {
                 .put("cost_micros", conversation.costMicros)
                 .put("created_by_agent", conversation.createdByAgent)
                 .put("parent_conversation_id", conversation.parentConversationId)
-                .put("tracking_paused", conversation.trackingPaused))
+                .put("tracking_paused", conversation.trackingPaused)
+                .put("global_topic_key", conversation.globalTopicKey))
         }
         preferences.writeString(KEY_CONVERSATIONS, array.toString())
     }
@@ -812,7 +840,8 @@ class AgentTranscriptStore(context: Context) {
                     costMicros = item.optLong("cost_micros", 0L),
                     createdByAgent = item.optBoolean("created_by_agent"),
                     parentConversationId = item.optString("parent_conversation_id"),
-                    trackingPaused = item.optBoolean("tracking_paused")
+                    trackingPaused = item.optBoolean("tracking_paused"),
+                    globalTopicKey = item.optString("global_topic_key").take(MAX_GLOBAL_TOPIC_KEY_CHARACTERS)
                 ))
             }
         }
@@ -833,5 +862,6 @@ class AgentTranscriptStore(context: Context) {
         private const val MAX_TITLE_CHARACTERS = 72
         private const val MAX_SUMMARY_CHARACTERS = 12_000
         private const val MAX_DEDUPE_KEY_CHARACTERS = 240
+        private const val MAX_GLOBAL_TOPIC_KEY_CHARACTERS = 80
     }
 }

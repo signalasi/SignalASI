@@ -251,7 +251,10 @@ class GlobalAgentDeliberationTest {
             content = "A derived result",
             topic = "Runtime",
             urgent = false,
-            causalEventIds = setOf(source.id)
+            causalEventIds = setOf(source.id),
+            status = GlobalProactiveMessageStatus.DELIVERING,
+            deliveryConversationId = "target",
+            deliveryLeaseExpiresAtMillis = 20_000L
         )
 
         val invalidatedCognition = GlobalAgentEvidenceLifecyclePolicy.invalidateCognitionTasks(
@@ -273,6 +276,7 @@ class GlobalAgentDeliberationTest {
         assertEquals(GlobalAutonomousRunStatus.PAUSED, invalidatedRun.status)
         assertEquals(GlobalAutonomousActionStatus.SKIPPED, invalidatedRun.actions.single().status)
         assertEquals(GlobalProactiveMessageStatus.DISMISSED, invalidatedMessage.status)
+        assertEquals(0L, invalidatedMessage.deliveryLeaseExpiresAtMillis)
     }
 
     @Test

@@ -25,6 +25,21 @@ The global runtime must:
 
 Model output never owns lifecycle or safety state. The Android host validates structured cognition, action vocabularies, plan revisions, resource routes, confirmations, retries, and completion evidence before persistence or execution.
 
+### Proactive Delivery Contract
+
+Global findings are not complete when they are merely stored. The host must close the loop by routing each eligible result to exactly one durable destination:
+
+- Use the source conversation for findings that directly extend the active topic.
+- Reuse an existing eligible topic workspace before creating a new one.
+- Create one Agent-owned child workspace only when the topic is substantial, no matching workspace exists, and automatic creation is enabled.
+- Merge low-priority findings into bounded digest batches without silently consuming overflow items.
+- Persist a stable topic ownership key so renaming a workspace does not break future routing.
+- Exclude private, tracking-paused, archived, and deleted destinations. A deleted source leaves a bounded tombstone so delayed work cannot recreate it.
+- Claim delivery with a durable lease before writing the transcript. A stale claim may recover after restart; transcript dedupe and a stable delivery group make completion idempotent.
+- Recheck the adaptive daily budget and per-topic cooldown at delivery time, not only when an insight is first planned.
+- Persist the result before notifying. Notifications open the actual destination workspace and are recoverable without repeating old notifications.
+- Preserve feedback provenance from the rendered transcript entry to every contributing proactive message.
+
 ### Durable Knowledge and Execution Graphs
 
 The global runtime stores three related encrypted graphs rather than treating conversation history as one flat prompt:

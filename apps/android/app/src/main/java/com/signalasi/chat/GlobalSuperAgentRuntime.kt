@@ -40,7 +40,7 @@ data class GlobalAgentDashboardSnapshot(
 data class GlobalAgentNotificationCandidate(
     val title: String,
     val content: String,
-    val sourceConversationId: String,
+    val conversationId: String,
     val messageIds: Set<String>
 )
 
@@ -195,6 +195,184 @@ class GlobalAgentRepository(context: Context) {
         true
     }
 
+    fun claimProactiveMessages(
+        messageIds: Set<String>,
+        conversationId: String,
+        deliveryGroupId: String,
+        nowMillis: Long,
+        leaseMillis: Long
+    ): List<GlobalProactiveMessage> = synchronized(STORE_LOCK) {
+        if (messageIds.isEmpty() || conversationId.isBlank() || deliveryGroupId.isBlank()) {
+            return@synchronized emptyList()
+        }
+        val messages = loadProactiveMessages().toMutableList()
+        val claimed = mutableListOf<GlobalProactiveMessage>()
+        messages.indices.forEach { index ->
+            val message = messages[index]
+            if (message.id !in messageIds || !GlobalProactiveDeliveryPolicy.isRecoverable(message, nowMillis)) {
+                return@forEach
+            }
+            val updated = message.copy(
+                status = GlobalProactiveMessageStatus.DELIVERING,
+                deliveryConversationId = conversationId,
+                deliveryLeaseExpiresAtMillis = nowMillis + leaseMillis.coerceAtLeast(1L),
+                deliveryAttemptCount = message.deliveryAttemptCount + 1,
+                deliveryGroupId = deliveryGroupId,
+                lastDeliveryError = ""
+            )
+            messages[index] = updated
+            claimed += updated
+        }
+        if (claimed.size != messageIds.size) return@synchronized emptyList()
+        saveProactiveMessages(messages)
+        claimed
+    }
+
+    fun completeProactiveDelivery(
+        messageIds: Set<String>,
+        conversationId: String,
+        deliveryGroupId: String,
+        countBudget: Boolean,
+        nowMillis: Long
+    ): List<GlobalProactiveMessage> = synchronized(STORE_LOCK) {
+        if (messageIds.isEmpty() || conversationId.isBlank() || deliveryGroupId.isBlank()) {
+            return@synchronized emptyList()
+        }
+        val messages = loadProactiveMessages().toMutableList()
+        val selected = messages.filter { it.id in messageIds }
+        if (selected.size != messageIds.size) return@synchronized emptyList()
+        val history = interventionHistory()
+        val alreadyCounted = deliveryGroupId in history.countedDeliveryGroupIds
+        if (countBudget && !alreadyCounted) {
+            saveInterventionHistory(history.copy(
+                notificationTimestamps = (history.notificationTimestamps + nowMillis).takeLast(100),
+                lastTopicNotificationMillis = history.lastTopicNotificationMillis +
+                    selected.associate { GlobalAgentText.normalize(it.topic) to nowMillis },
+                countedDeliveryGroupIds = (history.countedDeliveryGroupIds + deliveryGroupId)
+                    .takeLast(MAX_COUNTED_DELIVERY_GROUPS)
+            ))
+        }
+        val completed = mutableListOf<GlobalProactiveMessage>()
+        messages.indices.forEach { index ->
+            val message = messages[index]
+            if (message.id !in messageIds) return@forEach
+            val updated = message.copy(
+                status = GlobalProactiveMessageStatus.DELIVERED,
+                deliveryConversationId = conversationId,
+                deliveryLeaseExpiresAtMillis = 0L,
+                deliveryBudgetCounted = message.deliveryBudgetCounted || countBudget || alreadyCounted,
+                lastDeliveryError = "",
+                deliveredAtMillis = nowMillis,
+                deliveredConversationId = conversationId,
+                deliveryGroupId = deliveryGroupId
+            )
+            messages[index] = updated
+            completed += updated
+        }
+        saveProactiveMessages(messages)
+        completed
+    }
+
+    fun releaseProactiveDelivery(messageIds: Set<String>, reason: String) = synchronized(STORE_LOCK) {
+        if (messageIds.isEmpty()) return@synchronized
+        saveProactiveMessages(loadProactiveMessages().map { message ->
+            if (message.id !in messageIds || message.status != GlobalProactiveMessageStatus.DELIVERING) {
+                message
+            } else {
+                message.copy(
+                    status = if (message.notifiedAtMillis > 0L) {
+                        GlobalProactiveMessageStatus.NOTIFIED
+                    } else GlobalProactiveMessageStatus.PENDING,
+                    deliveryLeaseExpiresAtMillis = 0L,
+                    lastDeliveryError = reason.take(600)
+                )
+            }
+        })
+    }
+
+    fun dismissProactiveMessages(messageIds: Set<String>, reason: String) = synchronized(STORE_LOCK) {
+        if (messageIds.isEmpty()) return@synchronized
+        saveProactiveMessages(loadProactiveMessages().map { message ->
+            if (message.id !in messageIds || message.status in setOf(
+                    GlobalProactiveMessageStatus.DELIVERED,
+                    GlobalProactiveMessageStatus.DISMISSED
+                )
+            ) message else message.copy(
+                status = GlobalProactiveMessageStatus.DISMISSED,
+                deliveryLeaseExpiresAtMillis = 0L,
+                lastDeliveryError = reason.take(600)
+            )
+        })
+    }
+
+    fun markDeliveryArtifactsRetracted(messageIds: Set<String>) = synchronized(STORE_LOCK) {
+        if (messageIds.isEmpty()) return@synchronized
+        saveProactiveMessages(loadProactiveMessages().map { message ->
+            if (message.id !in messageIds) message else message.copy(
+                deliveryConversationId = "",
+                deliveryLeaseExpiresAtMillis = 0L
+            )
+        })
+    }
+
+    fun markProactiveNotified(messageIds: Set<String>, nowMillis: Long) = synchronized(STORE_LOCK) {
+        if (messageIds.isEmpty()) return@synchronized
+        val messages = loadProactiveMessages()
+        val targets = messages.filter { it.id in messageIds }
+        if (targets.isEmpty()) return@synchronized
+        val groupId = targets.map(GlobalProactiveMessage::deliveryGroupId)
+            .firstOrNull(String::isNotBlank)
+            ?: "notification:${GlobalAgentText.stableKey(*targets.map(GlobalProactiveMessage::id).sorted().toTypedArray())}"
+        val shouldCountBudget = targets.none(GlobalProactiveMessage::deliveryBudgetCounted)
+        val history = interventionHistory()
+        val budgetCountedForGroup = shouldCountBudget || groupId in history.countedDeliveryGroupIds
+        if (shouldCountBudget && groupId !in history.countedDeliveryGroupIds) {
+            saveInterventionHistory(history.copy(
+                notificationTimestamps = (history.notificationTimestamps + nowMillis).takeLast(100),
+                lastTopicNotificationMillis = history.lastTopicNotificationMillis +
+                    targets.associate { GlobalAgentText.normalize(it.topic) to nowMillis },
+                countedDeliveryGroupIds = (history.countedDeliveryGroupIds + groupId)
+                    .takeLast(MAX_COUNTED_DELIVERY_GROUPS)
+            ))
+        }
+        saveProactiveMessages(messages.map { message ->
+            if (message.id !in messageIds) message else message.copy(
+                status = if (message.status == GlobalProactiveMessageStatus.PENDING) {
+                    GlobalProactiveMessageStatus.NOTIFIED
+                } else message.status,
+                notifiedAtMillis = nowMillis,
+                deliveryBudgetCounted = message.deliveryBudgetCounted || budgetCountedForGroup
+            )
+        })
+    }
+
+    fun conversationTombstones(): Set<String> = synchronized(STORE_LOCK) { loadConversationTombstones() }
+
+    fun excludedConversationIds(): Set<String> = synchronized(STORE_LOCK) {
+        loadConversationTombstones() + loadEvents().asSequence()
+            .filter { it.type == GlobalConversationEventType.CONVERSATION_DELETED || it.excludesConversationFromGlobalModel() }
+            .map(GlobalConversationEvent::conversationId)
+            .filter(String::isNotBlank)
+            .toSet()
+    }
+
+    fun markConversationDeleted(conversationId: String) = synchronized(STORE_LOCK) {
+        val cleanId = conversationId.trim()
+        if (cleanId.isBlank()) return@synchronized
+        saveConversationTombstones(
+            (loadConversationTombstones() + cleanId).toList()
+                .takeLast(MAX_CONVERSATION_TOMBSTONES)
+                .toSet()
+        )
+    }
+
+    fun markConversationCreated(conversationId: String) = synchronized(STORE_LOCK) {
+        val cleanId = conversationId.trim()
+        if (cleanId.isBlank()) return@synchronized
+        val retained = loadConversationTombstones() - cleanId
+        saveConversationTombstones(retained)
+    }
+
     fun interventionHistory(): GlobalInterventionHistory = synchronized(STORE_LOCK) {
         decodeInterventionHistory(database.readString(KEY_INTERVENTION_HISTORY, ""))
     }
@@ -237,7 +415,7 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 10)
+            .put("version", 11)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("world", encodeWorld(loadWorld()))
             .put("topic_project_graph", topicGraphStore.export())
@@ -253,6 +431,7 @@ class GlobalAgentRepository(context: Context) {
             .put("intervention_history", encodeInterventionHistory(interventionHistory()))
             .put("settings", encodeSettings(settings()))
             .put("persistent_context_sync_version", persistentContextSyncVersion())
+            .put("conversation_tombstones", JSONArray(conversationTombstones().toList()))
             .put("feedback", JSONArray().apply { loadFeedback().forEach { put(encodeFeedback(it)) } })
     }
 
@@ -282,6 +461,9 @@ class GlobalAgentRepository(context: Context) {
         }
         payload.optJSONObject("settings")?.let { saveSettings(decodeSettings(it.toString())) }
         savePersistentContextSyncVersion(0)
+        payload.optJSONArray("conversation_tombstones")?.let { array ->
+            saveConversationTombstones(array.strings().takeLast(MAX_CONVERSATION_TOMBSTONES).toSet())
+        }
         payload.optJSONArray("feedback")?.let { array ->
             saveFeedback(buildList {
                 for (index in 0 until array.length()) decodeFeedback(array.optJSONObject(index))?.let(::add)
@@ -324,6 +506,19 @@ class GlobalAgentRepository(context: Context) {
             for (index in 0 until array.length()) decodeFeedback(array.optJSONObject(index))?.let(::add)
         }
     }.getOrDefault(emptyList())
+
+    private fun loadConversationTombstones(): Set<String> = runCatching {
+        JSONArray(database.readString(KEY_CONVERSATION_TOMBSTONES, "[]")).strings()
+            .takeLast(MAX_CONVERSATION_TOMBSTONES)
+            .toSet()
+    }.getOrDefault(emptySet())
+
+    private fun saveConversationTombstones(conversationIds: Set<String>) {
+        database.writeString(
+            KEY_CONVERSATION_TOMBSTONES,
+            JSONArray(conversationIds.filter(String::isNotBlank).takeLast(MAX_CONVERSATION_TOMBSTONES)).toString()
+        )
+    }
 
     private fun encodeEvent(event: GlobalConversationEvent): JSONObject = JSONObject()
         .put("id", event.id)
@@ -711,6 +906,12 @@ class GlobalAgentRepository(context: Context) {
         .put("urgent", message.urgent)
         .put("status", message.status.name)
         .put("created_at_millis", message.createdAtMillis)
+        .put("notified_at_millis", message.notifiedAtMillis)
+        .put("delivery_conversation_id", message.deliveryConversationId)
+        .put("delivery_lease_expires_at_millis", message.deliveryLeaseExpiresAtMillis)
+        .put("delivery_attempt_count", message.deliveryAttemptCount)
+        .put("delivery_budget_counted", message.deliveryBudgetCounted)
+        .put("last_delivery_error", message.lastDeliveryError)
         .put("delivered_at_millis", message.deliveredAtMillis)
         .put("delivered_conversation_id", message.deliveredConversationId)
         .put("delivery_group_id", message.deliveryGroupId)
@@ -719,6 +920,17 @@ class GlobalAgentRepository(context: Context) {
         if (json == null) return null
         val id = json.optString("id")
         if (id.isBlank()) return null
+        val status = enumValue(json.optString("status"), GlobalProactiveMessageStatus.PENDING)
+        val createdAtMillis = json.optLong("created_at_millis")
+        val notifiedAtMillis = if (json.has("notified_at_millis")) {
+            json.optLong("notified_at_millis")
+        } else if (status in setOf(
+                GlobalProactiveMessageStatus.NOTIFIED,
+                GlobalProactiveMessageStatus.DELIVERED
+            )
+        ) {
+            json.optLong("delivered_at_millis").takeIf { it > 0L } ?: createdAtMillis
+        } else 0L
         return GlobalProactiveMessage(
             id = id,
             sourceEventId = json.optString("source_event_id"),
@@ -730,8 +942,18 @@ class GlobalAgentRepository(context: Context) {
             content = json.optString("content"),
             topic = json.optString("topic"),
             urgent = json.optBoolean("urgent"),
-            status = enumValue(json.optString("status"), GlobalProactiveMessageStatus.PENDING),
-            createdAtMillis = json.optLong("created_at_millis"),
+            status = status,
+            createdAtMillis = createdAtMillis,
+            notifiedAtMillis = notifiedAtMillis,
+            deliveryConversationId = json.optString("delivery_conversation_id"),
+            deliveryLeaseExpiresAtMillis = json.optLong("delivery_lease_expires_at_millis"),
+            deliveryAttemptCount = json.optInt("delivery_attempt_count").coerceAtLeast(0),
+            deliveryBudgetCounted = if (json.has("delivery_budget_counted")) {
+                json.optBoolean("delivery_budget_counted")
+            } else {
+                status == GlobalProactiveMessageStatus.NOTIFIED
+            },
+            lastDeliveryError = json.optString("last_delivery_error").take(600),
             deliveredAtMillis = json.optLong("delivered_at_millis"),
             deliveredConversationId = json.optString("delivered_conversation_id"),
             deliveryGroupId = json.optString("delivery_group_id")
@@ -772,7 +994,9 @@ class GlobalAgentRepository(context: Context) {
             notificationTimestamps = root.optJSONArray("notification_timestamps").longs(),
             lastTopicNotificationMillis = buildMap {
                 if (topics != null) topics.keys().forEach { key -> put(key, topics.optLong(key)) }
-            }
+            },
+            countedDeliveryGroupIds = root.optJSONArray("counted_delivery_group_ids").strings()
+                .takeLast(MAX_COUNTED_DELIVERY_GROUPS)
         )
     }.getOrDefault(GlobalInterventionHistory())
 
@@ -782,6 +1006,10 @@ class GlobalAgentRepository(context: Context) {
         return JSONObject()
             .put("notification_timestamps", JSONArray(history.notificationTimestamps.takeLast(100)))
             .put("last_topic_notification_millis", topics)
+            .put(
+                "counted_delivery_group_ids",
+                JSONArray(history.countedDeliveryGroupIds.takeLast(MAX_COUNTED_DELIVERY_GROUPS))
+            )
     }
 
     private fun encodeSettings(settings: GlobalAgentSettings): JSONObject = JSONObject()
@@ -858,11 +1086,14 @@ class GlobalAgentRepository(context: Context) {
         private const val KEY_SETTINGS = "settings"
         private const val KEY_PERSISTENT_CONTEXT_SYNC_VERSION = "persistent_context_sync_version"
         private const val KEY_FEEDBACK = "feedback"
+        private const val KEY_CONVERSATION_TOMBSTONES = "conversation_tombstones"
         private const val MAX_PENDING_EVENTS = 2_000
         private const val MAX_PROCESS_BATCH = 250
         private const val MAX_RESEARCH_TASKS = 300
         private const val MAX_PROACTIVE_MESSAGES = 300
         private const val MAX_FEEDBACK_ITEMS = 800
+        private const val MAX_COUNTED_DELIVERY_GROUPS = 800
+        private const val MAX_CONVERSATION_TOMBSTONES = 500
         private const val MAX_EVENT_CONTENT_CHARACTERS = 12_000
         private val STORE_LOCK = Any()
     }
@@ -912,6 +1143,13 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         var proactiveMessagesInvalidated = false
         var changedItems = 0
         events.forEach { event ->
+            when (event.type) {
+                GlobalConversationEventType.CONVERSATION_DELETED ->
+                    repository.markConversationDeleted(event.conversationId)
+                GlobalConversationEventType.CONVERSATION_CREATED ->
+                    repository.markConversationCreated(event.conversationId)
+                else -> Unit
+            }
             val currentRunsForLifecycle = if (event.excludesConversationFromGlobalModel()) {
                 deliberationStore.autonomousRuns()
             } else emptyList()
@@ -1394,6 +1632,40 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                     .filter { it > 0L }
                     .forEach { add(it) }
             }
+            if (settings.proactiveInsightsEnabled) {
+                val proactiveMessages = repository.proactiveMessages()
+                val profile = adaptiveProfile()
+                val history = repository.interventionHistory()
+                val recoverableDigestCount = proactiveMessages.count {
+                    it.target == GlobalProactiveTarget.GLOBAL_DIGEST &&
+                        GlobalProactiveDeliveryPolicy.isRecoverable(it, nowMillis)
+                }
+                proactiveMessages.forEach { message ->
+                    when (message.status) {
+                        GlobalProactiveMessageStatus.DELIVERING ->
+                            message.deliveryLeaseExpiresAtMillis.takeIf { it > 0L }?.let(::add)
+                        GlobalProactiveMessageStatus.PENDING,
+                        GlobalProactiveMessageStatus.NOTIFIED -> {
+                            val eligibleAt = GlobalProactiveDeliveryPolicy.nextEligibleAtMillis(
+                                message,
+                                settings,
+                                profile,
+                                history,
+                                nowMillis
+                            )
+                            if (eligibleAt > 0L) {
+                                val digestReadyAt = if (
+                                    message.target == GlobalProactiveTarget.GLOBAL_DIGEST &&
+                                    recoverableDigestCount < MIN_DIGEST_ITEMS
+                                ) message.createdAtMillis + DIGEST_MAX_WAIT_MILLIS else eligibleAt
+                                add(maxOf(eligibleAt, digestReadyAt))
+                            }
+                        }
+                        GlobalProactiveMessageStatus.DELIVERED,
+                        GlobalProactiveMessageStatus.DISMISSED -> Unit
+                    }
+                }
+            }
         }
         val next = candidates.minOrNull()?.coerceAtLeast(nowMillis + MIN_WAKE_DELAY_MILLIS) ?: 0L
         GlobalAgentWakeScheduler.schedule(appContext, next)
@@ -1408,170 +1680,276 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     fun consumeResearchResponse(response: AgentConnectorResponse): Boolean =
         consumeConnectorResponse(response)
 
-    fun pendingProactiveMessages(): List<GlobalProactiveMessage> = repository.proactiveMessages()
-        .filter { it.status in setOf(GlobalProactiveMessageStatus.PENDING, GlobalProactiveMessageStatus.NOTIFIED) }
-        .sortedBy(GlobalProactiveMessage::createdAtMillis)
+    fun pendingProactiveMessages(nowMillis: Long = System.currentTimeMillis()): List<GlobalProactiveMessage> =
+        repository.proactiveMessages()
+            .filter { GlobalProactiveDeliveryPolicy.isRecoverable(it, nowMillis) }
+            .sortedWith(
+                compareByDescending<GlobalProactiveMessage> { it.urgent }
+                    .thenBy(GlobalProactiveMessage::createdAtMillis)
+            )
 
-    fun nextNotificationCandidate(nowMillis: Long = System.currentTimeMillis()): GlobalAgentNotificationCandidate? {
+    fun notificationCandidateForDelivered(
+        delivered: List<GlobalProactiveMessage>
+    ): GlobalAgentNotificationCandidate? {
         val settings = repository.settings()
         if (!settings.enabled || !settings.proactiveInsightsEnabled || !settings.notificationsEnabled) return null
-        val pending = repository.proactiveMessages()
-            .filter { it.status == GlobalProactiveMessageStatus.PENDING }
-            .sortedBy(GlobalProactiveMessage::createdAtMillis)
-        pending.lastOrNull { it.target != GlobalProactiveTarget.GLOBAL_DIGEST }?.let { message ->
+        val messages = delivered.filter { it.notifiedAtMillis <= 0L && it.deliveredConversationId.isNotBlank() }
+        if (messages.isEmpty()) return null
+        val primary = messages.lastOrNull(GlobalProactiveMessage::urgent) ?: messages.last()
+        if (messages.size == 1) {
             return GlobalAgentNotificationCandidate(
-                title = message.title.ifBlank { "SignalASI" },
-                content = message.content.take(240),
-                sourceConversationId = message.sourceConversationId,
-                messageIds = setOf(message.id)
+                title = primary.title.ifBlank { "SignalASI" },
+                content = primary.content.take(240),
+                conversationId = primary.deliveredConversationId,
+                messageIds = setOf(primary.id)
             )
         }
-        val digest = pending.filter { it.target == GlobalProactiveTarget.GLOBAL_DIGEST }
-        val digestReady = digest.size >= MIN_DIGEST_ITEMS ||
-            digest.firstOrNull()?.let { nowMillis - it.createdAtMillis >= DIGEST_MAX_WAIT_MILLIS } == true
-        if (!digestReady) return null
-        val chinese = digest.any { GlobalAgentText.containsCjk(it.content) }
-        val title = if (chinese) "Signal \u6709 ${digest.size} \u6761\u65b0\u53d1\u73b0" else "Signal has ${digest.size} new insights"
-        val content = digest
+        val chinese = messages.any { GlobalAgentText.containsCjk(it.content) }
+        val title = if (chinese) {
+            "Signal \u6709 ${messages.size} \u6761\u65b0\u53d1\u73b0"
+        } else {
+            "Signal has ${messages.size} new insights"
+        }
+        val content = messages.asReversed()
             .distinctBy { GlobalAgentText.normalize(it.topic) }
             .take(3)
             .joinToString(" \u00b7 ") { it.topic.ifBlank { it.content.take(48) } }
-        return GlobalAgentNotificationCandidate(title, content, digest.first().sourceConversationId, digest.map { it.id }.toSet())
+        return GlobalAgentNotificationCandidate(
+            title = title,
+            content = content,
+            conversationId = primary.deliveredConversationId,
+            messageIds = messages.map(GlobalProactiveMessage::id).toSet()
+        )
     }
+
+    fun unnotifiedDeliveredMessages(limit: Int = 24): List<GlobalProactiveMessage> =
+        repository.proactiveMessages()
+            .asSequence()
+            .filter {
+                it.status == GlobalProactiveMessageStatus.DELIVERED &&
+                    it.notifiedAtMillis <= 0L &&
+                    it.deliveredConversationId.isNotBlank()
+            }
+            .sortedBy(GlobalProactiveMessage::deliveredAtMillis)
+            .toList()
+            .takeLast(limit.coerceIn(1, 100))
 
     fun markNotified(messageIds: Set<String>) {
-        if (messageIds.isEmpty()) return
-        val now = System.currentTimeMillis()
-        val messages = repository.proactiveMessages().map { message ->
-            if (message.id in messageIds && message.status == GlobalProactiveMessageStatus.PENDING) {
-                message.copy(status = GlobalProactiveMessageStatus.NOTIFIED)
-            } else message
-        }
-        repository.saveProactiveMessages(messages)
-        val notified = messages.filter { it.id in messageIds }
-        if (notified.isNotEmpty()) {
-            val previous = repository.interventionHistory()
-            repository.saveInterventionHistory(previous.copy(
-                notificationTimestamps = (previous.notificationTimestamps + now).takeLast(100),
-                lastTopicNotificationMillis = previous.lastTopicNotificationMillis +
-                    notified.associate { GlobalAgentText.normalize(it.topic) to now }
-            ))
-        }
+        repository.markProactiveNotified(messageIds, System.currentTimeMillis())
     }
 
-    fun deliverPending(transcriptStore: AgentTranscriptStore): List<GlobalProactiveMessage> = synchronized(PROCESS_LOCK) {
+    fun deliverPending(
+        transcriptStore: AgentTranscriptStore,
+        nowMillis: Long = System.currentTimeMillis()
+    ): List<GlobalProactiveMessage> = synchronized(PROCESS_LOCK) {
         val settings = repository.settings()
+        retractInvalidatedDeliveryArtifacts(transcriptStore)
         if (!settings.enabled || !settings.proactiveInsightsEnabled) return@synchronized emptyList()
-        val messages = pendingProactiveMessages()
+        val messages = pendingProactiveMessages(nowMillis)
         if (messages.isEmpty()) return@synchronized emptyList()
         val delivered = mutableListOf<GlobalProactiveMessage>()
-        messages.filterNot { it.target == GlobalProactiveTarget.GLOBAL_DIGEST }.forEach { message ->
-            val targetConversationId = resolveTargetConversation(transcriptStore, message)
-            val persisted = transcriptStore.append(
-                role = AgentTranscriptRole.ASSISTANT,
-                text = "${message.title}\n\n${message.content}",
-                dedupeKey = "global-agent:${message.id}",
-                conversationId = targetConversationId,
-                taskId = message.id
-            )
-            if (persisted || transcriptStore.list(targetConversationId).any { it.dedupeKey == "global-agent:${message.id}" }) {
-                delivered += message.copy(
-                    status = GlobalProactiveMessageStatus.DELIVERED,
-                    deliveredAtMillis = System.currentTimeMillis(),
-                    deliveredConversationId = targetConversationId,
-                    deliveryGroupId = message.id
+        val excludedConversationIds = repository.excludedConversationIds()
+
+        messages.asSequence()
+            .filterNot { it.target == GlobalProactiveTarget.GLOBAL_DIGEST }
+            .forEach { message ->
+                val profile = adaptiveProfile()
+                val history = repository.interventionHistory()
+                if (!GlobalProactiveDeliveryPolicy.canDeliver(message, settings, profile, history, nowMillis)) {
+                    return@forEach
+                }
+                val currentConversations = transcriptStore.conversations(includeArchived = true)
+                val route = resolveTargetConversation(
+                    transcriptStore = transcriptStore,
+                    message = message,
+                    conversations = currentConversations,
+                    excludedConversationIds = excludedConversationIds,
+                    settings = settings
+                )
+                if (route == null) {
+                    val sourceIsUnavailable = currentConversations
+                        .firstOrNull { it.id == message.sourceConversationId }
+                        ?.let { !GlobalProactiveConversationRouter.isEligible(it) } == true
+                    if (message.sourceConversationId in excludedConversationIds || sourceIsUnavailable) {
+                        repository.dismissProactiveMessages(setOf(message.id), "Source conversation is unavailable")
+                    }
+                    return@forEach
+                }
+                val groupId = message.deliveryGroupId.ifBlank { message.id }
+                val claimed = repository.claimProactiveMessages(
+                    messageIds = setOf(message.id),
+                    conversationId = route.conversationId,
+                    deliveryGroupId = groupId,
+                    nowMillis = nowMillis,
+                    leaseMillis = PROACTIVE_DELIVERY_LEASE_MILLIS
+                )
+                if (claimed.isEmpty()) return@forEach
+                val dedupeKey = "global-agent:${message.id}"
+                val persisted = runCatching {
+                    transcriptStore.append(
+                        role = AgentTranscriptRole.ASSISTANT,
+                        text = proactiveTranscriptText(message),
+                        dedupeKey = dedupeKey,
+                        conversationId = route.conversationId,
+                        taskId = message.id
+                    ) || transcriptStore.list(route.conversationId).any { it.dedupeKey == dedupeKey }
+                }.getOrElse { error ->
+                    repository.releaseProactiveDelivery(setOf(message.id), error.message.orEmpty())
+                    false
+                }
+                if (!persisted) {
+                    repository.releaseProactiveDelivery(setOf(message.id), "Transcript persistence failed")
+                    return@forEach
+                }
+                delivered += repository.completeProactiveDelivery(
+                    messageIds = setOf(message.id),
+                    conversationId = route.conversationId,
+                    deliveryGroupId = groupId,
+                    countBudget = claimed.none(GlobalProactiveMessage::deliveryBudgetCounted),
+                    nowMillis = nowMillis
                 )
             }
-        }
-        val digestMessages = messages.filter { it.target == GlobalProactiveTarget.GLOBAL_DIGEST }
-        val digestReady = digestMessages.size >= MIN_DIGEST_ITEMS ||
-            digestMessages.minOfOrNull(GlobalProactiveMessage::createdAtMillis)?.let {
-                System.currentTimeMillis() - it >= DIGEST_MAX_WAIT_MILLIS
-            } == true
-        if (digestReady) {
-            val grouped = digestMessages
-                .sortedByDescending(GlobalProactiveMessage::createdAtMillis)
-                .distinctBy { GlobalAgentText.normalize(it.topic) }
-                .take(MAX_DIGEST_ITEMS)
-                .sortedBy(GlobalProactiveMessage::createdAtMillis)
-            val chinese = grouped.any { GlobalAgentText.containsCjk(it.content) }
-            val title = if (chinese) "Signal \u6458\u8981" else "Signal digest"
-            val content = grouped.mapIndexed { index, message ->
-                "${index + 1}. ${message.content.trim()}"
-            }.joinToString("\n\n").take(MAX_DIGEST_CHARACTERS)
-            val digestKey = GlobalAgentText.stableKey(*digestMessages.map(GlobalProactiveMessage::id).sorted().toTypedArray())
-            val targetConversationId = transcriptStore.agentConversationForTopic(title)?.id
-                ?: transcriptStore.createAgentConversation(title).id
-            val persisted = transcriptStore.append(
-                role = AgentTranscriptRole.ASSISTANT,
-                text = "$title\n\n$content",
-                dedupeKey = "global-agent-digest:$digestKey",
-                conversationId = targetConversationId,
-                taskId = "digest:$digestKey"
-            )
-            if (persisted || transcriptStore.list(targetConversationId).any {
-                    it.dedupeKey == "global-agent-digest:$digestKey"
-                }
-            ) {
-                val deliveredAt = System.currentTimeMillis()
-                delivered += digestMessages.map { message ->
-                    message.copy(
-                        status = GlobalProactiveMessageStatus.DELIVERED,
-                        deliveredAtMillis = deliveredAt,
-                        deliveredConversationId = targetConversationId,
-                        deliveryGroupId = digestKey
-                    )
-                }
-            }
-        }
-        if (delivered.isNotEmpty()) {
-            val deliveredById = delivered.associateBy(GlobalProactiveMessage::id)
-            repository.saveProactiveMessages(repository.proactiveMessages().map { deliveredById[it.id] ?: it })
-            val countedOnDelivery = delivered.filter { deliveredMessage ->
-                messages.firstOrNull { it.id == deliveredMessage.id }?.status == GlobalProactiveMessageStatus.PENDING
-            }
-            if (countedOnDelivery.isNotEmpty()) {
-                val now = countedOnDelivery.maxOf(GlobalProactiveMessage::deliveredAtMillis)
-                val previous = repository.interventionHistory()
-                repository.saveInterventionHistory(previous.copy(
-                    notificationTimestamps = (previous.notificationTimestamps + now).takeLast(100),
-                    lastTopicNotificationMillis = previous.lastTopicNotificationMillis +
-                        countedOnDelivery.associate { GlobalAgentText.normalize(it.topic) to now }
-                ))
-            }
+
+        val currentMessages = pendingProactiveMessages(nowMillis)
+        val staleDigestSources = currentMessages.asSequence()
+            .filter { it.target == GlobalProactiveTarget.GLOBAL_DIGEST }
+            .filter { it.sourceConversationId in excludedConversationIds }
+            .map(GlobalProactiveMessage::id)
+            .toSet()
+        repository.dismissProactiveMessages(staleDigestSources, "Source conversation is unavailable")
+        val digestMessages = GlobalProactiveDeliveryPolicy.digestBatch(
+            messages = pendingProactiveMessages(nowMillis),
+            settings = settings,
+            profile = adaptiveProfile(),
+            history = repository.interventionHistory(),
+            nowMillis = nowMillis,
+            minimumItems = MIN_DIGEST_ITEMS,
+            maximumItems = MAX_DIGEST_ITEMS,
+            maximumWaitMillis = DIGEST_MAX_WAIT_MILLIS
+        )
+        if (digestMessages.isNotEmpty()) {
+            delivered += deliverDigest(transcriptStore, digestMessages, settings, nowMillis)
         }
         delivered
     }
 
+    private fun retractInvalidatedDeliveryArtifacts(transcriptStore: AgentTranscriptStore) {
+        val invalidated = repository.proactiveMessages().filter { message ->
+            message.status == GlobalProactiveMessageStatus.DISMISSED &&
+                message.deliveredAtMillis <= 0L &&
+                message.deliveryConversationId.isNotBlank()
+        }
+        if (invalidated.isEmpty()) return
+        invalidated.groupBy { message ->
+            val dedupeKey = if (
+                message.target == GlobalProactiveTarget.GLOBAL_DIGEST &&
+                message.deliveryGroupId.isNotBlank()
+            ) {
+                "global-agent-digest:${message.deliveryGroupId}"
+            } else {
+                "global-agent:${message.id}"
+            }
+            message.deliveryConversationId to dedupeKey
+        }.forEach { (target, _) ->
+            transcriptStore.deleteByDedupeKey(target.first, target.second)
+        }
+        repository.markDeliveryArtifactsRetracted(invalidated.map(GlobalProactiveMessage::id).toSet())
+    }
+
     private fun resolveTargetConversation(
         transcriptStore: AgentTranscriptStore,
-        message: GlobalProactiveMessage
-    ): String {
-        val settings = repository.settings()
-        return when (message.target) {
-        GlobalProactiveTarget.CURRENT_CONVERSATION -> transcriptStore.conversations(includeArchived = true)
-            .firstOrNull {
-                it.id == message.sourceConversationId &&
-                    it.status == AgentConversationStatus.ACTIVE &&
-                    !it.trackingPaused
+        message: GlobalProactiveMessage,
+        conversations: List<AgentConversation>,
+        excludedConversationIds: Set<String>,
+        settings: GlobalAgentSettings
+    ): GlobalProactiveDeliveryRoute? {
+        val relatedConversationIds = repository.topicGraph()
+            .relevant(message.topic, message.sourceConversationId, 12)
+            .flatMap(GlobalTopicNode::conversationIds)
+            .distinct()
+        val route = GlobalProactiveConversationRouter.resolve(
+            message = message,
+            conversations = conversations,
+            relatedConversationIds = relatedConversationIds,
+            autoCreateConversationsEnabled = settings.autoCreateConversationsEnabled,
+            excludedConversationIds = excludedConversationIds
+        ) ?: return null
+        val resolved = if (route.createConversation) {
+            val conversation = transcriptStore.createAgentConversation(
+                title = route.title,
+                parentConversationId = route.parentConversationId,
+                globalTopicKey = route.topicKey
+            )
+            route.copy(conversationId = conversation.id, createConversation = false)
+        } else route
+        if (resolved.bindTopic) transcriptStore.bindGlobalTopic(resolved.conversationId, resolved.topicKey)
+        return resolved
+    }
+
+    private fun deliverDigest(
+        transcriptStore: AgentTranscriptStore,
+        messages: List<GlobalProactiveMessage>,
+        settings: GlobalAgentSettings,
+        nowMillis: Long
+    ): List<GlobalProactiveMessage> {
+        val chinese = messages.any { GlobalAgentText.containsCjk(it.content) }
+        val title = if (chinese) "Signal \u6458\u8981" else "Signal digest"
+        val topicKey = GlobalProactiveConversationRouter.topicKey("global-digest")
+        val target = transcriptStore.agentConversationForTopic(title, globalTopicKey = topicKey)
+            ?: if (settings.autoCreateConversationsEnabled) {
+                transcriptStore.createAgentConversation(title, globalTopicKey = topicKey)
+            } else {
+                transcriptStore.conversations(includeArchived = true)
+                    .firstOrNull(GlobalProactiveConversationRouter::isEligible)
             }
-            ?.id
-            ?: transcriptStore.agentConversationForTopic(message.topic)?.id
-            ?: transcriptStore.createAgentConversation(message.topic).id
-        GlobalProactiveTarget.NEW_CONVERSATION -> if (settings.autoCreateConversationsEnabled) {
-            transcriptStore.agentConversationForTopic(message.topic)?.id
-                ?: transcriptStore.createAgentConversation(
-                    title = message.topic,
-                    parentConversationId = message.sourceConversationId
-                ).id
-        } else {
-            transcriptStore.conversations(includeArchived = true)
-                .firstOrNull { it.id == message.sourceConversationId && it.status == AgentConversationStatus.ACTIVE }
-                ?.id
-                ?: transcriptStore.activeConversation().id
+            ?: return emptyList()
+        val groupId = messages.firstNotNullOfOrNull { it.deliveryGroupId.takeIf(String::isNotBlank) }
+            ?: GlobalAgentText.stableKey(*messages.map(GlobalProactiveMessage::id).sorted().toTypedArray())
+        val messageIds = messages.map(GlobalProactiveMessage::id).toSet()
+        val claimed = repository.claimProactiveMessages(
+            messageIds = messageIds,
+            conversationId = target.id,
+            deliveryGroupId = groupId,
+            nowMillis = nowMillis,
+            leaseMillis = PROACTIVE_DELIVERY_LEASE_MILLIS
+        )
+        if (claimed.size != messageIds.size) return emptyList()
+        val content = messages.mapIndexed { index, message ->
+            val topicPrefix = message.topic.trim().takeIf(String::isNotBlank)?.let { "[$it] " }.orEmpty()
+            "${index + 1}. $topicPrefix${message.content.trim()}"
+        }.joinToString("\n\n").take(MAX_DIGEST_CHARACTERS)
+        val dedupeKey = "global-agent-digest:$groupId"
+        val persisted = runCatching {
+            transcriptStore.append(
+                role = AgentTranscriptRole.ASSISTANT,
+                text = "$title\n\n$content",
+                dedupeKey = dedupeKey,
+                conversationId = target.id,
+                taskId = "digest:$groupId"
+            ) || transcriptStore.list(target.id).any { it.dedupeKey == dedupeKey }
+        }.getOrElse { error ->
+            repository.releaseProactiveDelivery(messageIds, error.message.orEmpty())
+            false
         }
-        GlobalProactiveTarget.GLOBAL_DIGEST -> error("Digest messages are delivered as a merged batch")
+        if (!persisted) {
+            repository.releaseProactiveDelivery(messageIds, "Transcript persistence failed")
+            return emptyList()
         }
+        return repository.completeProactiveDelivery(
+            messageIds = messageIds,
+            conversationId = target.id,
+            deliveryGroupId = groupId,
+            countBudget = claimed.none(GlobalProactiveMessage::deliveryBudgetCounted),
+            nowMillis = nowMillis
+        )
+    }
+
+    private fun proactiveTranscriptText(message: GlobalProactiveMessage): String = buildString {
+        message.title.trim().takeIf(String::isNotBlank)?.let {
+            append(it)
+            append("\n\n")
+        }
+        append(message.content.trim())
     }
 
     fun dashboard(): GlobalAgentDashboardSnapshot {
@@ -1616,7 +1994,13 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                 it.status !in setOf(GlobalLongHorizonGoalStatus.COMPLETED, GlobalLongHorizonGoalStatus.PAUSED)
             },
             blockedLongHorizonGoalCount = longGoals.count { it.status == GlobalLongHorizonGoalStatus.BLOCKED },
-            pendingInsightCount = pendingProactiveMessages().size,
+            pendingInsightCount = repository.proactiveMessages().count {
+                it.status in setOf(
+                    GlobalProactiveMessageStatus.PENDING,
+                    GlobalProactiveMessageStatus.NOTIFIED,
+                    GlobalProactiveMessageStatus.DELIVERING
+                )
+            },
             feedbackCount = profile.sampleCount,
             learnedTopicCount = profile.topicAffinity.size,
             updatedAtMillis = world.updatedAtMillis
@@ -1631,6 +2015,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         private const val MAX_DIGEST_ITEMS = 12
         private const val MAX_DIGEST_CHARACTERS = 12_000
         private const val DIGEST_MAX_WAIT_MILLIS = 12L * 60L * 60L * 1_000L
+        private const val PROACTIVE_DELIVERY_LEASE_MILLIS = 2L * 60L * 1_000L
         private const val MIN_WAKE_DELAY_MILLIS = 60_000L
         private const val PERSISTENT_CONTEXT_SYNC_VERSION = 2
         private val PROCESS_LOCK = Any()

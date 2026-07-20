@@ -327,17 +327,24 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
                     runCatching { runtime.processPending() }
                     runCatching { runtime.processLongHorizonCycle() }
                 }
-                notifyPendingGlobalMessage(runtime)
+                deliverPendingGlobalMessages(runtime)
                 runCatching { runtime.scheduleNextWake() }
             }
         }
-        notifyPendingGlobalMessage(runtime)
+        deliverPendingGlobalMessages(runtime)
         runCatching { runtime.scheduleNextWake() }
     }
 
-    private fun notifyPendingGlobalMessage(runtime: GlobalSuperAgentRuntime) {
-        if (AppForegroundTracker.isForeground()) return
-        val candidate = runtime.nextNotificationCandidate() ?: return
+    private fun deliverPendingGlobalMessages(runtime: GlobalSuperAgentRuntime) {
+        if (AppForegroundTracker.isForeground()) {
+            GlobalProactiveDeliveryBus.signalReady()
+            return
+        }
+        val delivered = runCatching { runtime.deliverPending(AgentTranscriptStore(this)) }
+            .getOrDefault(emptyList())
+        val candidate = runtime.notificationCandidateForDelivered(
+            delivered.ifEmpty { runtime.unnotifiedDeliveredMessages() }
+        ) ?: return
         showGlobalAgentNotification(candidate)
         runtime.markNotified(candidate.messageIds)
     }
@@ -346,7 +353,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("signalasi_open_agent", true)
-            putExtra("signalasi_agent_conversation_id", message.sourceConversationId)
+            putExtra("signalasi_agent_conversation_id", message.conversationId)
         }
         val pendingIntent = PendingIntent.getActivity(
             this,

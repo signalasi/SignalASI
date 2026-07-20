@@ -32,4 +32,39 @@ class AgentTranscriptDraftPersistenceTest {
         assertEquals(draft.id, AgentTranscriptStore(context).activeConversation().id)
         assertTrue(AgentTranscriptStore(context).conversations(includeArchived = true).any { it.id == draft.id })
     }
+
+    @Test
+    fun agentTopicOwnershipAndDeliveryDedupeSurviveStoreRecreation() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val store = AgentTranscriptStore(context)
+        store.clear()
+        val topicKey = GlobalProactiveConversationRouter.topicKey("Durable project")
+        val conversation = store.createAgentConversation(
+            title = "Durable project",
+            parentConversationId = "source",
+            globalTopicKey = topicKey
+        )
+
+        assertTrue(store.append(
+            role = AgentTranscriptRole.ASSISTANT,
+            text = "First proactive result",
+            dedupeKey = "global-agent:message-1",
+            conversationId = conversation.id
+        ))
+        assertFalse(store.append(
+            role = AgentTranscriptRole.ASSISTANT,
+            text = "Duplicate proactive result",
+            dedupeKey = "global-agent:message-1",
+            conversationId = conversation.id
+        ))
+        assertTrue(store.renameConversation(conversation.id, "Renamed project"))
+
+        val recreated = AgentTranscriptStore(context)
+        val resolved = recreated.agentConversationForTopic(
+            title = "Durable project",
+            globalTopicKey = topicKey
+        )
+        assertEquals(conversation.id, resolved?.id)
+        assertEquals(1, recreated.list(conversation.id).count { it.dedupeKey == "global-agent:message-1" })
+    }
 }

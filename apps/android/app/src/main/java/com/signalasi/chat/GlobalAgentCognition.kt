@@ -1074,7 +1074,8 @@ data class GlobalInterventionDecision(
 
 data class GlobalInterventionHistory(
     val notificationTimestamps: List<Long> = emptyList(),
-    val lastTopicNotificationMillis: Map<String, Long> = emptyMap()
+    val lastTopicNotificationMillis: Map<String, Long> = emptyMap(),
+    val countedDeliveryGroupIds: List<String> = emptyList()
 )
 
 enum class GlobalAgentFeedbackKind {
@@ -1452,7 +1453,7 @@ object GlobalResearchPlanner {
 }
 
 enum class GlobalProactiveTarget { CURRENT_CONVERSATION, NEW_CONVERSATION, GLOBAL_DIGEST }
-enum class GlobalProactiveMessageStatus { PENDING, NOTIFIED, DELIVERED, DISMISSED }
+enum class GlobalProactiveMessageStatus { PENDING, NOTIFIED, DELIVERING, DELIVERED, DISMISSED }
 
 data class GlobalProactiveMessage(
     val id: String = UUID.randomUUID().toString(),
@@ -1466,6 +1467,12 @@ data class GlobalProactiveMessage(
     val causalEventIds: Set<String> = emptySet(),
     val status: GlobalProactiveMessageStatus = GlobalProactiveMessageStatus.PENDING,
     val createdAtMillis: Long = System.currentTimeMillis(),
+    val notifiedAtMillis: Long = 0L,
+    val deliveryConversationId: String = "",
+    val deliveryLeaseExpiresAtMillis: Long = 0L,
+    val deliveryAttemptCount: Int = 0,
+    val deliveryBudgetCounted: Boolean = false,
+    val lastDeliveryError: String = "",
     val deliveredAtMillis: Long = 0L,
     val deliveredConversationId: String = "",
     val deliveryGroupId: String = ""

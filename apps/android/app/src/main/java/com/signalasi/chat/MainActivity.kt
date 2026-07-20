@@ -86,6 +86,7 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlin.math.abs
@@ -287,6 +288,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     // State
     private val handler = Handler(Looper.getMainLooper())
+    private val globalAgentRefreshInProgress = AtomicBoolean(false)
+    private val globalAgentRefreshRequested = AtomicBoolean(false)
+    private val globalProactiveDeliveryListener = GlobalProactiveDeliveryListener {
+        handler.post(::refreshGlobalAgentCognition)
+    }
     private val historyExecutor = Executors.newSingleThreadExecutor()
     private val cloudExecutor = Executors.newCachedThreadPool()
     private val historySaveSeq = AtomicInteger()
@@ -295,6 +301,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentTranscriptStore: AgentTranscriptStore
     private lateinit var globalSuperAgentRuntime: GlobalSuperAgentRuntime
     private var openLatestGlobalInsightWhenDelivered = false
+    private var requestedGlobalInsightConversationId = ""
     private lateinit var agentRunRecorder: AgentRunRecorder
     private lateinit var agentSkillRuntime: AgentSkillRuntime
     private lateinit var agentSkillMatcher: AgentSkillMatcher
@@ -437,7 +444,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentTranscriptStore = AgentTranscriptStore(this)
         globalSuperAgentRuntime = GlobalSuperAgentRuntime.get(this)
         openLatestGlobalInsightWhenDelivered = intent?.getBooleanExtra("signalasi_open_agent", false) == true
+        requestedGlobalInsightConversationId = intent
+            ?.getStringExtra("signalasi_agent_conversation_id")
+            ?.trim()
+            .orEmpty()
         intent?.removeExtra("signalasi_open_agent")
+        intent?.removeExtra("signalasi_agent_conversation_id")
+        requestedGlobalInsightConversationId.takeIf(String::isNotBlank)?.let(agentTranscriptStore::switchConversation)
         agentRunRecorder = AgentRunRecorder(this)
         agentRunEventStore = AgentRunEventStore(this)
         encryptedAgentRegistry = EncryptedAgentRegistry(this)
@@ -592,8 +605,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         super.onNewIntent(intent)
         setIntent(intent)
         if (intent?.getBooleanExtra("signalasi_open_agent", false) == true) {
+            requestedGlobalInsightConversationId = intent
+                .getStringExtra("signalasi_agent_conversation_id")
+                ?.trim()
+                .orEmpty()
             intent.removeExtra("signalasi_open_agent")
+            intent.removeExtra("signalasi_agent_conversation_id")
             openLatestGlobalInsightWhenDelivered = true
+            requestedGlobalInsightConversationId.takeIf(String::isNotBlank)?.let(agentTranscriptStore::switchConversation)
             showMainTab(PAGE_AGENT)
             renderAgentState(mobileNativeAgent.reloadSession())
             refreshGlobalAgentCognition()
@@ -663,6 +682,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         AppForegroundTracker.onActivityResumed()
         AgentConnectorResponseBus.addListener(agentConnectorResponseListener)
+        GlobalProactiveDeliveryBus.addListener(globalProactiveDeliveryListener)
         ScreenPerceptionState.addVisualListener(agentVisualScreenListener)
         val reloadedAgentState = mobileNativeAgent.reloadSession()
         syncAgentRegistrySnapshot()
@@ -703,6 +723,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     override fun onPause() {
         AgentConnectorResponseBus.removeListener(agentConnectorResponseListener)
+        GlobalProactiveDeliveryBus.removeListener(globalProactiveDeliveryListener)
         ScreenPerceptionState.removeVisualListener(agentVisualScreenListener)
         saveChatHistory(sync = true)
         AppForegroundTracker.onActivityPaused()
@@ -2701,6 +2722,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun refreshGlobalAgentCognition() {
         if (!::globalSuperAgentRuntime.isInitialized || !::agentTranscriptStore.isInitialized) return
+        if (!globalAgentRefreshInProgress.compareAndSet(false, true)) {
+            globalAgentRefreshRequested.set(true)
+            return
+        }
         thread(name = "signalasi-global-agent-cognition") {
             runCatching { globalSuperAgentRuntime.processPending() }
             runCatching { globalSuperAgentRuntime.processLongHorizonCycle() }
@@ -2710,25 +2735,40 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             runCatching { globalSuperAgentRuntime.processPending() }
             runCatching { globalSuperAgentRuntime.processLongHorizonCycle() }
             runCatching { globalSuperAgentRuntime.scheduleNextWake() }
-            runOnUiThread {
-                if (isFinishing || isDestroyed) return@runOnUiThread
-                val delivered = runCatching {
-                    globalSuperAgentRuntime.deliverPending(agentTranscriptStore)
-                }.getOrDefault(emptyList())
-                if (openLatestGlobalInsightWhenDelivered) {
-                    delivered.lastOrNull { it.deliveredConversationId.isNotBlank() }
-                        ?.deliveredConversationId
-                        ?.let { targetId ->
-                            if (agentTranscriptStore.switchConversation(targetId)) {
-                                renderedAgentTranscriptIds.clear()
-                                agentOutputList.removeAllViews()
-                            }
-                        }
-                    openLatestGlobalInsightWhenDelivered = false
+            val delivered = runCatching {
+                globalSuperAgentRuntime.deliverPending(agentTranscriptStore)
+            }.getOrDefault(emptyList())
+            if (delivered.isNotEmpty()) {
+                runCatching {
+                    globalSuperAgentRuntime.markNotified(delivered.map(GlobalProactiveMessage::id).toSet())
                 }
-                if (delivered.isNotEmpty() && activeMainTab == PAGE_AGENT) {
-                    refreshAgentConversationHeader()
-                    renderAgentTranscript(agentTranscriptStore.list())
+            }
+            runOnUiThread {
+                try {
+                    if (!isFinishing && !isDestroyed) {
+                        if (openLatestGlobalInsightWhenDelivered) {
+                            (requestedGlobalInsightConversationId.takeIf(String::isNotBlank)
+                                ?: delivered.lastOrNull { it.deliveredConversationId.isNotBlank() }
+                                    ?.deliveredConversationId)
+                                ?.let { targetId ->
+                                    if (agentTranscriptStore.switchConversation(targetId)) {
+                                        renderedAgentTranscriptIds.clear()
+                                        agentOutputList.removeAllViews()
+                                    }
+                                }
+                            openLatestGlobalInsightWhenDelivered = false
+                            requestedGlobalInsightConversationId = ""
+                        }
+                        if (activeMainTab == PAGE_AGENT) {
+                            refreshAgentConversationHeader()
+                            renderAgentTranscript(agentTranscriptStore.list())
+                        }
+                    }
+                } finally {
+                    globalAgentRefreshInProgress.set(false)
+                    if (globalAgentRefreshRequested.getAndSet(false) && !isFinishing && !isDestroyed) {
+                        handler.post(::refreshGlobalAgentCognition)
+                    }
                 }
             }
         }
@@ -4905,8 +4945,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             runCatching { runtime.processPending(250) }
             runCatching { runtime.processLongHorizonCycle() }
             runCatching { runtime.scheduleNextWake() }
+            runtime.deliverPending(agentTranscriptStore).let { delivered ->
+                if (delivered.isNotEmpty()) {
+                    runtime.markNotified(delivered.map(GlobalProactiveMessage::id).toSet())
+                }
+            }
             runOnUiThread {
-                runtime.deliverPending(agentTranscriptStore)
                 renderAgentTranscript(agentTranscriptStore.list())
                 if (controlCenterDestination?.route == ControlCenterRoute.GLOBAL_AGENT) {
                     renderControlCenterGlobalAgentPage()
