@@ -140,6 +140,25 @@ class AgentTranscriptPresentationPolicyTest {
         assertEquals(listOf("user", "implementation", "assistant"), visible.map(AgentTranscriptEntry::text))
     }
 
+    @Test
+    fun hidesRawOnDeviceLinuxSandboxHandoffButKeepsModelNarration() {
+        val entries = listOf(
+            entry("user", AgentTranscriptRole.USER, "conversation", "turn", 1L),
+            entry("Execute in the on-device Linux sandbox", AgentTranscriptRole.PROCESS,
+                "conversation", "turn", 2L, "pending:plan:runtime"),
+            entry("Implement a small Python program", AgentTranscriptRole.PROCESS,
+                "conversation", "turn", 3L, "pending:plan:summary"),
+            entry("assistant", AgentTranscriptRole.ASSISTANT, "conversation", "turn", 4L)
+        )
+
+        val visible = AgentTranscriptPresentationPolicy.collapseProcessGroups(entries)
+
+        assertEquals(
+            listOf("user", "Implement a small Python program", "assistant"),
+            visible.map(AgentTranscriptEntry::text)
+        )
+    }
+
     private fun entry(
         id: String,
         role: AgentTranscriptRole,

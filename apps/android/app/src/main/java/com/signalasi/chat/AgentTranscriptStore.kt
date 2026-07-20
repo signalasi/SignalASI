@@ -134,7 +134,7 @@ object AgentTranscriptPresentationPolicy {
     fun isInternalRuntimeHandoff(entry: AgentTranscriptEntry): Boolean {
         if (entry.role != AgentTranscriptRole.PROCESS || !entry.dedupeKey.startsWith("pending:")) return false
         val text = entry.text.trim().lowercase()
-        return (
+        return text == "execute in the on-device linux sandbox" || (
             ("phone linux" in text || "on-device linux" in text) &&
                 ("run and verify" in text || "execute and verify" in text)
             ) || ("\u624b\u673a\u672c\u5730 linux" in text && "\u6267\u884c\u5e76\u9a8c\u8bc1" in text)
