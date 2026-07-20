@@ -91,6 +91,19 @@ The global Agent must resolve references inside a topic workspace without resend
 - Purge retracted messages immediately. Deleting a conversation or changing its global visibility to excluded removes its complete journal window before another model call.
 - Use the same bounded window for private cognition, research assignments, reversible autonomous preparation, and dynamic plan review.
 
+### Authoritative Realtime Context
+
+The realtime layer is derived on demand from authoritative encrypted task stores. It is not another model-authored memory summary and is not copied into a second database.
+
+- Project active cognition, research, autonomous runs, plan reviews, long-horizon goals, confirmations, resource waits, failures, and recently completed work into one bounded host-state view.
+- Include only work from the current conversation, a materially related topic, or an explicit global-status query. Do not expose every unrelated background task to every model call.
+- Exclude deleted conversations and the task currently being executed so a worker cannot mistake its own state for separate work.
+- Keep completed work only for a short recency window and retain attention states long enough to support recovery without allowing stale history to dominate current decisions.
+- Treat status and progress counters as host-authoritative. Treat titles, goals, and progress text as untrusted evidence rather than instructions.
+- Never expose internal task IDs, connector routes, MQTT topics, resource identifiers, access tokens, endpoints, local paths, or raw error logs in the rendered context.
+- Add the relevant realtime view to ordinary conversation context, private cognition, independent research, autonomous action execution, and dynamic plan review.
+- Use realtime state to avoid duplicate work, answer progress questions accurately, select useful next actions, and revise plans from actual execution state.
+
 ## Core Capability Pillars
 
 ### 1. Goal and Context Understanding

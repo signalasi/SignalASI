@@ -3,6 +3,8 @@ package com.signalasi.chat
 object GlobalAgentEvidenceLifecyclePolicy {
     private const val INVALIDATED_REASON = "Source evidence was revised or deleted"
 
+    fun isInvalidatedState(reason: String): Boolean = reason == INVALIDATED_REASON
+
     fun evidenceIdsForConversation(
         conversationId: String,
         cognitionTasks: List<GlobalCognitionTask>,

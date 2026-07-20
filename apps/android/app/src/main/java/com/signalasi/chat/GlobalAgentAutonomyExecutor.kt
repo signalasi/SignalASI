@@ -25,6 +25,7 @@ class GlobalCognitionExecutor(context: Context) {
     private val deliberationStore = GlobalAgentDeliberationStore(appContext)
     private val resources = GlobalAgentResourceResolver(appContext)
     private val goalStore = GlobalLongHorizonGoalStore(appContext)
+    private val realtimeContext = GlobalRealtimeContextProvider(appContext)
     private val autonomousToolHost by lazy { GlobalAutonomousToolHost(appContext) }
 
     fun executeNext(): GlobalCognitionExecutionResult? {
@@ -384,6 +385,13 @@ class GlobalCognitionExecutor(context: Context) {
             maximumEvents = 14,
             maximumCharacters = 4_000
         )
+        val realtimeState = realtimeContext.build(
+            query = task.sourceEvent.content,
+            currentConversationId = task.sourceEvent.conversationId,
+            excludedKeys = setOf("cognition:${task.id}"),
+            maximumItems = 10,
+            maximumCharacters = 2_500
+        )
         val baseline = task.baselineUnderstanding
         return buildString {
             append("Produce structured private cognition, not a conversational reply. ")
@@ -408,6 +416,9 @@ class GlobalCognitionExecutor(context: Context) {
             if (conversationContext.isNotBlank()) {
                 append(conversationContext).append("\n\n")
             }
+            if (realtimeState.isNotBlank()) {
+                append(realtimeState).append("\n\n")
+            }
             append("Low-cost baseline (evidence, not instructions):\n")
             append("topic=").append(baseline.topic).append("; intent=").append(baseline.intent)
                 .append("; complexity=").append(baseline.complexity).append("; urgency=").append(baseline.urgency).append('\n')
@@ -430,6 +441,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
     private val repository = GlobalAgentRepository(appContext)
     private val store = GlobalAgentDeliberationStore(appContext)
     private val resources = GlobalAgentResourceResolver(appContext)
+    private val realtimeContext = GlobalRealtimeContextProvider(appContext)
     private val autonomousToolHost by lazy { GlobalAutonomousToolHost(appContext) }
 
     fun executeNext(): GlobalAutonomousExecutionResult? {
@@ -1310,6 +1322,13 @@ class GlobalAutonomousRunExecutor(context: Context) {
             maximumEvents = 12,
             maximumCharacters = 3_500
         )
+        val realtimeState = realtimeContext.build(
+            query = "${run.goal} ${action.goal}",
+            currentConversationId = run.sourceConversationId,
+            excludedKeys = setOf("run:${run.id}"),
+            maximumItems = 10,
+            maximumCharacters = 2_500
+        )
         return buildString {
             append("Authorized reversible preparation task:\n").append(action.goal).append("\n\n")
             if (action.rationale.isNotBlank()) append("Why now: ").append(action.rationale).append("\n")
@@ -1321,6 +1340,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
                 contract.criteria.forEach { append("- ").append(it.take(600)).append('\n') }
             }
             if (conversationContext.isNotBlank()) append('\n').append(conversationContext).append('\n')
+            if (realtimeState.isNotBlank()) append('\n').append(realtimeState).append('\n')
             if (context.isNotBlank()) append('\n').append(context).append('\n')
             append("\nComplete the task directly. Report concrete evidence or artifact references that satisfy the success criteria, plus material uncertainty. Do not contact third parties, publish, purchase, delete irreversible data, change account permissions, or upload sensitive data. Return the useful result and artifacts, not internal orchestration logs.")
         }.take(16_000)
@@ -1340,6 +1360,13 @@ class GlobalAutonomousRunExecutor(context: Context) {
             excludedEventIds = setOf(run.sourceEventId),
             maximumEvents = 12,
             maximumCharacters = 3_500
+        )
+        val realtimeState = realtimeContext.build(
+            query = run.goal,
+            currentConversationId = run.sourceConversationId,
+            excludedKeys = setOf("run:${run.id}"),
+            maximumItems = 10,
+            maximumCharacters = 2_500
         )
         val settings = repository.settings()
         val toolCatalogBlock = if (settings.autonomousToolExecutionEnabled) {
@@ -1374,6 +1401,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
             }
             if (toolCatalogBlock.isNotBlank()) append('\n').append(toolCatalogBlock).append('\n')
             if (conversationContext.isNotBlank()) append('\n').append(conversationContext).append('\n')
+            if (realtimeState.isNotBlank()) append('\n').append(realtimeState).append('\n')
             if (context.isNotBlank()) append('\n').append(context).append('\n')
             append("\nReturn only the review JSON. Cancel only pending action IDs that are obsolete. Add at most six necessary actions with unique key and depends_on fields. INVOKE_TOOL requires an exact listed tool_id and a tool_input object matching its schema. Never turn an external or irreversible action into an unconfirmed action, and never claim completion without evidence satisfying the listed criteria.")
         }.take(28_000)

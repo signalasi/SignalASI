@@ -1188,6 +1188,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     private val longHorizonCoordinator by lazy { GlobalLongHorizonCoordinator(appContext) }
     private val longHorizonStore by lazy { GlobalLongHorizonGoalStore(appContext) }
     private val proactiveDiscoveryCoordinator by lazy { GlobalProactiveDiscoveryCoordinator(appContext) }
+    private val realtimeContext by lazy { GlobalRealtimeContextProvider(appContext) }
 
     init {
         val settings = repository.settings()
@@ -1417,13 +1418,24 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
 
     fun augmentContext(context: AgentConversationContext, query: String): AgentConversationContext {
         if (context.privateMode) return context.copy(globalContext = "")
-        val block = GlobalAgentContextSelector.buildWithGraph(
+        val durableContext = GlobalAgentContextSelector.buildWithGraph(
             repository.loadWorld(),
             repository.topicGraph(),
             query,
-            context.conversationId
+            context.conversationId,
+            maxCharacters = 5_500
         )
-        return context.copy(globalContext = block)
+        val realtimeState = realtimeContext.build(
+            query = query,
+            currentConversationId = context.conversationId,
+            maximumItems = 10,
+            maximumCharacters = 2_500
+        )
+        return context.copy(globalContext = listOf(durableContext, realtimeState)
+            .filter(String::isNotBlank)
+            .joinToString("\n\n")
+            .take(8_000)
+            .trim())
     }
 
     fun worldSnapshot(): PersonalWorldModel = repository.loadWorld()
