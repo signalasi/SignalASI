@@ -43,6 +43,7 @@ class GlobalCognitionExecutor(context: Context) {
             .filterNot { it in task.attemptedResourceIds }
         val resourceId = candidates.firstOrNull().orEmpty()
         if (resourceId.isBlank()) return waitForResource(task, "No trusted reasoning resource is currently available")
+        val prompt = buildPrompt(task, toolCatalogBlock)
         val cloud = resources.cloudContact(resourceId)
         if (cloud != null) {
             val ownerKey = cognitionBudgetOwner(task)
@@ -50,21 +51,32 @@ class GlobalCognitionExecutor(context: Context) {
                 GlobalModelCallKind.COGNITION,
                 ownerKey,
                 GlobalCognitionTaskPolicy.LEASE_MILLIS,
-                settings
+                settings,
+                resourceId,
+                GlobalModelUsageEstimator.estimateTokens(COGNITION_SYSTEM_PROMPT, prompt)
             )
             if (!permit.granted) return waitForModelBudget(task, permit)
             val running = markRunning(task, resourceId, 0L)
             val startedAt = System.currentTimeMillis()
-            val response = try {
-                runCatching {
-                    CloudModelClient.sendStructured(
-                        appContext,
-                        cloud,
-                        COGNITION_SYSTEM_PROMPT,
-                        buildPrompt(running, toolCatalogBlock)
-                    )
-                }
-            } finally {
+            val runningPrompt = buildPrompt(running, toolCatalogBlock)
+            val response = runCatching {
+                CloudModelClient.sendStructuredWithUsage(
+                    appContext,
+                    cloud,
+                    COGNITION_SYSTEM_PROMPT,
+                    runningPrompt
+                )
+            }
+            response.getOrNull()?.let { usage ->
+                modelCallBudget.complete(
+                    GlobalModelCallKind.COGNITION,
+                    ownerKey,
+                    usage.inputTokens,
+                    usage.outputTokens,
+                    usage.costMicros,
+                    usage.text
+                )
+            } ?: run {
                 modelCallBudget.release(GlobalModelCallKind.COGNITION, ownerKey)
             }
             AgentResourceHealthStore(appContext).record(
@@ -73,7 +85,7 @@ class GlobalCognitionExecutor(context: Context) {
                 System.currentTimeMillis() - startedAt
             )
             return if (response.isSuccess) {
-                complete(running, response.getOrNull().orEmpty(), resourceId)
+                complete(running, response.getOrNull()?.text.orEmpty(), resourceId)
             } else retryOrFail(running, naturalFailure(response.exceptionOrNull()))
         }
         val contactId = resources.resolvePairedContact(resourceId)
@@ -85,7 +97,9 @@ class GlobalCognitionExecutor(context: Context) {
             GlobalModelCallKind.COGNITION,
             ownerKey,
             GlobalCognitionTaskPolicy.LEASE_MILLIS,
-            settings
+            settings,
+            resourceId,
+            GlobalModelUsageEstimator.estimateTokens(COGNITION_SYSTEM_PROMPT, prompt)
         )
         if (!permit.granted) return waitForModelBudget(task, permit)
         val sourceMessageId = correlationId("cognition", task.id)
@@ -111,7 +125,14 @@ class GlobalCognitionExecutor(context: Context) {
         val task = deliberationStore.cognitionTasks().firstOrNull {
             it.status == GlobalCognitionTaskStatus.RUNNING && it.sourceMessageId == response.sourceMessageId
         } ?: return false
-        modelCallBudget.release(GlobalModelCallKind.COGNITION, cognitionBudgetOwner(task))
+        modelCallBudget.complete(
+            GlobalModelCallKind.COGNITION,
+            cognitionBudgetOwner(task),
+            response.inputTokens,
+            response.outputTokens,
+            response.costMicros,
+            response.content
+        )
         if (!response.success) retryOrFail(task, response.content.ifBlank { "The reasoning Agent failed" })
         else complete(task, response.content, task.resourceId.ifBlank { response.contactId })
         return true
@@ -633,7 +654,14 @@ class GlobalAutonomousRunExecutor(context: Context) {
                 candidate.review.sourceMessageId == response.sourceMessageId
         }
         if (reviewRun != null) {
-            modelCallBudget.release(GlobalModelCallKind.PLAN_REVIEW, reviewBudgetOwner(reviewRun))
+            modelCallBudget.complete(
+                GlobalModelCallKind.PLAN_REVIEW,
+                reviewBudgetOwner(reviewRun),
+                response.inputTokens,
+                response.outputTokens,
+                response.costMicros,
+                response.content
+            )
             if (response.success && response.content.isNotBlank()) {
                 completePlanReview(reviewRun, response.content)
             } else {
@@ -651,7 +679,14 @@ class GlobalAutonomousRunExecutor(context: Context) {
             }
         } ?: return false
         val action = run.actions.first { it.sourceMessageId == response.sourceMessageId }
-        modelCallBudget.release(GlobalModelCallKind.AUTONOMOUS_ACTION, actionBudgetOwner(run, action))
+        modelCallBudget.complete(
+            GlobalModelCallKind.AUTONOMOUS_ACTION,
+            actionBudgetOwner(run, action),
+            response.inputTokens,
+            response.outputTokens,
+            response.costMicros,
+            response.content
+        )
         val assignment = GlobalSpecialistAssignmentPolicy.create(run, action, action.resourceId)
         val latencyMillis = (System.currentTimeMillis() - action.startedAtMillis)
             .takeIf { action.startedAtMillis > 0L }
@@ -749,28 +784,38 @@ class GlobalAutonomousRunExecutor(context: Context) {
                 GlobalModelCallKind.AUTONOMOUS_ACTION,
                 ownerKey,
                 GlobalAutonomousRunPolicy.LEASE_MILLIS,
-                repository.settings()
+                repository.settings(),
+                resourceId,
+                GlobalModelUsageEstimator.estimateTokens(AUTONOMY_SYSTEM_PROMPT, prompt)
             )
             if (!permit.granted) return waitForActionModelBudget(run, action, permit)
             val running = markActionRunning(run, action, resourceId, 0L)
             val startedAt = System.currentTimeMillis()
-            val response = try {
-                runCatching {
-                    CloudModelClient.sendStructured(appContext, cloud, AUTONOMY_SYSTEM_PROMPT, prompt)
-                }
-            } finally {
+            val response = runCatching {
+                CloudModelClient.sendStructuredWithUsage(appContext, cloud, AUTONOMY_SYSTEM_PROMPT, prompt)
+            }
+            response.getOrNull()?.let { usage ->
+                modelCallBudget.complete(
+                    GlobalModelCallKind.AUTONOMOUS_ACTION,
+                    ownerKey,
+                    usage.inputTokens,
+                    usage.outputTokens,
+                    usage.costMicros,
+                    usage.text
+                )
+            } ?: run {
                 modelCallBudget.release(GlobalModelCallKind.AUTONOMOUS_ACTION, ownerKey)
             }
             resourceHealth.record(
                 "target:$resourceId",
-                response.isSuccess && response.getOrNull().orEmpty().isNotBlank(),
+                response.isSuccess && response.getOrNull()?.text.orEmpty().isNotBlank(),
                 System.currentTimeMillis() - startedAt
             )
-            return if (response.isSuccess && response.getOrNull().orEmpty().isNotBlank()) {
+            return if (response.isSuccess && response.getOrNull()?.text.orEmpty().isNotBlank()) {
                 completeDelegatedResponse(
                     running,
                     running.actions.first { it.id == action.id },
-                    response.getOrNull().orEmpty(),
+                    response.getOrNull()?.text.orEmpty(),
                     assignment
                 )
             } else failOrRetryAction(
@@ -790,7 +835,9 @@ class GlobalAutonomousRunExecutor(context: Context) {
             GlobalModelCallKind.AUTONOMOUS_ACTION,
             ownerKey,
             GlobalAutonomousRunPolicy.LEASE_MILLIS,
-            repository.settings()
+            repository.settings(),
+            resourceId,
+            GlobalModelUsageEstimator.estimateTokens(AUTONOMY_SYSTEM_PROMPT, prompt)
         )
         if (!permit.granted) return waitForActionModelBudget(selected, selectedAction, permit)
         val sourceMessageId = correlationId(run.id, action.id)
@@ -1198,19 +1245,29 @@ class GlobalAutonomousRunExecutor(context: Context) {
                 GlobalModelCallKind.PLAN_REVIEW,
                 ownerKey,
                 GlobalAutonomousReplanPolicy.LEASE_MILLIS,
-                repository.settings()
+                repository.settings(),
+                resourceId,
+                GlobalModelUsageEstimator.estimateTokens(REPLAN_SYSTEM_PROMPT, prompt)
             )
             if (!permit.granted) return waitForPlanReviewModelBudget(run, permit)
             val running = markPlanReviewRunning(run, resourceId, 0L)
-            val response = try {
-                runCatching {
-                    CloudModelClient.sendStructured(appContext, cloud, REPLAN_SYSTEM_PROMPT, prompt)
-                }
-            } finally {
+            val response = runCatching {
+                CloudModelClient.sendStructuredWithUsage(appContext, cloud, REPLAN_SYSTEM_PROMPT, prompt)
+            }
+            response.getOrNull()?.let { usage ->
+                modelCallBudget.complete(
+                    GlobalModelCallKind.PLAN_REVIEW,
+                    ownerKey,
+                    usage.inputTokens,
+                    usage.outputTokens,
+                    usage.costMicros,
+                    usage.text
+                )
+            } ?: run {
                 modelCallBudget.release(GlobalModelCallKind.PLAN_REVIEW, ownerKey)
             }
-            return if (response.isSuccess && response.getOrNull().orEmpty().isNotBlank()) {
-                completePlanReview(running, response.getOrNull().orEmpty())
+            return if (response.isSuccess && response.getOrNull()?.text.orEmpty().isNotBlank()) {
+                completePlanReview(running, response.getOrNull()?.text.orEmpty())
             } else failOrRetryPlanReview(running, naturalFailure(response.exceptionOrNull()))
         }
         val selected = markPlanReviewRunning(run, resourceId, 0L)
@@ -1223,7 +1280,9 @@ class GlobalAutonomousRunExecutor(context: Context) {
             GlobalModelCallKind.PLAN_REVIEW,
             ownerKey,
             GlobalAutonomousReplanPolicy.LEASE_MILLIS,
-            repository.settings()
+            repository.settings(),
+            resourceId,
+            GlobalModelUsageEstimator.estimateTokens(REPLAN_SYSTEM_PROMPT, prompt)
         )
         if (!permit.granted) return waitForPlanReviewModelBudget(selected, permit)
         val sourceMessageId = correlationId("global-replan", run.id, run.revision.toString())

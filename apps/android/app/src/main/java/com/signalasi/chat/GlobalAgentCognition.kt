@@ -1250,6 +1250,8 @@ data class GlobalAgentSettings(
     val allowMeteredBackgroundResearch: Boolean = false,
     val dailyBackgroundModelCallBudget: Int = 48,
     val maxConcurrentBackgroundModelCalls: Int = 3,
+    val dailyBackgroundTokenBudget: Long = 250_000L,
+    val dailyBackgroundReportedCostBudgetMicros: Long = 1_000_000L,
     val dailyMessageBudget: Int = 4,
     val dailyDiscoveryTaskBudget: Int = 3,
     val topicCooldownMillis: Long = 6L * 60L * 60L * 1_000L,

@@ -1498,4 +1498,11 @@
     <string name="cc_global_concurrent_model_calls_status">活跃 %1$d / %2$d</string>
     <string name="cc_global_calls_per_day">每 24 小时 %1$d 次</string>
     <string name="cc_global_concurrent_calls">并发 %1$d 次</string>
+    <string name="cc_global_daily_model_tokens_title">每日后台 Token</string>
+    <string name="cc_global_daily_model_tokens_subtitle">滚动 24 小时 Token 上限；优先采用提供方用量，缺失时保守估算</string>
+    <string name="cc_global_daily_model_tokens_status">%1$s / %2$s Token</string>
+    <string name="cc_global_tokens_per_day">每 24 小时 %1$s Token</string>
+    <string name="cc_global_daily_reported_cost_title">每日已报告模型费用</string>
+    <string name="cc_global_daily_reported_cost_subtitle">仅统计提供方报告的费用；当前有 %1$d 次调用未报告价格</string>
+    <string name="cc_global_daily_reported_cost_status">已报告 %1$s / %2$s</string>
 </resources>

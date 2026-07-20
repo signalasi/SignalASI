@@ -505,6 +505,7 @@ object AgentResourceCatalog {
 class AgentResourceRouter(context: Context) {
     private val appContext = context.applicationContext
     private val healthStore = AgentResourceHealthStore(appContext)
+    private val modelUsageStore = GlobalModelCallBudgetStore(appContext)
 
     fun route(goal: String, targets: List<AgentCallableTarget>, tools: List<AgentSystemTool>): AgentRoutingDecision {
         val requirements = AgentTaskRequirementAnalyzer.analyze(goal)
@@ -512,13 +513,19 @@ class AgentResourceRouter(context: Context) {
         val hasPairedDesktop = SignalASILinkProtocol.allServerLinks(appContext).any { it.paired }
         val preferredTargets = preferredTargetOrder(requirements, hasPairedDesktop)
         val registrations = EncryptedAgentRegistry(appContext).list()
+        val observedUsage = modelUsageStore.resourceUsageSnapshots()
         val candidates = AgentResourceCatalog.build(targets, tools)
             .asSequence()
             .map { resource -> projectRegistration(resource, registrations) }
             .filter { it.targetId.isNotBlank() }
             .distinctBy { resource -> "${canonicalTargetId(resource.targetId)}|${resource.failureDomain}" }
             .map { resource ->
-                val candidate = score(resource, requirements, environment)
+                val candidate = score(
+                    resource,
+                    requirements,
+                    environment,
+                    observedUsage[resource.targetId] ?: GlobalModelResourceUsageSnapshot(resource.targetId)
+                )
                 val preference = preferenceBonus(resource.targetId, preferredTargets)
                 candidate.copy(
                     score = candidate.score + preference,
@@ -622,7 +629,8 @@ class AgentResourceRouter(context: Context) {
     private fun score(
         resource: AgentResourceDescriptor,
         requirements: AgentTaskRequirements,
-        environment: AgentRuntimeEnvironment
+        environment: AgentRuntimeEnvironment,
+        observedUsage: GlobalModelResourceUsageSnapshot
     ): AgentResourceCandidate {
         val reasons = mutableListOf<String>()
         if (resource.status != AgentConnectorStatus.AVAILABLE) {
@@ -696,6 +704,14 @@ class AgentResourceRouter(context: Context) {
         if (requirements.estimatedInputTokens > 1_000 && resource.cost > AgentResourceCost.LOW) {
             score -= (requirements.estimatedInputTokens / 100).coerceAtMost(120)
         }
+        if (observedUsage.averageTotalTokens > 0L) {
+            val multiplier = if (requirements.mode == AgentRoutingMode.ECONOMY) 2 else 1
+            score -= ((observedUsage.averageTotalTokens / 1_000L).coerceAtMost(60L) * multiplier).toInt()
+        }
+        if (observedUsage.averageReportedCostMicros > 0L) {
+            val multiplier = if (requirements.mode == AgentRoutingMode.ECONOMY) 2 else 1
+            score -= ((observedUsage.averageReportedCostMicros / 5_000L).coerceAtMost(120L) * multiplier).toInt()
+        }
         if (resource.location != AgentResourceLocation.CLOUD) score += 35
         if (requirements.liveDataRequired && resource.supportsTools) score += 120
         if (requirements.mode == AgentRoutingMode.PRIVATE && resource.location == AgentResourceLocation.PHONE) score += 180
@@ -707,6 +723,12 @@ class AgentResourceRouter(context: Context) {
         reasons += "domain:${resource.failureDomain.ifBlank { "none" }}"
         reasons += "domain_health:${domainHealth.reliabilityPercent}"
         if (health.averageLatencyMs > 0) reasons += "observed_latency_ms:${health.averageLatencyMs}"
+        if (observedUsage.averageTotalTokens > 0L) {
+            reasons += "observed_average_tokens:${observedUsage.averageTotalTokens}"
+        }
+        if (observedUsage.averageReportedCostMicros > 0L) {
+            reasons += "observed_average_reported_cost_micros:${observedUsage.averageReportedCostMicros}"
+        }
         reasons += "latency:${resource.latency.name.lowercase(Locale.US)}"
         reasons += "cost:${resource.cost.name.lowercase(Locale.US)}"
         reasons += "trust:${resource.trust.name.lowercase(Locale.US)}"

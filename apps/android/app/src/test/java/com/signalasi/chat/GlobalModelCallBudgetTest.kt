@@ -149,13 +149,179 @@ class GlobalModelCallBudgetTest {
         assertEquals(1, busy.state.activeLeases.size)
     }
 
+    @Test
+    fun `completion replaces reservation with provider usage and reported cost`() {
+        val acquired = acquire(
+            GlobalModelCallBudgetState(),
+            "call-1",
+            resourceId = "cloud-model:primary",
+            estimatedInputTokens = 120L
+        )
+        val completed = GlobalModelCallBudgetPolicy.complete(
+            state = acquired.state,
+            leaseId = acquired.leaseId,
+            inputTokens = 180L,
+            outputTokens = 45L,
+            reportedCostMicros = 2_500L,
+            responseText = "done",
+            nowMillis = NOW + 500L
+        )
+
+        val dispatch = completed.dispatches.single()
+        assertEquals(180L, dispatch.inputTokens)
+        assertEquals(45L, dispatch.outputTokens)
+        assertEquals(225L, dispatch.totalTokens)
+        assertEquals(2_500L, dispatch.reportedCostMicros)
+        assertFalse(dispatch.usageEstimated)
+        assertEquals(NOW + 500L, dispatch.completedAtMillis)
+        assertTrue(completed.activeLeases.isEmpty())
+    }
+
+    @Test
+    fun `completion estimates missing provider usage without inventing cost`() {
+        val acquired = acquire(
+            GlobalModelCallBudgetState(),
+            "call-1",
+            estimatedInputTokens = 80L
+        )
+        val completed = GlobalModelCallBudgetPolicy.complete(
+            acquired.state,
+            acquired.leaseId,
+            inputTokens = 0L,
+            outputTokens = 0L,
+            reportedCostMicros = 0L,
+            responseText = "A useful answer",
+            nowMillis = NOW + 500L
+        )
+
+        val dispatch = completed.dispatches.single()
+        assertEquals(80L, dispatch.inputTokens)
+        assertTrue(dispatch.outputTokens > 0L)
+        assertEquals(0L, dispatch.reportedCostMicros)
+        assertTrue(dispatch.usageEstimated)
+    }
+
+    @Test
+    fun `token budget is shared and exposes rolling eligibility`() {
+        val first = acquire(
+            GlobalModelCallBudgetState(),
+            "call-1",
+            estimatedInputTokens = 9_000L,
+            dailyTokenLimit = 10_000L
+        )
+        val completed = GlobalModelCallBudgetPolicy.complete(
+            first.state,
+            first.leaseId,
+            inputTokens = 9_000L,
+            outputTokens = 900L,
+            reportedCostMicros = 0L,
+            responseText = "done",
+            nowMillis = NOW + 100L
+        )
+        val denied = acquire(
+            completed,
+            "call-2",
+            estimatedInputTokens = 500L,
+            dailyTokenLimit = 10_000L,
+            nowMillis = NOW + 200L
+        )
+
+        assertFalse(denied.granted)
+        assertEquals(GlobalModelCallBudgetDenial.TOKEN_LIMIT, denied.denial)
+        assertEquals(NOW + GlobalModelCallBudgetPolicy.WINDOW_MILLIS, denied.nextEligibleAtMillis)
+    }
+
+    @Test
+    fun `first oversized request is admitted then blocks later calls`() {
+        val oversized = acquire(
+            GlobalModelCallBudgetState(),
+            "call-1",
+            estimatedInputTokens = 20_000L,
+            dailyTokenLimit = 10_000L
+        )
+        assertTrue(oversized.granted)
+
+        val released = GlobalModelCallBudgetPolicy.release(oversized.state, oversized.leaseId, NOW + 1L)
+        val next = acquire(
+            released,
+            "call-2",
+            estimatedInputTokens = 1L,
+            dailyTokenLimit = 10_000L,
+            nowMillis = NOW + 2L
+        )
+        assertFalse(next.granted)
+        assertEquals(GlobalModelCallBudgetDenial.TOKEN_LIMIT, next.denial)
+    }
+
+    @Test
+    fun `reported cost cap ignores unknown price and blocks reported spend`() {
+        val first = acquire(
+            GlobalModelCallBudgetState(),
+            "call-1",
+            dailyReportedCostLimitMicros = 10_000L
+        )
+        val completed = GlobalModelCallBudgetPolicy.complete(
+            first.state,
+            first.leaseId,
+            inputTokens = 10L,
+            outputTokens = 5L,
+            reportedCostMicros = 10_000L,
+            responseText = "done",
+            nowMillis = NOW + 100L
+        )
+        val denied = acquire(
+            completed,
+            "call-2",
+            dailyReportedCostLimitMicros = 10_000L,
+            nowMillis = NOW + 200L
+        )
+
+        assertFalse(denied.granted)
+        assertEquals(GlobalModelCallBudgetDenial.REPORTED_COST_LIMIT, denied.denial)
+        assertEquals(NOW + GlobalModelCallBudgetPolicy.WINDOW_MILLIS, denied.nextEligibleAtMillis)
+    }
+
+    @Test
+    fun `resource usage aggregates only matching dispatches`() {
+        val first = acquire(GlobalModelCallBudgetState(), "call-1", resourceId = "model-a")
+        val firstDone = GlobalModelCallBudgetPolicy.complete(
+            first.state, first.leaseId, 100L, 20L, 1_000L, "a", NOW + 1L
+        )
+        val second = acquire(firstDone, "call-2", resourceId = "model-a", nowMillis = NOW + 2L)
+        val secondDone = GlobalModelCallBudgetPolicy.complete(
+            second.state, second.leaseId, 200L, 40L, 3_000L, "b", NOW + 3L
+        )
+        val third = acquire(secondDone, "call-3", resourceId = "model-b", nowMillis = NOW + 4L)
+
+        val usage = GlobalModelCallBudgetPolicy.resourceUsage(third.state.dispatches, "model-a")
+        assertEquals(2, usage.dispatches)
+        assertEquals(150L, usage.averageInputTokens)
+        assertEquals(30L, usage.averageOutputTokens)
+        assertEquals(180L, usage.averageTotalTokens)
+        assertEquals(2_000L, usage.averageReportedCostMicros)
+    }
+
+    @Test
+    fun `usage totals saturate instead of overflowing`() {
+        val dispatches = listOf(
+            GlobalModelCallDispatch("a", GlobalModelCallKind.COGNITION, NOW, inputTokens = Long.MAX_VALUE),
+            GlobalModelCallDispatch("b", GlobalModelCallKind.COGNITION, NOW + 1L, outputTokens = Long.MAX_VALUE)
+        )
+
+        assertEquals(Long.MAX_VALUE, GlobalModelCallBudgetPolicy.totalTokens(dispatches))
+    }
+
     private fun acquire(
         state: GlobalModelCallBudgetState,
         ownerKey: String,
         kind: GlobalModelCallKind = GlobalModelCallKind.COGNITION,
         dailyLimit: Int = 48,
         concurrencyLimit: Int = 3,
-        nowMillis: Long = NOW
+        nowMillis: Long = NOW,
+        resourceId: String = "",
+        estimatedInputTokens: Long = 0L,
+        dailyTokenLimit: Long = GlobalModelCallBudgetPolicy.MAX_DAILY_TOKEN_LIMIT,
+        dailyReportedCostLimitMicros: Long = 0L
     ): GlobalModelCallBudgetDecision = GlobalModelCallBudgetPolicy.acquire(
         state = state,
         leaseId = GlobalModelCallBudgetStore.leaseId(kind, ownerKey),
@@ -164,7 +330,11 @@ class GlobalModelCallBudgetTest {
         leaseMillis = LEASE_MILLIS,
         dailyLimit = dailyLimit,
         concurrencyLimit = concurrencyLimit,
-        nowMillis = nowMillis
+        nowMillis = nowMillis,
+        resourceId = resourceId,
+        estimatedInputTokens = estimatedInputTokens,
+        dailyTokenLimit = dailyTokenLimit,
+        dailyReportedCostLimitMicros = dailyReportedCostLimitMicros
     )
 
     private companion object {

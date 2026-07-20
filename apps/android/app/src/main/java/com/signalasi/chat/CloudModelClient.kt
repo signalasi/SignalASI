@@ -45,8 +45,39 @@ object CloudModelClient {
     }
 
     fun sendStructured(context: Context, contact: JSONObject, systemPrompt: String, prompt: String): String {
+        return sendStructuredWithUsage(context, contact, systemPrompt, prompt).text
+    }
+
+    fun sendStructuredWithUsage(
+        context: Context,
+        contact: JSONObject,
+        systemPrompt: String,
+        prompt: String
+    ): CloudModelResponse {
+        validateContact(context, contact)
         val turn = ChatMessage(0L, prompt, true, Contact("me", context.getString(R.string.chat_me), ""))
-        return send(context, contact, listOf(turn), systemPrompt.take(4_000), null)
+        val boundedSystemPrompt = systemPrompt.take(4_000)
+        return when (contact.optString("cloud_api_style", "openai")) {
+            "anthropic" -> sendAnthropicWithUsage(
+                context,
+                contact,
+                CloudWebGrounding.enrich(listOf(turn)),
+                boundedSystemPrompt
+            )
+            "gemini" -> sendGeminiWithUsage(
+                context,
+                contact,
+                CloudWebGrounding.enrich(listOf(turn)),
+                boundedSystemPrompt
+            )
+            else -> sendOpenAiCompatibleWithUsage(
+                context,
+                contact,
+                listOf(turn),
+                boundedSystemPrompt,
+                null
+            )
+        }
     }
 
     fun nativeToolAdapter(

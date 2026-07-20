@@ -1442,6 +1442,8 @@ class GlobalAgentRepository(context: Context) {
         .put("allow_metered_background_research", settings.allowMeteredBackgroundResearch)
         .put("daily_background_model_call_budget", settings.dailyBackgroundModelCallBudget)
         .put("max_concurrent_background_model_calls", settings.maxConcurrentBackgroundModelCalls)
+        .put("daily_background_token_budget", settings.dailyBackgroundTokenBudget)
+        .put("daily_background_reported_cost_budget_micros", settings.dailyBackgroundReportedCostBudgetMicros)
         .put("daily_message_budget", settings.dailyMessageBudget)
         .put("daily_discovery_task_budget", settings.dailyDiscoveryTaskBudget)
         .put("topic_cooldown_millis", settings.topicCooldownMillis)
@@ -1478,6 +1480,18 @@ class GlobalAgentRepository(context: Context) {
                     GlobalModelCallBudgetPolicy.MIN_CONCURRENCY_LIMIT,
                     GlobalModelCallBudgetPolicy.MAX_CONCURRENCY_LIMIT
                 ),
+            dailyBackgroundTokenBudget = json.optLong("daily_background_token_budget", 250_000L)
+                .coerceIn(
+                    GlobalModelCallBudgetPolicy.MIN_DAILY_TOKEN_LIMIT,
+                    GlobalModelCallBudgetPolicy.MAX_DAILY_TOKEN_LIMIT
+                ),
+            dailyBackgroundReportedCostBudgetMicros = json.optLong(
+                "daily_background_reported_cost_budget_micros",
+                1_000_000L
+            ).coerceIn(
+                GlobalModelCallBudgetPolicy.MIN_DAILY_REPORTED_COST_LIMIT_MICROS,
+                GlobalModelCallBudgetPolicy.MAX_DAILY_REPORTED_COST_LIMIT_MICROS
+            ),
             dailyMessageBudget = json.optInt("daily_message_budget", 4).coerceIn(0, 20),
             dailyDiscoveryTaskBudget = json.optInt("daily_discovery_task_budget", 3).coerceIn(1, 12),
             topicCooldownMillis = json.optLong("topic_cooldown_millis", 6L * 60L * 60L * 1_000L)

@@ -176,6 +176,9 @@ The realtime layer is derived on demand from authoritative encrypted task stores
 - Apply bounded fallbacks without weakening privacy or action confirmation.
 - Prefer deterministic tools for exact operations and specialist agents for code, research, or long-running work.
 - Record observed success, latency, token use, cost, and failure history for future routing.
+- Keep a host-owned encrypted rolling ledger for every global cognition, research, autonomous-action, and plan-review model dispatch. Reserve estimated input tokens before dispatch, replace estimates with provider-reported usage when available, retain an explicit estimated marker otherwise, and never treat missing price data as zero-cost evidence.
+- Enforce one shared 24-hour call budget, token budget, provider-reported spend budget, and concurrency limit across phone cloud models and paired Agents. A first oversized request may finish, but later background work must wait for the exact rolling-window release time; unpublished requests must refund their reservation.
+- Feed bounded per-resource observed token and reported-cost averages back into routing while preserving capability, trust, privacy, quality, health, latency, and user-mode constraints as higher-order policy inputs.
 - Emit capability observations only for material registration, availability, capacity, setup, failure, and recovery changes; repeated heartbeats and same-state health samples must remain silent.
 
 ### 5. Multi-Agent Collaboration

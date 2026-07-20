@@ -4647,6 +4647,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             "global.daily_model_calls" -> showGlobalDailyModelCallBudgetDialog()
             "global.concurrent_model_calls" -> showGlobalConcurrentModelCallBudgetDialog()
+            "global.daily_model_tokens" -> showGlobalDailyModelTokenBudgetDialog()
+            "global.daily_reported_cost" -> showGlobalDailyReportedCostBudgetDialog()
             "global.process_now" -> processGlobalAgentNow()
             "global.world.goals" -> showGlobalWorldItemsDialog(GlobalWorldItemKind.GOAL)
             "global.world.tasks" -> showGlobalWorldItemsDialog(GlobalWorldItemKind.TASK)
@@ -5067,6 +5069,35 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                                     modelBudget.concurrencyLimit
                                 ),
                                 if (modelBudget.activeCalls >= modelBudget.concurrencyLimit) ControlCenterTone.AMBER else ControlCenterTone.GREEN
+                            ),
+                            ControlCenterRowSpec(
+                                "global.daily_model_tokens",
+                                getString(R.string.cc_global_daily_model_tokens_title),
+                                getString(R.string.cc_global_daily_model_tokens_subtitle),
+                                R.drawable.ic_protocol_link,
+                                getString(
+                                    R.string.cc_global_daily_model_tokens_status,
+                                    formatCompactCount(modelBudget.totalTokensInWindow),
+                                    formatCompactCount(modelBudget.dailyTokenLimit)
+                                ),
+                                if (modelBudget.totalTokensInWindow >= modelBudget.dailyTokenLimit) ControlCenterTone.AMBER else ControlCenterTone.VIOLET
+                            ),
+                            ControlCenterRowSpec(
+                                "global.daily_reported_cost",
+                                getString(R.string.cc_global_daily_reported_cost_title),
+                                getString(
+                                    R.string.cc_global_daily_reported_cost_subtitle,
+                                    modelBudget.unpricedDispatches
+                                ),
+                                R.drawable.ic_security_shield,
+                                getString(
+                                    R.string.cc_global_daily_reported_cost_status,
+                                    formatUsdMicros(modelBudget.reportedCostMicrosInWindow),
+                                    formatUsdMicros(modelBudget.dailyReportedCostLimitMicros)
+                                ),
+                                if (modelBudget.dailyReportedCostLimitMicros > 0L &&
+                                    modelBudget.reportedCostMicrosInWindow >= modelBudget.dailyReportedCostLimitMicros
+                                ) ControlCenterTone.AMBER else ControlCenterTone.BLUE
                             )
                         )
                     ),
@@ -5120,6 +5151,46 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .setNegativeButton(R.string.common_cancel, null)
             .show()
     }
+
+    private fun showGlobalDailyModelTokenBudgetDialog() {
+        val runtime = if (::globalSuperAgentRuntime.isInitialized) globalSuperAgentRuntime else GlobalSuperAgentRuntime.get(this)
+        val values = longArrayOf(50_000L, 100_000L, 250_000L, 500_000L, 1_000_000L, 2_000_000L)
+        val current = runtime.settings().dailyBackgroundTokenBudget
+        val selected = values.indices.minByOrNull { kotlin.math.abs(values[it] - current) } ?: 0
+        val labels = values.map { getString(R.string.cc_global_tokens_per_day, formatCompactCount(it)) }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(R.string.cc_global_daily_model_tokens_title)
+            .setSingleChoiceItems(labels, selected) { dialog, index ->
+                updateGlobalAgentSettings { it.copy(dailyBackgroundTokenBudget = values[index]) }
+                dialog.dismiss()
+            }
+            .setNegativeButton(R.string.common_cancel, null)
+            .show()
+    }
+
+    private fun showGlobalDailyReportedCostBudgetDialog() {
+        val runtime = if (::globalSuperAgentRuntime.isInitialized) globalSuperAgentRuntime else GlobalSuperAgentRuntime.get(this)
+        val values = longArrayOf(250_000L, 500_000L, 1_000_000L, 2_000_000L, 5_000_000L, 10_000_000L)
+        val current = runtime.settings().dailyBackgroundReportedCostBudgetMicros
+        val selected = values.indices.minByOrNull { kotlin.math.abs(values[it] - current) } ?: 0
+        val labels = values.map(::formatUsdMicros).toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(R.string.cc_global_daily_reported_cost_title)
+            .setSingleChoiceItems(labels, selected) { dialog, index ->
+                updateGlobalAgentSettings { it.copy(dailyBackgroundReportedCostBudgetMicros = values[index]) }
+                dialog.dismiss()
+            }
+            .setNegativeButton(R.string.common_cancel, null)
+            .show()
+    }
+
+    private fun formatCompactCount(value: Long): String = when {
+        value >= 1_000_000L -> String.format(Locale.US, "%.1fM", value / 1_000_000.0).replace(".0M", "M")
+        value >= 1_000L -> String.format(Locale.US, "%.1fK", value / 1_000.0).replace(".0K", "K")
+        else -> value.toString()
+    }
+
+    private fun formatUsdMicros(value: Long): String = String.format(Locale.US, "$%.2f", value.coerceAtLeast(0L) / 1_000_000.0)
 
     private fun processGlobalAgentNow() {
         val runtime = if (::globalSuperAgentRuntime.isInitialized) globalSuperAgentRuntime else GlobalSuperAgentRuntime.get(this)

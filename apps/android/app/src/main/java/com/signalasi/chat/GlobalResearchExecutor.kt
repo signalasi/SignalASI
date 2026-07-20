@@ -77,9 +77,13 @@ class GlobalResearchExecutor(context: Context) {
                 task.status in setOf(GlobalResearchTaskStatus.RUNNING, GlobalResearchTaskStatus.WAITING_FOR_RESOURCE)
         }
         if (synthesisTask != null) {
-            modelCallBudget.release(
+            modelCallBudget.complete(
                 GlobalModelCallKind.RESEARCH_SYNTHESIS,
-                synthesisBudgetOwner(synthesisTask)
+                synthesisBudgetOwner(synthesisTask),
+                response.inputTokens,
+                response.outputTokens,
+                response.costMicros,
+                response.content
             )
             if (response.success && response.content.isNotBlank()) {
                 complete(synthesisTask, response.content, synthesisTask.researchPlan.synthesisResourceId, synthesisTask.evidenceLedger)
@@ -98,9 +102,13 @@ class GlobalResearchExecutor(context: Context) {
         }
         if (unitTask != null) {
             val unit = unitTask.researchPlan.units.first { it.sourceMessageId == response.sourceMessageId }
-            modelCallBudget.release(
+            modelCallBudget.complete(
                 GlobalModelCallKind.RESEARCH_EVIDENCE,
-                evidenceBudgetOwner(unitTask, unit)
+                evidenceBudgetOwner(unitTask, unit),
+                response.inputTokens,
+                response.outputTokens,
+                response.costMicros,
+                response.content
             )
             if (response.success && response.content.isNotBlank()) {
                 completeUnit(unitTask, unit, response.content, unit.resourceId.ifBlank { response.contactId })
@@ -154,36 +162,47 @@ class GlobalResearchExecutor(context: Context) {
         cloud: JSONObject
     ): UnitDispatchResult {
         val ownerKey = evidenceBudgetOwner(task, unit, unit.attemptCount + 1)
+        val estimatedPrompt = buildUnitPrompt(task, unit)
         val permit = modelCallBudget.acquire(
             GlobalModelCallKind.RESEARCH_EVIDENCE,
             ownerKey,
             GlobalResearchTaskPolicy.leaseMillis(task.depth),
-            repository.settings()
+            repository.settings(),
+            resourceId,
+            GlobalModelUsageEstimator.estimateTokens(RESEARCH_SYSTEM_PROMPT, estimatedPrompt)
         )
         if (!permit.granted) return UnitDispatchResult(task, permit)
         val running = markUnitRunning(task, unit, resourceId, 0L)
         val runningUnit = running.researchPlan.units.first { it.id == unit.id }
         CLOUD_RESEARCH_EXECUTOR.execute {
             val startedAt = System.currentTimeMillis()
-            val response = try {
-                runCatching {
-                    CloudModelClient.sendStructured(
-                        appContext,
-                        cloud,
-                        RESEARCH_SYSTEM_PROMPT,
-                        buildUnitPrompt(running, runningUnit)
-                    )
-                }
-            } finally {
+            val response = runCatching {
+                CloudModelClient.sendStructuredWithUsage(
+                    appContext,
+                    cloud,
+                    RESEARCH_SYSTEM_PROMPT,
+                    buildUnitPrompt(running, runningUnit)
+                )
+            }
+            response.getOrNull()?.let { usage ->
+                modelCallBudget.complete(
+                    GlobalModelCallKind.RESEARCH_EVIDENCE,
+                    ownerKey,
+                    usage.inputTokens,
+                    usage.outputTokens,
+                    usage.costMicros,
+                    usage.text
+                )
+            } ?: run {
                 modelCallBudget.release(GlobalModelCallKind.RESEARCH_EVIDENCE, ownerKey)
             }
-            if (response.isSuccess && response.getOrNull().orEmpty().isNotBlank()) {
+            if (response.isSuccess && response.getOrNull()?.text.orEmpty().isNotBlank()) {
                 AgentResourceHealthStore(appContext).record(
                     "target:$resourceId",
                     true,
                     System.currentTimeMillis() - startedAt
                 )
-                completeUnit(running, runningUnit, response.getOrNull().orEmpty(), resourceId)
+                completeUnit(running, runningUnit, response.getOrNull()?.text.orEmpty(), resourceId)
             } else {
                 AgentResourceHealthStore(appContext).record(
                     "target:$resourceId",
@@ -212,11 +231,14 @@ class GlobalResearchExecutor(context: Context) {
         val topic = AppStore.outgoingTopicForContact(appContext, contactId)
             ?: return UnitDispatchResult(failUnit(task, unit, "The paired research route is unavailable"))
         val ownerKey = evidenceBudgetOwner(task, unit, unit.attemptCount + 1)
+        val estimatedPrompt = buildUnitPrompt(task, unit)
         val permit = modelCallBudget.acquire(
             GlobalModelCallKind.RESEARCH_EVIDENCE,
             ownerKey,
             GlobalResearchTaskPolicy.leaseMillis(task.depth),
-            repository.settings()
+            repository.settings(),
+            resourceId,
+            GlobalModelUsageEstimator.estimateTokens(RESEARCH_SYSTEM_PROMPT, estimatedPrompt)
         )
         if (!permit.granted) return UnitDispatchResult(task, permit)
         val sourceMessageId = correlationId(task.id, unit.id)
@@ -435,30 +457,41 @@ class GlobalResearchExecutor(context: Context) {
         val cloud = cloudContact(resourceId)
         if (cloud != null) {
             val ownerKey = synthesisBudgetOwner(task, plan.synthesisAttemptCount + 1)
+            val estimatedPrompt = buildSynthesisPrompt(task, ledger)
             val permit = modelCallBudget.acquire(
                 GlobalModelCallKind.RESEARCH_SYNTHESIS,
                 ownerKey,
                 GlobalResearchTaskPolicy.leaseMillis(task.depth),
-                repository.settings()
+                repository.settings(),
+                resourceId,
+                GlobalModelUsageEstimator.estimateTokens(SYNTHESIS_SYSTEM_PROMPT, estimatedPrompt)
             )
             if (!permit.granted) return waitForModelBudget(task, permit, releaseClaimAttempt = true)
             val synthesizing = markSynthesisRunning(task, resourceId, 0L, ledger)
             val startedAt = System.currentTimeMillis()
-            val response = try {
-                runCatching {
-                    CloudModelClient.sendStructured(
-                        appContext,
-                        cloud,
-                        SYNTHESIS_SYSTEM_PROMPT,
-                        buildSynthesisPrompt(synthesizing, ledger)
-                    )
-                }
-            } finally {
+            val response = runCatching {
+                CloudModelClient.sendStructuredWithUsage(
+                    appContext,
+                    cloud,
+                    SYNTHESIS_SYSTEM_PROMPT,
+                    buildSynthesisPrompt(synthesizing, ledger)
+                )
+            }
+            response.getOrNull()?.let { usage ->
+                modelCallBudget.complete(
+                    GlobalModelCallKind.RESEARCH_SYNTHESIS,
+                    ownerKey,
+                    usage.inputTokens,
+                    usage.outputTokens,
+                    usage.costMicros,
+                    usage.text
+                )
+            } ?: run {
                 modelCallBudget.release(GlobalModelCallKind.RESEARCH_SYNTHESIS, ownerKey)
             }
-            return if (response.isSuccess && response.getOrNull().orEmpty().isNotBlank()) {
+            return if (response.isSuccess && response.getOrNull()?.text.orEmpty().isNotBlank()) {
                 AgentResourceHealthStore(appContext).record("target:$resourceId", true, System.currentTimeMillis() - startedAt)
-                complete(synthesizing, response.getOrNull().orEmpty(), resourceId, ledger)
+                complete(synthesizing, response.getOrNull()?.text.orEmpty(), resourceId, ledger)
             } else {
                 AgentResourceHealthStore(appContext).record("target:$resourceId", false, System.currentTimeMillis() - startedAt)
                 handleSynthesisFailure(synthesizing, response.exceptionOrNull()?.let(::naturalFailure)
@@ -471,11 +504,14 @@ class GlobalResearchExecutor(context: Context) {
             return handleSynthesisFailure(task, "The synthesis Agent route is unavailable")
         }
         val ownerKey = synthesisBudgetOwner(task, plan.synthesisAttemptCount + 1)
+        val estimatedPrompt = buildSynthesisPrompt(task, ledger)
         val permit = modelCallBudget.acquire(
             GlobalModelCallKind.RESEARCH_SYNTHESIS,
             ownerKey,
             GlobalResearchTaskPolicy.leaseMillis(task.depth),
-            repository.settings()
+            repository.settings(),
+            resourceId,
+            GlobalModelUsageEstimator.estimateTokens(SYNTHESIS_SYSTEM_PROMPT, estimatedPrompt)
         )
         if (!permit.granted) return waitForModelBudget(task, permit, releaseClaimAttempt = true)
         val sourceMessageId = correlationId(task.id, "synthesis-${plan.synthesisAttemptCount}")
