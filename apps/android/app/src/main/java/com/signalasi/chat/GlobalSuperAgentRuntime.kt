@@ -2635,6 +2635,38 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             route.copy(conversationId = conversation.id, createConversation = false)
         } else route
         if (resolved.bindTopic) transcriptStore.bindGlobalTopic(resolved.conversationId, resolved.topicKey)
+        transcriptStore.conversation(resolved.conversationId)
+            ?.let { destination ->
+                GlobalProactiveTopicNoticePolicy.create(message, destination)
+            }
+            ?.let { notice ->
+                transcriptStore.append(
+                    role = AgentTranscriptRole.ASSISTANT,
+                    text = notice.text,
+                    dedupeKey = notice.dedupeKey,
+                    timestampMillis = message.createdAtMillis,
+                    conversationId = notice.parentConversationId,
+                    taskId = notice.taskId,
+                    richOutputJson = AgentRichContentCodec.encode(listOf(
+                        AgentRichBlock(
+                            id = "${notice.taskId}:text",
+                            type = AgentRichBlockType.NOTICE,
+                            text = notice.text
+                        ),
+                        AgentRichBlock(
+                            id = "${notice.taskId}:actions",
+                            type = AgentRichBlockType.ACTIONS,
+                            actions = listOf(AgentRichAction(
+                                id = "${notice.taskId}:open",
+                                label = notice.actionLabel,
+                                verb = "open_conversation",
+                                value = notice.destinationConversationId,
+                                style = "primary"
+                            ))
+                        )
+                    ))
+                )
+            }
         return resolved
     }
 

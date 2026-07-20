@@ -45,6 +45,7 @@ Global findings are not complete when they are merely stored. The host must clos
 - Show a low-interruption new-finding indicator above the composer instead of inserting extra status chatter. Opening the inbox durably marks only delivered findings as viewed.
 - Expose the topic, source workspace, delivery class, urgency, destination, and concise result without leaking internal event IDs or model deliberation.
 - Let the user open the destination and record Helpful, Not relevant, or Too frequent feedback directly from each finding. Negative feedback removes the item; every response updates the adaptive intervention profile and preserves causal provenance.
+- When the Agent creates a durable topic workspace, write one idempotent receipt into the eligible source workspace and include an Open topic action. A restart may recreate the missing receipt, but must never duplicate it; renamed Agent-owned destinations remain addressable through their stable conversation identity.
 
 ### No-Event Proactive Discovery Contract
 

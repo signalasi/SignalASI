@@ -42,6 +42,45 @@ data class GlobalProactiveDeliveryRoute(
     val bindTopic: Boolean = false
 )
 
+data class GlobalProactiveTopicNotice(
+    val parentConversationId: String,
+    val destinationConversationId: String,
+    val dedupeKey: String,
+    val taskId: String,
+    val text: String,
+    val actionLabel: String
+)
+
+object GlobalProactiveTopicNoticePolicy {
+    fun create(
+        message: GlobalProactiveMessage,
+        destination: AgentConversation
+    ): GlobalProactiveTopicNotice? {
+        if (message.target != GlobalProactiveTarget.NEW_CONVERSATION ||
+            !destination.createdByAgent ||
+            destination.parentConversationId.isBlank() ||
+            destination.parentConversationId != message.sourceConversationId ||
+            destination.status != AgentConversationStatus.ACTIVE
+        ) return null
+        val title = destination.title.trim().ifBlank { message.topic.trim() }.take(160)
+        if (title.isBlank()) return null
+        val chinese = GlobalAgentText.containsCjk("$title ${message.content}")
+        val text = if (chinese) {
+            "\u201c$title\u201d\u5df2\u521b\u5efa\u4e3a\u72ec\u7acb\u4e13\u9898\uff0c\u540e\u7eed\u7814\u7a76\u548c\u7ed3\u679c\u4f1a\u7ee7\u7eed\u6574\u7406\u5230\u90a3\u91cc\u3002"
+        } else {
+            "$title now has its own topic workspace. Follow-up research and results will continue there."
+        }
+        return GlobalProactiveTopicNotice(
+            parentConversationId = destination.parentConversationId,
+            destinationConversationId = destination.id,
+            dedupeKey = "global-agent-topic-created:${destination.id}",
+            taskId = "global-agent-topic:${destination.id}",
+            text = text,
+            actionLabel = if (chinese) "\u6253\u5f00\u4e13\u9898" else "Open topic"
+        )
+    }
+}
+
 object GlobalProactiveConversationRouter {
     fun topicKey(topic: String): String = GlobalAgentText.stableKey("global-topic", topic)
 

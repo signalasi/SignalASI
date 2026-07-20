@@ -124,6 +124,47 @@ class GlobalProactiveDeliveryTest {
     }
 
     @Test
+    fun agentCreatedTopicProducesOneSourceWorkspaceNoticeContract() {
+        val destination = conversation(
+            id = "topic-workspace",
+            title = "Runtime reliability",
+            createdByAgent = true,
+            parentConversationId = "source"
+        )
+
+        val notice = GlobalProactiveTopicNoticePolicy.create(
+            message(target = GlobalProactiveTarget.NEW_CONVERSATION),
+            destination
+        )
+
+        assertEquals("source", notice?.parentConversationId)
+        assertEquals("topic-workspace", notice?.destinationConversationId)
+        assertEquals("global-agent-topic-created:topic-workspace", notice?.dedupeKey)
+        assertEquals("Open topic", notice?.actionLabel)
+        assertTrue(notice?.text.orEmpty().contains("Runtime reliability"))
+    }
+
+    @Test
+    fun sourceNoticeCannotBeCreatedForUserOwnedOrUnrelatedWorkspace() {
+        val userOwned = conversation("user-topic", "User topic")
+        val unrelated = conversation(
+            id = "agent-topic",
+            title = "Agent topic",
+            createdByAgent = true,
+            parentConversationId = "different-source"
+        )
+
+        assertNull(GlobalProactiveTopicNoticePolicy.create(
+            message(target = GlobalProactiveTarget.NEW_CONVERSATION),
+            userOwned
+        ))
+        assertNull(GlobalProactiveTopicNoticePolicy.create(
+            message(target = GlobalProactiveTarget.NEW_CONVERSATION),
+            unrelated
+        ))
+    }
+
+    @Test
     fun disabledAutoCreationFallsBackToEligibleSource() {
         val source = conversation("source", "Current work")
 
@@ -236,7 +277,8 @@ class GlobalProactiveDeliveryTest {
         privateMode: Boolean = false,
         trackingPaused: Boolean = false,
         createdByAgent: Boolean = false,
-        globalTopicKey: String = ""
+        globalTopicKey: String = "",
+        parentConversationId: String = ""
     ): AgentConversation = AgentConversation(
         id = id,
         title = title,
@@ -245,7 +287,8 @@ class GlobalProactiveDeliveryTest {
         privateMode = privateMode,
         trackingPaused = trackingPaused,
         createdByAgent = createdByAgent,
-        globalTopicKey = globalTopicKey
+        globalTopicKey = globalTopicKey,
+        parentConversationId = parentConversationId
     )
 
     companion object {

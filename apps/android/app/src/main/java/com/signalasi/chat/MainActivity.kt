@@ -5749,7 +5749,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun openGlobalInsightTopic(item: GlobalProactiveInboxItem) {
-        val destination = agentTranscriptStore.resolveMergedConversationId(item.destinationConversationId) ?: return
+        openAgentConversation(item.destinationConversationId)
+    }
+
+    private fun openAgentConversation(conversationId: String) {
+        val destination = agentTranscriptStore.resolveMergedConversationId(conversationId) ?: return
         agentTranscriptStore.conversation(destination)?.takeIf {
             it.status == AgentConversationStatus.ARCHIVED
         }?.let { agentTranscriptStore.restoreConversation(destination) }
@@ -9084,6 +9088,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             "set_input" -> setAgentRichInput(action.value, submit = false)
             "submit_prompt" -> setAgentRichInput(action.value, submit = true)
+            "open_conversation" -> openAgentConversation(action.value)
             "approve_task", "reject_task" -> runAgentRichTaskDecision(
                 entry,
                 approved = action.verb == "approve_task"

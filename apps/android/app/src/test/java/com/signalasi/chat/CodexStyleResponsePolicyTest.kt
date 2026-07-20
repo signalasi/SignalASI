@@ -40,6 +40,32 @@ class CodexStyleResponsePolicyTest {
     }
 
     @Test
+    fun assistantRichOutputKeepsHostOwnedConversationActions() {
+        val raw = AgentRichContentCodec.encode(listOf(
+            AgentRichBlock(
+                id = "notice",
+                type = AgentRichBlockType.NOTICE,
+                text = "A focused topic workspace is ready."
+            ),
+            AgentRichBlock(
+                id = "actions",
+                type = AgentRichBlockType.ACTIONS,
+                actions = listOf(AgentRichAction(
+                    id = "open",
+                    label = "Open topic",
+                    verb = "open_conversation",
+                    value = "conversation-id"
+                ))
+            )
+        ))
+
+        val blocks = AgentRichContentCodec.decode(CodexStyleResponsePolicy.filterAssistantRichOutput(raw))
+
+        assertEquals(listOf("notice", "actions"), blocks.map(AgentRichBlock::id))
+        assertEquals("open_conversation", blocks.last().actions.single().verb)
+    }
+
+    @Test
     fun assistantTextRemovesToolChatterAndStackFrames() {
         val raw = """
             preparing mcp_fetch
