@@ -215,6 +215,7 @@ The realtime layer is derived on demand from authoritative encrypted task stores
 ### 9. Continuous and Background Operation
 
 - Continue durable tasks through screen changes, app backgrounding, reconnects, and process restart.
+- Resume the global Agent immediately when validated phone networking, MQTT transport, or its authenticated channel recovers. Coalesce duplicate recovery signals, and leave a bounded service-recovery alarm when the foreground service is removed or destroyed so persisted work does not depend on an open UI.
 - Support schedules, event triggers, notifications, incoming messages, and long-running remote jobs.
 - Report meaningful state transitions and only notify the user when attention or a result is available.
 - Enforce battery, network, privacy, and execution budgets.

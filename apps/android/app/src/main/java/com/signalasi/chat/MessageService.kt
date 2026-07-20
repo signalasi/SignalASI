@@ -8,6 +8,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import android.util.Base64
@@ -34,6 +37,8 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
     private val globalResearchExecutor = Executors.newFixedThreadPool(2) { runnable ->
         Thread(runnable, "signalasi-global-research").apply { isDaemon = true }
     }
+    private val recoverySignalGate = GlobalAgentRecoverySignalGate()
+    private var networkRecoveryCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun attachBaseContext(newBase: Context) {
         super.attachBaseContext(AppLanguage.wrap(newBase))
@@ -45,12 +50,13 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         startForeground(NOTIFICATION_ID, serviceNotification())
         SignalASIMqttClient.addListener(this)
         SignalASIMqttClient.connect(this)
+        registerNetworkRecoveryCallback()
         thread(name = "signalasi-runtime-service-autostart") {
             runCatching { AgentEmbeddedRuntimeBootstrap.ensureInstalled(this@MessageService) }
             runCatching { AgentOnDeviceRuntimeLifecycle.ensureRunning(this@MessageService) }
         }
         globalAgentExecutor.scheduleWithFixedDelay(
-            ::processGlobalAgentEvents,
+            ::requestRecoveryCycle,
             0L,
             GLOBAL_AGENT_INTERVAL_SECONDS,
             TimeUnit.SECONDS
@@ -77,7 +83,22 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         return START_STICKY
     }
 
+    override fun onConnectionChanged(isConnected: Boolean) {
+        if (isConnected) requestRecoveryCycle()
+    }
+
+    override fun onSecureChannelChanged(isReady: Boolean) {
+        if (isReady) requestRecoveryCycle()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        scheduleServiceRecoveryWake()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
+        unregisterNetworkRecoveryCallback()
+        scheduleServiceRecoveryWake()
         SignalASIMqttClient.removeListener(this)
         globalAgentExecutor.shutdownNow()
         globalResearchExecutor.shutdownNow()
@@ -116,6 +137,60 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         if (stored.notify) {
             showIncomingNotification(stored)
             ChatHistoryStore.markNotified(this, stored.contactId, stored.messageId)
+        }
+    }
+
+    private fun registerNetworkRecoveryCallback() {
+        val manager = getSystemService(ConnectivityManager::class.java)
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                requestRecoveryCycle()
+            }
+
+            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+                if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+                    requestRecoveryCycle()
+                }
+            }
+        }
+        if (runCatching { manager.registerDefaultNetworkCallback(callback) }.isSuccess) {
+            networkRecoveryCallback = callback
+        }
+    }
+
+    private fun unregisterNetworkRecoveryCallback() {
+        val callback = networkRecoveryCallback ?: return
+        networkRecoveryCallback = null
+        runCatching {
+            getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(callback)
+        }
+    }
+
+    private fun requestRecoveryCycle() {
+        if (!recoverySignalGate.tryAcquire()) return
+        runCatching {
+            globalAgentExecutor.execute {
+                try {
+                    processGlobalAgentEvents()
+                } finally {
+                    recoverySignalGate.release()
+                }
+            }
+        }.onFailure {
+            recoverySignalGate.release()
+            scheduleServiceRecoveryWake()
+        }
+    }
+
+    private fun scheduleServiceRecoveryWake(nowMillis: Long = System.currentTimeMillis()) {
+        val scheduledWorkWake = runCatching {
+            GlobalSuperAgentRuntime.get(this).scheduleNextWake(nowMillis)
+        }.getOrDefault(0L)
+        runCatching {
+            GlobalAgentWakeScheduler.schedule(
+                this,
+                GlobalAgentServiceContinuityPolicy.recoveryWakeAt(nowMillis, scheduledWorkWake)
+            )
         }
     }
 
