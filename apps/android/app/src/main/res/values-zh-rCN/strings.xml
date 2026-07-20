@@ -1485,4 +1485,9 @@
     <string name="cc_global_verification_verified">已验证</string>
     <string name="cc_global_verification_insufficient">证据不足</string>
     <string name="cc_global_verification_contested">存在争议</string>
+    <string name="cc_global_section_resources">资源策略</string>
+    <string name="cc_global_battery_protection_title">后台电量保护</string>
+    <string name="cc_global_battery_protection_subtitle">省电模式或低电量时延后模型推理与自主工作</string>
+    <string name="cc_global_metered_research_title">计费网络研究</string>
+    <string name="cc_global_metered_research_subtitle">允许自主研究使用蜂窝网络或其他计费连接</string>
 </resources>

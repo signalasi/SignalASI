@@ -4639,6 +4639,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "global.toggle_notifications" -> updateGlobalAgentSettings {
                 it.copy(notificationsEnabled = !it.notificationsEnabled)
             }
+            "global.toggle_battery_protection" -> updateGlobalAgentSettings {
+                it.copy(protectBatteryForBackgroundWork = !it.protectBatteryForBackgroundWork)
+            }
+            "global.toggle_metered_research" -> updateGlobalAgentSettings {
+                it.copy(allowMeteredBackgroundResearch = !it.allowMeteredBackgroundResearch)
+            }
             "global.process_now" -> processGlobalAgentNow()
             "global.world.goals" -> showGlobalWorldItemsDialog(GlobalWorldItemKind.GOAL)
             "global.world.tasks" -> showGlobalWorldItemsDialog(GlobalWorldItemKind.TASK)
@@ -5031,6 +5037,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         )
                     ),
                     ControlCenterSectionSpec(
+                        getString(R.string.cc_global_section_resources),
+                        listOf(
+                            ControlCenterRowSpec("global.toggle_battery_protection", getString(R.string.cc_global_battery_protection_title), getString(R.string.cc_global_battery_protection_subtitle), R.drawable.ic_resource_battery, switchValue = settings.protectBatteryForBackgroundWork, showChevron = false, enabled = settings.enabled),
+                            ControlCenterRowSpec("global.toggle_metered_research", getString(R.string.cc_global_metered_research_title), getString(R.string.cc_global_metered_research_subtitle), R.drawable.ic_resource_network, switchValue = settings.allowMeteredBackgroundResearch, showChevron = false, enabled = settings.enabled && settings.autonomousResearchEnabled)
+                        )
+                    ),
+                    ControlCenterSectionSpec(
                         getString(R.string.cc_global_section_privacy),
                         listOf(
                             ControlCenterRowSpec("global.toggle_cloud_cognition", getString(R.string.cc_global_cloud_cognition_title), getString(R.string.cc_global_cloud_cognition_subtitle), R.drawable.ic_security_shield, switchValue = settings.allowCloudCognition, showChevron = false, enabled = settings.enabled && settings.modelUnderstandingEnabled),
@@ -5056,9 +5069,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             runCatching { runtime.processLongHorizonCycle() }
             runCatching { runtime.processProactiveDiscoveryCycle(force = true) }
             repeat(2) {
-                runCatching { runtime.executeCognitionCycle() }
-                runCatching { runtime.executeAutonomousCycle() }
-                runCatching { runtime.executeResearchCycle() }
+                runCatching { runtime.executeCognitionCycle(explicitUserOverride = true) }
+                runCatching { runtime.executeAutonomousCycle(explicitUserOverride = true) }
+                runCatching { runtime.executeResearchCycle(explicitUserOverride = true) }
             }
             runCatching { runtime.processPending(250) }
             runCatching { runtime.processLongHorizonCycle() }

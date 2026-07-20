@@ -1438,6 +1438,8 @@ class GlobalAgentRepository(context: Context) {
         .put("auto_create_conversations_enabled", settings.autoCreateConversationsEnabled)
         .put("notifications_enabled", settings.notificationsEnabled)
         .put("adaptive_learning_enabled", settings.adaptiveLearningEnabled)
+        .put("protect_battery_for_background_work", settings.protectBatteryForBackgroundWork)
+        .put("allow_metered_background_research", settings.allowMeteredBackgroundResearch)
         .put("daily_message_budget", settings.dailyMessageBudget)
         .put("daily_discovery_task_budget", settings.dailyDiscoveryTaskBudget)
         .put("topic_cooldown_millis", settings.topicCooldownMillis)
@@ -1462,6 +1464,8 @@ class GlobalAgentRepository(context: Context) {
             autoCreateConversationsEnabled = json.optBoolean("auto_create_conversations_enabled", true),
             notificationsEnabled = json.optBoolean("notifications_enabled", true),
             adaptiveLearningEnabled = json.optBoolean("adaptive_learning_enabled", true),
+            protectBatteryForBackgroundWork = json.optBoolean("protect_battery_for_background_work", true),
+            allowMeteredBackgroundResearch = json.optBoolean("allow_metered_background_research", false),
             dailyMessageBudget = json.optInt("daily_message_budget", 4).coerceIn(0, 20),
             dailyDiscoveryTaskBudget = json.optInt("daily_discovery_task_budget", 3).coerceIn(1, 12),
             topicCooldownMillis = json.optLong("topic_cooldown_millis", 6L * 60L * 60L * 1_000L)
@@ -2146,21 +2150,39 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         repository.savePersistentContextSyncVersion(PERSISTENT_CONTEXT_SYNC_VERSION)
     }
 
-    fun executeResearchCycle(): GlobalResearchExecutionResult? {
+    fun executeResearchCycle(explicitUserOverride: Boolean = false): GlobalResearchExecutionResult? {
         val settings = repository.settings()
         if (!settings.enabled || !settings.autonomousResearchEnabled) return null
+        val budget = backgroundBudgetDecision(
+            GlobalBackgroundWorkKind.RESEARCH,
+            settings,
+            explicitUserOverride = explicitUserOverride
+        )
+        if (!budget.allowed) return null
         return researchExecutor.executeNext()
     }
 
-    fun executeCognitionCycle(): GlobalCognitionExecutionResult? {
+    fun executeCognitionCycle(explicitUserOverride: Boolean = false): GlobalCognitionExecutionResult? {
         val settings = repository.settings()
         if (!settings.enabled || !settings.modelUnderstandingEnabled) return null
+        val budget = backgroundBudgetDecision(
+            GlobalBackgroundWorkKind.COGNITION,
+            settings,
+            explicitUserOverride = explicitUserOverride
+        )
+        if (!budget.allowed) return null
         return cognitionExecutor.executeNext()
     }
 
-    fun executeAutonomousCycle(): GlobalAutonomousExecutionResult? {
+    fun executeAutonomousCycle(explicitUserOverride: Boolean = false): GlobalAutonomousExecutionResult? {
         val settings = repository.settings()
         if (!settings.enabled || !settings.autonomousPreparationEnabled) return null
+        val budget = backgroundBudgetDecision(
+            GlobalBackgroundWorkKind.AUTONOMOUS_WORK,
+            settings,
+            explicitUserOverride = explicitUserOverride
+        )
+        if (!budget.allowed) return null
         return autonomousRunExecutor.executeNext()
     }
 
@@ -2170,31 +2192,66 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             GlobalAgentWakeScheduler.schedule(appContext, 0L)
             return 0L
         }
+        val environment = runtimeEnvironment()
+        val cognitionBudget = GlobalBackgroundExecutionBudgetPolicy.decide(
+            GlobalBackgroundWorkKind.COGNITION,
+            environment,
+            settings,
+            nowMillis
+        )
+        val researchBudget = GlobalBackgroundExecutionBudgetPolicy.decide(
+            GlobalBackgroundWorkKind.RESEARCH,
+            environment,
+            settings,
+            nowMillis
+        )
+        val autonomousBudget = GlobalBackgroundExecutionBudgetPolicy.decide(
+            GlobalBackgroundWorkKind.AUTONOMOUS_WORK,
+            environment,
+            settings,
+            nowMillis
+        )
         val candidates = buildList {
             repository.nextPendingEventAttemptAt(nowMillis).takeIf { it > 0L }?.let(::add)
             repository.researchTasks().forEach { task ->
                 when (task.status) {
-                    GlobalResearchTaskStatus.QUEUED -> add(nowMillis + MIN_WAKE_DELAY_MILLIS)
+                    GlobalResearchTaskStatus.QUEUED -> add(
+                        if (researchBudget.allowed) nowMillis + MIN_WAKE_DELAY_MILLIS
+                        else researchBudget.nextEligibleAtMillis
+                    )
                     GlobalResearchTaskStatus.RUNNING -> task.leaseExpiresAtMillis.takeIf { it > 0L }?.let(::add)
                     GlobalResearchTaskStatus.SCHEDULED,
-                    GlobalResearchTaskStatus.WAITING_FOR_RESOURCE -> task.nextAttemptAtMillis.takeIf { it > 0L }?.let(::add)
+                    GlobalResearchTaskStatus.WAITING_FOR_RESOURCE -> task.nextAttemptAtMillis.takeIf { it > 0L }?.let {
+                        add(if (researchBudget.allowed) it else maxOf(it, researchBudget.nextEligibleAtMillis))
+                    }
                     else -> Unit
                 }
             }
             deliberationStore.cognitionTasks().forEach { task ->
                 when (task.status) {
-                    GlobalCognitionTaskStatus.QUEUED -> add(nowMillis + MIN_WAKE_DELAY_MILLIS)
+                    GlobalCognitionTaskStatus.QUEUED -> add(
+                        if (cognitionBudget.allowed) nowMillis + MIN_WAKE_DELAY_MILLIS
+                        else cognitionBudget.nextEligibleAtMillis
+                    )
                     GlobalCognitionTaskStatus.RUNNING -> task.leaseExpiresAtMillis.takeIf { it > 0L }?.let(::add)
-                    GlobalCognitionTaskStatus.WAITING_FOR_RESOURCE -> task.nextAttemptAtMillis.takeIf { it > 0L }?.let(::add)
+                    GlobalCognitionTaskStatus.WAITING_FOR_RESOURCE -> task.nextAttemptAtMillis.takeIf { it > 0L }?.let {
+                        add(if (cognitionBudget.allowed) it else maxOf(it, cognitionBudget.nextEligibleAtMillis))
+                    }
                     else -> Unit
                 }
             }
             deliberationStore.autonomousRuns().forEach { run ->
                 when (run.status) {
-                    GlobalAutonomousRunStatus.QUEUED -> add(nowMillis + MIN_WAKE_DELAY_MILLIS)
+                    GlobalAutonomousRunStatus.QUEUED -> add(
+                        if (autonomousBudget.allowed) nowMillis + MIN_WAKE_DELAY_MILLIS
+                        else autonomousBudget.nextEligibleAtMillis
+                    )
                     GlobalAutonomousRunStatus.RUNNING -> {
                         if (GlobalAutonomousActionGraphPolicy.readyActions(run.actions).isNotEmpty()) {
-                            add(nowMillis + MIN_WAKE_DELAY_MILLIS)
+                            add(
+                                if (autonomousBudget.allowed) nowMillis + MIN_WAKE_DELAY_MILLIS
+                                else autonomousBudget.nextEligibleAtMillis
+                            )
                         }
                         run.actions.asSequence()
                             .filter { it.status == GlobalAutonomousActionStatus.RUNNING }
@@ -2205,13 +2262,19 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                     GlobalAutonomousRunStatus.REPLANNING -> {
                         val at = when (run.review.status) {
                             GlobalRunReviewStatus.RUNNING -> run.review.leaseExpiresAtMillis
-                            GlobalRunReviewStatus.PENDING -> nowMillis + MIN_WAKE_DELAY_MILLIS
-                            GlobalRunReviewStatus.WAITING_FOR_RESOURCE -> run.review.nextAttemptAtMillis
+                            GlobalRunReviewStatus.PENDING -> if (autonomousBudget.allowed) {
+                                nowMillis + MIN_WAKE_DELAY_MILLIS
+                            } else autonomousBudget.nextEligibleAtMillis
+                            GlobalRunReviewStatus.WAITING_FOR_RESOURCE -> if (autonomousBudget.allowed) {
+                                run.review.nextAttemptAtMillis
+                            } else maxOf(run.review.nextAttemptAtMillis, autonomousBudget.nextEligibleAtMillis)
                             else -> run.nextAttemptAtMillis
                         }
                         at.takeIf { it > 0L }?.let(::add)
                     }
-                    GlobalAutonomousRunStatus.WAITING_FOR_RESOURCE -> run.nextAttemptAtMillis.takeIf { it > 0L }?.let(::add)
+                    GlobalAutonomousRunStatus.WAITING_FOR_RESOURCE -> run.nextAttemptAtMillis.takeIf { it > 0L }?.let {
+                        add(if (autonomousBudget.allowed) it else maxOf(it, autonomousBudget.nextEligibleAtMillis))
+                    }
                     else -> Unit
                 }
             }
@@ -2264,6 +2327,29 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         GlobalAgentWakeScheduler.schedule(appContext, next)
         return next
     }
+
+    private fun backgroundBudgetDecision(
+        kind: GlobalBackgroundWorkKind,
+        settings: GlobalAgentSettings,
+        nowMillis: Long = System.currentTimeMillis(),
+        explicitUserOverride: Boolean = false
+    ): GlobalBackgroundExecutionDecision = GlobalBackgroundExecutionBudgetPolicy.decide(
+        kind = kind,
+        environment = runtimeEnvironment(),
+        settings = settings,
+        nowMillis = nowMillis,
+        explicitUserOverride = explicitUserOverride
+    )
+
+    private fun runtimeEnvironment(): AgentRuntimeEnvironment = runCatching {
+        AgentRuntimeEnvironmentProbe.probe(appContext)
+    }.getOrDefault(
+        AgentRuntimeEnvironment(
+            charging = true,
+            networkAvailable = true,
+            networkValidated = true
+        )
+    )
 
     fun consumeConnectorResponse(response: AgentConnectorResponse): Boolean =
         cognitionExecutor.consumeConnectorResponse(response) ||

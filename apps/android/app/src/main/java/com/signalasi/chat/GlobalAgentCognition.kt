@@ -1246,6 +1246,8 @@ data class GlobalAgentSettings(
     val autoCreateConversationsEnabled: Boolean = true,
     val notificationsEnabled: Boolean = true,
     val adaptiveLearningEnabled: Boolean = true,
+    val protectBatteryForBackgroundWork: Boolean = true,
+    val allowMeteredBackgroundResearch: Boolean = false,
     val dailyMessageBudget: Int = 4,
     val dailyDiscoveryTaskBudget: Int = 3,
     val topicCooldownMillis: Long = 6L * 60L * 60L * 1_000L,

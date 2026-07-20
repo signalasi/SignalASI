@@ -1576,4 +1576,9 @@
     <string name="cc_global_research_phase_collecting">Collecting evidence</string>
     <string name="cc_global_research_phase_synthesis_pending">Ready to synthesize</string>
     <string name="cc_global_research_phase_synthesizing">Synthesizing</string>
+    <string name="cc_global_section_resources">Resource policy</string>
+    <string name="cc_global_battery_protection_title">Protect battery in background</string>
+    <string name="cc_global_battery_protection_subtitle">Defer model reasoning and autonomous work during power saver or low battery</string>
+    <string name="cc_global_metered_research_title">Research on metered networks</string>
+    <string name="cc_global_metered_research_subtitle">Allow autonomous research to use cellular or another metered connection</string>
 </resources>
