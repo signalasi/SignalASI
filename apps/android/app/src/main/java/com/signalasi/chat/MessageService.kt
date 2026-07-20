@@ -308,6 +308,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         val runtime = GlobalSuperAgentRuntime.get(this)
         runCatching { runtime.processPending() }
         runCatching { runtime.processLongHorizonCycle() }
+        runCatching { runtime.processProactiveDiscoveryCycle() }
         repeat(2) {
             globalResearchExecutor.execute {
                 val cognition = runCatching { runtime.executeCognitionCycle() }.getOrNull()
@@ -326,6 +327,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
                 ) {
                     runCatching { runtime.processPending() }
                     runCatching { runtime.processLongHorizonCycle() }
+                    runCatching { runtime.processProactiveDiscoveryCycle() }
                 }
                 deliverPendingGlobalMessages(runtime)
                 runCatching { runtime.scheduleNextWake() }

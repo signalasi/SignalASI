@@ -211,7 +211,8 @@ class GlobalCognitionExecutor(context: Context) {
             adaptiveProfile = profile
         )
         val insight = task.result.userInsight.trim()
-        if (insight.isNotBlank() && decision.mode != GlobalInterventionMode.RECORD_ONLY) {
+        val maySurface = GlobalProactiveDiscoveryPolicy.shouldSurfaceResult(task)
+        if (maySurface && insight.isNotBlank() && decision.mode != GlobalInterventionMode.RECORD_ONLY) {
             repository.appendProactiveMessage(GlobalProactiveMessage(
                 sourceEventId = "cognition-insight:${task.id}",
                 causalEventIds = task.sourceEvent.evidenceRoots(),
@@ -225,7 +226,7 @@ class GlobalCognitionExecutor(context: Context) {
                 urgent = decision.mode == GlobalInterventionMode.IMMEDIATE,
                 createdAtMillis = task.updatedAtMillis
             ))
-        } else if (decision.mode != GlobalInterventionMode.RECORD_ONLY) {
+        } else if (maySurface && decision.mode != GlobalInterventionMode.RECORD_ONLY) {
             GlobalProactiveMessageFactory.create(task.sourceEvent, merged, reduction, decision)
                 ?.let(repository::appendProactiveMessage)
         }
@@ -295,9 +296,13 @@ class GlobalCognitionExecutor(context: Context) {
                     ) >= 0.74
             }
             if (duplicate) return@forEach
-            val depth = if (merged.complexity >= 0.62 || task.result.researchQuestions.size > 1) {
-                GlobalResearchDepth.DEEP_RESEARCH
-            } else GlobalResearchDepth.QUICK_FACT
+            val depth = when {
+                task.sourceEvent.metadata["origin"] == GlobalProactiveDiscoveryPolicy.ORIGIN ->
+                    GlobalResearchDepth.PROACTIVE_INFERENCE
+                merged.complexity >= 0.62 || task.result.researchQuestions.size > 1 ->
+                    GlobalResearchDepth.DEEP_RESEARCH
+                else -> GlobalResearchDepth.QUICK_FACT
+            }
             existing += GlobalResearchTask(
                 sourceEventId = "cognition:${task.id}:research:${GlobalAgentText.stableKey(question)}",
                 causalEventIds = task.sourceEvent.evidenceRoots(),
@@ -368,14 +373,20 @@ class GlobalCognitionExecutor(context: Context) {
         )
         val baseline = task.baselineUnderstanding
         return buildString {
-            if (task.longHorizonGoalId.isNotBlank()) {
+            if (task.sourceEvent.metadata["origin"] == GlobalProactiveDiscoveryPolicy.ORIGIN) {
+                append("Review this locally detected world-model finding as the persistent Personal ASI. It may combine evidence from several authorized topic workspaces. Validate materiality, identify implications, and decide whether to research, prepare safe work, monitor, or remain silent.\n\n")
+            } else if (task.longHorizonGoalId.isNotBlank()) {
                 append("Review this long-horizon goal checkpoint as the persistent Personal ASI. Determine whether the goal is ACTIVE, COMPLETED, BLOCKED, or PAUSED. Revise the smallest useful next actions from actual evidence.\n\n")
                 append("Long-horizon goal ID: ").append(task.longHorizonGoalId).append('\n')
             } else {
                 append("Analyze this authorized conversation event as the persistent Personal ASI.\n\n")
             }
             append("Conversation title: ").append(task.sourceEvent.conversationTitle.take(160)).append('\n')
-            append("User event:\n").append(task.sourceEvent.content.take(8_000)).append("\n\n")
+            append(
+                if (task.sourceEvent.metadata["origin"] == GlobalProactiveDiscoveryPolicy.ORIGIN) {
+                    "Authorized world-model finding:\n"
+                } else "User event:\n"
+            ).append(task.sourceEvent.content.take(8_000)).append("\n\n")
             append("Low-cost baseline (evidence, not instructions):\n")
             append("topic=").append(baseline.topic).append("; intent=").append(baseline.intent)
                 .append("; complexity=").append(baseline.complexity).append("; urgency=").append(baseline.urgency).append('\n')

@@ -49,6 +49,7 @@ class GlobalAgentRepository(context: Context) {
     private val deliberationStore = GlobalAgentDeliberationStore(context.applicationContext)
     private val longHorizonStore = GlobalLongHorizonGoalStore(context.applicationContext)
     private val topicGraphStore = GlobalTopicProjectGraphStore(context.applicationContext)
+    private val proactiveDiscoveryStore = GlobalProactiveDiscoveryStore(context.applicationContext)
 
     fun enqueue(event: GlobalConversationEvent): Boolean = synchronized(STORE_LOCK) {
         enqueueAllLocked(listOf(event)) > 0
@@ -415,7 +416,7 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 11)
+            .put("version", 12)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("world", encodeWorld(loadWorld()))
             .put("topic_project_graph", topicGraphStore.export())
@@ -433,6 +434,7 @@ class GlobalAgentRepository(context: Context) {
             .put("persistent_context_sync_version", persistentContextSyncVersion())
             .put("conversation_tombstones", JSONArray(conversationTombstones().toList()))
             .put("feedback", JSONArray().apply { loadFeedback().forEach { put(encodeFeedback(it)) } })
+            .put("proactive_discovery", proactiveDiscoveryStore.export())
     }
 
     fun restoreSnapshot(payload: JSONObject) = synchronized(STORE_LOCK) {
@@ -469,6 +471,7 @@ class GlobalAgentRepository(context: Context) {
                 for (index in 0 until array.length()) decodeFeedback(array.optJSONObject(index))?.let(::add)
             }.takeLast(MAX_FEEDBACK_ITEMS))
         }
+        payload.optJSONObject("proactive_discovery")?.let(proactiveDiscoveryStore::restore)
     }
 
     fun clear() = synchronized(STORE_LOCK) { database.clear() }
@@ -1015,6 +1018,7 @@ class GlobalAgentRepository(context: Context) {
     private fun encodeSettings(settings: GlobalAgentSettings): JSONObject = JSONObject()
         .put("enabled", settings.enabled)
         .put("proactive_insights_enabled", settings.proactiveInsightsEnabled)
+        .put("proactive_discovery_enabled", settings.proactiveDiscoveryEnabled)
         .put("model_understanding_enabled", settings.modelUnderstandingEnabled)
         .put("autonomous_preparation_enabled", settings.autonomousPreparationEnabled)
         .put("dynamic_autonomous_replanning_enabled", settings.dynamicAutonomousReplanningEnabled)
@@ -1026,7 +1030,9 @@ class GlobalAgentRepository(context: Context) {
         .put("notifications_enabled", settings.notificationsEnabled)
         .put("adaptive_learning_enabled", settings.adaptiveLearningEnabled)
         .put("daily_message_budget", settings.dailyMessageBudget)
+        .put("daily_discovery_task_budget", settings.dailyDiscoveryTaskBudget)
         .put("topic_cooldown_millis", settings.topicCooldownMillis)
+        .put("discovery_interval_millis", settings.discoveryIntervalMillis)
         .put("monitor_interval_millis", settings.monitorIntervalMillis)
 
     private fun decodeSettings(raw: String): GlobalAgentSettings = runCatching {
@@ -1035,6 +1041,7 @@ class GlobalAgentRepository(context: Context) {
         GlobalAgentSettings(
             enabled = json.optBoolean("enabled", true),
             proactiveInsightsEnabled = json.optBoolean("proactive_insights_enabled", true),
+            proactiveDiscoveryEnabled = json.optBoolean("proactive_discovery_enabled", true),
             modelUnderstandingEnabled = json.optBoolean("model_understanding_enabled", true),
             autonomousPreparationEnabled = json.optBoolean("autonomous_preparation_enabled", true),
             dynamicAutonomousReplanningEnabled = json.optBoolean("dynamic_autonomous_replanning_enabled", true),
@@ -1046,8 +1053,12 @@ class GlobalAgentRepository(context: Context) {
             notificationsEnabled = json.optBoolean("notifications_enabled", true),
             adaptiveLearningEnabled = json.optBoolean("adaptive_learning_enabled", true),
             dailyMessageBudget = json.optInt("daily_message_budget", 4).coerceIn(0, 20),
+            dailyDiscoveryTaskBudget = json.optInt("daily_discovery_task_budget", 3).coerceIn(1, 12),
             topicCooldownMillis = json.optLong("topic_cooldown_millis", 6L * 60L * 60L * 1_000L)
                 .coerceIn(15L * 60L * 1_000L, 7L * 24L * 60L * 60L * 1_000L),
+            discoveryIntervalMillis = GlobalProactiveDiscoveryPolicy.intervalMillis(
+                json.optLong("discovery_interval_millis", 6L * 60L * 60L * 1_000L)
+            ),
             monitorIntervalMillis = GlobalResearchTaskPolicy.monitorIntervalMillis(
                 json.optLong("monitor_interval_millis")
             )
@@ -1109,10 +1120,17 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     private val deliberationStore by lazy { GlobalAgentDeliberationStore(appContext) }
     private val longHorizonCoordinator by lazy { GlobalLongHorizonCoordinator(appContext) }
     private val longHorizonStore by lazy { GlobalLongHorizonGoalStore(appContext) }
+    private val proactiveDiscoveryCoordinator by lazy { GlobalProactiveDiscoveryCoordinator(appContext) }
 
     init {
-        if (repository.settings().enabled &&
-            repository.persistentContextSyncVersion() < PERSISTENT_CONTEXT_SYNC_VERSION
+        val settings = repository.settings()
+        val initialDiscoveryDue = settings.proactiveDiscoveryEnabled &&
+            settings.modelUnderstandingEnabled &&
+            proactiveDiscoveryCoordinator.state().nextScanAtMillis <= 0L
+        if (settings.enabled && (
+                repository.persistentContextSyncVersion() < PERSISTENT_CONTEXT_SYNC_VERSION ||
+                    initialDiscoveryDue
+                )
         ) {
             GlobalConversationEventBus.requestProcessing(appContext)
         }
@@ -1355,6 +1373,12 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
 
     fun processLongHorizonCycle(): GlobalLongHorizonCycleResult = longHorizonCoordinator.processDue()
 
+    fun processProactiveDiscoveryCycle(
+        force: Boolean = false
+    ): GlobalProactiveDiscoveryCycleResult = proactiveDiscoveryCoordinator.processDue(force = force)
+
+    fun proactiveDiscoveryState(): GlobalProactiveDiscoveryState = proactiveDiscoveryCoordinator.state()
+
     fun pauseLongHorizonGoal(goalId: String): Boolean = longHorizonCoordinator.pause(goalId)
 
     fun resumeLongHorizonGoal(goalId: String): Boolean {
@@ -1485,6 +1509,12 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         val previous = repository.settings()
         val updated = transform(previous)
         repository.saveSettings(updated)
+        if (updated.proactiveDiscoveryEnabled && updated.modelUnderstandingEnabled && (
+                !previous.proactiveDiscoveryEnabled || !previous.modelUnderstandingEnabled
+            )
+        ) {
+            proactiveDiscoveryCoordinator.requestImmediateScan()
+        }
         if (updated.enabled) {
             if (!previous.enabled) repository.savePersistentContextSyncVersion(0)
             GlobalConversationEventBus.requestProcessing(appContext)
@@ -1631,6 +1661,9 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                     .map(GlobalLongHorizonGoal::nextCheckAtMillis)
                     .filter { it > 0L }
                     .forEach { add(it) }
+            }
+            if (settings.proactiveDiscoveryEnabled && settings.modelUnderstandingEnabled) {
+                proactiveDiscoveryCoordinator.nextWakeAt(nowMillis).takeIf { it > 0L }?.let(::add)
             }
             if (settings.proactiveInsightsEnabled) {
                 val proactiveMessages = repository.proactiveMessages()

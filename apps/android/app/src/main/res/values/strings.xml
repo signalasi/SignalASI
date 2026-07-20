@@ -1439,6 +1439,8 @@
     <string name="cc_global_dynamic_replanning_subtitle">Review real outcomes and revise remaining steps without discarding completed evidence</string>
     <string name="cc_global_long_horizon_toggle_title">Long-horizon planning</string>
     <string name="cc_global_long_horizon_toggle_subtitle">Keep durable goals alive across sessions, restarts, and resource outages</string>
+    <string name="cc_global_discovery_title">Continuous discovery</string>
+    <string name="cc_global_discovery_subtitle">Re-evaluate authorized world-model evidence even when no new message arrives</string>
     <string name="cc_global_proactive_title">Proactive insights</string>
     <string name="cc_global_proactive_subtitle">Surface valuable risks, conflicts, opportunities, and omissions</string>
     <string name="cc_global_research_title">Autonomous research</string>

@@ -14,7 +14,11 @@ object GlobalAgentEvidenceLifecyclePolicy {
         if (conversationId.isBlank()) return emptySet()
         return buildSet {
             cognitionTasks.asSequence()
-                .filter { it.sourceEvent.conversationId == conversationId }
+                .filter {
+                    it.sourceEvent.conversationId == conversationId ||
+                        conversationId in it.sourceEvent.metadata["source_conversation_ids"]
+                            .orEmpty().split(',').map(String::trim)
+                }
                 .forEach { addAll(it.sourceEvent.evidenceRoots()) }
             researchTasks.asSequence()
                 .filter { it.sourceConversationId == conversationId }

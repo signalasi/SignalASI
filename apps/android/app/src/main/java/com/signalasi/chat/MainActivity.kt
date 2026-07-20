@@ -2729,11 +2729,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         thread(name = "signalasi-global-agent-cognition") {
             runCatching { globalSuperAgentRuntime.processPending() }
             runCatching { globalSuperAgentRuntime.processLongHorizonCycle() }
+            runCatching { globalSuperAgentRuntime.processProactiveDiscoveryCycle() }
             runCatching { globalSuperAgentRuntime.executeCognitionCycle() }
             runCatching { globalSuperAgentRuntime.executeAutonomousCycle() }
             runCatching { globalSuperAgentRuntime.executeResearchCycle() }
             runCatching { globalSuperAgentRuntime.processPending() }
             runCatching { globalSuperAgentRuntime.processLongHorizonCycle() }
+            runCatching { globalSuperAgentRuntime.processProactiveDiscoveryCycle() }
             runCatching { globalSuperAgentRuntime.scheduleNextWake() }
             val delivered = runCatching {
                 globalSuperAgentRuntime.deliverPending(agentTranscriptStore)
@@ -4534,6 +4536,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "global.toggle_long_horizon" -> updateGlobalAgentSettings {
                 it.copy(longHorizonPlanningEnabled = !it.longHorizonPlanningEnabled)
             }
+            "global.toggle_discovery" -> updateGlobalAgentSettings {
+                it.copy(proactiveDiscoveryEnabled = !it.proactiveDiscoveryEnabled)
+            }
             "global.toggle_cloud_cognition" -> updateGlobalAgentSettings {
                 it.copy(allowCloudCognition = !it.allowCloudCognition)
             }
@@ -4885,6 +4890,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             ControlCenterRowSpec("global.toggle_autonomous_preparation", getString(R.string.cc_global_autonomous_preparation_title), getString(R.string.cc_global_autonomous_preparation_subtitle), R.drawable.ic_agent_control, switchValue = settings.autonomousPreparationEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_dynamic_replanning", getString(R.string.cc_global_dynamic_replanning_title), getString(R.string.cc_global_dynamic_replanning_subtitle), R.drawable.ic_reset_data, switchValue = settings.dynamicAutonomousReplanningEnabled, showChevron = false, enabled = settings.enabled && settings.autonomousPreparationEnabled),
                             ControlCenterRowSpec("global.toggle_long_horizon", getString(R.string.cc_global_long_horizon_toggle_title), getString(R.string.cc_global_long_horizon_toggle_subtitle), R.drawable.ic_agent_history, switchValue = settings.longHorizonPlanningEnabled, showChevron = false, enabled = settings.enabled),
+                            ControlCenterRowSpec("global.toggle_discovery", getString(R.string.cc_global_discovery_title), getString(R.string.cc_global_discovery_subtitle), R.drawable.ic_tab_discover, switchValue = settings.proactiveDiscoveryEnabled, showChevron = false, enabled = settings.enabled && settings.modelUnderstandingEnabled),
                             ControlCenterRowSpec("global.toggle_proactive", getString(R.string.cc_global_proactive_title), getString(R.string.cc_global_proactive_subtitle), R.drawable.ic_agent_memory, switchValue = settings.proactiveInsightsEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_learning", getString(R.string.cc_global_learning_toggle_title), getString(R.string.cc_global_learning_toggle_subtitle), R.drawable.ic_agent_skill, switchValue = settings.adaptiveLearningEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_research", getString(R.string.cc_global_research_title), getString(R.string.cc_global_research_subtitle), R.drawable.ic_agent_knowledge, switchValue = settings.autonomousResearchEnabled, showChevron = false, enabled = settings.enabled),
@@ -4937,6 +4943,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         thread(name = "signalasi-global-agent-manual") {
             val batch = runCatching { runtime.processPending(250) }.getOrNull()
             runCatching { runtime.processLongHorizonCycle() }
+            runCatching { runtime.processProactiveDiscoveryCycle(force = true) }
             repeat(2) {
                 runCatching { runtime.executeCognitionCycle() }
                 runCatching { runtime.executeAutonomousCycle() }

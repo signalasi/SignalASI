@@ -1216,6 +1216,7 @@ object GlobalAgentLearningPolicy {
 data class GlobalAgentSettings(
     val enabled: Boolean = true,
     val proactiveInsightsEnabled: Boolean = true,
+    val proactiveDiscoveryEnabled: Boolean = true,
     val modelUnderstandingEnabled: Boolean = true,
     val autonomousPreparationEnabled: Boolean = true,
     val dynamicAutonomousReplanningEnabled: Boolean = true,
@@ -1227,7 +1228,9 @@ data class GlobalAgentSettings(
     val notificationsEnabled: Boolean = true,
     val adaptiveLearningEnabled: Boolean = true,
     val dailyMessageBudget: Int = 4,
+    val dailyDiscoveryTaskBudget: Int = 3,
     val topicCooldownMillis: Long = 6L * 60L * 60L * 1_000L,
+    val discoveryIntervalMillis: Long = 6L * 60L * 60L * 1_000L,
     val monitorIntervalMillis: Long = 24L * 60L * 60L * 1_000L
 )
 

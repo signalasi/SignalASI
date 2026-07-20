@@ -40,6 +40,19 @@ Global findings are not complete when they are merely stored. The host must clos
 - Persist the result before notifying. Notifications open the actual destination workspace and are recoverable without repeating old notifications.
 - Preserve feedback provenance from the rendered transcript entry to every contributing proactive message.
 
+### No-Event Proactive Discovery Contract
+
+The global Agent must continue reasoning about accumulated authorized state even when no new conversation event arrives. A local discovery pass periodically reviews the personal world model and durable goal graph for unresolved cross-topic conflicts, material risks, supported opportunities, and stalled goals.
+
+- Scan only shareable, non-expired evidence from active, non-deleted conversations. Local-only or retracted evidence must never enter a delegated discovery prompt.
+- Use deterministic local scoring before model deliberation. Low-value observations remain silent and consume no model budget.
+- Persist the scan cursor, lease, completion time, emitted finding fingerprints, and daily deliberation budget in encrypted storage.
+- Recover an expired scan lease after process death, and use deterministic cognition task IDs so replay cannot dispatch duplicate work.
+- Never deliberate the same unchanged finding twice. Materially changed evidence may be reconsidered after a bounded cooldown; failed tasks may retry only after their own recovery window.
+- Preserve all contributing evidence roots and conversation IDs in the synthetic review event. Deleting any source conversation invalidates pending cognition, research, autonomous work, and proactive output derived from that finding.
+- Route high-value candidates into the existing structured cognition layer. That layer may request proactive inference research, prepare reversible work, update a long-horizon goal, create a topic workspace, or remain silent.
+- Schedule the next scan through the durable wake scheduler so discovery continues across app backgrounding and restart without polling the MQTT transport.
+
 ### Durable Knowledge and Execution Graphs
 
 The global runtime stores three related encrypted graphs rather than treating conversation history as one flat prompt:
