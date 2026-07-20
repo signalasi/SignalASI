@@ -1402,6 +1402,16 @@
     <string name="agent_session_pause_tracking">暂停全局跟踪</string>
     <string name="agent_session_resume_tracking">恢复全局跟踪</string>
     <string name="agent_session_tracking_paused">已暂停跟踪</string>
+    <string name="agent_session_merged">已合并</string>
+    <string name="agent_session_merged_from">来自 %1$s</string>
+    <string name="agent_session_merge_into_original">合并回原会话</string>
+    <string name="agent_session_merge_confirm">将“%1$s”合并回“%2$s”。消息、运行中的任务和迟到回复都会继续写入原会话。</string>
+    <string name="agent_session_merge_confirm_action">合并</string>
+    <string name="agent_session_merge_success">已将 %1$d 条消息合并回原会话</string>
+    <string name="agent_session_merge_target_missing">原会话已不存在</string>
+    <string name="agent_session_merge_already_done">这个会话已经合并</string>
+    <string name="agent_session_merge_privacy_mismatch">不同隐私模式的会话不能合并</string>
+    <string name="agent_session_merge_unavailable">当前会话不能合并</string>
     <string name="agent_global_feedback_helpful">有帮助</string>
     <string name="agent_global_feedback_not_relevant">不相关</string>
     <string name="agent_global_feedback_too_frequent">太频繁</string>

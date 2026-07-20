@@ -150,7 +150,10 @@ data class AgentTranscriptEntry(
     val conversationId: String = "",
     val turnId: String = "",
     val taskId: String = "",
-    val richOutputJson: String = ""
+    val richOutputJson: String = "",
+    val sourceConversationId: String = "",
+    val sourceConversationTitle: String = "",
+    val sourceEntryId: String = ""
 )
 
 data class AgentConversation(
@@ -170,7 +173,9 @@ data class AgentConversation(
     val createdByAgent: Boolean = false,
     val parentConversationId: String = "",
     val trackingPaused: Boolean = false,
-    val globalTopicKey: String = ""
+    val globalTopicKey: String = "",
+    val mergedIntoConversationId: String = "",
+    val mergedAtMillis: Long = 0L
 )
 
 data class AgentConversationContext(
@@ -398,6 +403,55 @@ class AgentTranscriptStore(context: Context) {
 
     @Synchronized
     fun conversation(conversationId: String): AgentConversation? = conversationForEvent(conversationId)
+
+    @Synchronized
+    fun resolveMergedConversationId(conversationId: String): String? {
+        val cleanId = conversationId.trim()
+        if (cleanId.isBlank()) return null
+        val conversations = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]"))
+            .associateBy(AgentConversation::id)
+        if (cleanId !in conversations && draftConversation?.id != cleanId) return null
+        var currentId = cleanId
+        repeat(MAX_MERGE_CHAIN_DEPTH) {
+            val current = conversations[currentId] ?: return currentId
+            val nextId = current.mergedIntoConversationId.trim()
+            if (nextId.isBlank()) return currentId
+            if (nextId == currentId || nextId !in conversations) return null
+            currentId = nextId
+        }
+        return null
+    }
+
+    @Synchronized
+    fun mergeConversationIntoParent(
+        sourceConversationId: String,
+        nowMillis: Long = System.currentTimeMillis()
+    ): AgentConversationMergeResult {
+        val conversations = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]"))
+        val mutation = AgentConversationMergePolicy.mergeIntoParent(
+            conversations = conversations,
+            entries = allEntries(),
+            sourceConversationId = sourceConversationId,
+            nowMillis = nowMillis
+        )
+        if (!mutation.result.merged) return mutation.result
+        val target = mutation.result.targetConversation ?: return mutation.result.copy(
+            merged = false,
+            failure = AgentConversationMergeFailure.TARGET_NOT_FOUND
+        )
+        saveEntries(boundedEntries(mutation.entries))
+        saveConversations(mutation.conversations)
+        SharedPreferencesAgentTaskStore(appContext).rebindSession(sourceConversationId, target.id)
+        AgentRunRecorder(appContext).rebindConversation(sourceConversationId, target.id)
+        EncryptedAgentMemoryStore(appContext).rebindConversationScope(sourceConversationId, target.id)
+        if (draftConversation?.id == sourceConversationId) {
+            draftConversation = null
+            preferences.remove(KEY_DRAFT_CONVERSATION)
+        }
+        preferences.writeString(KEY_ACTIVE_CONVERSATION, target.id)
+        GlobalConversationEventBus.publishConversationMerged(appContext, mutation.result)
+        return mutation.result
+    }
 
     @Synchronized
     fun deleteEntry(entryId: String): Boolean {
@@ -772,7 +826,10 @@ class AgentTranscriptStore(context: Context) {
                 .put("id", entry.id).put("role", entry.role.name).put("text", entry.text)
                 .put("timestamp", entry.timestampMillis).put("dedupe_key", entry.dedupeKey)
                 .put("conversation_id", entry.conversationId).put("turn_id", entry.turnId)
-                .put("task_id", entry.taskId).put("rich_output", entry.richOutputJson))
+                .put("task_id", entry.taskId).put("rich_output", entry.richOutputJson)
+                .put("source_conversation_id", entry.sourceConversationId)
+                .put("source_conversation_title", entry.sourceConversationTitle)
+                .put("source_entry_id", entry.sourceEntryId))
         }
         preferences.writeString(KEY_ITEMS, array.toString())
     }
@@ -793,7 +850,9 @@ class AgentTranscriptStore(context: Context) {
                 .put("created_by_agent", conversation.createdByAgent)
                 .put("parent_conversation_id", conversation.parentConversationId)
                 .put("tracking_paused", conversation.trackingPaused)
-                .put("global_topic_key", conversation.globalTopicKey))
+                .put("global_topic_key", conversation.globalTopicKey)
+                .put("merged_into_conversation_id", conversation.mergedIntoConversationId)
+                .put("merged_at_millis", conversation.mergedAtMillis))
         }
         preferences.writeString(KEY_CONVERSATIONS, array.toString())
     }
@@ -813,7 +872,10 @@ class AgentTranscriptStore(context: Context) {
                     dedupeKey = item.optString("dedupe_key").take(MAX_DEDUPE_KEY_CHARACTERS),
                     conversationId = item.optString("conversation_id").ifBlank { fallbackConversationId },
                     turnId = item.optString("turn_id"), taskId = item.optString("task_id"),
-                    richOutputJson = AgentRichContentCodec.normalize(item.optString("rich_output"))
+                    richOutputJson = AgentRichContentCodec.normalize(item.optString("rich_output")),
+                    sourceConversationId = item.optString("source_conversation_id"),
+                    sourceConversationTitle = item.optString("source_conversation_title").take(MAX_TITLE_CHARACTERS),
+                    sourceEntryId = item.optString("source_entry_id")
                 ))
             }
         }
@@ -841,7 +903,9 @@ class AgentTranscriptStore(context: Context) {
                     createdByAgent = item.optBoolean("created_by_agent"),
                     parentConversationId = item.optString("parent_conversation_id"),
                     trackingPaused = item.optBoolean("tracking_paused"),
-                    globalTopicKey = item.optString("global_topic_key").take(MAX_GLOBAL_TOPIC_KEY_CHARACTERS)
+                    globalTopicKey = item.optString("global_topic_key").take(MAX_GLOBAL_TOPIC_KEY_CHARACTERS),
+                    mergedIntoConversationId = item.optString("merged_into_conversation_id"),
+                    mergedAtMillis = item.optLong("merged_at_millis", 0L)
                 ))
             }
         }
@@ -863,5 +927,6 @@ class AgentTranscriptStore(context: Context) {
         private const val MAX_SUMMARY_CHARACTERS = 12_000
         private const val MAX_DEDUPE_KEY_CHARACTERS = 240
         private const val MAX_GLOBAL_TOPIC_KEY_CHARACTERS = 80
+        private const val MAX_MERGE_CHAIN_DEPTH = 8
     }
 }

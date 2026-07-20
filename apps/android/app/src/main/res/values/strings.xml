@@ -1521,6 +1521,16 @@
     <string name="agent_session_pause_tracking">Pause global tracking</string>
     <string name="agent_session_resume_tracking">Resume global tracking</string>
     <string name="agent_session_tracking_paused">Tracking paused</string>
+    <string name="agent_session_merged">Merged</string>
+    <string name="agent_session_merged_from">From %1$s</string>
+    <string name="agent_session_merge_into_original">Merge into original session</string>
+    <string name="agent_session_merge_confirm">%1$s will be merged into %2$s. Its messages, active tasks, and late replies will continue there.</string>
+    <string name="agent_session_merge_confirm_action">Merge</string>
+    <string name="agent_session_merge_success">Merged %1$d messages into the original session</string>
+    <string name="agent_session_merge_target_missing">The original session is no longer available</string>
+    <string name="agent_session_merge_already_done">This session has already been merged</string>
+    <string name="agent_session_merge_privacy_mismatch">Sessions with different privacy modes cannot be merged</string>
+    <string name="agent_session_merge_unavailable">This session cannot be merged</string>
     <string name="agent_global_feedback_helpful">Helpful</string>
     <string name="agent_global_feedback_not_relevant">Not relevant</string>
     <string name="agent_global_feedback_too_frequent">Too frequent</string>

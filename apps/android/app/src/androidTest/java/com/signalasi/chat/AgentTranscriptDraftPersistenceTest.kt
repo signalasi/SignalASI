@@ -67,4 +67,45 @@ class AgentTranscriptDraftPersistenceTest {
         assertEquals(conversation.id, resolved?.id)
         assertEquals(1, recreated.list(conversation.id).count { it.dedupeKey == "global-agent:message-1" })
     }
+
+    @Test
+    fun mergedAgentTopicPersistsAndRoutesLateRepliesToItsParent() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val store = AgentTranscriptStore(context)
+        store.clear()
+        val parent = store.createConversation("Main topic")
+        assertTrue(store.append(AgentTranscriptRole.USER, "Start", conversationId = parent.id))
+        val child = store.createAgentConversation("Agent research", parent.id, "research")
+        assertTrue(store.append(
+            AgentTranscriptRole.USER,
+            "Investigate",
+            conversationId = child.id,
+            turnId = "turn"
+        ))
+        assertTrue(store.append(
+            AgentTranscriptRole.PROCESS,
+            "Internal tool step",
+            conversationId = child.id,
+            turnId = "turn"
+        ))
+        assertTrue(store.append(
+            AgentTranscriptRole.ASSISTANT,
+            "Research result",
+            conversationId = child.id,
+            turnId = "turn"
+        ))
+
+        val result = store.mergeConversationIntoParent(child.id, nowMillis = 2_000L)
+
+        assertTrue(result.merged)
+        assertEquals(2, result.copiedEntryCount)
+        val recreated = AgentTranscriptStore(context)
+        assertEquals(parent.id, recreated.resolveMergedConversationId(child.id))
+        assertEquals(parent.id, recreated.activeConversation().id)
+        assertEquals(2, recreated.list(parent.id).count { it.sourceConversationId == child.id })
+        assertFalse(recreated.list(parent.id).any { it.text == "Internal tool step" })
+        val mergedChild = recreated.conversation(child.id)
+        assertEquals(AgentConversationStatus.ARCHIVED, mergedChild?.status)
+        assertEquals(parent.id, mergedChild?.mergedIntoConversationId)
+    }
 }

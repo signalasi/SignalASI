@@ -187,6 +187,29 @@ class AgentRunRecorder(context: Context) {
     }
 
     @Synchronized
+    fun rebindConversation(sourceConversationId: String, targetConversationId: String): Int {
+        val source = sourceConversationId.trim()
+        val target = targetConversationId.trim()
+        if (source.isBlank() || target.isBlank() || source == target) return 0
+        val runs = allRuns()
+        val changedRuns = runs.count { it.conversationId == source }
+        if (changedRuns > 0) {
+            saveRuns(runs.map { run ->
+                if (run.conversationId == source) run.copy(conversationId = target) else run
+            })
+        }
+        val contexts = contexts().map { current ->
+            if (current.conversationId == source) {
+                current.copy(conversationId = target, updatedAtMillis = System.currentTimeMillis())
+            } else current
+        }.groupBy(AgentTaskThreadContext::conversationId)
+            .values
+            .map { matches -> matches.maxByOrNull(AgentTaskThreadContext::updatedAtMillis) ?: matches.first() }
+        saveContexts(contexts)
+        return changedRuns
+    }
+
+    @Synchronized
     fun clear() = database.clear()
 
     private fun update(runId: String, transform: (AgentRecordedRun) -> AgentRecordedRun): AgentRecordedRun? {
@@ -213,7 +236,14 @@ class AgentRunRecorder(context: Context) {
 
     private fun saveContext(context: AgentTaskThreadContext) {
         val remaining = contexts().filterNot { it.conversationId == context.conversationId } + context
-        database.writeString(KEY_CONTEXTS, JSONArray().apply { remaining.takeLast(MAX_CONTEXTS).forEach { put(it.toJson()) } }.toString())
+        saveContexts(remaining)
+    }
+
+    private fun saveContexts(contexts: List<AgentTaskThreadContext>) {
+        database.writeString(
+            KEY_CONTEXTS,
+            JSONArray().apply { contexts.takeLast(MAX_CONTEXTS).forEach { put(it.toJson()) } }.toString()
+        )
     }
 
     private fun decodeRuns(raw: String): List<AgentRecordedRun> = runCatching {

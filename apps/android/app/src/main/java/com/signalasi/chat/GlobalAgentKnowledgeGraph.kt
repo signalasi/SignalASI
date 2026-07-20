@@ -95,6 +95,9 @@ object GlobalTopicProjectGraphReducer {
         val retractedGraph = retractEvidence(graph, incomingRetractions, event.timestampMillis).copy(
             retractedEventIds = retractedEventIds
         )
+        if (event.type == GlobalConversationEventType.CONVERSATION_MERGED) {
+            return GlobalConversationMergeLifecycle.rebindTopicGraph(retractedGraph, event)
+        }
         if (event.evidenceRoots().any(retractedEventIds::contains)) return retractedGraph
         if (event.excludesConversationFromGlobalModel()) {
             return removeConversation(retractedGraph, event.conversationId, event.timestampMillis)

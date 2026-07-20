@@ -987,12 +987,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         runtime: MobileNativeAgent?,
         turnId: String
     ): String? {
-        val knownIds = agentTranscriptStore.conversations(includeArchived = true).mapTo(HashSet()) { it.id }
         val explicit = explicitConversationId.trim()
-        if (explicit.isNotBlank()) return explicit.takeIf { it in knownIds }
+        if (explicit.isNotBlank()) return agentTranscriptStore.resolveMergedConversationId(explicit)
         val runtimeConversation = runtime?.let(agentRuntimeConversationIds::get).orEmpty()
-        if (runtimeConversation in knownIds) return runtimeConversation
-        return agentTranscriptStore.conversationIdForTurn(turnId)?.takeIf { it in knownIds }
+        if (runtimeConversation.isNotBlank()) {
+            agentTranscriptStore.resolveMergedConversationId(runtimeConversation)?.let { return it }
+        }
+        return agentTranscriptStore.conversationIdForTurn(turnId)
+            ?.let(agentTranscriptStore::resolveMergedConversationId)
     }
 
     override fun onBackPressed() {
@@ -1052,6 +1054,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 ?: envelope?.optLong("source_message_id", 0L)
                 ?: 0L
             val responseConversationId = envelope?.optString("conversation_id").orEmpty()
+            val resolvedResponseConversationId = responseConversationId.takeIf(String::isNotBlank)
+                ?.let(agentTranscriptStore::resolveMergedConversationId)
+                .orEmpty()
             val responseTurnId = envelope?.optString("turn_id").orEmpty()
             val responseTaskId = envelope?.optString("task_id").orEmpty()
             val supersededResponse = sourceMessageId > 0L && sourceMessageId in supersededConnectorSourceIds
@@ -1073,19 +1078,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             if (responseTaskId.isNotBlank()) {
                 completedConnectorTaskIds.add(responseTaskId)
             }
-            if (!nativeAgentResponse && responseConversationId.isNotBlank() &&
-                agentTranscriptStore.conversations(includeArchived = true).any { it.id == responseConversationId }
-            ) {
+            if (!nativeAgentResponse && resolvedResponseConversationId.isNotBlank()) {
                 agentTranscriptStore.append(
                     AgentTranscriptRole.ASSISTANT,
                     msg.content,
-                    conversationId = responseConversationId,
+                    conversationId = resolvedResponseConversationId,
                     turnId = responseTurnId,
                     taskId = envelope?.optString("task_id").orEmpty(),
                     richOutputJson = AgentRichContentCodec.fromEnvelope(envelope)
                 )
-                if (responseConversationId == agentTranscriptStore.activeConversation().id) {
-                    renderAgentTranscript(agentTranscriptStore.list(responseConversationId))
+                if (resolvedResponseConversationId == agentTranscriptStore.activeConversation().id) {
+                    renderAgentTranscript(agentTranscriptStore.list(resolvedResponseConversationId))
                 }
             }
             if (!nativeAgentResponse) {
@@ -2721,7 +2724,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             val sourceTitle = if (conversation.createdByAgent) {
                 getString(R.string.agent_session_created_by_agent, title)
             } else title
-            if (conversation.trackingPaused) {
+            if (conversation.mergedIntoConversationId.isNotBlank()) {
+                "$sourceTitle \u00b7 ${getString(R.string.agent_session_merged)}"
+            } else if (conversation.trackingPaused) {
                 "$sourceTitle \u00b7 ${getString(R.string.agent_session_tracking_paused)}"
             } else sourceTitle
         }
@@ -2948,10 +2953,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
              ).apply {
                  setPadding(dp(14), dp(10), dp(4), dp(10))
                  setOnClickListener {
-                     if (conversation.status == AgentConversationStatus.ARCHIVED) {
+                    val destination = agentTranscriptStore.resolveMergedConversationId(conversation.id)
+                        ?: conversation.id
+                    if (destination == conversation.id && conversation.status == AgentConversationStatus.ARCHIVED) {
                         agentTranscriptStore.restoreConversation(conversation.id)
                     }
-                    agentTranscriptStore.switchConversation(conversation.id)
+                    agentTranscriptStore.switchConversation(destination)
                     renderedAgentTranscriptIds.clear()
                     agentOutputList.removeAllViews()
                     refreshAgentConversationHeader()
@@ -3008,31 +3015,41 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun showAgentConversationQuickActions(conversation: AgentConversation, showArchived: Boolean) {
-        val labels = arrayOf(
-            getString(R.string.agent_session_modify),
-            getString(if (conversation.trackingPaused) R.string.agent_session_resume_tracking else R.string.agent_session_pause_tracking),
-            getString(R.string.common_delete),
-            getString(R.string.agent_session_delete_more)
-        )
+        val actions = mutableListOf<Pair<String, () -> Unit>>()
+        actions += getString(R.string.agent_session_modify) to {
+            showTextSettingDialog(
+                getString(R.string.agent_session_modify),
+                conversation.title
+            ) { title ->
+                agentTranscriptStore.renameConversation(conversation.id, title)
+                refreshAgentConversationHeader()
+                showAgentSessionsPage(showArchived)
+            }
+        }
+        if (canMergeAgentConversation(conversation)) {
+            actions += getString(R.string.agent_session_merge_into_original) to {
+                confirmMergeAgentConversation(conversation)
+            }
+        }
+        if (conversation.mergedIntoConversationId.isBlank()) {
+            actions += getString(
+                if (conversation.trackingPaused) R.string.agent_session_resume_tracking
+                else R.string.agent_session_pause_tracking
+            ) to {
+                agentTranscriptStore.setTrackingPaused(conversation.id, !conversation.trackingPaused)
+                showAgentSessionsPage(showArchived)
+            }
+        }
+        actions += getString(R.string.common_delete) to {
+            confirmDeleteAgentConversation(conversation, showArchived)
+        }
+        actions += getString(R.string.agent_session_delete_more) to {
+            showAgentConversationMultiDelete(showArchived)
+        }
         android.app.AlertDialog.Builder(this)
             .setTitle(conversation.title)
-            .setItems(labels) { _, which ->
-                when (which) {
-                    0 -> showTextSettingDialog(
-                        getString(R.string.agent_session_modify),
-                        conversation.title
-                    ) { title ->
-                        agentTranscriptStore.renameConversation(conversation.id, title)
-                        refreshAgentConversationHeader()
-                        showAgentSessionsPage(showArchived)
-                    }
-                    1 -> {
-                        agentTranscriptStore.setTrackingPaused(conversation.id, !conversation.trackingPaused)
-                        showAgentSessionsPage(showArchived)
-                    }
-                    2 -> confirmDeleteAgentConversation(conversation, showArchived)
-                    3 -> showAgentConversationMultiDelete(showArchived)
-                }
+            .setItems(actions.map(Pair<String, () -> Unit>::first).toTypedArray()) { _, which ->
+                actions[which].second.invoke()
             }
             .setNegativeButton(getString(R.string.common_cancel), null)
             .show()
@@ -3093,9 +3110,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun deleteAgentConversationData(conversation: AgentConversation) {
-        val taskIds = agentTranscriptStore.taskIds(conversation.id)
-        SignalASIMqttClient.publishAgentConversationDelete(conversation.id, taskIds)
-        SharedPreferencesAgentTaskStore(this).delete(taskIds + conversation.id)
+        if (conversation.mergedIntoConversationId.isBlank()) {
+            val taskIds = agentTranscriptStore.taskIds(conversation.id)
+            SignalASIMqttClient.publishAgentConversationDelete(conversation.id, taskIds)
+            SharedPreferencesAgentTaskStore(this).delete(taskIds + conversation.id)
+        }
         agentTranscriptStore.deleteConversation(conversation.id)
     }
 
@@ -3114,68 +3133,124 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun showAgentConversationActions(conversation: AgentConversation) {
-        val labels = arrayOf(
-            getString(R.string.agent_session_rename),
-            getString(if (conversation.pinned) R.string.agent_session_unpin else R.string.agent_session_pin),
-            getString(if (conversation.privateMode) R.string.agent_session_standard else R.string.agent_session_private),
-            getString(if (conversation.trackingPaused) R.string.agent_session_resume_tracking else R.string.agent_session_pause_tracking),
-            getString(R.string.agent_session_context_policy),
-            getString(R.string.agent_session_summary),
-            getString(R.string.agent_session_details),
-            getString(if (conversation.status == AgentConversationStatus.ARCHIVED) R.string.agent_session_restore else R.string.agent_session_archive),
-            getString(R.string.agent_session_delete)
-        )
+        val actions = mutableListOf<Pair<String, () -> Unit>>()
+        actions += getString(R.string.agent_session_rename) to {
+            showTextSettingDialog(getString(R.string.agent_session_rename), conversation.title) {
+                agentTranscriptStore.renameConversation(conversation.id, it)
+                showAgentSessionsPage()
+            }
+        }
+        if (canMergeAgentConversation(conversation)) {
+            actions += getString(R.string.agent_session_merge_into_original) to {
+                confirmMergeAgentConversation(conversation)
+            }
+        }
+        actions += getString(if (conversation.pinned) R.string.agent_session_unpin else R.string.agent_session_pin) to {
+            agentTranscriptStore.setPinned(conversation.id, !conversation.pinned)
+            showAgentSessionsPage()
+        }
+        if (conversation.mergedIntoConversationId.isBlank()) {
+            actions += getString(if (conversation.privateMode) R.string.agent_session_standard else R.string.agent_session_private) to {
+                agentTranscriptStore.setPrivateMode(conversation.id, !conversation.privateMode)
+                showAgentSessionsPage()
+            }
+            actions += getString(
+                if (conversation.trackingPaused) R.string.agent_session_resume_tracking
+                else R.string.agent_session_pause_tracking
+            ) to {
+                agentTranscriptStore.setTrackingPaused(conversation.id, !conversation.trackingPaused)
+                showAgentSessionsPage()
+            }
+        }
+        actions += getString(R.string.agent_session_context_policy) to {
+            showAgentConversationContextPolicy(conversation)
+        }
+        actions += getString(R.string.agent_session_summary) to {
+            showTextSettingDialog(getString(R.string.agent_session_summary), conversation.summary) {
+                agentTranscriptStore.updateSummary(conversation.id, it)
+                showAgentSessionsPage()
+            }
+        }
+        actions += getString(R.string.agent_session_details) to {
+            showAgentConversationDetails(conversation)
+        }
+        if (conversation.mergedIntoConversationId.isBlank()) {
+            actions += getString(
+                if (conversation.status == AgentConversationStatus.ARCHIVED) R.string.agent_session_restore
+                else R.string.agent_session_archive
+            ) to {
+                if (conversation.status == AgentConversationStatus.ARCHIVED) {
+                    agentTranscriptStore.restoreConversation(conversation.id)
+                } else {
+                    agentTranscriptStore.archiveConversation(conversation.id)
+                }
+                showAgentSessionsPage()
+            }
+        }
+        actions += getString(R.string.agent_session_delete) to {
+            confirmDeleteAgentConversation(conversation, conversation.status == AgentConversationStatus.ARCHIVED)
+        }
         android.app.AlertDialog.Builder(this)
             .setTitle(conversation.title)
-            .setItems(labels) { _, which ->
-                when (which) {
-                    0 -> showTextSettingDialog(getString(R.string.agent_session_rename), conversation.title) {
-                        agentTranscriptStore.renameConversation(conversation.id, it)
-                        showAgentSessionsPage()
-                    }
-                    1 -> {
-                        agentTranscriptStore.setPinned(conversation.id, !conversation.pinned)
-                        showAgentSessionsPage()
-                    }
-                    2 -> {
-                        agentTranscriptStore.setPrivateMode(conversation.id, !conversation.privateMode)
-                        showAgentSessionsPage()
-                    }
-                    3 -> {
-                        agentTranscriptStore.setTrackingPaused(conversation.id, !conversation.trackingPaused)
-                        showAgentSessionsPage()
-                    }
-                    4 -> showAgentConversationContextPolicy(conversation)
-                    5 -> showTextSettingDialog(getString(R.string.agent_session_summary), conversation.summary) {
-                        agentTranscriptStore.updateSummary(conversation.id, it)
-                        showAgentSessionsPage()
-                    }
-                    6 -> showAgentConversationDetails(conversation)
-                    7 -> {
-                        if (conversation.status == AgentConversationStatus.ARCHIVED) {
-                            agentTranscriptStore.restoreConversation(conversation.id)
-                        } else {
-                            agentTranscriptStore.archiveConversation(conversation.id)
-                        }
-                        showAgentSessionsPage()
-                    }
-                    8 -> android.app.AlertDialog.Builder(this)
-                        .setTitle(getString(R.string.agent_session_delete))
-                        .setMessage(getString(R.string.agent_session_delete_confirm))
-                        .setPositiveButton(getString(R.string.common_delete)) { _, _ ->
-                            val taskIds = agentTranscriptStore.taskIds(conversation.id)
-                            SignalASIMqttClient.publishAgentConversationDelete(conversation.id, taskIds)
-                            SharedPreferencesAgentTaskStore(this@MainActivity)
-                                .delete(taskIds + conversation.id)
-                            agentTranscriptStore.deleteConversation(conversation.id)
-                            showAgentSessionsPage()
-                        }
-                        .setNegativeButton(getString(R.string.common_cancel), null)
-                        .show()
-                }
+            .setItems(actions.map(Pair<String, () -> Unit>::first).toTypedArray()) { _, which ->
+                actions[which].second.invoke()
             }
             .setNegativeButton(getString(R.string.common_cancel), null)
             .show()
+    }
+
+    private fun canMergeAgentConversation(conversation: AgentConversation): Boolean {
+        if (!conversation.createdByAgent || conversation.parentConversationId.isBlank() ||
+            conversation.mergedIntoConversationId.isNotBlank()
+        ) return false
+        val parent = agentTranscriptStore.conversation(conversation.parentConversationId) ?: return false
+        return parent.privateMode == conversation.privateMode
+    }
+
+    private fun confirmMergeAgentConversation(conversation: AgentConversation) {
+        val target = agentTranscriptStore.conversation(conversation.parentConversationId)
+        if (target == null) {
+            Toast.makeText(this, getString(R.string.agent_session_merge_target_missing), Toast.LENGTH_SHORT).show()
+            return
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.agent_session_merge_into_original))
+            .setMessage(getString(R.string.agent_session_merge_confirm, conversation.title, target.title))
+            .setPositiveButton(getString(R.string.agent_session_merge_confirm_action)) { _, _ ->
+                val result = agentTranscriptStore.mergeConversationIntoParent(conversation.id)
+                if (!result.merged) {
+                    Toast.makeText(
+                        this,
+                        getString(agentConversationMergeFailureMessage(result.failure)),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@setPositiveButton
+                }
+                val targetId = result.targetConversation?.id.orEmpty()
+                agentRuntimeConversationIds.entries.toList()
+                    .filter { it.value == conversation.id }
+                    .forEach { agentRuntimeConversationIds[it.key] = targetId }
+                agentSessionsDialog?.dismiss()
+                renderedAgentTranscriptIds.clear()
+                agentOutputList.removeAllViews()
+                showMainTab(PAGE_AGENT)
+                refreshAgentConversationHeader()
+                renderAgentTranscript(agentTranscriptStore.list(targetId))
+                refreshGlobalAgentCognition()
+                Toast.makeText(
+                    this,
+                    getString(R.string.agent_session_merge_success, result.copiedEntryCount),
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            .setNegativeButton(getString(R.string.common_cancel), null)
+            .show()
+    }
+
+    private fun agentConversationMergeFailureMessage(failure: AgentConversationMergeFailure): Int = when (failure) {
+        AgentConversationMergeFailure.ALREADY_MERGED -> R.string.agent_session_merge_already_done
+        AgentConversationMergeFailure.PRIVACY_MISMATCH -> R.string.agent_session_merge_privacy_mismatch
+        else -> R.string.agent_session_merge_unavailable
     }
 
     private fun showAgentConversationContextPolicy(conversation: AgentConversation) {
@@ -5452,12 +5527,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun openGlobalInsightTopic(item: GlobalProactiveInboxItem) {
-        if (!agentTranscriptStore.switchConversation(item.destinationConversationId)) return
+        val destination = agentTranscriptStore.resolveMergedConversationId(item.destinationConversationId) ?: return
+        agentTranscriptStore.conversation(destination)?.takeIf {
+            it.status == AgentConversationStatus.ARCHIVED
+        }?.let { agentTranscriptStore.restoreConversation(destination) }
+        if (!agentTranscriptStore.switchConversation(destination)) return
         renderedAgentTranscriptIds.clear()
         agentOutputList.removeAllViews()
         showMainTab(PAGE_AGENT)
         refreshAgentConversationHeader()
-        renderAgentTranscript(agentTranscriptStore.list(item.destinationConversationId))
+        renderAgentTranscript(agentTranscriptStore.list(destination))
         refreshGlobalInsightIndicator()
     }
 
@@ -8259,18 +8338,40 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
-    private fun agentTranscriptRow(entry: AgentTranscriptEntry): View = when (entry.role) {
-        AgentTranscriptRole.USER -> agentUserTranscriptRow(entry)
-        AgentTranscriptRole.ASSISTANT -> AgentRichContentView(
-            activity = this,
-            onTextViewReady = { textView -> attachAgentTranscriptActions(textView, entry) },
-            onAction = { action -> handleAgentRichAction(entry, action) },
-            onFormSubmit = { block, values -> handleAgentRichForm(entry, block, values) }
-        ).create(entry.copy(
-            text = CodexStyleResponsePolicy.sanitizeAssistantText(entry.text),
-            richOutputJson = CodexStyleResponsePolicy.filterAssistantRichOutput(entry.richOutputJson)
-        ))
-        AgentTranscriptRole.PROCESS -> agentProcessTranscriptRow(entry)
+    private fun agentTranscriptRow(entry: AgentTranscriptEntry): View {
+        val content = when (entry.role) {
+            AgentTranscriptRole.USER -> agentUserTranscriptRow(entry)
+            AgentTranscriptRole.ASSISTANT -> AgentRichContentView(
+                activity = this,
+                onTextViewReady = { textView -> attachAgentTranscriptActions(textView, entry) },
+                onAction = { action -> handleAgentRichAction(entry, action) },
+                onFormSubmit = { block, values -> handleAgentRichForm(entry, block, values) }
+            ).create(entry.copy(
+                text = CodexStyleResponsePolicy.sanitizeAssistantText(entry.text),
+                richOutputJson = CodexStyleResponsePolicy.filterAssistantRichOutput(entry.richOutputJson)
+            ))
+            AgentTranscriptRole.PROCESS -> agentProcessTranscriptRow(entry)
+        }
+        if (entry.sourceConversationId.isBlank() || entry.role == AgentTranscriptRole.PROCESS) return content
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = if (entry.role == AgentTranscriptRole.USER) Gravity.END else Gravity.START
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            addView(TextView(this@MainActivity).apply {
+                text = getString(
+                    R.string.agent_session_merged_from,
+                    entry.sourceConversationTitle.ifBlank { entry.sourceConversationId.take(12) }
+                )
+                setTextColor(getColorCompat(R.color.text_secondary))
+                textSize = 11f
+                includeFontPadding = false
+                setPadding(dp(2), dp(8), dp(2), 0)
+            })
+            addView(content)
+        }
     }
 
     private fun agentProcessTranscriptRow(entry: AgentTranscriptEntry): View {

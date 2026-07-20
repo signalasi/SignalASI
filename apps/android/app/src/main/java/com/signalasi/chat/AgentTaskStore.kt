@@ -27,6 +27,7 @@ interface AgentTaskStore {
     fun forSession(sessionId: String, limit: Int = 50): List<AgentTaskRecord>
     fun find(taskId: String): AgentTaskRecord?
     fun search(query: String, limit: Int = 10): List<AgentTaskRecord>
+    fun rebindSession(sourceSessionId: String, targetSessionId: String): Int
     fun delete(taskIds: Set<String>)
     fun clear()
 }
@@ -72,6 +73,24 @@ class SharedPreferencesAgentTaskStore(context: Context) : AgentTaskStore {
 
     override fun clear() {
         synchronized(STORE_LOCK) { prefs.clear() }
+    }
+
+    override fun rebindSession(sourceSessionId: String, targetSessionId: String): Int {
+        val source = sourceSessionId.trim()
+        val target = targetSessionId.trim()
+        if (source.isBlank() || target.isBlank() || source == target) return 0
+        return synchronized(STORE_LOCK) {
+            val items = loadItems()
+            var changed = 0
+            val rebound = items.map { item ->
+                if (item.sessionId == source) {
+                    changed += 1
+                    item.copy(sessionId = target)
+                } else item
+            }
+            if (changed > 0) saveItems(rebound)
+            changed
+        }
     }
 
     override fun delete(taskIds: Set<String>) {

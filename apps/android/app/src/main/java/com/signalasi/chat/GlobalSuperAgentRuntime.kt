@@ -1240,6 +1240,52 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         var proactiveMessagesInvalidated = false
         var changedItems = 0
         events.forEach { event ->
+            if (GlobalConversationMergeLifecycle.valid(event)) {
+                val sourceConversationId = GlobalConversationMergeLifecycle.sourceConversationId(event)
+                val targetConversationId = GlobalConversationMergeLifecycle.targetConversationId(event)
+                repository.markConversationDeleted(sourceConversationId)
+                repository.markConversationCreated(targetConversationId)
+
+                val reboundResearch = GlobalConversationMergeLifecycle.rebindResearchTasks(existingTasks, event)
+                if (reboundResearch != existingTasks) {
+                    existingTasks.clear()
+                    existingTasks.addAll(reboundResearch)
+                    researchTasksInvalidated = true
+                }
+                val reboundNewResearch = GlobalConversationMergeLifecycle.rebindResearchTasks(newTasks, event)
+                if (reboundNewResearch != newTasks) {
+                    newTasks.clear()
+                    newTasks.addAll(reboundNewResearch)
+                }
+                val reboundCognition = GlobalConversationMergeLifecycle.rebindCognitionTasks(existingCognitionTasks, event)
+                if (reboundCognition != existingCognitionTasks) {
+                    existingCognitionTasks.clear()
+                    existingCognitionTasks.addAll(reboundCognition)
+                    cognitionTasksInvalidated = true
+                }
+                val reboundNewCognition = GlobalConversationMergeLifecycle.rebindCognitionTasks(newCognitionTasks, event)
+                if (reboundNewCognition != newCognitionTasks) {
+                    newCognitionTasks.clear()
+                    newCognitionTasks.addAll(reboundNewCognition)
+                }
+                val reboundMessages = GlobalConversationMergeLifecycle.rebindProactiveMessages(existingMessages, event)
+                if (reboundMessages != existingMessages) {
+                    existingMessages.clear()
+                    existingMessages.addAll(reboundMessages)
+                    proactiveMessagesInvalidated = true
+                }
+                val reboundNewMessages = GlobalConversationMergeLifecycle.rebindProactiveMessages(newMessages, event)
+                if (reboundNewMessages != newMessages) {
+                    newMessages.clear()
+                    newMessages.addAll(reboundNewMessages)
+                }
+                val currentRuns = deliberationStore.autonomousRuns()
+                val reboundRuns = GlobalConversationMergeLifecycle.rebindAutonomousRuns(currentRuns, event)
+                if (reboundRuns != currentRuns) deliberationStore.saveAutonomousRuns(reboundRuns)
+                val currentGoals = longHorizonStore.goals()
+                val reboundGoals = GlobalConversationMergeLifecycle.rebindLongHorizonGoals(currentGoals, event)
+                if (reboundGoals != currentGoals) longHorizonStore.save(reboundGoals)
+            }
             when (event.type) {
                 GlobalConversationEventType.CONVERSATION_DELETED ->
                     repository.markConversationDeleted(event.conversationId)
@@ -2419,6 +2465,43 @@ object GlobalConversationEventBus {
         return enqueued
     }
 
+    fun publishConversationMerged(
+        context: Context,
+        result: AgentConversationMergeResult
+    ): Boolean {
+        if (!result.merged) return false
+        val source = result.sourceConversation ?: return false
+        val target = result.targetConversation ?: return false
+        if (source.privateMode || target.privateMode) return false
+        val repository = GlobalAgentRepository(context)
+        if (!repository.settings().enabled) return false
+        val event = GlobalConversationEvent(
+            id = "conversation-merged:${source.id}:${target.id}:${source.mergedAtMillis}",
+            type = GlobalConversationEventType.CONVERSATION_MERGED,
+            conversationId = target.id,
+            actor = GlobalConversationActor.SYSTEM,
+            timestampMillis = source.mergedAtMillis.takeIf { it > 0L } ?: System.currentTimeMillis(),
+            content = "",
+            contentRef = "encrypted://agent-conversations/${target.id}",
+            conversationTitle = target.title,
+            topicHints = setOf(target.title, source.title).filterNot {
+                it.equals("New session", ignoreCase = true)
+            }.toSet(),
+            sensitivity = conversationSensitivity(target),
+            metadata = conversationMetadata(target) + mapOf(
+                "origin" to "conversation_merge",
+                GlobalConversationMergeLifecycle.SOURCE_CONVERSATION_ID to source.id,
+                GlobalConversationMergeLifecycle.TARGET_CONVERSATION_ID to target.id,
+                "source_conversation_title" to source.title,
+                "copied_entry_count" to result.copiedEntryCount.toString(),
+                "skipped_entry_count" to result.skippedEntryCount.toString()
+            )
+        )
+        val enqueued = repository.enqueue(event)
+        if (enqueued) requestProcessing(context)
+        return enqueued
+    }
+
     fun publishConversationCreated(context: Context, conversation: AgentConversation): Boolean {
         if (conversation.privateMode || conversation.trackingPaused) return false
         val repository = GlobalAgentRepository(context)
@@ -2605,6 +2688,8 @@ object GlobalConversationEventBus {
         "global_visibility" to if (conversation.privateMode || conversation.trackingPaused) "excluded" else "included",
         "created_by_agent" to conversation.createdByAgent.toString(),
         "parent_conversation_id" to conversation.parentConversationId,
+        "merged_into_conversation_id" to conversation.mergedIntoConversationId,
+        "merged_at_millis" to conversation.mergedAtMillis.toString(),
         "selected_resource" to conversation.selectedModelOrAgent,
         "context_policy" to conversation.contextPolicy
     )
@@ -2622,6 +2707,8 @@ object GlobalConversationEventBus {
         if (previous.contextPolicy != current.contextPolicy) add("context_policy")
         if (previous.createdByAgent != current.createdByAgent) add("created_by_agent")
         if (previous.parentConversationId != current.parentConversationId) add("parent_conversation_id")
+        if (previous.mergedIntoConversationId != current.mergedIntoConversationId) add("merged_into_conversation_id")
+        if (previous.mergedAtMillis != current.mergedAtMillis) add("merged_at_millis")
     }
 
     fun requestProcessing(context: Context) {

@@ -14,6 +14,12 @@ object GlobalConversationContextJournalPolicy {
         incoming.sortedWith(compareBy<GlobalConversationEvent>(GlobalConversationEvent::timestampMillis)
             .thenBy(GlobalConversationEvent::id)).forEach { event ->
             event.effectiveRetractions().forEach(journal::remove)
+            if (event.type == GlobalConversationEventType.CONVERSATION_MERGED) {
+                val rebound = GlobalConversationMergeLifecycle.rebindJournal(journal.values, event)
+                journal.clear()
+                rebound.forEach { journal[it.id] = it }
+                return@forEach
+            }
             if (event.type == GlobalConversationEventType.CONVERSATION_DELETED ||
                 event.excludesConversationFromGlobalModel()
             ) {

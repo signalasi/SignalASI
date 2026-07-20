@@ -8229,6 +8229,7 @@ interface AgentMemoryStore {
     fun recall(query: String): List<AgentMemoryItem>
     fun recent(limit: Int = 10): List<AgentMemoryItem>
     fun count(): Int
+    fun rebindConversationScope(sourceConversationId: String, targetConversationId: String): Int
     fun delete(query: String): Int
     fun snapshot(): AgentMemorySnapshot
     fun update(itemId: String, value: String, key: String = ""): AgentMemoryWriteResult?
@@ -8293,6 +8294,21 @@ class InMemoryAgentMemoryStore : AgentMemoryStore {
         .asReversed()
 
     override fun count(): Int = items.count { it.status == AgentMemoryStatus.ACTIVE }
+
+    override fun rebindConversationScope(sourceConversationId: String, targetConversationId: String): Int {
+        val source = sourceConversationId.trim()
+        val target = targetConversationId.trim()
+        if (source.isBlank() || target.isBlank() || source == target) return 0
+        var changed = 0
+        items.indices.forEach { index ->
+            val item = items[index]
+            if (item.scope == AgentMemoryScope.CONVERSATION && item.scopeId == source) {
+                items[index] = item.copy(scopeId = target)
+                changed += 1
+            }
+        }
+        return changed
+    }
 
     override fun delete(query: String): Int {
         val before = items.size
@@ -8542,6 +8558,23 @@ class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
 
     @Synchronized
     override fun count(): Int = loadItems().count { it.status == AgentMemoryStatus.ACTIVE }
+
+    @Synchronized
+    override fun rebindConversationScope(sourceConversationId: String, targetConversationId: String): Int {
+        val source = sourceConversationId.trim()
+        val target = targetConversationId.trim()
+        if (source.isBlank() || target.isBlank() || source == target) return 0
+        val items = loadItems()
+        var changed = 0
+        val rebound = items.map { item ->
+            if (item.scope == AgentMemoryScope.CONVERSATION && item.scopeId == source) {
+                changed += 1
+                item.copy(scopeId = target)
+            } else item
+        }
+        if (changed > 0) saveItems(rebound)
+        return changed
+    }
 
     @Synchronized
     override fun delete(query: String): Int {

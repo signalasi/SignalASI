@@ -11,6 +11,7 @@ enum class GlobalConversationEventType {
     MESSAGE_DELETED,
     CONVERSATION_CREATED,
     CONVERSATION_UPDATED,
+    CONVERSATION_MERGED,
     CONVERSATION_DELETED,
     ATTACHMENT_ADDED,
     ARTIFACT_CREATED,
@@ -447,6 +448,13 @@ object GlobalWorldModelReducer {
                 items = retractedWorld.items.filterNot { it.stableKey in replacementStableKeys }
             )
             else -> retractedWorld
+        }
+        if (event.type == GlobalConversationEventType.CONVERSATION_MERGED) {
+            return GlobalWorldReduction(
+                world = GlobalConversationMergeLifecycle.rebindWorld(projectionAdjustedWorld, event),
+                changedItems = emptyList(),
+                conflicts = emptyList()
+            )
         }
         if (event.evidenceRoots().any(retractedEventIds::contains)) {
             return GlobalWorldReduction(
