@@ -18,6 +18,8 @@ data class GlobalAgentProcessingBatch(
 
 data class GlobalAgentDashboardSnapshot(
     val pendingEventCount: Int,
+    val retryingEventCount: Int,
+    val quarantinedEventCount: Int,
     val worldItemCount: Int,
     val topicCount: Int,
     val crossConversationLinkCount: Int,
@@ -61,27 +63,116 @@ class GlobalAgentRepository(context: Context) {
 
     private fun enqueueAllLocked(incoming: List<GlobalConversationEvent>): Int {
         if (incoming.isEmpty()) return 0
-        val events = loadEvents().toMutableList()
-        val knownIds = events.mapTo(mutableSetOf(), GlobalConversationEvent::id)
-        val additions = incoming.asSequence()
-            .filter { it.id.isNotBlank() && knownIds.add(it.id) }
-            .toList()
-        if (additions.isEmpty()) return 0
-        saveContextJournal(
-            GlobalConversationContextJournalPolicy.apply(loadContextJournal(), additions)
+        val mutation = GlobalEventQueuePolicy.enqueue(
+            state = GlobalEventQueueState(loadEvents(), loadOverflowEvents()),
+            incoming = incoming,
+            deadLetterEventIds = loadDeadLetters().mapTo(mutableSetOf()) { it.event.id },
+            readyCapacity = MAX_PENDING_EVENTS,
+            overflowCapacity = MAX_OVERFLOW_EVENTS
         )
-        events += additions
-        saveEvents(events.takeLast(MAX_PENDING_EVENTS))
-        return additions.size
+        if (mutation.acceptedCount == 0) return 0
+        val acceptedIds = (mutation.state.ready.asSequence() + mutation.state.overflow.asSequence())
+            .map(GlobalConversationEvent::id).toSet()
+        val accepted = incoming.filter { it.id in acceptedIds || mutation.capacityRejected.any { rejected -> rejected.id == it.id } }
+        saveContextJournal(
+            GlobalConversationContextJournalPolicy.apply(loadContextJournal(), accepted)
+        )
+        saveEvents(mutation.state.ready)
+        saveOverflowEvents(mutation.state.overflow)
+        if (mutation.capacityRejected.isNotEmpty()) {
+            val now = System.currentTimeMillis()
+            saveDeadLetters(
+                loadDeadLetters() + mutation.capacityRejected.map { event ->
+                    GlobalDeadLetterEvent(event, GlobalEventRetryPolicy.capacityFailure(event.id, now), now)
+                }
+            )
+        }
+        return mutation.acceptedCount
     }
 
-    fun pendingEvents(limit: Int = 100): List<GlobalConversationEvent> = synchronized(STORE_LOCK) {
-        loadEvents().take(limit.coerceIn(1, MAX_PROCESS_BATCH))
+    fun pendingEvents(
+        limit: Int = 100,
+        nowMillis: Long = System.currentTimeMillis()
+    ): List<GlobalConversationEvent> = synchronized(STORE_LOCK) {
+        val failures = loadEventFailures().associateBy(GlobalEventProcessingFailure::eventId)
+        loadEvents().asSequence()
+            .filter { GlobalEventRetryPolicy.eligible(failures[it.id], nowMillis) }
+            .take(limit.coerceIn(1, MAX_PROCESS_BATCH))
+            .toList()
+    }
+
+    fun pendingEventCount(): Int = synchronized(STORE_LOCK) { loadEvents().size + loadOverflowEvents().size }
+
+    fun eventFailures(): List<GlobalEventProcessingFailure> = synchronized(STORE_LOCK) { loadEventFailures() }
+
+    fun deadLetters(): List<GlobalDeadLetterEvent> = synchronized(STORE_LOCK) { loadDeadLetters() }
+
+    fun nextPendingEventAttemptAt(nowMillis: Long = System.currentTimeMillis()): Long = synchronized(STORE_LOCK) {
+        val ready = loadEvents()
+        if (ready.isEmpty()) return@synchronized 0L
+        val failures = loadEventFailures().associateBy(GlobalEventProcessingFailure::eventId)
+        ready.minOfOrNull { event ->
+            failures[event.id]?.nextAttemptAtMillis?.takeIf { it > nowMillis } ?: nowMillis
+        } ?: 0L
+    }
+
+    fun recordEventFailure(
+        event: GlobalConversationEvent,
+        error: Throwable,
+        nowMillis: Long = System.currentTimeMillis()
+    ): GlobalEventProcessingFailure = synchronized(STORE_LOCK) {
+        val failures = loadEventFailures()
+        val failure = GlobalEventRetryPolicy.recordFailure(
+            event.id,
+            failures.firstOrNull { it.eventId == event.id },
+            error,
+            nowMillis
+        )
+        saveEventFailures(failures.filterNot { it.eventId == event.id } + failure)
+        failure
+    }
+
+    fun clearEventFailure(eventId: String) = synchronized(STORE_LOCK) {
+        val failures = loadEventFailures()
+        if (failures.any { it.eventId == eventId }) {
+            saveEventFailures(failures.filterNot { it.eventId == eventId })
+        }
+    }
+
+    fun quarantineEvent(
+        event: GlobalConversationEvent,
+        failure: GlobalEventProcessingFailure,
+        nowMillis: Long = System.currentTimeMillis()
+    ) = synchronized(STORE_LOCK) {
+        saveDeadLetters(loadDeadLetters().filterNot { it.event.id == event.id } +
+            GlobalDeadLetterEvent(event, failure.copy(quarantined = true, nextAttemptAtMillis = 0L), nowMillis))
+        saveEventFailures(loadEventFailures().filterNot { it.eventId == event.id })
+    }
+
+    fun replayDeadLetter(eventId: String): Boolean = synchronized(STORE_LOCK) {
+        val letters = loadDeadLetters()
+        val letter = letters.firstOrNull { it.event.id == eventId } ?: return@synchronized false
+        if ((loadEvents().asSequence() + loadOverflowEvents().asSequence()).any { it.id == eventId }) {
+            saveDeadLetters(letters.filterNot { it.event.id == eventId })
+            clearEventFailure(eventId)
+            return@synchronized true
+        }
+        saveDeadLetters(letters.filterNot { it.event.id == eventId })
+        val enqueued = enqueueAllLocked(listOf(letter.event)) > 0
+        if (!enqueued) saveDeadLetters(letters)
+        enqueued
     }
 
     fun removeEvents(eventIds: Set<String>) = synchronized(STORE_LOCK) {
         if (eventIds.isEmpty()) return@synchronized
-        saveEvents(loadEvents().filterNot { it.id in eventIds })
+        val next = GlobalEventQueuePolicy.removeAndPromote(
+            GlobalEventQueueState(loadEvents(), loadOverflowEvents()),
+            eventIds,
+            MAX_PENDING_EVENTS
+        )
+        saveEvents(next.ready)
+        saveOverflowEvents(next.overflow)
+        saveEventFailures(loadEventFailures().filterNot { it.eventId in eventIds })
     }
 
     fun recentConversationContext(
@@ -460,8 +551,15 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 15)
+            .put("version", 16)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
+            .put("event_overflow", JSONArray().apply { loadOverflowEvents().forEach { put(encodeEvent(it)) } })
+            .put("event_failures", JSONArray().apply {
+                loadEventFailures().forEach { put(encodeEventFailure(it)) }
+            })
+            .put("event_dead_letters", JSONArray().apply {
+                loadDeadLetters().forEach { put(encodeDeadLetter(it)) }
+            })
             .put("context_journal", JSONArray().apply {
                 loadContextJournal().forEach { put(encodeEvent(it)) }
             })
@@ -489,6 +587,21 @@ class GlobalAgentRepository(context: Context) {
             saveEvents(buildList {
                 for (index in 0 until array.length()) decodeEvent(array.optJSONObject(index))?.let(::add)
             }.takeLast(MAX_PENDING_EVENTS))
+        }
+        payload.optJSONArray("event_overflow").let { array ->
+            saveOverflowEvents(if (array == null) emptyList() else buildList {
+                for (index in 0 until array.length()) decodeEvent(array.optJSONObject(index))?.let(::add)
+            }.take(MAX_OVERFLOW_EVENTS))
+        }
+        payload.optJSONArray("event_failures").let { array ->
+            saveEventFailures(if (array == null) emptyList() else buildList {
+                for (index in 0 until array.length()) decodeEventFailure(array.optJSONObject(index))?.let(::add)
+            })
+        }
+        payload.optJSONArray("event_dead_letters").let { array ->
+            saveDeadLetters(if (array == null) emptyList() else buildList {
+                for (index in 0 until array.length()) decodeDeadLetter(array.optJSONObject(index))?.let(::add)
+            })
         }
         val contextJournal = payload.optJSONArray("context_journal")
         saveContextJournal(if (contextJournal == null) {
@@ -547,6 +660,47 @@ class GlobalAgentRepository(context: Context) {
         val array = JSONArray()
         events.forEach { array.put(encodeEvent(it)) }
         database.writeString(KEY_EVENTS, array.toString())
+    }
+
+    private fun loadOverflowEvents(): List<GlobalConversationEvent> = runCatching {
+        val array = JSONArray(database.readString(KEY_OVERFLOW_EVENTS, "[]"))
+        buildList {
+            for (index in 0 until array.length()) decodeEvent(array.optJSONObject(index))?.let(::add)
+        }
+    }.getOrDefault(emptyList())
+
+    private fun saveOverflowEvents(events: List<GlobalConversationEvent>) {
+        val array = JSONArray()
+        events.take(MAX_OVERFLOW_EVENTS).forEach { array.put(encodeEvent(it)) }
+        database.writeString(KEY_OVERFLOW_EVENTS, array.toString())
+    }
+
+    private fun loadEventFailures(): List<GlobalEventProcessingFailure> = runCatching {
+        val array = JSONArray(database.readString(KEY_EVENT_FAILURES, "[]"))
+        buildList {
+            for (index in 0 until array.length()) decodeEventFailure(array.optJSONObject(index))?.let(::add)
+        }
+    }.getOrDefault(emptyList())
+
+    private fun saveEventFailures(failures: List<GlobalEventProcessingFailure>) {
+        val array = JSONArray()
+        failures.sortedBy(GlobalEventProcessingFailure::lastFailedAtMillis).takeLast(MAX_EVENT_FAILURES)
+            .forEach { array.put(encodeEventFailure(it)) }
+        database.writeString(KEY_EVENT_FAILURES, array.toString())
+    }
+
+    private fun loadDeadLetters(): List<GlobalDeadLetterEvent> = runCatching {
+        val array = JSONArray(database.readString(KEY_DEAD_LETTERS, "[]"))
+        buildList {
+            for (index in 0 until array.length()) decodeDeadLetter(array.optJSONObject(index))?.let(::add)
+        }
+    }.getOrDefault(emptyList())
+
+    private fun saveDeadLetters(letters: List<GlobalDeadLetterEvent>) {
+        val array = JSONArray()
+        letters.distinctBy { it.event.id }.sortedBy(GlobalDeadLetterEvent::quarantinedAtMillis)
+            .takeLast(MAX_DEAD_LETTERS).forEach { array.put(encodeDeadLetter(it)) }
+        database.writeString(KEY_DEAD_LETTERS, array.toString())
     }
 
     private fun loadContextJournal(): List<GlobalConversationEvent> = runCatching {
@@ -633,6 +787,42 @@ class GlobalAgentRepository(context: Context) {
             causalEventIds = json.optJSONArray("causal_event_ids").strings().toSet(),
             retractedEventIds = json.optJSONArray("retracted_event_ids").strings().toSet()
         )
+    }
+
+    private fun encodeEventFailure(failure: GlobalEventProcessingFailure): JSONObject = JSONObject()
+        .put("event_id", failure.eventId)
+        .put("attempt_count", failure.attemptCount)
+        .put("first_failed_at_millis", failure.firstFailedAtMillis)
+        .put("last_failed_at_millis", failure.lastFailedAtMillis)
+        .put("next_attempt_at_millis", failure.nextAttemptAtMillis)
+        .put("error_fingerprint", failure.errorFingerprint)
+        .put("reason", failure.reason)
+        .put("quarantined", failure.quarantined)
+
+    private fun decodeEventFailure(json: JSONObject?): GlobalEventProcessingFailure? {
+        if (json == null || json.optString("event_id").isBlank()) return null
+        return GlobalEventProcessingFailure(
+            eventId = json.optString("event_id"),
+            attemptCount = json.optInt("attempt_count").coerceAtLeast(0),
+            firstFailedAtMillis = json.optLong("first_failed_at_millis"),
+            lastFailedAtMillis = json.optLong("last_failed_at_millis"),
+            nextAttemptAtMillis = json.optLong("next_attempt_at_millis"),
+            errorFingerprint = json.optString("error_fingerprint"),
+            reason = json.optString("reason"),
+            quarantined = json.optBoolean("quarantined")
+        )
+    }
+
+    private fun encodeDeadLetter(letter: GlobalDeadLetterEvent): JSONObject = JSONObject()
+        .put("event", encodeEvent(letter.event))
+        .put("failure", encodeEventFailure(letter.failure))
+        .put("quarantined_at_millis", letter.quarantinedAtMillis)
+
+    private fun decodeDeadLetter(json: JSONObject?): GlobalDeadLetterEvent? {
+        if (json == null) return null
+        val event = decodeEvent(json.optJSONObject("event")) ?: return null
+        val failure = decodeEventFailure(json.optJSONObject("failure")) ?: return null
+        return GlobalDeadLetterEvent(event, failure, json.optLong("quarantined_at_millis"))
     }
 
     private fun encodeWorld(world: PersonalWorldModel): JSONObject = JSONObject()
@@ -1205,6 +1395,9 @@ class GlobalAgentRepository(context: Context) {
     companion object {
         const val DATABASE_NAME = "signalasi_global_super_agent"
         private const val KEY_EVENTS = "conversation_events"
+        private const val KEY_OVERFLOW_EVENTS = "conversation_event_overflow"
+        private const val KEY_EVENT_FAILURES = "conversation_event_failures"
+        private const val KEY_DEAD_LETTERS = "conversation_event_dead_letters"
         private const val KEY_CONTEXT_JOURNAL = "conversation_context_journal"
         private const val KEY_WORLD = "personal_world_model"
         private const val KEY_RESEARCH_TASKS = "research_tasks"
@@ -1215,6 +1408,9 @@ class GlobalAgentRepository(context: Context) {
         private const val KEY_FEEDBACK = "feedback"
         private const val KEY_CONVERSATION_TOMBSTONES = "conversation_tombstones"
         private const val MAX_PENDING_EVENTS = 2_000
+        private const val MAX_OVERFLOW_EVENTS = 8_000
+        private const val MAX_EVENT_FAILURES = 1_000
+        private const val MAX_DEAD_LETTERS = 1_000
         private const val MAX_PROCESS_BATCH = 250
         private const val MAX_RESEARCH_TASKS = 300
         private const val MAX_PROACTIVE_MESSAGES = 300
@@ -1277,7 +1473,22 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         var cognitionTasksInvalidated = false
         var proactiveMessagesInvalidated = false
         var changedItems = 0
+        val handledEventIds = mutableSetOf<String>()
+        val retryingEventIds = repository.eventFailures().mapTo(mutableSetOf(), GlobalEventProcessingFailure::eventId)
         events.forEach { event ->
+            val worldBefore = world
+            val topicGraphBefore = topicGraph
+            val existingTasksBefore = existingTasks.toList()
+            val existingCognitionBefore = existingCognitionTasks.toList()
+            val existingMessagesBefore = existingMessages.toList()
+            val newTasksBefore = newTasks.toList()
+            val newCognitionBefore = newCognitionTasks.toList()
+            val newMessagesBefore = newMessages.toList()
+            val researchInvalidatedBefore = researchTasksInvalidated
+            val cognitionInvalidatedBefore = cognitionTasksInvalidated
+            val messagesInvalidatedBefore = proactiveMessagesInvalidated
+            val changedItemsBefore = changedItems
+            try {
             if (GlobalConversationMergeLifecycle.valid(event)) {
                 val sourceConversationId = GlobalConversationMergeLifecycle.sourceConversationId(event)
                 val targetConversationId = GlobalConversationMergeLifecycle.targetConversationId(event)
@@ -1423,6 +1634,8 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                     processedEventIds = (world.processedEventIds + event.id).takeLast(4_000),
                     updatedAtMillis = event.timestampMillis
                 )
+                handledEventIds += event.id
+                if (retryingEventIds.remove(event.id)) repository.clearEventFailure(event.id)
                 return@forEach
             }
             if (event.type == GlobalConversationEventType.TOOL_RESULT) {
@@ -1494,6 +1707,35 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                         }
                     }
                     ?.let(newMessages::add)
+                }
+                handledEventIds += event.id
+                if (retryingEventIds.remove(event.id)) repository.clearEventFailure(event.id)
+            } catch (error: Exception) {
+                world = worldBefore
+                topicGraph = topicGraphBefore
+                existingTasks.clear()
+                existingTasks.addAll(existingTasksBefore)
+                existingCognitionTasks.clear()
+                existingCognitionTasks.addAll(existingCognitionBefore)
+                existingMessages.clear()
+                existingMessages.addAll(existingMessagesBefore)
+                newTasks.clear()
+                newTasks.addAll(newTasksBefore)
+                newCognitionTasks.clear()
+                newCognitionTasks.addAll(newCognitionBefore)
+                newMessages.clear()
+                newMessages.addAll(newMessagesBefore)
+                researchTasksInvalidated = researchInvalidatedBefore
+                cognitionTasksInvalidated = cognitionInvalidatedBefore
+                proactiveMessagesInvalidated = messagesInvalidatedBefore
+                changedItems = changedItemsBefore
+                val failure = repository.recordEventFailure(event, error)
+                retryingEventIds += event.id
+                if (failure.quarantined) {
+                    repository.quarantineEvent(event, failure)
+                    retryingEventIds -= event.id
+                    handledEventIds += event.id
+                }
             }
         }
         repository.saveWorld(world)
@@ -1507,8 +1749,8 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         if (proactiveMessagesInvalidated || newMessages.isNotEmpty()) {
             repository.saveProactiveMessages(existingMessages + newMessages)
         }
-        repository.removeEvents(events.map(GlobalConversationEvent::id).toSet())
-        GlobalAgentProcessingBatch(events.size, changedItems, newTasks, newMessages, newCognitionTasks)
+        repository.removeEvents(handledEventIds)
+        GlobalAgentProcessingBatch(handledEventIds.size, changedItems, newTasks, newMessages, newCognitionTasks)
     }
 
     fun augmentContext(context: AgentConversationContext, query: String): AgentConversationContext {
@@ -1789,6 +2031,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             return 0L
         }
         val candidates = buildList {
+            repository.nextPendingEventAttemptAt(nowMillis).takeIf { it > 0L }?.let(::add)
             repository.researchTasks().forEach { task ->
                 when (task.status) {
                     GlobalResearchTaskStatus.QUEUED -> add(nowMillis + MIN_WAKE_DELAY_MILLIS)
@@ -2184,7 +2427,9 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         val runs = deliberationStore.autonomousRuns()
         val longGoals = longHorizonCoordinator.goals()
         return GlobalAgentDashboardSnapshot(
-            pendingEventCount = repository.pendingEvents(250).size,
+            pendingEventCount = repository.pendingEventCount(),
+            retryingEventCount = repository.eventFailures().size,
+            quarantinedEventCount = repository.deadLetters().size,
             worldItemCount = active.size,
             topicCount = topicGraph.activeNodes().size.coerceAtLeast(
                 active.map { GlobalAgentText.normalize(it.topic) }.filter(String::isNotBlank).distinct().size
@@ -2752,12 +2997,22 @@ object GlobalConversationEventBus {
     fun requestProcessing(context: Context) {
         val intent = Intent(context.applicationContext, MessageService::class.java)
             .setAction(MessageService.ACTION_PROCESS_GLOBAL_AGENT)
-        runCatching {
+        val started = runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.applicationContext.startForegroundService(intent)
             } else {
                 context.applicationContext.startService(intent)
             }
+        }.isSuccess
+        if (!started) {
+            runCatching {
+                GlobalAgentWakeScheduler.schedule(
+                    context.applicationContext,
+                    System.currentTimeMillis() + PROCESSING_START_RETRY_MILLIS
+                )
+            }
         }
     }
+
+    private const val PROCESSING_START_RETRY_MILLIS = 60_000L
 }

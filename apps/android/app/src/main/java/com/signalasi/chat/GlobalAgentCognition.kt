@@ -425,12 +425,13 @@ object GlobalWorldModelReducer {
         understanding: GlobalUnderstanding
     ): GlobalWorldReduction {
         if (event.id in world.processedEventIds) return GlobalWorldReduction(world, emptyList(), emptyList())
+        val modelUpdatedAt = maxOf(world.updatedAtMillis, event.timestampMillis)
         val incomingRetractions = event.effectiveRetractions()
         val retractedEventIds = (world.retractedEventIds + incomingRetractions)
             .filter(String::isNotBlank)
             .distinct()
             .takeLast(MAX_RETRACTED_EVENT_IDS)
-        val retractedWorld = retractEvidence(world, incomingRetractions, event.timestampMillis).copy(
+        val retractedWorld = retractEvidence(world, incomingRetractions, modelUpdatedAt).copy(
             retractedEventIds = retractedEventIds
         )
         val replacementStableKeys = if (event.type.isCapabilityLifecycleEvent()) {
@@ -461,7 +462,7 @@ object GlobalWorldModelReducer {
                 world = projectionAdjustedWorld.copy(
                     processedEventIds = (projectionAdjustedWorld.processedEventIds + event.id)
                         .takeLast(MAX_PROCESSED_EVENT_IDS),
-                    updatedAtMillis = event.timestampMillis
+                    updatedAtMillis = modelUpdatedAt
                 ),
                 changedItems = emptyList(),
                 conflicts = emptyList()
@@ -472,7 +473,7 @@ object GlobalWorldModelReducer {
                 world = projectionAdjustedWorld.copy(
                     processedEventIds = (projectionAdjustedWorld.processedEventIds + event.id)
                         .takeLast(MAX_PROCESSED_EVENT_IDS),
-                    updatedAtMillis = event.timestampMillis
+                    updatedAtMillis = modelUpdatedAt
                 ),
                 changedItems = emptyList(),
                 conflicts = emptyList()
@@ -483,7 +484,7 @@ object GlobalWorldModelReducer {
                 world = projectionAdjustedWorld.copy(
                     processedEventIds = (projectionAdjustedWorld.processedEventIds + event.id)
                         .takeLast(MAX_PROCESSED_EVENT_IDS),
-                    updatedAtMillis = event.timestampMillis
+                    updatedAtMillis = modelUpdatedAt
                 ),
                 changedItems = emptyList(),
                 conflicts = emptyList()
@@ -503,7 +504,7 @@ object GlobalWorldModelReducer {
                     },
                     processedEventIds = (projectionAdjustedWorld.processedEventIds + event.id)
                         .takeLast(MAX_PROCESSED_EVENT_IDS),
-                    updatedAtMillis = event.timestampMillis
+                    updatedAtMillis = modelUpdatedAt
                 ),
                 changedItems = emptyList(),
                 conflicts = emptyList()
@@ -518,7 +519,7 @@ object GlobalWorldModelReducer {
                 world = projectionAdjustedWorld.copy(
                     processedEventIds = (projectionAdjustedWorld.processedEventIds + event.id)
                         .takeLast(MAX_PROCESSED_EVENT_IDS),
-                    updatedAtMillis = event.timestampMillis
+                    updatedAtMillis = modelUpdatedAt
                 ),
                 changedItems = emptyList(),
                 conflicts = emptyList()
@@ -541,12 +542,17 @@ object GlobalWorldModelReducer {
                     .distinctBy(GlobalEvidenceRef::eventId)
                     .takeLast(MAX_EVIDENCE_PER_ITEM)
                 val replaceProjection = event.type in PERSISTENT_CONTEXT_UPSERT_EVENTS
+                val candidateIsCurrent = candidate.lastSeenAtMillis >= existing.lastSeenAtMillis
                 val merged = existing.copy(
-                    kind = if (replaceProjection) candidate.kind else existing.kind,
-                    layer = if (replaceProjection) candidate.layer else existing.layer,
-                    topic = if (replaceProjection) candidate.topic else existing.topic,
-                    value = if (existing.kind == GlobalWorldItemKind.STATE || replaceProjection) candidate.value else existing.value,
-                    status = if (existing.kind == GlobalWorldItemKind.STATE || replaceProjection) candidate.status else existing.status,
+                    kind = if (replaceProjection && candidateIsCurrent) candidate.kind else existing.kind,
+                    layer = if (replaceProjection && candidateIsCurrent) candidate.layer else existing.layer,
+                    topic = if (replaceProjection && candidateIsCurrent) candidate.topic else existing.topic,
+                    value = if (candidateIsCurrent &&
+                        (existing.kind == GlobalWorldItemKind.STATE || replaceProjection)
+                    ) candidate.value else existing.value,
+                    status = if (candidateIsCurrent &&
+                        (existing.kind == GlobalWorldItemKind.STATE || replaceProjection)
+                    ) candidate.status else existing.status,
                     confidence = max(existing.confidence, candidate.confidence)
                         .plus(0.03).coerceAtMost(0.98),
                     contextVisibility = if (replaceProjection) {
@@ -556,8 +562,12 @@ object GlobalWorldModelReducer {
                     conversationIds = (existing.conversationIds + candidate.conversationIds).take(20).toSet(),
                     evidenceEventIds = evidence.map(GlobalEvidenceRef::eventId),
                     evidenceProvenance = evidence,
-                    lastSeenAtMillis = now,
-                    expiresAtMillis = if (existing.kind == GlobalWorldItemKind.STATE || replaceProjection) {
+                    firstSeenAtMillis = listOf(existing.firstSeenAtMillis, candidate.firstSeenAtMillis)
+                        .filter { it > 0L }.minOrNull() ?: 0L,
+                    lastSeenAtMillis = maxOf(existing.lastSeenAtMillis, candidate.lastSeenAtMillis),
+                    expiresAtMillis = if (candidateIsCurrent &&
+                        (existing.kind == GlobalWorldItemKind.STATE || replaceProjection)
+                    ) {
                         candidate.expiresAtMillis
                     } else existing.expiresAtMillis
                 )
@@ -572,7 +582,7 @@ object GlobalWorldModelReducer {
                     val previous = mutable[contradictionIndex].copy(
                         status = GlobalWorldItemStatus.CONFLICTED,
                         conflictGroupId = conflictId,
-                        lastSeenAtMillis = now
+                        lastSeenAtMillis = maxOf(mutable[contradictionIndex].lastSeenAtMillis, now)
                     )
                     val conflicting = candidate.copy(
                         status = GlobalWorldItemStatus.CONFLICTED,
@@ -599,7 +609,7 @@ object GlobalWorldModelReducer {
                 links = links,
                 processedEventIds = (retractedWorld.processedEventIds + event.id).takeLast(MAX_PROCESSED_EVENT_IDS),
                 retractedEventIds = projectionAdjustedWorld.retractedEventIds,
-                updatedAtMillis = now
+                updatedAtMillis = modelUpdatedAt
             ),
             changedItems = changed,
             conflicts = conflicts
@@ -942,7 +952,7 @@ object GlobalWorldModelReducer {
                     strength = (existing.strength + 0.08).coerceAtMost(1.0),
                     evidenceCount = evidence.size.coerceAtLeast(1),
                     evidenceProvenance = evidence,
-                    lastSeenAtMillis = now
+                    lastSeenAtMillis = maxOf(existing.lastSeenAtMillis, now)
                 )
             } else {
                 mutable += GlobalConversationLink(
