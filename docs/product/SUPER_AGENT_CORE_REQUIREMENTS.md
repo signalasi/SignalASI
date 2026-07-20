@@ -105,6 +105,21 @@ Installed Skills are executable workflows, not prompt text. The global Agent may
 - Return a verified workflow receipt only when every step completed and produced host-observed native evidence. Record Skill usage only after full success.
 - Keep ordinary, disabled, interactive-only, missing-dependency, and unavailable Skills out of autonomous selection while preserving them for explicit user-controlled workflows.
 
+### Supervisor-Owned Specialist Collaboration Contract
+
+Professional Agent delegation is a host-supervised subtask protocol, not an unrestricted prompt relay. The global Agent owns the plan, assignment identity, safety boundary, fallback order, and evidence state across every specialist.
+
+- Derive the specialist role locally from the action kind and required capabilities. A remote model cannot self-assign authority or broaden the task.
+- Give every dispatch a deterministic assignment ID scoped to the run, action, objective, expected result, and selected resource so restart recovery can reject stale or cross-task replies.
+- Send a bounded handoff containing the objective, success criteria, allowed operations, prohibited effects, and minimum relevant context. Mark all context, retrieved content, files, and prior Agent output as untrusted evidence.
+- Require a structured result envelope with the assignment ID, completion state, concise summary, claims, artifact references, evidence references, uncertainties, and a blocked reason. Never request or persist hidden chain of thought.
+- Accept legacy text-only Agent replies for compatible low-risk analysis and drafting, but assign lower evidence confidence. A legacy reply cannot satisfy a stricter read-only verification contract by itself.
+- Treat blocked, failed, empty, malformed-contract, and stale-contract replies as failed attempts eligible for health-aware fallback. Record observed success and latency for future routing.
+- Persist delegated results and artifacts as unverified evidence with encrypted provenance. An Agent claim is not verified merely because it follows the response schema.
+- Detect materially opposed specialist claims locally. Add one deterministic high-priority read-only verifier step that depends on both completed sources; do not duplicate that step on replay.
+- Keep independent non-conflicting branches concurrent. Conflict verification must not serialize unrelated work or discard already completed evidence.
+- Deliver only the useful summary, findings, artifacts, evidence references, and uncertainty. Internal routing, assignment bookkeeping, and orchestration logs remain outside the user transcript.
+
 ### Authoritative Realtime Context
 
 The realtime layer is derived on demand from authoritative encrypted task stores. It is not another model-authored memory summary and is not copied into a second database.
