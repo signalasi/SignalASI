@@ -39,6 +39,10 @@ Global findings are not complete when they are merely stored. The host must clos
 - Recheck the adaptive daily budget and per-topic cooldown at delivery time, not only when an insight is first planned.
 - Persist the result before notifying. Notifications open the actual destination workspace and are recoverable without repeating old notifications.
 - Preserve feedback provenance from the rendered transcript entry to every contributing proactive message.
+- Project delivered findings into one local proactive inbox. Digest members share one stable inbox item, while current-topic and Agent-created-topic findings retain their exact durable destination.
+- Show a low-interruption new-finding indicator above the composer instead of inserting extra status chatter. Opening the inbox durably marks only delivered findings as viewed.
+- Expose the topic, source workspace, delivery class, urgency, destination, and concise result without leaking internal event IDs or model deliberation.
+- Let the user open the destination and record Helpful, Not relevant, or Too frequent feedback directly from each finding. Negative feedback removes the item; every response updates the adaptive intervention profile and preserves causal provenance.
 
 ### No-Event Proactive Discovery Contract
 

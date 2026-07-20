@@ -225,6 +225,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentRecentTaskList: LinearLayout
     private lateinit var agentGoalInput: EditText
     private lateinit var agentVoiceButton: TextView
+    private lateinit var agentInsightBar: LinearLayout
+    private lateinit var agentInsightText: TextView
     private lateinit var agentInputContent: LinearLayout
     private lateinit var agentRecordingCenter: LinearLayout
     private lateinit var agentRecordingWaveform: VoiceWaveformView
@@ -529,6 +531,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentRecentTaskList = findViewById(R.id.agentRecentTaskList)
         agentGoalInput = findViewById(R.id.agentGoalInput)
         agentVoiceButton = findViewById(R.id.agentVoiceButton)
+        agentInsightBar = findViewById(R.id.agentInsightBar)
+        agentInsightText = findViewById(R.id.agentInsightText)
         agentInputContent = findViewById(R.id.agentInputContent)
         agentRecordingCenter = findViewById(R.id.agentRecordingCenter)
         agentRecordingWaveform = findViewById(R.id.agentRecordingWaveform)
@@ -1712,8 +1716,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         renderAgentState(restoredOrFreshAgentState(), syncTranscript = false)
         renderAgentTranscript(agentTranscriptStore.list())
         refreshAgentConversationHeader()
+        refreshGlobalInsightIndicator()
         findViewById<View>(R.id.agentSessionSummary).setOnClickListener { showAgentSessionsPage() }
         agentSettingsButton.setOnClickListener { showMainTab(PAGE_SETTINGS) }
+        agentInsightBar.setOnClickListener { showGlobalInsightsDialog() }
         agentPermissionModeButton.setOnClickListener {
             val next = nextAgentPermissionMode(mobileNativeAgent.safetySettings().permissionMode)
             renderAgentState(mobileNativeAgent.updatePermissionMode(next))
@@ -2764,6 +2770,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         if (activeMainTab == PAGE_AGENT) {
                             refreshAgentConversationHeader()
                             renderAgentTranscript(agentTranscriptStore.list())
+                            refreshGlobalInsightIndicator()
                         }
                     }
                 } finally {
@@ -4566,7 +4573,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "global.cognition" -> showGlobalCognitionTasksDialog()
             "global.runs" -> showGlobalAutonomousRunsDialog()
             "global.long_horizon" -> showGlobalLongHorizonGoalsDialog()
-            "global.insights" -> showGlobalInsightsDialog()
+            "global.insights" -> showGlobalPendingInsightsDialog()
             "global.learning" -> showGlobalLearningDialog()
             "profile.nickname" -> openExistingControlCenterPage { showEditNicknameDialog() }
             "profile.copy_id" -> copyText(SignalASICrypto.localSignalasiId(), getString(R.string.security_copied_signalasi_id))
@@ -5283,6 +5290,138 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     })
 
     private fun showGlobalInsightsDialog() {
+        val runtime = if (::globalSuperAgentRuntime.isInitialized) {
+            globalSuperAgentRuntime
+        } else GlobalSuperAgentRuntime.get(this)
+        val items = runtime.proactiveInboxItems(limit = 40)
+        if (items.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle(R.string.agent_global_insights_title)
+                .setMessage(R.string.agent_global_insights_empty)
+                .setPositiveButton(android.R.string.ok, null)
+                .show()
+            refreshGlobalInsightIndicator()
+            return
+        }
+
+        runtime.markProactiveInboxViewed(items.flatMapTo(linkedSetOf(), GlobalProactiveInboxItem::messageIds))
+        refreshGlobalInsightIndicator()
+        val conversations = agentTranscriptStore.conversations(includeArchived = true).associateBy(AgentConversation::id)
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(4), dp(16), dp(8))
+        }
+        val scroll = ScrollView(this).apply {
+            isFillViewport = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(list, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+        }
+        var dialog: AlertDialog? = null
+        items.forEach { item ->
+            val sourceTitle = conversations[item.sourceConversationId]?.let(::agentConversationDisplayTitle)
+                ?: item.topic.ifBlank { getString(R.string.app_name) }
+            val targetLabel = getString(when (item.target) {
+                GlobalProactiveTarget.CURRENT_CONVERSATION -> R.string.agent_global_insight_current_topic
+                GlobalProactiveTarget.NEW_CONVERSATION -> R.string.agent_global_insight_new_topic
+                GlobalProactiveTarget.GLOBAL_DIGEST -> R.string.agent_global_insight_digest
+            })
+            val metadata = buildString {
+                append(targetLabel)
+                if (item.urgent) append(" \u00b7 ").append(getString(R.string.agent_global_insight_urgent))
+                append(" \u00b7 ").append(getString(R.string.agent_global_insight_source, sourceTitle))
+                if (item.deliveredAtMillis > 0L) {
+                    append(" \u00b7 ")
+                    append(SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()).format(Date(item.deliveredAtMillis)))
+                }
+            }
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(13), dp(12), dp(13), dp(12))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(8).toFloat()
+                    setColor(getColor(R.color.surface_bg))
+                    setStroke(dp(1), getColor(R.color.separator))
+                }
+            }
+            card.addView(TextView(this).apply {
+                text = metadata
+                setTextColor(getColor(R.color.text_secondary))
+                textSize = 11f
+                maxLines = 2
+            })
+            card.addView(TextView(this).apply {
+                text = item.title.ifBlank { getString(R.string.agent_global_insights_title) }
+                setTextColor(getColor(R.color.text_primary))
+                textSize = 15f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setPadding(0, dp(7), 0, 0)
+            })
+            card.addView(TextView(this).apply {
+                text = item.content
+                setTextColor(getColor(R.color.text_primary))
+                textSize = 14f
+                setLineSpacing(dp(3).toFloat(), 1f)
+                setTextIsSelectable(true)
+                setPadding(0, dp(6), 0, dp(8))
+            })
+            if (item.destinationConversationId.isNotBlank()) {
+                card.addView(globalInsightActionButton(
+                    label = getString(R.string.agent_global_insight_open_topic),
+                    emphasized = true
+                ) {
+                    dialog?.dismiss()
+                    openGlobalInsightTopic(item)
+                }, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    dp(40)
+                ))
+            }
+            card.addView(TextView(this).apply {
+                text = getString(R.string.agent_global_insight_feedback_hint)
+                setTextColor(getColor(R.color.text_secondary))
+                textSize = 11f
+                setPadding(0, dp(9), 0, dp(5))
+            })
+            val feedbackRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            listOf(
+                R.string.agent_global_feedback_helpful to GlobalAgentFeedbackKind.HELPFUL,
+                R.string.agent_global_feedback_not_relevant to GlobalAgentFeedbackKind.NOT_RELEVANT,
+                R.string.agent_global_feedback_too_frequent to GlobalAgentFeedbackKind.TOO_FREQUENT
+            ).forEachIndexed { index, (labelId, kind) ->
+                feedbackRow.addView(globalInsightActionButton(
+                    label = getString(labelId),
+                    emphasized = item.feedbackKind == kind
+                ) {
+                    if (recordGlobalInsightFeedback(item.key, kind)) dialog?.dismiss()
+                }, LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+                    if (index > 0) leftMargin = dp(6)
+                })
+            }
+            card.addView(feedbackRow)
+            list.addView(card, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(10) })
+        }
+        dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.agent_global_insights_title)
+            .setView(scroll)
+            .setNegativeButton(R.string.common_close, null)
+            .create()
+        dialog.show()
+        dialog.window?.setLayout(
+            (resources.displayMetrics.widthPixels * 0.94f).toInt(),
+            (resources.displayMetrics.heightPixels * 0.80f).toInt()
+        )
+    }
+
+    private fun showGlobalPendingInsightsDialog() {
         val messages = globalSuperAgentRuntime.pendingProactiveMessages().takeLast(30)
         val message = messages.takeIf(List<GlobalProactiveMessage>::isNotEmpty)?.joinToString("\n\n") {
             "\u2022 ${it.title}\n${it.content.take(240)}"
@@ -5292,6 +5431,46 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .setMessage(message)
             .setPositiveButton(android.R.string.ok, null)
             .show()
+    }
+
+    private fun globalInsightActionButton(
+        label: String,
+        emphasized: Boolean,
+        onClick: () -> Unit
+    ): TextView = TextView(this).apply {
+        text = label
+        gravity = Gravity.CENTER
+        maxLines = 2
+        textSize = 12f
+        setTextColor(getColor(if (emphasized) R.color.agent_insight_text else R.color.text_primary))
+        background = GradientDrawable().apply {
+            cornerRadius = dp(7).toFloat()
+            setColor(getColor(if (emphasized) R.color.agent_insight_bg else R.color.page_bg))
+            setStroke(dp(1), getColor(if (emphasized) R.color.agent_insight_stroke else R.color.separator))
+        }
+        setOnClickListener { onClick() }
+    }
+
+    private fun openGlobalInsightTopic(item: GlobalProactiveInboxItem) {
+        if (!agentTranscriptStore.switchConversation(item.destinationConversationId)) return
+        renderedAgentTranscriptIds.clear()
+        agentOutputList.removeAllViews()
+        showMainTab(PAGE_AGENT)
+        refreshAgentConversationHeader()
+        renderAgentTranscript(agentTranscriptStore.list(item.destinationConversationId))
+        refreshGlobalInsightIndicator()
+    }
+
+    private fun refreshGlobalInsightIndicator() {
+        if (!::agentInsightBar.isInitialized || !::agentInsightText.isInitialized) return
+        val runtime = if (::globalSuperAgentRuntime.isInitialized) {
+            globalSuperAgentRuntime
+        } else return
+        val count = runtime.newProactiveInsightCount()
+        agentInsightBar.visibility = if (count > 0) View.VISIBLE else View.GONE
+        if (count > 0) {
+            agentInsightText.text = resources.getQuantityString(R.plurals.agent_global_new_insights, count, count)
+        }
     }
 
     private fun showGlobalLearningDialog() {
@@ -8546,10 +8725,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun recordGlobalInsightFeedback(entry: AgentTranscriptEntry, kind: GlobalAgentFeedbackKind) {
+        recordGlobalInsightFeedback(entry.dedupeKey, kind)
+    }
+
+    private fun recordGlobalInsightFeedback(dedupeKey: String, kind: GlobalAgentFeedbackKind): Boolean {
         val runtime = if (::globalSuperAgentRuntime.isInitialized) {
             globalSuperAgentRuntime
         } else GlobalSuperAgentRuntime.get(this)
-        val count = runtime.recordProactiveFeedback(entry.dedupeKey, kind)
+        val count = runtime.recordProactiveFeedback(dedupeKey, kind)
+        refreshGlobalInsightIndicator()
         Toast.makeText(
             this,
             getString(
@@ -8558,6 +8742,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ),
             Toast.LENGTH_SHORT
         ).show()
+        return count > 0
     }
 
     private fun handleAgentRichAction(entry: AgentTranscriptEntry, action: AgentRichAction) {
@@ -10994,6 +11179,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         discoverPage.visibility = if (tab == PAGE_DISCOVER) View.VISIBLE else View.GONE
         mePage.visibility = if (tab == PAGE_SETTINGS) View.VISIBLE else View.GONE
         if (tab == PAGE_SETTINGS) refreshSettingsControlCenter()
+        if (tab == PAGE_AGENT) refreshGlobalInsightIndicator()
 
     }
 

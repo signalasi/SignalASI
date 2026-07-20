@@ -19,4 +19,7 @@
     <color name="separator">#343841</color>
     <color name="incoming_bubble">#252930</color>
     <color name="icon_gray">#CED3DC</color>
+    <color name="agent_insight_bg">#202A36</color>
+    <color name="agent_insight_stroke">#34475C</color>
+    <color name="agent_insight_text">#B8D5F2</color>
 </resources>

@@ -382,6 +382,15 @@ class GlobalAgentRepository(context: Context) {
         })
     }
 
+    fun markProactiveViewed(messageIds: Set<String>, nowMillis: Long): Int = synchronized(STORE_LOCK) {
+        if (messageIds.isEmpty() || nowMillis <= 0L) return@synchronized 0
+        val messages = loadProactiveMessages()
+        val updated = GlobalProactiveInboxPolicy.markViewed(messages, messageIds, nowMillis)
+        val changed = updated.indices.count { index -> updated[index] != messages[index] }
+        if (changed > 0) saveProactiveMessages(updated)
+        changed
+    }
+
     fun conversationTombstones(): Set<String> = synchronized(STORE_LOCK) { loadConversationTombstones() }
 
     fun excludedConversationIds(): Set<String> = synchronized(STORE_LOCK) {
@@ -451,7 +460,7 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 14)
+            .put("version", 15)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("context_journal", JSONArray().apply {
                 loadContextJournal().forEach { put(encodeEvent(it)) }
@@ -982,6 +991,7 @@ class GlobalAgentRepository(context: Context) {
         .put("delivered_at_millis", message.deliveredAtMillis)
         .put("delivered_conversation_id", message.deliveredConversationId)
         .put("delivery_group_id", message.deliveryGroupId)
+        .put("viewed_at_millis", message.viewedAtMillis)
 
     private fun decodeProactiveMessage(json: JSONObject?): GlobalProactiveMessage? {
         if (json == null) return null
@@ -1023,7 +1033,8 @@ class GlobalAgentRepository(context: Context) {
             lastDeliveryError = json.optString("last_delivery_error").take(600),
             deliveredAtMillis = json.optLong("delivered_at_millis"),
             deliveredConversationId = json.optString("delivered_conversation_id"),
-            deliveryGroupId = json.optString("delivery_group_id")
+            deliveryGroupId = json.optString("delivery_group_id"),
+            viewedAtMillis = json.optLong("viewed_at_millis")
         )
     }
 
@@ -1568,13 +1579,16 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         val ids = targets.map(GlobalProactiveMessage::id).toSet()
         repository.saveProactiveMessages(allMessages.map { message ->
             if (message.id !in ids) return@map message
-            message.copy(status = when (kind) {
-                GlobalAgentFeedbackKind.HELPFUL -> if (message.deliveredAtMillis > 0L) {
-                    GlobalProactiveMessageStatus.DELIVERED
-                } else GlobalProactiveMessageStatus.PENDING
-                GlobalAgentFeedbackKind.NOT_RELEVANT,
-                GlobalAgentFeedbackKind.TOO_FREQUENT -> GlobalProactiveMessageStatus.DISMISSED
-            })
+            message.copy(
+                status = when (kind) {
+                    GlobalAgentFeedbackKind.HELPFUL -> if (message.deliveredAtMillis > 0L) {
+                        GlobalProactiveMessageStatus.DELIVERED
+                    } else GlobalProactiveMessageStatus.PENDING
+                    GlobalAgentFeedbackKind.NOT_RELEVANT,
+                    GlobalAgentFeedbackKind.TOO_FREQUENT -> GlobalProactiveMessageStatus.DISMISSED
+                },
+                viewedAtMillis = now
+            )
         })
         GlobalConversationEventBus.requestProcessing(appContext)
         return targets.size
@@ -1799,6 +1813,19 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                 compareByDescending<GlobalProactiveMessage> { it.urgent }
                     .thenBy(GlobalProactiveMessage::createdAtMillis)
             )
+
+    fun proactiveInboxItems(limit: Int = 50): List<GlobalProactiveInboxItem> =
+        GlobalProactiveInboxPolicy.project(
+            messages = repository.proactiveMessages(),
+            feedback = repository.feedback(),
+            limit = limit
+        )
+
+    fun newProactiveInsightCount(): Int =
+        GlobalProactiveInboxPolicy.newCount(proactiveInboxItems(limit = 100))
+
+    fun markProactiveInboxViewed(messageIds: Set<String>): Int =
+        repository.markProactiveViewed(messageIds, System.currentTimeMillis())
 
     fun notificationCandidateForDelivered(
         delivered: List<GlobalProactiveMessage>

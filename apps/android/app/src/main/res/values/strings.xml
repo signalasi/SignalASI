@@ -1526,6 +1526,19 @@
     <string name="agent_global_feedback_too_frequent">Too frequent</string>
     <string name="agent_global_feedback_saved">Feedback saved. Signal will adapt future insights.</string>
     <string name="agent_global_feedback_unavailable">This insight can no longer be linked to its source.</string>
+    <plurals name="agent_global_new_insights">
+        <item quantity="one">Signal has %1$d new finding</item>
+        <item quantity="other">Signal has %1$d new findings</item>
+    </plurals>
+    <string name="agent_global_insights_title">Signal insights</string>
+    <string name="agent_global_insights_empty">No recent Signal insights.</string>
+    <string name="agent_global_insight_current_topic">Current topic</string>
+    <string name="agent_global_insight_new_topic">New topic</string>
+    <string name="agent_global_insight_digest">Digest</string>
+    <string name="agent_global_insight_urgent">Important</string>
+    <string name="agent_global_insight_open_topic">Open topic</string>
+    <string name="agent_global_insight_source">From %1$s</string>
+    <string name="agent_global_insight_feedback_hint">Your feedback changes when and where Signal intervenes.</string>
     <string name="cc_global_learning_toggle_title">Adaptive autonomy</string>
     <string name="cc_global_learning_toggle_subtitle">Learn when, where, and how often proactive help is useful</string>
     <string name="cc_global_learning_title">Learned behavior</string>

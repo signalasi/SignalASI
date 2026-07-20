@@ -1479,7 +1479,8 @@ data class GlobalProactiveMessage(
     val lastDeliveryError: String = "",
     val deliveredAtMillis: Long = 0L,
     val deliveredConversationId: String = "",
-    val deliveryGroupId: String = ""
+    val deliveryGroupId: String = "",
+    val viewedAtMillis: Long = 0L
 )
 
 object GlobalProactiveMessageFactory {
