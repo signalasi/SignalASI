@@ -63,9 +63,11 @@ class GlobalAgentRepository(context: Context) {
 
     private fun enqueueAllLocked(incoming: List<GlobalConversationEvent>): Int {
         if (incoming.isEmpty()) return 0
+        val normalizedIncoming = incoming.mapNotNull(GlobalConversationEventPolicy::normalize)
+        if (normalizedIncoming.isEmpty()) return 0
         val mutation = GlobalEventQueuePolicy.enqueue(
             state = GlobalEventQueueState(loadEvents(), loadOverflowEvents()),
-            incoming = incoming,
+            incoming = normalizedIncoming,
             deadLetterEventIds = loadDeadLetters().mapTo(mutableSetOf()) { it.event.id },
             readyCapacity = MAX_PENDING_EVENTS,
             overflowCapacity = MAX_OVERFLOW_EVENTS
@@ -73,7 +75,9 @@ class GlobalAgentRepository(context: Context) {
         if (mutation.acceptedCount == 0) return 0
         val acceptedIds = (mutation.state.ready.asSequence() + mutation.state.overflow.asSequence())
             .map(GlobalConversationEvent::id).toSet()
-        val accepted = incoming.filter { it.id in acceptedIds || mutation.capacityRejected.any { rejected -> rejected.id == it.id } }
+        val accepted = normalizedIncoming.filter {
+            it.id in acceptedIds || mutation.capacityRejected.any { rejected -> rejected.id == it.id }
+        }
         saveContextJournal(
             GlobalConversationContextJournalPolicy.apply(loadContextJournal(), accepted)
         )
@@ -151,9 +155,14 @@ class GlobalAgentRepository(context: Context) {
 
     fun replayDeadLetter(eventId: String): Boolean = synchronized(STORE_LOCK) {
         val letters = loadDeadLetters()
+        val target = letters.firstOrNull { it.event.id == eventId } ?: return@synchronized false
+        val normalizedEvent = GlobalConversationEventPolicy.normalize(target.event) ?: return@synchronized false
+        val normalizedLetters = letters.map { letter ->
+            if (letter.event.id == eventId) letter.copy(event = normalizedEvent) else letter
+        }
         val mutation = GlobalDeadLetterRecoveryPolicy.replay(
             state = GlobalEventQueueState(loadEvents(), loadOverflowEvents()),
-            deadLetters = letters,
+            deadLetters = normalizedLetters,
             eventId = eventId,
             readyCapacity = MAX_PENDING_EVENTS,
             overflowCapacity = MAX_OVERFLOW_EVENTS
