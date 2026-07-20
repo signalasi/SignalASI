@@ -63,6 +63,21 @@ The global runtime stores three related encrypted graphs rather than treating co
 
 Ready action branches are reserved atomically before execution so multiple background workers may run independent work without dispatching the same step twice. A failed prerequisite blocks only its dependent branch. Completion is accepted only when the host-side verification contract has sufficient evidence; delegated model text alone cannot verify research, device changes, or other objective effects.
 
+### Host-Validated Autonomous Tool Contract
+
+The global Agent may invoke phone-native tools, MCP capabilities, device integrations, and local runtimes from its durable action graph. Tool use follows one host-owned protocol:
+
+- Expose only a bounded, goal-relevant catalog of tools that are registered, currently available, and not blocked. The prompt contains the exact stable tool ID, risk classification, description, and input JSON Schema.
+- Treat every model-generated `INVOKE_TOOL` action as a proposal. The Android host resolves the exact registered descriptor again and rejects unknown, stale, unavailable, blocked, or schema-invalid requests.
+- Never trust model-provided risk, external-effect, reversibility, permission, consent, or confirmation fields. The registered local descriptor and current local policy are authoritative.
+- Apply the existing direct, confirm-once, and always-confirm tiers after validating the tool. Remembered consent remains scoped to the registered action contract and can be revoked locally.
+- Keep credentials, access tokens, pairing secrets, and MCP session state outside model prompts. A model receives only the capability contract and the minimum task input needed for selection.
+- Bind file and runtime operations to the run workspace, use deterministic idempotency keys where required, and preserve action leases so process recovery cannot dispatch the same side effect twice.
+- Persist a native execution receipt containing provenance, duration, input and output hashes, verification state, and an encrypted receipt reference. Raw transport logs are not completion evidence.
+- Publish tool success and failure as causally linked global events. Successful discovery actions and non-retryable failures trigger bounded replanning when downstream work remains.
+- Accept completion only when the action verification contract is satisfied by a native receipt or stronger evidence. A model summary cannot substitute for observed tool execution.
+- Retracting any source event invalidates pending derived tool work and proactive output through the same causal evidence lifecycle used by cognition, research, and long-horizon goals.
+
 ## Core Capability Pillars
 
 ### 1. Goal and Context Understanding

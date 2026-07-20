@@ -4530,6 +4530,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "global.toggle_autonomous_preparation" -> updateGlobalAgentSettings {
                 it.copy(autonomousPreparationEnabled = !it.autonomousPreparationEnabled)
             }
+            "global.toggle_autonomous_tools" -> updateGlobalAgentSettings {
+                it.copy(autonomousToolExecutionEnabled = !it.autonomousToolExecutionEnabled)
+            }
             "global.toggle_dynamic_replanning" -> updateGlobalAgentSettings {
                 it.copy(dynamicAutonomousReplanningEnabled = !it.dynamicAutonomousReplanningEnabled)
             }
@@ -4888,6 +4891,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             ControlCenterRowSpec("global.toggle_enabled", getString(R.string.cc_global_master_title), getString(R.string.cc_global_master_subtitle), R.drawable.ic_agent_node, switchValue = settings.enabled, showChevron = false),
                             ControlCenterRowSpec("global.toggle_model_understanding", getString(R.string.cc_global_model_understanding_title), getString(R.string.cc_global_model_understanding_subtitle), R.drawable.ic_settings_model, switchValue = settings.modelUnderstandingEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_autonomous_preparation", getString(R.string.cc_global_autonomous_preparation_title), getString(R.string.cc_global_autonomous_preparation_subtitle), R.drawable.ic_agent_control, switchValue = settings.autonomousPreparationEnabled, showChevron = false, enabled = settings.enabled),
+                            ControlCenterRowSpec("global.toggle_autonomous_tools", getString(R.string.cc_global_autonomous_tools_title), getString(R.string.cc_global_autonomous_tools_subtitle), R.drawable.ic_agent_control, switchValue = settings.autonomousToolExecutionEnabled, showChevron = false, enabled = settings.enabled && settings.autonomousPreparationEnabled),
                             ControlCenterRowSpec("global.toggle_dynamic_replanning", getString(R.string.cc_global_dynamic_replanning_title), getString(R.string.cc_global_dynamic_replanning_subtitle), R.drawable.ic_reset_data, switchValue = settings.dynamicAutonomousReplanningEnabled, showChevron = false, enabled = settings.enabled && settings.autonomousPreparationEnabled),
                             ControlCenterRowSpec("global.toggle_long_horizon", getString(R.string.cc_global_long_horizon_toggle_title), getString(R.string.cc_global_long_horizon_toggle_subtitle), R.drawable.ic_agent_history, switchValue = settings.longHorizonPlanningEnabled, showChevron = false, enabled = settings.enabled),
                             ControlCenterRowSpec("global.toggle_discovery", getString(R.string.cc_global_discovery_title), getString(R.string.cc_global_discovery_subtitle), R.drawable.ic_tab_discover, switchValue = settings.proactiveDiscoveryEnabled, showChevron = false, enabled = settings.enabled && settings.modelUnderstandingEnabled),
@@ -5125,6 +5129,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "\u2022 ${action.goal}\n${globalAutonomousActionStatusLabel(action.status)}" +
                 action.dependsOnActionIds.takeIf(Set<String>::isNotEmpty)?.let {
                     " \u00b7 ${getString(R.string.cc_global_dependency_count, it.size)}"
+                }.orEmpty() +
+                action.toolId.takeIf(String::isNotBlank)?.let {
+                    "\n${getString(R.string.cc_global_tool_label, it)}"
+                }.orEmpty() +
+                action.toolInputJson.takeIf(String::isNotBlank)?.let {
+                    "\n${getString(R.string.cc_global_tool_input_label, it.take(320))}"
                 }.orEmpty() +
                 "\n${getString(R.string.cc_global_verification_label, globalActionVerificationLabel(action.verificationStatus))}" +
                 action.result.takeIf(String::isNotBlank)?.let { "\n${it.take(300)}" }.orEmpty() +

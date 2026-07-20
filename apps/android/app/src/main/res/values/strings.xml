@@ -1435,6 +1435,10 @@
     <string name="cc_global_model_understanding_subtitle">Use a trusted reasoning resource only when cross-topic meaning needs deeper analysis</string>
     <string name="cc_global_autonomous_preparation_title">Autonomous preparation</string>
     <string name="cc_global_autonomous_preparation_subtitle">Prepare research, analysis, drafts, checks, and topic workspaces without external side effects</string>
+    <string name="cc_global_autonomous_tools_title">Autonomous tools</string>
+    <string name="cc_global_autonomous_tools_subtitle">Let the global Agent use available phone tools and MCP under local permission and confirmation policy</string>
+    <string name="cc_global_tool_label">Tool: %1$s</string>
+    <string name="cc_global_tool_input_label">Input: %1$s</string>
     <string name="cc_global_dynamic_replanning_title">Dynamic replanning</string>
     <string name="cc_global_dynamic_replanning_subtitle">Review real outcomes and revise remaining steps without discarding completed evidence</string>
     <string name="cc_global_long_horizon_toggle_title">Long-horizon planning</string>

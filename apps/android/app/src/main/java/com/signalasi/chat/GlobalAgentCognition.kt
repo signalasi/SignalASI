@@ -1219,6 +1219,7 @@ data class GlobalAgentSettings(
     val proactiveDiscoveryEnabled: Boolean = true,
     val modelUnderstandingEnabled: Boolean = true,
     val autonomousPreparationEnabled: Boolean = true,
+    val autonomousToolExecutionEnabled: Boolean = true,
     val dynamicAutonomousReplanningEnabled: Boolean = true,
     val longHorizonPlanningEnabled: Boolean = true,
     val maxAutonomousReplans: Int = 3,

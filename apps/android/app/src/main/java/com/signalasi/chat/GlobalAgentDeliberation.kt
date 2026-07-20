@@ -71,6 +71,7 @@ enum class GlobalAutonomousActionKind {
     ANALYZE,
     DRAFT,
     READ_ONLY_CHECK,
+    INVOKE_TOOL,
     CREATE_TOPIC,
     START_RESEARCH,
     START_MONITOR
@@ -88,6 +89,7 @@ enum class GlobalAutonomousActionStatus {
 enum class GlobalActionEvidenceKind {
     DELEGATED_RESULT,
     LOCAL_RECEIPT,
+    NATIVE_TOOL_RECEIPT,
     RESEARCH_LEDGER,
     ARTIFACT,
     USER_CONFIRMATION
@@ -129,6 +131,8 @@ data class GlobalAutonomousAction(
     val rationale: String = "",
     val expectedResult: String = "",
     val targetTopic: String = "",
+    val toolId: String = "",
+    val toolInputJson: String = "",
     val priority: Double = 0.5,
     val externalEffect: Boolean = false,
     val reversible: Boolean = true,
@@ -156,7 +160,12 @@ object GlobalAutonomousActionGraphPolicy {
         val keyed = actions.mapIndexed { index, action ->
             action.copy(
                 planKey = action.planKey.ifBlank {
-                    "step-${index + 1}-${GlobalAgentText.stableKey(action.kind.name, action.goal).take(8)}"
+                    "step-${index + 1}-${GlobalAgentText.stableKey(
+                        action.kind.name,
+                        action.goal,
+                        action.toolId,
+                        action.toolInputJson
+                    ).take(8)}"
                 }.take(80),
                 verificationContract = if (action.verificationContract.criteria.isEmpty()) {
                     GlobalActionVerificationPolicy.defaultContract(action)
@@ -187,7 +196,12 @@ object GlobalAutonomousActionGraphPolicy {
     ): List<GlobalAutonomousAction> {
         val keyed = (existing + proposed).mapIndexed { index, action ->
             if (action.planKey.isNotBlank()) action else action.copy(
-                planKey = "step-${index + 1}-${GlobalAgentText.stableKey(action.kind.name, action.goal).take(8)}"
+                planKey = "step-${index + 1}-${GlobalAgentText.stableKey(
+                    action.kind.name,
+                    action.goal,
+                    action.toolId,
+                    action.toolInputJson
+                ).take(8)}"
             )
         }
         val byKey = keyed.associateBy(GlobalAutonomousAction::planKey)
@@ -303,6 +317,11 @@ object GlobalActionVerificationPolicy {
                     GlobalActionEvidenceKind.RESEARCH_LEDGER
                 ),
                 minimumConfidence = 0.58
+            )
+            GlobalAutonomousActionKind.INVOKE_TOOL -> GlobalActionVerificationContract(
+                criteria = criteria,
+                acceptedEvidenceKinds = setOf(GlobalActionEvidenceKind.NATIVE_TOOL_RECEIPT),
+                minimumConfidence = 0.72
             )
             GlobalAutonomousActionKind.CREATE_TOPIC,
             GlobalAutonomousActionKind.START_MONITOR -> GlobalActionVerificationContract(
@@ -483,6 +502,11 @@ object GlobalModelUnderstandingParser {
                 val kind = actionKind(item.optString("kind")) ?: continue
                 val goal = clean(item.optString("goal"), 1_000)
                 if (goal.isBlank()) continue
+                val toolId = clean(item.optString("tool_id"), 180)
+                val toolInputJson = item.optJSONObject("tool_input")?.toString().orEmpty().take(8_000)
+                if (kind == GlobalAutonomousActionKind.INVOKE_TOOL &&
+                    (toolId.isBlank() || toolInputJson.isBlank())
+                ) continue
                 add(GlobalAutonomousAction(
                     planKey = clean(item.optString("key"), 80),
                     dependencyKeys = strings(item.optJSONArray("depends_on"), 8, 80).toSet(),
@@ -491,6 +515,8 @@ object GlobalModelUnderstandingParser {
                     rationale = clean(item.optString("rationale"), 600),
                     expectedResult = clean(item.optString("expected_result"), 600),
                     targetTopic = clean(item.optString("target_topic"), 160),
+                    toolId = toolId,
+                    toolInputJson = toolInputJson,
                     priority = item.optDouble("priority", 0.5).coerceIn(0.0, 1.0),
                     externalEffect = item.optBoolean("external_effect", false),
                     reversible = item.optBoolean("reversible", true)
@@ -523,7 +549,9 @@ object GlobalModelUnderstandingParser {
             researchQuestions = strings(json.optJSONArray("research_questions"), 6, 1_000),
             goalDependencies = goalDependencies,
             actions = GlobalAutonomousActionGraphPolicy.prepare(
-                actions.distinctBy { GlobalAgentText.stableKey(it.kind.name, it.goal) }
+                actions.distinctBy {
+                    GlobalAgentText.stableKey(it.kind.name, it.goal, it.toolId, it.toolInputJson)
+                }
             ),
             userInsight = clean(json.optString("user_insight"), 2_000),
             goalState = enumValue(json.optString("goal_state"), GlobalGoalProgressState.ACTIVE),
@@ -581,10 +609,18 @@ object GlobalAutonomousRunPlanner {
         ) return null
         val actions = GlobalAutonomousActionGraphPolicy.prepare(result.actions)
             .sortedByDescending(GlobalAutonomousAction::priority)
-            .distinctBy { GlobalAgentText.stableKey(it.kind.name, it.goal) }
+            .distinctBy {
+                GlobalAgentText.stableKey(it.kind.name, it.goal, it.toolId, it.toolInputJson)
+            }
             .take(MAX_ACTIONS)
             .map { action ->
-                if (action.requiresConfirmation) {
+                if (action.kind == GlobalAutonomousActionKind.INVOKE_TOOL) {
+                    // Tool confirmation is derived from the registered host contract at execution time.
+                    action.copy(
+                        status = GlobalAutonomousActionStatus.PENDING,
+                        confirmationGranted = false
+                    )
+                } else if (action.requiresConfirmation) {
                     action.copy(status = GlobalAutonomousActionStatus.WAITING_CONFIRMATION)
                 } else action
             }
@@ -1075,6 +1111,8 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
         .put("rationale", action.rationale)
         .put("expected_result", action.expectedResult)
         .put("target_topic", action.targetTopic)
+        .put("tool_id", action.toolId)
+        .put("tool_input_json", action.toolInputJson.take(8_000))
         .put("priority", action.priority)
         .put("external_effect", action.externalEffect)
         .put("reversible", action.reversible)
@@ -1107,6 +1145,8 @@ class GlobalAgentDeliberationStore(context: android.content.Context) {
             rationale = json.optString("rationale").take(600),
             expectedResult = json.optString("expected_result").take(600),
             targetTopic = json.optString("target_topic").take(160),
+            toolId = json.optString("tool_id").take(180),
+            toolInputJson = json.optString("tool_input_json").take(8_000),
             priority = json.optDouble("priority", 0.5).coerceIn(0.0, 1.0),
             externalEffect = json.optBoolean("external_effect", false),
             reversible = json.optBoolean("reversible", true),

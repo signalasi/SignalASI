@@ -1345,6 +1345,10 @@
     <string name="cc_global_model_understanding_subtitle">只在跨主题含义需要深入分析时调用可信推理资源</string>
     <string name="cc_global_autonomous_preparation_title">自主准备</string>
     <string name="cc_global_autonomous_preparation_subtitle">自主准备研究、分析、草稿、检查和专题工作区，不产生外部后果</string>
+    <string name="cc_global_autonomous_tools_title">自主调用工具</string>
+    <string name="cc_global_autonomous_tools_subtitle">允许全局 Agent 在本机权限与确认策略约束下调用手机工具和 MCP</string>
+    <string name="cc_global_tool_label">工具：%1$s</string>
+    <string name="cc_global_tool_input_label">参数：%1$s</string>
     <string name="cc_global_proactive_title">主动发现</string>
     <string name="cc_global_proactive_subtitle">主动发现有价值的风险、矛盾、机会与遗漏</string>
     <string name="cc_global_research_title">自主研究</string>

@@ -67,6 +67,11 @@ object GlobalRunReplanParser {
                 val kind = enumValueOrNull<GlobalAutonomousActionKind>(item.optString("kind")) ?: continue
                 val goal = cleanText(item.optString("goal"), 1_000)
                 if (goal.isBlank()) continue
+                val toolId = cleanText(item.optString("tool_id"), 180)
+                val toolInputJson = item.optJSONObject("tool_input")?.toString().orEmpty().take(8_000)
+                if (kind == GlobalAutonomousActionKind.INVOKE_TOOL &&
+                    (toolId.isBlank() || toolInputJson.isBlank())
+                ) continue
                 add(GlobalAutonomousAction(
                     planKey = cleanText(item.optString("key"), 80),
                     dependencyKeys = strings(item.optJSONArray("depends_on"), 8, 80).toSet(),
@@ -75,12 +80,16 @@ object GlobalRunReplanParser {
                     rationale = cleanText(item.optString("rationale"), 600),
                     expectedResult = cleanText(item.optString("expected_result"), 600),
                     targetTopic = cleanText(item.optString("target_topic"), 160),
+                    toolId = toolId,
+                    toolInputJson = toolInputJson,
                     priority = item.optDouble("priority", 0.5).coerceIn(0.0, 1.0),
                     externalEffect = item.optBoolean("external_effect", false),
                     reversible = item.optBoolean("reversible", true)
                 ))
             }
-        }.distinctBy { GlobalAgentText.stableKey(it.kind.name, it.goal) }
+        }.distinctBy {
+            GlobalAgentText.stableKey(it.kind.name, it.goal, it.toolId, it.toolInputJson)
+        }
         val summary = cleanText(json.optString("summary"), 2_000)
         if (summary.isBlank() && actions.isEmpty() && state == GlobalGoalProgressState.ACTIVE) return null
         return GlobalRunReplanDecision(
@@ -135,7 +144,8 @@ object GlobalAutonomousReplanPolicy {
         }
         val discoveryStep = action.kind in setOf(
             GlobalAutonomousActionKind.ANALYZE,
-            GlobalAutonomousActionKind.READ_ONLY_CHECK
+            GlobalAutonomousActionKind.READ_ONLY_CHECK,
+            GlobalAutonomousActionKind.INVOKE_TOOL
         )
         val normalized = result.lowercase(Locale.ROOT)
         val changedAssumptions = OUTCOME_REVIEW_SIGNALS.any(normalized::contains)
@@ -174,13 +184,23 @@ object GlobalAutonomousReplanPolicy {
                 completedAtMillis = nowMillis
             ) else action
         }
-        val existingKeys = cancelled.map { GlobalAgentText.stableKey(it.kind.name, it.goal) }.toSet()
+        val existingKeys = cancelled.map {
+            GlobalAgentText.stableKey(it.kind.name, it.goal, it.toolId, it.toolInputJson)
+        }.toSet()
         val proposedAdditions = decision.actions
-            .filterNot { GlobalAgentText.stableKey(it.kind.name, it.goal) in existingKeys }
+            .filterNot {
+                GlobalAgentText.stableKey(it.kind.name, it.goal, it.toolId, it.toolInputJson) in existingKeys
+            }
             .take((MAX_RUN_ACTIONS - cancelled.size).coerceAtLeast(0))
         val additions = GlobalAutonomousActionGraphPolicy.resolveAgainst(cancelled, proposedAdditions)
             .map { action ->
-                if (action.status == GlobalAutonomousActionStatus.SKIPPED) action else if (action.requiresConfirmation) {
+                if (action.status == GlobalAutonomousActionStatus.SKIPPED) action
+                else if (action.kind == GlobalAutonomousActionKind.INVOKE_TOOL) {
+                    action.copy(
+                        status = GlobalAutonomousActionStatus.PENDING,
+                        confirmationGranted = false
+                    )
+                } else if (action.requiresConfirmation) {
                     action.copy(status = GlobalAutonomousActionStatus.WAITING_CONFIRMATION)
                 } else action.copy(status = GlobalAutonomousActionStatus.PENDING)
             }

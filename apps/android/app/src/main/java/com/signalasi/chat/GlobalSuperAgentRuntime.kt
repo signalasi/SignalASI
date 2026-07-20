@@ -416,7 +416,7 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 12)
+            .put("version", 13)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("world", encodeWorld(loadWorld()))
             .put("topic_project_graph", topicGraphStore.export())
@@ -1021,6 +1021,7 @@ class GlobalAgentRepository(context: Context) {
         .put("proactive_discovery_enabled", settings.proactiveDiscoveryEnabled)
         .put("model_understanding_enabled", settings.modelUnderstandingEnabled)
         .put("autonomous_preparation_enabled", settings.autonomousPreparationEnabled)
+        .put("autonomous_tool_execution_enabled", settings.autonomousToolExecutionEnabled)
         .put("dynamic_autonomous_replanning_enabled", settings.dynamicAutonomousReplanningEnabled)
         .put("long_horizon_planning_enabled", settings.longHorizonPlanningEnabled)
         .put("max_autonomous_replans", settings.maxAutonomousReplans)
@@ -1044,6 +1045,7 @@ class GlobalAgentRepository(context: Context) {
             proactiveDiscoveryEnabled = json.optBoolean("proactive_discovery_enabled", true),
             modelUnderstandingEnabled = json.optBoolean("model_understanding_enabled", true),
             autonomousPreparationEnabled = json.optBoolean("autonomous_preparation_enabled", true),
+            autonomousToolExecutionEnabled = json.optBoolean("autonomous_tool_execution_enabled", true),
             dynamicAutonomousReplanningEnabled = json.optBoolean("dynamic_autonomous_replanning_enabled", true),
             longHorizonPlanningEnabled = json.optBoolean("long_horizon_planning_enabled", true),
             maxAutonomousReplans = json.optInt("max_autonomous_replans", 3).coerceIn(1, 5),
