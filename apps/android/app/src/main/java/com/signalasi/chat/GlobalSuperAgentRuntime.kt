@@ -412,7 +412,11 @@ class GlobalAgentRepository(context: Context) {
 
     fun appendProactiveMessage(message: GlobalProactiveMessage): Boolean = synchronized(STORE_LOCK) {
         val messages = loadProactiveMessages()
-        if (messages.any { it.id == message.id || it.sourceEventId == message.sourceEventId && it.content == message.content }) {
+        if (messages.any {
+                it.id == message.id ||
+                    message.sourceEventId.isNotBlank() && it.sourceEventId == message.sourceEventId
+            }
+        ) {
             return@synchronized false
         }
         saveProactiveMessages(messages + message)
@@ -2330,7 +2334,13 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             }
             if (settings.longHorizonPlanningEnabled) {
                 longHorizonCoordinator.goals().asSequence()
-                    .filter { it.status in setOf(GlobalLongHorizonGoalStatus.ACTIVE, GlobalLongHorizonGoalStatus.BLOCKED) }
+                    .filter {
+                        it.status in setOf(
+                            GlobalLongHorizonGoalStatus.ACTIVE,
+                            GlobalLongHorizonGoalStatus.IN_PROGRESS,
+                            GlobalLongHorizonGoalStatus.BLOCKED
+                        ) && it.activeCognitionTaskId.isBlank() && it.activeRunId.isBlank()
+                    }
                     .map(GlobalLongHorizonGoal::nextCheckAtMillis)
                     .filter { it > 0L }
                     .forEach { add(it) }

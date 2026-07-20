@@ -67,6 +67,7 @@ The global runtime stores three related encrypted graphs rather than treating co
 
 - The topic and project graph links conversations, topics, projects, supporting evidence, and conflicts. Topic nodes can be promoted into durable projects as work becomes substantial.
 - The long-horizon goal graph records prerequisite goals, project ownership, checkpoints, completion criteria, and verified completion evidence.
+- Every goal status transition is host-stamped with its previous state and transition time. Orphaned in-progress goals return to the durable scheduler, while completion, blocking, dependency waits, confirmation waits, and recovery produce one crash-recoverable proactive outbox item. Routine checkpoints remain silent, and the existing urgency, cooldown, digest, and daily-delivery budgets still decide when that item reaches the user.
 - The autonomous action graph records stable step keys, prerequisite steps, independent branches, leases, retries, and result evidence.
 
 Ready action branches are reserved atomically before execution so multiple background workers may run independent work without dispatching the same step twice. A failed prerequisite blocks only its dependent branch. Completion is accepted only when the host-side verification contract has sufficient evidence; delegated model text alone cannot verify research, device changes, or other objective effects.

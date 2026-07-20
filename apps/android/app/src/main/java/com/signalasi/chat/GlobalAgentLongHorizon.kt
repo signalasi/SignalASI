@@ -311,6 +311,8 @@ data class GlobalLongHorizonGoal(
     val title: String,
     val description: String = "",
     val status: GlobalLongHorizonGoalStatus = GlobalLongHorizonGoalStatus.ACTIVE,
+    val previousStatus: GlobalLongHorizonGoalStatus? = null,
+    val statusChangedAtMillis: Long = 0L,
     val priority: Double = 0.5,
     val confidence: Double = 0.5,
     val sourceConversationIds: Set<String> = emptySet(),
@@ -334,6 +336,138 @@ data class GlobalLongHorizonGoal(
 ) {
     companion object {
         const val DEFAULT_CHECKPOINT_MILLIS = 24L * 60L * 60L * 1_000L
+    }
+}
+
+object GlobalLongHorizonLifecyclePolicy {
+    fun stampTransition(
+        previous: GlobalLongHorizonGoal?,
+        next: GlobalLongHorizonGoal,
+        nowMillis: Long = next.updatedAtMillis.takeIf { it > 0L } ?: System.currentTimeMillis()
+    ): GlobalLongHorizonGoal {
+        if (previous == null) {
+            return if (next.statusChangedAtMillis > 0L) next else next.copy(
+                statusChangedAtMillis = next.createdAtMillis.takeIf { it > 0L } ?: nowMillis
+            )
+        }
+        if (previous.status == next.status) {
+            return next.copy(
+                previousStatus = next.previousStatus ?: previous.previousStatus,
+                statusChangedAtMillis = next.statusChangedAtMillis.takeIf { it > 0L }
+                    ?: previous.statusChangedAtMillis.takeIf { it > 0L }
+                    ?: previous.updatedAtMillis.takeIf { it > 0L }
+                    ?: nowMillis
+            )
+        }
+        return next.copy(
+            previousStatus = previous.status,
+            statusChangedAtMillis = nowMillis
+        )
+    }
+
+    fun stampTransitions(
+        previous: List<GlobalLongHorizonGoal>,
+        next: List<GlobalLongHorizonGoal>
+    ): List<GlobalLongHorizonGoal> {
+        val previousById = previous.associateBy(GlobalLongHorizonGoal::id)
+        return next.map { goal -> stampTransition(previousById[goal.id], goal) }
+    }
+
+    fun proactiveMessage(goal: GlobalLongHorizonGoal): GlobalProactiveMessage? {
+        val previous = goal.previousStatus ?: return null
+        if (previous == goal.status || goal.statusChangedAtMillis <= 0L) return null
+        val chinese = GlobalAgentText.containsCjk("${goal.topic} ${goal.title} ${goal.description}")
+        val detail = when (goal.status) {
+            GlobalLongHorizonGoalStatus.COMPLETED -> goal.verificationSummary.ifBlank { goal.progressSummary }
+            GlobalLongHorizonGoalStatus.BLOCKED -> goal.blocker.ifBlank { goal.progressSummary }
+            GlobalLongHorizonGoalStatus.WAITING_DEPENDENCY -> goal.blocker
+            GlobalLongHorizonGoalStatus.WAITING_CONFIRMATION -> goal.blocker
+            GlobalLongHorizonGoalStatus.ACTIVE -> goal.progressSummary
+            else -> ""
+        }.replace(Regex("\\s+"), " ").trim().take(1_200)
+        val resumed = goal.status == GlobalLongHorizonGoalStatus.ACTIVE && previous in setOf(
+            GlobalLongHorizonGoalStatus.BLOCKED,
+            GlobalLongHorizonGoalStatus.WAITING_DEPENDENCY,
+            GlobalLongHorizonGoalStatus.WAITING_CONFIRMATION
+        )
+        val material = goal.status in setOf(
+            GlobalLongHorizonGoalStatus.COMPLETED,
+            GlobalLongHorizonGoalStatus.BLOCKED,
+            GlobalLongHorizonGoalStatus.WAITING_DEPENDENCY,
+            GlobalLongHorizonGoalStatus.WAITING_CONFIRMATION
+        ) || resumed
+        if (!material) return null
+        val title = when (goal.status) {
+            GlobalLongHorizonGoalStatus.COMPLETED -> if (chinese) {
+                "\u76ee\u6807\u5df2\u5b8c\u6210"
+            } else "Goal completed"
+            GlobalLongHorizonGoalStatus.BLOCKED -> if (chinese) {
+                "\u76ee\u6807\u53d7\u963b"
+            } else "Goal blocked"
+            GlobalLongHorizonGoalStatus.WAITING_DEPENDENCY -> if (chinese) {
+                "\u6b63\u5728\u7b49\u5f85\u524d\u7f6e\u76ee\u6807"
+            } else "Waiting for a prerequisite"
+            GlobalLongHorizonGoalStatus.WAITING_CONFIRMATION -> if (chinese) {
+                "\u9700\u8981\u4f60\u7684\u786e\u8ba4"
+            } else "Confirmation required"
+            GlobalLongHorizonGoalStatus.ACTIVE -> if (chinese) {
+                "\u76ee\u6807\u5df2\u6062\u590d"
+            } else "Goal resumed"
+            else -> return null
+        }
+        val content = buildString {
+            when (goal.status) {
+                GlobalLongHorizonGoalStatus.COMPLETED -> if (chinese) {
+                    append('\u201c').append(goal.title).append("\u201d\u5df2\u7ecf\u5b8c\u6210\u5e76\u9a8c\u8bc1\u3002")
+                } else append(goal.title).append(" is complete and verified.")
+                GlobalLongHorizonGoalStatus.BLOCKED -> if (chinese) {
+                    append('\u201c').append(goal.title).append("\u201d\u5f53\u524d\u53d7\u963b\u3002")
+                } else append(goal.title).append(" is currently blocked.")
+                GlobalLongHorizonGoalStatus.WAITING_DEPENDENCY -> if (chinese) {
+                    append('\u201c').append(goal.title).append("\u201d\u6b63\u5728\u7b49\u5f85\u524d\u7f6e\u76ee\u6807\u5b8c\u6210\u3002")
+                } else append(goal.title).append(" is waiting for a prerequisite goal.")
+                GlobalLongHorizonGoalStatus.WAITING_CONFIRMATION -> if (chinese) {
+                    append('\u201c').append(goal.title).append("\u201d\u9700\u8981\u4f60\u786e\u8ba4\u540e\u624d\u80fd\u7ee7\u7eed\u3002")
+                } else append(goal.title).append(" needs your confirmation before it can continue.")
+                GlobalLongHorizonGoalStatus.ACTIVE -> if (chinese) {
+                    append('\u201c').append(goal.title).append("\u201d\u5df2\u6062\u590d\uff0c\u5c06\u7ee7\u7eed\u8ddf\u8fdb\u3002")
+                } else append(goal.title).append(" has resumed and will continue to be tracked.")
+                else -> Unit
+            }
+            if (detail.isNotBlank()) append("\n\n").append(detail)
+        }.take(4_000)
+        val urgent = goal.status == GlobalLongHorizonGoalStatus.WAITING_CONFIRMATION ||
+            goal.status == GlobalLongHorizonGoalStatus.BLOCKED && goal.priority >= 0.90
+        val target = when (goal.status) {
+            GlobalLongHorizonGoalStatus.WAITING_CONFIRMATION -> GlobalProactiveTarget.CURRENT_CONVERSATION
+            GlobalLongHorizonGoalStatus.WAITING_DEPENDENCY -> GlobalProactiveTarget.GLOBAL_DIGEST
+            GlobalLongHorizonGoalStatus.BLOCKED -> if (goal.priority >= 0.72) {
+                GlobalProactiveTarget.CURRENT_CONVERSATION
+            } else GlobalProactiveTarget.GLOBAL_DIGEST
+            GlobalLongHorizonGoalStatus.COMPLETED,
+            GlobalLongHorizonGoalStatus.ACTIVE -> GlobalProactiveTarget.NEW_CONVERSATION
+            else -> return null
+        }
+        val sourceId = listOf(
+            "long-horizon-lifecycle",
+            goal.id,
+            previous.name,
+            goal.status.name,
+            goal.statusChangedAtMillis.toString(),
+            goal.checkpointCount.toString()
+        ).joinToString(":")
+        return GlobalProactiveMessage(
+            id = GlobalAgentText.stableKey(sourceId),
+            sourceEventId = sourceId,
+            sourceConversationId = goal.sourceConversationIds.sorted().firstOrNull().orEmpty(),
+            target = target,
+            title = title,
+            content = content,
+            topic = goal.topic.ifBlank { goal.title }.take(160),
+            urgent = urgent,
+            causalEventIds = goal.sourceEventIds.filter(String::isNotBlank).toSet(),
+            createdAtMillis = goal.statusChangedAtMillis
+        )
     }
 }
 
@@ -506,7 +640,11 @@ object GlobalLongHorizonGoalPolicy {
 
     fun nextDue(goals: List<GlobalLongHorizonGoal>, nowMillis: Long): List<GlobalLongHorizonGoal> = goals
         .filter {
-            it.status in setOf(GlobalLongHorizonGoalStatus.ACTIVE, GlobalLongHorizonGoalStatus.BLOCKED) &&
+            it.status in setOf(
+                GlobalLongHorizonGoalStatus.ACTIVE,
+                GlobalLongHorizonGoalStatus.IN_PROGRESS,
+                GlobalLongHorizonGoalStatus.BLOCKED
+            ) &&
                 it.activeCognitionTaskId.isBlank() && it.activeRunId.isBlank() &&
                 it.nextCheckAtMillis <= nowMillis
         }
@@ -708,6 +846,10 @@ class GlobalLongHorizonGoalStore(context: Context) {
     fun goals(): List<GlobalLongHorizonGoal> = synchronized(STORE_LOCK) { load() }
 
     fun save(goals: List<GlobalLongHorizonGoal>) = synchronized(STORE_LOCK) {
+        write(GlobalLongHorizonLifecyclePolicy.stampTransitions(load(), goals))
+    }
+
+    private fun write(goals: List<GlobalLongHorizonGoal>) {
         val array = JSONArray()
         goals.sortedBy(GlobalLongHorizonGoal::createdAtMillis).takeLast(MAX_GOALS)
             .forEach { array.put(encode(it)) }
@@ -725,9 +867,10 @@ class GlobalLongHorizonGoalStore(context: Context) {
         val goals = load().toMutableList()
         val index = goals.indexOfFirst { it.id == goalId }
         if (index < 0) return@synchronized null
-        val updated = transform(goals[index])
+        val current = goals[index]
+        val updated = GlobalLongHorizonLifecyclePolicy.stampTransition(current, transform(current))
         goals[index] = updated
-        save(goals)
+        write(goals)
         updated
     }
 
@@ -736,7 +879,7 @@ class GlobalLongHorizonGoalStore(context: Context) {
     }
 
     fun restore(array: JSONArray) = synchronized(STORE_LOCK) {
-        save(buildList {
+        write(buildList {
             for (index in 0 until array.length()) decode(array.optJSONObject(index))?.let(::add)
         })
     }
@@ -755,6 +898,8 @@ class GlobalLongHorizonGoalStore(context: Context) {
         .put("title", goal.title)
         .put("description", goal.description)
         .put("status", goal.status.name)
+        .put("previous_status", goal.previousStatus?.name.orEmpty())
+        .put("status_changed_at_millis", goal.statusChangedAtMillis)
         .put("priority", goal.priority)
         .put("confidence", goal.confidence)
         .put("source_conversation_ids", JSONArray(goal.sourceConversationIds.toList()))
@@ -789,6 +934,11 @@ class GlobalLongHorizonGoalStore(context: Context) {
             title = title,
             description = json.optString("description").take(2_000),
             status = enumValue(json.optString("status"), GlobalLongHorizonGoalStatus.ACTIVE),
+            previousStatus = json.optString("previous_status").takeIf(String::isNotBlank)?.let {
+                enumValue(it, GlobalLongHorizonGoalStatus.ACTIVE)
+            },
+            statusChangedAtMillis = json.optLong("status_changed_at_millis").takeIf { it > 0L }
+                ?: json.optLong("updated_at_millis", System.currentTimeMillis()),
             priority = json.optDouble("priority", 0.5).coerceIn(0.0, 1.0),
             confidence = json.optDouble("confidence", 0.5).coerceIn(0.0, 1.0),
             sourceConversationIds = strings(json.optJSONArray("source_conversation_ids")).take(20).toSet(),
@@ -872,6 +1022,7 @@ class GlobalLongHorizonCoordinator(context: Context) {
         val world = repository.loadWorld()
         val updatedWorld = GlobalLongHorizonGoalPolicy.applyGoalStatesToWorld(world, reconciled, nowMillis)
         if (updatedWorld != world) repository.saveWorld(updatedWorld)
+        ensureLifecycleMessages(goalStore.goals())
         var goals = goalStore.goals()
         var queued = 0
         GlobalLongHorizonGoalPolicy.nextDue(goals, nowMillis)
@@ -899,6 +1050,7 @@ class GlobalLongHorizonCoordinator(context: Context) {
                 queued += 1
             }
         if (queued > 0) goalStore.save(goals)
+        ensureLifecycleMessages(goalStore.goals())
         return GlobalLongHorizonCycleResult(
             reconciledGoalCount = (synchronized.size - before.size).coerceAtLeast(0) +
                 reconciled.zip(synchronized).count { (left, right) -> left != right },
@@ -1057,12 +1209,24 @@ class GlobalLongHorizonCoordinator(context: Context) {
     }
 
     private fun nextWakeAt(goals: List<GlobalLongHorizonGoal>, nowMillis: Long): Long = goals.asSequence()
-        .filter { it.status in setOf(GlobalLongHorizonGoalStatus.ACTIVE, GlobalLongHorizonGoalStatus.BLOCKED) }
+        .filter {
+            it.status in setOf(
+                GlobalLongHorizonGoalStatus.ACTIVE,
+                GlobalLongHorizonGoalStatus.IN_PROGRESS,
+                GlobalLongHorizonGoalStatus.BLOCKED
+            ) && it.activeCognitionTaskId.isBlank() && it.activeRunId.isBlank()
+        }
         .map(GlobalLongHorizonGoal::nextCheckAtMillis)
         .filter { it > 0L }
         .minOrNull()
         ?.coerceAtLeast(nowMillis + 60_000L)
         ?: 0L
+
+    private fun ensureLifecycleMessages(goals: List<GlobalLongHorizonGoal>) {
+        goals.asSequence()
+            .mapNotNull(GlobalLongHorizonLifecyclePolicy::proactiveMessage)
+            .forEach(repository::appendProactiveMessage)
+    }
 
     private companion object {
         const val RETRY_CHECKPOINT_MILLIS = 60L * 60L * 1_000L

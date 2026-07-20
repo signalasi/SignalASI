@@ -234,6 +234,129 @@ class GlobalAgentLongHorizonTest {
     }
 
     @Test
+    fun `orphaned in progress goal returns to the due queue`() {
+        val orphaned = goal("orphaned", 0.8, 100L).copy(
+            status = GlobalLongHorizonGoalStatus.IN_PROGRESS,
+            activeCognitionTaskId = "",
+            activeRunId = ""
+        )
+        val activelyRunning = goal("running", 0.9, 100L).copy(
+            status = GlobalLongHorizonGoalStatus.IN_PROGRESS,
+            activeRunId = "run-id"
+        )
+
+        val due = GlobalLongHorizonGoalPolicy.nextDue(listOf(activelyRunning, orphaned), 101L)
+
+        assertEquals(listOf("orphaned"), due.map(GlobalLongHorizonGoal::title))
+    }
+
+    @Test
+    fun `material lifecycle transition creates one stable proactive message`() {
+        val previous = goal("Ship the durable Agent", 0.9, 100L).copy(
+            id = "goal-id",
+            status = GlobalLongHorizonGoalStatus.IN_PROGRESS,
+            sourceConversationIds = setOf("conversation"),
+            sourceEventIds = listOf("event")
+        )
+        val completed = GlobalLongHorizonLifecyclePolicy.stampTransition(
+            previous,
+            previous.copy(
+                status = GlobalLongHorizonGoalStatus.COMPLETED,
+                verificationSummary = "Verified by a native execution receipt",
+                checkpointCount = 3,
+                updatedAtMillis = 2_000L
+            ),
+            2_000L
+        )
+
+        val first = GlobalLongHorizonLifecyclePolicy.proactiveMessage(completed)
+        val replay = GlobalLongHorizonLifecyclePolicy.proactiveMessage(completed)
+
+        assertNotNull(first)
+        assertEquals(first?.id, replay?.id)
+        assertEquals(first?.sourceEventId, replay?.sourceEventId)
+        assertEquals(GlobalProactiveTarget.NEW_CONVERSATION, first?.target)
+        assertTrue(first?.content.orEmpty().contains("Verified by a native execution receipt"))
+        assertEquals(setOf("event"), first?.causalEventIds)
+    }
+
+    @Test
+    fun `routine checkpoint completion remains silent`() {
+        val previous = goal("Monitor runtime health", 0.5, 100L).copy(
+            status = GlobalLongHorizonGoalStatus.IN_PROGRESS
+        )
+        val active = GlobalLongHorizonLifecyclePolicy.stampTransition(
+            previous,
+            previous.copy(
+                status = GlobalLongHorizonGoalStatus.ACTIVE,
+                progressSummary = "No material change",
+                updatedAtMillis = 2_000L
+            ),
+            2_000L
+        )
+
+        assertNull(GlobalLongHorizonLifecyclePolicy.proactiveMessage(active))
+    }
+
+    @Test
+    fun `blocked goal recovery produces a concise continuation update`() {
+        val blocked = goal("Track release readiness", 0.8, 100L).copy(
+            status = GlobalLongHorizonGoalStatus.BLOCKED,
+            previousStatus = GlobalLongHorizonGoalStatus.IN_PROGRESS,
+            statusChangedAtMillis = 1_000L
+        )
+        val recovered = GlobalLongHorizonLifecyclePolicy.stampTransition(
+            blocked,
+            blocked.copy(
+                status = GlobalLongHorizonGoalStatus.ACTIVE,
+                blocker = "",
+                updatedAtMillis = 2_000L
+            ),
+            2_000L
+        )
+
+        val message = GlobalLongHorizonLifecyclePolicy.proactiveMessage(recovered)
+
+        assertNotNull(message)
+        assertEquals(GlobalProactiveTarget.NEW_CONVERSATION, message?.target)
+        assertTrue(message?.content.orEmpty().contains("resumed"))
+    }
+
+    @Test
+    fun `waiting states use the right interruption level`() {
+        val source = goal("Complete account migration", 0.8, 100L).copy(
+            status = GlobalLongHorizonGoalStatus.IN_PROGRESS
+        )
+        val dependency = GlobalLongHorizonLifecyclePolicy.stampTransition(
+            source,
+            source.copy(
+                status = GlobalLongHorizonGoalStatus.WAITING_DEPENDENCY,
+                blocker = "Waiting for one prerequisite goal",
+                updatedAtMillis = 2_000L
+            ),
+            2_000L
+        )
+        val confirmation = GlobalLongHorizonLifecyclePolicy.stampTransition(
+            source,
+            source.copy(
+                status = GlobalLongHorizonGoalStatus.WAITING_CONFIRMATION,
+                updatedAtMillis = 3_000L
+            ),
+            3_000L
+        )
+
+        assertEquals(
+            GlobalProactiveTarget.GLOBAL_DIGEST,
+            GlobalLongHorizonLifecyclePolicy.proactiveMessage(dependency)?.target
+        )
+        assertEquals(
+            GlobalProactiveTarget.CURRENT_CONVERSATION,
+            GlobalLongHorizonLifecyclePolicy.proactiveMessage(confirmation)?.target
+        )
+        assertTrue(GlobalLongHorizonLifecyclePolicy.proactiveMessage(confirmation)?.urgent == true)
+    }
+
+    @Test
     fun `verified long horizon completion closes matching world goal`() {
         val item = GlobalWorldItem(
             stableKey = "world-goal",
