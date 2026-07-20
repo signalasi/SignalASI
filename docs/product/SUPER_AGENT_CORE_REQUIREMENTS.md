@@ -94,6 +94,7 @@ The global Agent must resolve references inside a topic workspace without resend
 - Preserve the selected events in chronological order and stop at the first character-budget boundary instead of creating gaps in recent context.
 - Mark the entire window as untrusted evidence rather than instructions, then combine it with only the relevant topic graph and shareable world-model layers.
 - Purge retracted messages immediately. Deleting a conversation or changing its global visibility to excluded removes its complete journal window before another model call.
+- Treat private mode and paused global tracking as bidirectional boundaries: neither publish that conversation into global cognition nor inject cross-conversation world or realtime context into its replies.
 - Use the same bounded window for private cognition, research assignments, reversible autonomous preparation, and dynamic plan review.
 
 ### Host-Validated Autonomous Skill Contract

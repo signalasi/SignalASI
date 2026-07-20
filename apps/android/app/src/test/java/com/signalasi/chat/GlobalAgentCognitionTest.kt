@@ -503,6 +503,43 @@ class GlobalAgentCognitionTest {
     }
 
     @Test
+    fun privateConversationNeverRendersInjectedGlobalEvidence() {
+        val context = AgentConversationContext(
+            conversationId = "private-conversation",
+            summary = "Local summary",
+            turns = listOf(AgentTranscriptEntry("user", AgentTranscriptRole.USER, "Continue", 1L)),
+            privateMode = true,
+            globalContext = "Cross-conversation secret"
+        )
+
+        val prompt = context.asPromptBlock()
+
+        assertTrue(prompt.contains("Local summary"))
+        assertTrue(prompt.contains("User: Continue"))
+        assertFalse(prompt.contains("Cross-conversation secret"))
+        assertFalse(context.allowsGlobalContext)
+    }
+
+    @Test
+    fun trackingPausedConversationKeepsLocalDialogueButRejectsGlobalEvidence() {
+        val context = AgentConversationContext(
+            conversationId = "paused-conversation",
+            summary = "Local summary",
+            turns = listOf(AgentTranscriptEntry("user", AgentTranscriptRole.USER, "Continue locally", 1L)),
+            privateMode = false,
+            globalContext = "Unrelated global project context",
+            trackingPaused = true
+        )
+
+        val prompt = context.asPromptBlock()
+
+        assertTrue(prompt.contains("Local summary"))
+        assertTrue(prompt.contains("Continue locally"))
+        assertFalse(prompt.contains("Unrelated global project context"))
+        assertFalse(context.allowsGlobalContext)
+    }
+
+    @Test
     fun helpfulFeedbackMakesTheSameTopicMoreEligibleForResearch() {
         val now = 20_000_000L
         val feedback = (1..6).map { index ->

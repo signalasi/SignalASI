@@ -1864,7 +1864,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     }
 
     fun augmentContext(context: AgentConversationContext, query: String): AgentConversationContext {
-        if (context.privateMode) return context.copy(globalContext = "")
+        if (!context.allowsGlobalContext) return context.copy(globalContext = "")
         val durableContext = GlobalAgentContextSelector.buildWithGraph(
             repository.loadWorld(),
             repository.topicGraph(),
