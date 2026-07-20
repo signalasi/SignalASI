@@ -425,6 +425,45 @@ class GlobalAgentCognitionTest {
     }
 
     @Test
+    fun olderRetriedTaskEventCannotRegressNewerTerminalState() {
+        fun taskEvent(id: String, status: String, timestampMillis: Long) = GlobalConversationEvent(
+            id = id,
+            type = GlobalConversationEventType.TASK_UPDATED,
+            conversationId = "contact:codex",
+            actor = GlobalConversationActor.TOOL,
+            content = "Codex: $status",
+            conversationTitle = "Codex",
+            timestampMillis = timestampMillis,
+            metadata = mapOf(
+                "contact_id" to "codex",
+                "task_id" to "task-a",
+                "task_status" to status
+            )
+        )
+        val completedEvent = taskEvent("completed", "completed", 2_000L)
+        val completed = GlobalWorldModelReducer.reduce(
+            PersonalWorldModel(),
+            completedEvent,
+            pipeline.understand(completedEvent, PersonalWorldModel())
+        )
+        val olderRunningEvent = taskEvent("running", "running", 1_000L)
+
+        val retried = GlobalWorldModelReducer.reduce(
+            completed.world,
+            olderRunningEvent,
+            pipeline.understand(olderRunningEvent, completed.world)
+        )
+        val state = retried.world.items.single { it.kind == GlobalWorldItemKind.STATE }
+
+        assertEquals(GlobalWorldItemStatus.COMPLETED, state.status)
+        assertTrue(state.value.contains("completed"))
+        assertEquals(1_000L, state.firstSeenAtMillis)
+        assertEquals(2_000L, state.lastSeenAtMillis)
+        assertEquals(2_000L, retried.world.updatedAtMillis)
+        assertEquals(setOf("completed", "running"), state.evidenceEventIds.toSet())
+    }
+
+    @Test
     fun urgentRiskProducesImmediateConciseInsight() {
         val event = event(
             conversationId = "conversation-a",

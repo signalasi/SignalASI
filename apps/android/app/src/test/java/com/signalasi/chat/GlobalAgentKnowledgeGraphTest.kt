@@ -70,6 +70,88 @@ class GlobalAgentKnowledgeGraphTest {
     }
 
     @Test
+    fun `duplicate event is idempotent across topic nodes and relations`() {
+        val event = event("event-a", "conversation-a", "Android runtime").copy(timestampMillis = 2_000L)
+        val understanding = understanding(event, "Android runtime").copy(relatedTopics = setOf("Run engine"))
+        val first = GlobalTopicProjectGraphReducer.reduce(
+            GlobalTopicProjectGraph(),
+            event,
+            understanding,
+            reduction(event, understanding)
+        )
+
+        val duplicate = GlobalTopicProjectGraphReducer.reduce(
+            first,
+            event,
+            understanding,
+            reduction(event, understanding)
+        )
+
+        assertEquals(first, duplicate)
+        assertEquals(listOf(event.id), duplicate.processedEventIds)
+    }
+
+    @Test
+    fun `older retried event adds evidence without regressing graph time`() {
+        val newer = event("newer", "conversation-new", "Android runtime").copy(timestampMillis = 2_000L)
+        val newerUnderstanding = understanding(newer, "Android runtime").copy(relatedTopics = setOf("Run engine"))
+        val current = GlobalTopicProjectGraphReducer.reduce(
+            GlobalTopicProjectGraph(),
+            newer,
+            newerUnderstanding,
+            reduction(newer, newerUnderstanding)
+        )
+        val older = event("older", "conversation-old", "Android runtime").copy(timestampMillis = 1_000L)
+        val olderUnderstanding = understanding(older, "Android runtime").copy(relatedTopics = setOf("Run engine"))
+
+        val retried = GlobalTopicProjectGraphReducer.reduce(
+            current,
+            older,
+            olderUnderstanding,
+            reduction(older, olderUnderstanding)
+        )
+        val topic = retried.nodes.single { it.name == "Android runtime" }
+
+        assertEquals(1_000L, topic.firstSeenAtMillis)
+        assertEquals(2_000L, topic.lastSeenAtMillis)
+        assertEquals(2_000L, retried.updatedAtMillis)
+        assertEquals(setOf("newer", "older"), topic.evidenceEventIds.toSet())
+        assertEquals(setOf("conversation-new", "conversation-old"), topic.conversationIds)
+        assertTrue(retried.relations.all { it.lastSeenAtMillis == 2_000L })
+    }
+
+    @Test
+    fun `older conversation deletion cannot erase newer conversation evidence`() {
+        val newer = event("newer", "conversation-a", "Android runtime").copy(timestampMillis = 2_000L)
+        val newerUnderstanding = understanding(newer, "Android runtime")
+        val current = GlobalTopicProjectGraphReducer.reduce(
+            GlobalTopicProjectGraph(),
+            newer,
+            newerUnderstanding,
+            reduction(newer, newerUnderstanding)
+        )
+        val olderDeletion = GlobalConversationEvent(
+            id = "older-deletion",
+            type = GlobalConversationEventType.CONVERSATION_DELETED,
+            conversationId = "conversation-a",
+            actor = GlobalConversationActor.SYSTEM,
+            timestampMillis = 1_000L
+        )
+
+        val retained = GlobalTopicProjectGraphReducer.reduce(
+            current,
+            olderDeletion,
+            understanding(olderDeletion, "Android runtime"),
+            GlobalWorldReduction(PersonalWorldModel(), emptyList(), emptyList())
+        )
+
+        assertEquals(1, retained.nodes.size)
+        assertTrue("conversation-a" in retained.nodes.single().conversationIds)
+        assertEquals(2_000L, retained.nodes.single().lastSeenAtMillis)
+        assertEquals(2_000L, retained.updatedAtMillis)
+    }
+
+    @Test
     fun `deleting the only conversation removes its topic and relations`() {
         val first = event("event-a", "conversation-a", "Android runtime")
         val understanding = understanding(first, "Android runtime").copy(relatedTopics = setOf("Run engine"))

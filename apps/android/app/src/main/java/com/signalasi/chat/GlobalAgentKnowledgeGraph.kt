@@ -53,6 +53,7 @@ data class GlobalTopicRelation(
 data class GlobalTopicProjectGraph(
     val nodes: List<GlobalTopicNode> = emptyList(),
     val relations: List<GlobalTopicRelation> = emptyList(),
+    val processedEventIds: List<String> = emptyList(),
     val retractedEventIds: List<String> = emptyList(),
     val updatedAtMillis: Long = 0L
 ) {
@@ -87,13 +88,21 @@ object GlobalTopicProjectGraphReducer {
         understanding: GlobalUnderstanding,
         reduction: GlobalWorldReduction
     ): GlobalTopicProjectGraph {
+        if (event.id in graph.processedEventIds) return graph
+        val graphUpdatedAt = maxOf(graph.updatedAtMillis, event.timestampMillis)
+        val processedEventIds = (graph.processedEventIds + event.id)
+            .filter(String::isNotBlank)
+            .distinct()
+            .takeLast(MAX_PROCESSED_EVENT_IDS)
         val incomingRetractions = event.effectiveRetractions()
         val retractedEventIds = (graph.retractedEventIds + incomingRetractions)
             .filter(String::isNotBlank)
             .distinct()
             .takeLast(MAX_RETRACTED_EVENT_IDS)
-        val retractedGraph = retractEvidence(graph, incomingRetractions, event.timestampMillis).copy(
-            retractedEventIds = retractedEventIds
+        val retractedGraph = retractEvidence(graph, incomingRetractions, graphUpdatedAt).copy(
+            processedEventIds = processedEventIds,
+            retractedEventIds = retractedEventIds,
+            updatedAtMillis = graphUpdatedAt
         )
         if (event.type == GlobalConversationEventType.CONVERSATION_MERGED) {
             return GlobalConversationMergeLifecycle.rebindTopicGraph(retractedGraph, event)
@@ -113,7 +122,7 @@ object GlobalTopicProjectGraphReducer {
                 nodes = retractedGraph.nodes.map { node ->
                     node.copy(worldItemIds = node.worldItemIds.intersect(activeWorldItemIds))
                 },
-                updatedAtMillis = event.timestampMillis
+                updatedAtMillis = graphUpdatedAt
             )
         }
         if (event.type in setOf(
@@ -147,10 +156,15 @@ object GlobalTopicProjectGraphReducer {
         val topicNode = if (topicIndex >= 0) {
             val existing = nodes[topicIndex]
             val evidence = appendNodeEvidence(existing, event)
+            val candidateIsCurrent = now >= existing.lastSeenAtMillis
             existing.copy(
-                name = preferName(existing.name, topicName),
-                kind = if (existing.kind == GlobalTopicNodeKind.PROJECT) existing.kind else inferredKind,
-                status = GlobalTopicNodeStatus.ACTIVE,
+                name = if (candidateIsCurrent) preferName(existing.name, topicName) else existing.name,
+                kind = when {
+                    existing.kind == GlobalTopicNodeKind.PROJECT -> existing.kind
+                    candidateIsCurrent -> inferredKind
+                    else -> existing.kind
+                },
+                status = if (candidateIsCurrent) GlobalTopicNodeStatus.ACTIVE else existing.status,
                 conversationIds = (existing.conversationIds + conversationIds)
                     .take(MAX_CONVERSATIONS_PER_NODE).toSet(),
                 entityKeys = (existing.entityKeys + entityKeys).take(MAX_ENTITIES_PER_NODE).toSet(),
@@ -158,7 +172,8 @@ object GlobalTopicProjectGraphReducer {
                 evidenceEventIds = evidence.map(GlobalEvidenceRef::eventId),
                 evidenceProvenance = evidence,
                 confidence = (maxOf(existing.confidence, baseConfidence(understanding)) + 0.02).coerceAtMost(0.98),
-                lastSeenAtMillis = now
+                firstSeenAtMillis = minPositive(existing.firstSeenAtMillis, now),
+                lastSeenAtMillis = maxOf(existing.lastSeenAtMillis, now)
             ).also { nodes[topicIndex] = it }
         } else {
             GlobalTopicNode(
@@ -253,8 +268,9 @@ object GlobalTopicProjectGraphReducer {
                 }
                 .sortedByDescending(GlobalTopicRelation::lastSeenAtMillis)
                 .take(MAX_RELATIONS),
+            processedEventIds = retractedGraph.processedEventIds,
             retractedEventIds = retractedGraph.retractedEventIds,
-            updatedAtMillis = now
+            updatedAtMillis = graphUpdatedAt
         )
     }
 
@@ -265,17 +281,21 @@ object GlobalTopicProjectGraphReducer {
     ): GlobalTopicProjectGraph {
         val nodes = graph.nodes.mapNotNull { node ->
             if (conversationId !in node.conversationIds) return@mapNotNull node
+            val hasNewerEvidence = nodeEvidence(node).any {
+                it.conversationId == conversationId && it.timestampMillis > nowMillis
+            }
+            if (hasNewerEvidence) return@mapNotNull node
             val remaining = node.conversationIds - conversationId
             if (remaining.isEmpty() && node.evidenceEventIds.size <= 1) null else node.copy(
                 conversationIds = remaining,
-                lastSeenAtMillis = nowMillis
+                lastSeenAtMillis = maxOf(node.lastSeenAtMillis, nowMillis)
             )
         }
         val ids = nodes.map(GlobalTopicNode::id).toSet()
         return graph.copy(
             nodes = nodes,
             relations = graph.relations.filter { it.fromNodeId in ids && it.toNodeId in ids },
-            updatedAtMillis = nowMillis
+            updatedAtMillis = maxOf(graph.updatedAtMillis, nowMillis)
         )
     }
 
@@ -333,7 +353,8 @@ object GlobalTopicProjectGraphReducer {
                 strength = (maxOf(existing.strength, strength) + 0.03).coerceAtMost(1.0),
                 evidenceEventIds = evidence.map(GlobalEvidenceRef::eventId),
                 evidenceProvenance = evidence,
-                lastSeenAtMillis = nowMillis
+                firstSeenAtMillis = minPositive(existing.firstSeenAtMillis, nowMillis),
+                lastSeenAtMillis = maxOf(existing.lastSeenAtMillis, nowMillis)
             )
         } else {
             relations += GlobalTopicRelation(
@@ -361,15 +382,17 @@ object GlobalTopicProjectGraphReducer {
         if (index >= 0) {
             val existing = nodes[index]
             val evidence = appendNodeEvidence(existing, event)
+            val candidateIsCurrent = nowMillis >= existing.lastSeenAtMillis
             return existing.copy(
-                name = preferName(existing.name, name),
+                name = if (candidateIsCurrent) preferName(existing.name, name) else existing.name,
                 kind = GlobalTopicNodeKind.PROJECT,
                 conversationIds = (existing.conversationIds + topicNode.conversationIds).take(MAX_CONVERSATIONS_PER_NODE).toSet(),
                 entityKeys = (existing.entityKeys + topicNode.entityKeys).take(MAX_ENTITIES_PER_NODE).toSet(),
                 evidenceEventIds = evidence.map(GlobalEvidenceRef::eventId),
                 evidenceProvenance = evidence,
                 confidence = maxOf(existing.confidence, 0.88),
-                lastSeenAtMillis = nowMillis
+                firstSeenAtMillis = minPositive(existing.firstSeenAtMillis, nowMillis),
+                lastSeenAtMillis = maxOf(existing.lastSeenAtMillis, nowMillis)
             ).also { nodes[index] = it }
         }
         return GlobalTopicNode(
@@ -400,7 +423,8 @@ object GlobalTopicProjectGraphReducer {
                 evidenceEventIds = evidence.map(GlobalEvidenceRef::eventId),
                 evidenceProvenance = evidence,
                 confidence = (existing.confidence + 0.02).coerceAtMost(0.94),
-                lastSeenAtMillis = nowMillis
+                firstSeenAtMillis = minPositive(existing.firstSeenAtMillis, nowMillis),
+                lastSeenAtMillis = maxOf(existing.lastSeenAtMillis, nowMillis)
             ).also { nodes[index] = it }
         }
         return GlobalTopicNode(
@@ -507,6 +531,11 @@ object GlobalTopicProjectGraphReducer {
 
     private fun cleanName(value: String): String = value.replace(Regex("\\s+"), " ").trim().take(160)
 
+    private fun minPositive(left: Long, right: Long): Long = listOf(left, right)
+        .filter { it > 0L }
+        .minOrNull()
+        ?: 0L
+
     private const val MIN_RELATION_SCORE = 0.34
     private const val MAX_RELATIONS_PER_EVENT = 8
     private const val MAX_INFERRED_TOPICS_PER_EVENT = 8
@@ -517,6 +546,7 @@ object GlobalTopicProjectGraphReducer {
     private const val MAX_EVIDENCE_PER_RELATION = 40
     private const val MAX_NODES = 600
     private const val MAX_RELATIONS = 2_000
+    private const val MAX_PROCESSED_EVENT_IDS = 4_000
     private const val MAX_RETRACTED_EVENT_IDS = 4_000
 }
 
@@ -541,6 +571,7 @@ class GlobalTopicProjectGraphStore(context: Context) {
     private fun encode(graph: GlobalTopicProjectGraph): JSONObject = JSONObject()
         .put("nodes", JSONArray().apply { graph.nodes.forEach { put(encodeNode(it)) } })
         .put("relations", JSONArray().apply { graph.relations.forEach { put(encodeRelation(it)) } })
+        .put("processed_event_ids", JSONArray(graph.processedEventIds))
         .put("retracted_event_ids", JSONArray(graph.retractedEventIds))
         .put("updated_at_millis", graph.updatedAtMillis)
 
@@ -556,6 +587,7 @@ class GlobalTopicProjectGraphStore(context: Context) {
                 val array = root.optJSONArray("relations") ?: JSONArray()
                 for (index in 0 until array.length()) decodeRelation(array.optJSONObject(index))?.let(::add)
             },
+            processedEventIds = strings(root.optJSONArray("processed_event_ids")).takeLast(4_000),
             retractedEventIds = strings(root.optJSONArray("retracted_event_ids")).takeLast(4_000),
             updatedAtMillis = root.optLong("updated_at_millis")
         )

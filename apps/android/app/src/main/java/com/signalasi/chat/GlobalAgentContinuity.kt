@@ -17,6 +17,13 @@ data class GlobalDeadLetterEvent(
     val quarantinedAtMillis: Long
 )
 
+data class GlobalAgentContinuitySnapshot(
+    val pendingEventCount: Int,
+    val retryingEvents: List<GlobalEventProcessingFailure>,
+    val quarantinedEvents: List<GlobalDeadLetterEvent>,
+    val nextRetryAtMillis: Long
+)
+
 data class GlobalEventQueueState(
     val ready: List<GlobalConversationEvent> = emptyList(),
     val overflow: List<GlobalConversationEvent> = emptyList()
@@ -26,6 +33,13 @@ data class GlobalEventQueueMutation(
     val state: GlobalEventQueueState,
     val acceptedCount: Int,
     val capacityRejected: List<GlobalConversationEvent> = emptyList()
+)
+
+data class GlobalDeadLetterReplayMutation(
+    val queueState: GlobalEventQueueState,
+    val deadLetters: List<GlobalDeadLetterEvent>,
+    val replayed: Boolean,
+    val enqueuedEvent: GlobalConversationEvent? = null
 )
 
 object GlobalEventQueuePolicy {
@@ -82,6 +96,48 @@ object GlobalEventQueuePolicy {
 
     const val DEFAULT_READY_CAPACITY = 2_000
     const val DEFAULT_OVERFLOW_CAPACITY = 8_000
+}
+
+object GlobalDeadLetterRecoveryPolicy {
+    fun replay(
+        state: GlobalEventQueueState,
+        deadLetters: List<GlobalDeadLetterEvent>,
+        eventId: String,
+        readyCapacity: Int = GlobalEventQueuePolicy.DEFAULT_READY_CAPACITY,
+        overflowCapacity: Int = GlobalEventQueuePolicy.DEFAULT_OVERFLOW_CAPACITY
+    ): GlobalDeadLetterReplayMutation {
+        val letter = deadLetters.firstOrNull { it.event.id == eventId }
+            ?: return GlobalDeadLetterReplayMutation(state, deadLetters, replayed = false)
+        val queuedIds = (state.ready.asSequence() + state.overflow.asSequence())
+            .map(GlobalConversationEvent::id)
+            .toSet()
+        if (eventId in queuedIds) {
+            return GlobalDeadLetterReplayMutation(
+                queueState = state,
+                deadLetters = deadLetters.filterNot { it.event.id == eventId },
+                replayed = true
+            )
+        }
+        val mutation = GlobalEventQueuePolicy.enqueue(
+            state = state,
+            incoming = listOf(letter.event),
+            deadLetterEventIds = deadLetters.asSequence()
+                .map { it.event.id }
+                .filterNot { it == eventId }
+                .toSet(),
+            readyCapacity = readyCapacity,
+            overflowCapacity = overflowCapacity
+        )
+        val queued = (mutation.state.ready.asSequence() + mutation.state.overflow.asSequence())
+            .any { it.id == eventId }
+        if (!queued) return GlobalDeadLetterReplayMutation(state, deadLetters, replayed = false)
+        return GlobalDeadLetterReplayMutation(
+            queueState = mutation.state,
+            deadLetters = deadLetters.filterNot { it.event.id == eventId },
+            replayed = true,
+            enqueuedEvent = letter.event
+        )
+    }
 }
 
 object GlobalEventRetryPolicy {

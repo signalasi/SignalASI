@@ -2,6 +2,7 @@ package com.signalasi.chat
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -121,6 +122,94 @@ class GlobalAgentContinuityTest {
         assertEquals("bad payload", first.reason)
         assertEquals(first.errorFingerprint, second.errorFingerprint)
         assertFalse(first.reason.contains("IllegalStateException"))
+    }
+
+    @Test
+    fun reconstructedQueuePromotesEveryOverflowEventWithoutLoss() {
+        val initial = GlobalEventQueuePolicy.enqueue(
+            GlobalEventQueueState(),
+            (1..8).map { event("event-$it") },
+            readyCapacity = 3,
+            overflowCapacity = 8
+        ).state
+        var reconstructed = GlobalEventQueueState(
+            ready = initial.ready.toList(),
+            overflow = initial.overflow.toList()
+        )
+        val processed = mutableListOf<String>()
+
+        while (reconstructed.ready.isNotEmpty()) {
+            val next = reconstructed.ready.first()
+            processed += next.id
+            reconstructed = GlobalEventQueuePolicy.removeAndPromote(
+                reconstructed,
+                setOf(next.id),
+                readyCapacity = 3
+            )
+        }
+
+        assertEquals((1..8).map { "event-$it" }, processed)
+        assertTrue(reconstructed.overflow.isEmpty())
+    }
+
+    @Test
+    fun deadLetterReplayMovesEventAtomicallyIntoAvailableQueue() {
+        val letter = deadLetter("failed")
+
+        val replay = GlobalDeadLetterRecoveryPolicy.replay(
+            state = GlobalEventQueueState(ready = listOf(event("ready"))),
+            deadLetters = listOf(letter),
+            eventId = "failed",
+            readyCapacity = 2,
+            overflowCapacity = 1
+        )
+
+        assertTrue(replay.replayed)
+        assertEquals("failed", replay.enqueuedEvent?.id)
+        assertEquals(listOf("ready", "failed"), replay.queueState.ready.map(GlobalConversationEvent::id))
+        assertTrue(replay.deadLetters.isEmpty())
+    }
+
+    @Test
+    fun deadLetterReplayRemainsQuarantinedWhenDurableQueueIsFull() {
+        val letter = deadLetter("failed")
+
+        val replay = GlobalDeadLetterRecoveryPolicy.replay(
+            state = GlobalEventQueueState(
+                ready = listOf(event("ready")),
+                overflow = listOf(event("overflow"))
+            ),
+            deadLetters = listOf(letter),
+            eventId = "failed",
+            readyCapacity = 1,
+            overflowCapacity = 1
+        )
+
+        assertFalse(replay.replayed)
+        assertEquals(listOf(letter), replay.deadLetters)
+        assertEquals(listOf("ready"), replay.queueState.ready.map(GlobalConversationEvent::id))
+        assertEquals(listOf("overflow"), replay.queueState.overflow.map(GlobalConversationEvent::id))
+    }
+
+    @Test
+    fun replayClearsDuplicateDeadLetterWithoutEnqueueingTwice() {
+        val letter = deadLetter("failed")
+
+        val replay = GlobalDeadLetterRecoveryPolicy.replay(
+            state = GlobalEventQueueState(ready = listOf(event("failed"))),
+            deadLetters = listOf(letter),
+            eventId = "failed"
+        )
+
+        assertTrue(replay.replayed)
+        assertNull(replay.enqueuedEvent)
+        assertEquals(1, replay.queueState.ready.size)
+        assertTrue(replay.deadLetters.isEmpty())
+    }
+
+    private fun deadLetter(id: String): GlobalDeadLetterEvent {
+        val failure = GlobalEventRetryPolicy.capacityFailure(id, 1_000L)
+        return GlobalDeadLetterEvent(event(id), failure, 1_000L)
     }
 
     private fun event(id: String) = GlobalConversationEvent(

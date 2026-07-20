@@ -151,16 +151,24 @@ class GlobalAgentRepository(context: Context) {
 
     fun replayDeadLetter(eventId: String): Boolean = synchronized(STORE_LOCK) {
         val letters = loadDeadLetters()
-        val letter = letters.firstOrNull { it.event.id == eventId } ?: return@synchronized false
-        if ((loadEvents().asSequence() + loadOverflowEvents().asSequence()).any { it.id == eventId }) {
-            saveDeadLetters(letters.filterNot { it.event.id == eventId })
-            clearEventFailure(eventId)
-            return@synchronized true
+        val mutation = GlobalDeadLetterRecoveryPolicy.replay(
+            state = GlobalEventQueueState(loadEvents(), loadOverflowEvents()),
+            deadLetters = letters,
+            eventId = eventId,
+            readyCapacity = MAX_PENDING_EVENTS,
+            overflowCapacity = MAX_OVERFLOW_EVENTS
+        )
+        if (!mutation.replayed) return@synchronized false
+        mutation.enqueuedEvent?.let { event ->
+            saveContextJournal(
+                GlobalConversationContextJournalPolicy.apply(loadContextJournal(), listOf(event))
+            )
         }
-        saveDeadLetters(letters.filterNot { it.event.id == eventId })
-        val enqueued = enqueueAllLocked(listOf(letter.event)) > 0
-        if (!enqueued) saveDeadLetters(letters)
-        enqueued
+        saveEvents(mutation.queueState.ready)
+        saveOverflowEvents(mutation.queueState.overflow)
+        saveDeadLetters(mutation.deadLetters)
+        clearEventFailure(eventId)
+        true
     }
 
     fun removeEvents(eventIds: Set<String>) = synchronized(STORE_LOCK) {
@@ -1778,6 +1786,23 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     fun worldSnapshot(): PersonalWorldModel = repository.loadWorld()
 
     fun topicGraphSnapshot(): GlobalTopicProjectGraph = repository.topicGraph()
+
+    fun continuitySnapshot(nowMillis: Long = System.currentTimeMillis()): GlobalAgentContinuitySnapshot =
+        GlobalAgentContinuitySnapshot(
+            pendingEventCount = repository.pendingEventCount(),
+            retryingEvents = repository.eventFailures().sortedBy(GlobalEventProcessingFailure::nextAttemptAtMillis),
+            quarantinedEvents = repository.deadLetters().sortedBy(GlobalDeadLetterEvent::quarantinedAtMillis),
+            nextRetryAtMillis = repository.nextPendingEventAttemptAt(nowMillis)
+        )
+
+    fun replayQuarantinedEvent(eventId: String): Boolean {
+        val replayed = repository.replayDeadLetter(eventId)
+        if (replayed) {
+            GlobalConversationEventBus.requestProcessing(appContext)
+            scheduleNextWake()
+        }
+        return replayed
+    }
 
     fun researchTasks(): List<GlobalResearchTask> = repository.researchTasks()
 

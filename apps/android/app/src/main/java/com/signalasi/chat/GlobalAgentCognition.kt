@@ -555,7 +555,7 @@ object GlobalWorldModelReducer {
                     ) candidate.status else existing.status,
                     confidence = max(existing.confidence, candidate.confidence)
                         .plus(0.03).coerceAtMost(0.98),
-                    contextVisibility = if (replaceProjection) {
+                    contextVisibility = if (replaceProjection && candidateIsCurrent) {
                         candidate.contextVisibility
                     } else existing.contextVisibility,
                     evidenceCount = evidence.size.coerceAtLeast(1),
