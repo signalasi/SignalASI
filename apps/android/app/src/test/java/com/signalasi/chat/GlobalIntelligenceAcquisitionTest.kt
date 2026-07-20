@@ -84,6 +84,46 @@ class GlobalIntelligenceAcquisitionTest {
     }
 
     @Test
+    fun continuousMonitorCarriesItsPreviousBaselineIntoTheNextCycle() {
+        val task = task(GlobalResearchDepth.CONTINUOUS_MONITOR).copy(
+            result = "Runtime version 12.4 remains the supported baseline.",
+            evidenceUris = listOf("https://developer.android.com/releases/12.4?utm_source=old"),
+            lastCompletedAtMillis = NOW - 24L * 60L * 60L * 1_000L,
+            researchPlan = GlobalResearchPlan(createdAtMillis = NOW)
+        )
+
+        val baseline = GlobalContinuousMonitorPolicy.baselineBlock(task)
+
+        assertTrue(baseline.contains("Previous monitoring baseline"))
+        assertTrue(baseline.contains("Runtime version 12.4"))
+        assertTrue(baseline.contains("https://developer.android.com/releases/12.4"))
+        assertFalse(baseline.contains("utm_source"))
+        assertTrue(baseline.contains("MATERIAL_CHANGE"))
+        assertEquals(NOW, GlobalContinuousMonitorPolicy.contextCutoffMillis(task))
+    }
+
+    @Test
+    fun continuousMonitorKeepsItsComparisonContractWhenTheBaselineIsLong() {
+        val task = task(GlobalResearchDepth.CONTINUOUS_MONITOR).copy(
+            result = "A".repeat(5_000),
+            lastCompletedAtMillis = NOW
+        )
+
+        val baseline = GlobalContinuousMonitorPolicy.baselineBlock(task, maximumCharacters = 800)
+
+        assertTrue(baseline.contains("new citation or rewording alone is not a material change"))
+        assertTrue(baseline.contains("MATERIAL_CHANGE"))
+        assertTrue(baseline.length <= 800)
+    }
+
+    @Test
+    fun oneShotResearchDoesNotReceiveAMonitoringBaseline() {
+        val task = task(GlobalResearchDepth.DEEP_RESEARCH).copy(result = "Previous result")
+
+        assertEquals("", GlobalContinuousMonitorPolicy.baselineBlock(task))
+    }
+
+    @Test
     fun staleMonitoringEvidenceFailsTheFreshnessGate() {
         val plan = completedPlan(
             GlobalResearchDepth.CONTINUOUS_MONITOR,

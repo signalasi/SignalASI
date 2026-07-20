@@ -1417,6 +1417,7 @@ object GlobalResearchTaskPolicy {
         evidenceUris.sorted().joinToString("|")
     )
 
+    @Suppress("UNUSED_PARAMETER")
     fun isMaterialChange(
         previousResult: String,
         previousEvidenceUris: List<String>,
@@ -1424,15 +1425,81 @@ object GlobalResearchTaskPolicy {
         nextEvidenceUris: List<String>
     ): Boolean {
         if (previousResult.isBlank()) return true
-        val previousTokens = GlobalAgentText.tokens(previousResult.replace(RESULT_PUNCTUATION, " "))
-        val nextTokens = GlobalAgentText.tokens(nextResult.replace(RESULT_PUNCTUATION, " "))
+        val previousComparable = comparableResult(previousResult)
+        val nextComparable = comparableResult(nextResult)
+        if (previousComparable == nextComparable) return false
+        val previousTokens = GlobalAgentText.tokens(previousComparable)
+        val nextTokens = GlobalAgentText.tokens(nextComparable)
         val semanticOverlap = GlobalAgentText.overlap(previousTokens, nextTokens)
-        val newEvidence = nextEvidenceUris.toSet() - previousEvidenceUris.toSet()
-        return semanticOverlap < MATERIAL_CHANGE_OVERLAP || newEvidence.isNotEmpty()
+        val tokenUnion = previousTokens union nextTokens
+        val tokenDeltaRatio = if (tokenUnion.isEmpty()) 0.0 else {
+            ((previousTokens - nextTokens).size + (nextTokens - previousTokens).size).toDouble() / tokenUnion.size
+        }
+        val previousSignalText = signalResult(previousResult)
+        val nextSignalText = signalResult(nextResult)
+        val structuredChange = structuredSignals(previousSignalText) != structuredSignals(nextSignalText)
+        val polarityChange = polarity(previousSignalText) != polarity(nextSignalText)
+        return structuredChange || polarityChange || semanticOverlap < MATERIAL_CHANGE_OVERLAP ||
+            tokenDeltaRatio >= MATERIAL_TOKEN_DELTA_RATIO
     }
 
-    private const val MATERIAL_CHANGE_OVERLAP = 0.88
+    private fun comparableResult(value: String): String = value
+        .replace(URL_PATTERN, " ")
+        .replace(MONITOR_MARKER_PATTERN, " ")
+        .replace(RESULT_PUNCTUATION, " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+        .lowercase(Locale.ROOT)
+
+    private fun signalResult(value: String): String = value
+        .replace(URL_PATTERN, " ")
+        .replace(MONITOR_MARKER_PATTERN, " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+        .lowercase(Locale.ROOT)
+
+    private fun structuredSignals(value: String): Set<String> = buildSet {
+        VERSION_PATTERN.findAll(value).map(MatchResult::value).forEach(::add)
+        DATE_PATTERN.findAll(value).map(MatchResult::value).forEach(::add)
+        PERCENT_PATTERN.findAll(value).map(MatchResult::value).forEach(::add)
+        STATUS_GROUPS.forEach { (group, pattern) ->
+            if (pattern.containsMatchIn(value)) add(group)
+        }
+        if (POSITIVE_STATUS_CJK.any(value::contains)) add("status:positive")
+        if (NEGATIVE_STATUS_CJK.any(value::contains)) add("status:negative")
+        if (REQUIRED_STATUS_CJK.any(value::contains)) add("requirement:required")
+        if (OPTIONAL_STATUS_CJK.any(value::contains)) add("requirement:optional")
+    }
+
+    private fun polarity(value: String): Int = when {
+        NEGATION_PATTERN.containsMatchIn(value) || NEGATION_SIGNALS.any(value::contains) -> -1
+        else -> 1
+    }
+
+    private const val MATERIAL_CHANGE_OVERLAP = 0.82
+    private const val MATERIAL_TOKEN_DELTA_RATIO = 0.28
     private val RESULT_PUNCTUATION = Regex("[.,;:!?()\\[\\]{}]")
+    private val URL_PATTERN = Regex("https?://\\S+", RegexOption.IGNORE_CASE)
+    private val MONITOR_MARKER_PATTERN = Regex("(?im)^\\s*material[_ ]change\\s*[:=]\\s*(yes|no)\\s*$")
+    private val VERSION_PATTERN = Regex("(?i)\\b(?:v(?:ersion)?\\s*)?\\d+(?:\\.\\d+){1,4}(?:[-+._][a-z0-9]+)?\\b")
+    private val DATE_PATTERN = Regex("\\b20\\d{2}[-/.](?:0?[1-9]|1[0-2])[-/.](?:0?[1-9]|[12]\\d|3[01])\\b")
+    private val PERCENT_PATTERN = Regex("\\b\\d+(?:\\.\\d+)?%")
+    private val STATUS_GROUPS = mapOf(
+        "status:positive" to Regex("\\b(supported|released|available|fixed)\\b"),
+        "status:negative" to Regex("\\b(unsupported|deprecated|removed|blocked|vulnerable|breaking)\\b"),
+        "requirement:required" to Regex("\\b(required|mandatory)\\b"),
+        "requirement:optional" to Regex("\\b(optional|recommended)\\b")
+    )
+    private val POSITIVE_STATUS_CJK = setOf("\u652f\u6301", "\u53d1\u5e03", "\u53ef\u7528", "\u5df2\u4fee\u590d")
+    private val NEGATIVE_STATUS_CJK = setOf(
+        "\u4e0d\u652f\u6301", "\u5df2\u5e9f\u5f03", "\u5df2\u79fb\u9664", "\u53d7\u963b", "\u6f0f\u6d1e", "\u7834\u574f\u6027"
+    )
+    private val REQUIRED_STATUS_CJK = setOf("\u5fc5\u987b", "\u5f3a\u5236", "\u8981\u6c42")
+    private val OPTIONAL_STATUS_CJK = setOf("\u53ef\u9009", "\u5efa\u8bae")
+    private val NEGATION_PATTERN = Regex("\\b(no|not|never|without|cannot|unsupported)\\b")
+    private val NEGATION_SIGNALS = setOf(
+        "\u4e0d\u652f\u6301", "\u4e0d\u80fd", "\u65e0\u6cd5", "\u672a\u901a\u8fc7", "\u6ca1\u6709"
+    )
     private const val MIN_MONITOR_INTERVAL_MILLIS = 60L * 60L * 1_000L
     private const val DEFAULT_MONITOR_INTERVAL_MILLIS = 24L * 60L * 60L * 1_000L
     private const val MAX_MONITOR_INTERVAL_MILLIS = 30L * 24L * 60L * 60L * 1_000L

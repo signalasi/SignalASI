@@ -54,6 +54,8 @@ The global Agent must continue reasoning about accumulated authorized state even
 - Persist the scan cursor, lease, completion time, emitted finding fingerprints, and daily deliberation budget in encrypted storage.
 - Recover an expired scan lease after process death, and use deterministic cognition task IDs so replay cannot dispatch duplicate work.
 - Never deliberate the same unchanged finding twice. Materially changed evidence may be reconsidered after a bounded cooldown; failed tasks may retry only after their own recovery window.
+- Carry the previous completed monitoring result and canonical source set into each new monitoring cycle as untrusted baseline evidence. Compare facts, versions, status, deadlines, risks, opportunities, and decision impact; a new citation or rewording alone is not a material change.
+- Build each monitoring cycle from its current durable checkpoint so later authorized conversation updates can refine the monitor without replaying the complete history or freezing context at the task's original creation time.
 - Preserve all contributing evidence roots and conversation IDs in the synthetic review event. Deleting any source conversation invalidates pending cognition, research, autonomous work, and proactive output derived from that finding.
 - Route high-value candidates into the existing structured cognition layer. That layer may request proactive inference research, prepare reversible work, update a long-horizon goal, create a topic workspace, or remain silent.
 - Schedule the next scan through the durable wake scheduler so discovery continues across app backgrounding and restart without polling the MQTT transport.

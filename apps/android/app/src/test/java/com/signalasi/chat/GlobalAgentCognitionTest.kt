@@ -249,6 +249,49 @@ class GlobalAgentCognitionTest {
     }
 
     @Test
+    fun monitoringDoesNotNotifyForANewCitationWithTheSameConclusion() {
+        val previous = "Version 1.2 remains supported for the current runtime."
+        val equivalent = "For the current runtime, version 1.2 remains supported."
+
+        assertFalse(GlobalResearchTaskPolicy.isMaterialChange(
+            previous,
+            listOf("https://example.com/release/v1.2"),
+            equivalent,
+            listOf("https://example.com/release/v1.2", "https://second.example.org/corroboration")
+        ))
+    }
+
+    @Test
+    fun monitoringDoesNotTrustAMaterialChangeMarkerWithoutAHostVisibleDelta() {
+        assertFalse(GlobalResearchTaskPolicy.isMaterialChange(
+            "Runtime version 12.4 remains supported.\nMATERIAL_CHANGE: no",
+            listOf("https://example.com/v12.4"),
+            "Runtime version 12.4 remains supported.\nMATERIAL_CHANGE: yes",
+            listOf("https://example.com/v12.4", "https://second.example.org/v12.4")
+        ))
+    }
+
+    @Test
+    fun monitoringDetectsAChangedVersionInsideOtherwiseSimilarText() {
+        assertTrue(GlobalResearchTaskPolicy.isMaterialChange(
+            "Runtime version 12.4 is supported and required for deployment.",
+            listOf("https://example.com/v12.4"),
+            "Runtime version 12.5 is supported and required for deployment.",
+            listOf("https://example.com/v12.5")
+        ))
+    }
+
+    @Test
+    fun monitoringDetectsAReversedSupportStatus() {
+        assertTrue(GlobalResearchTaskPolicy.isMaterialChange(
+            "Runtime version 12.4 remains supported for deployment.",
+            listOf("https://example.com/v12.4"),
+            "Runtime version 12.4 is now unsupported for deployment.",
+            listOf("https://example.com/v12.4")
+        ))
+    }
+
+    @Test
     fun deletedChatMessageRemovesItsWorldModelEvidence() {
         val message = event("contact:codex", "Codex", "We need a durable Android runtime")
         val understanding = GlobalUnderstanding(
