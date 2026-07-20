@@ -1324,7 +1324,7 @@ object GlobalInterventionPolicy {
             reason = reason,
             researchRequired = settings.autonomousResearchEnabled && understanding.externalResearchUseful &&
                 score >= GlobalAgentLearningPolicy.researchThreshold(appliedProfile, understanding.topic),
-            autonomousPreparationAllowed = settings.autonomousResearchEnabled &&
+            autonomousPreparationAllowed = settings.autonomousPreparationEnabled &&
                 (understanding.externalResearchUseful || understanding.durableFollowUpUseful),
             notificationAllowed = notificationAllowed
         )
@@ -1539,6 +1539,15 @@ object GlobalResearchPlanner {
         val lower = value.lowercase(Locale.ROOT)
         return listOf("monitor", "track", "ongoing", "regularly", "\u6301\u7eed", "\u76d1\u63a7", "\u8ddf\u8e2a", "\u5b9a\u671f").any(lower::contains)
     }
+}
+
+object GlobalResearchPlanningPolicy {
+    fun shouldPlan(
+        settings: GlobalAgentSettings,
+        decision: GlobalInterventionDecision,
+        understanding: GlobalUnderstanding
+    ): Boolean = settings.autonomousResearchEnabled &&
+        (decision.researchRequired || understanding.durableFollowUpUseful)
 }
 
 enum class GlobalProactiveTarget { CURRENT_CONVERSATION, NEW_CONVERSATION, GLOBAL_DIGEST }

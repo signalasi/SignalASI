@@ -22,6 +22,7 @@ The global runtime must:
 - Keep internal cognition, research, and plan-review responses out of ordinary contact conversations.
 - Create or reuse topic conversations for substantial work and deliver only useful results at the right time.
 - Require local policy approval for irreversible external effects regardless of which model or Agent proposed them.
+- Treat analysis, drafting, read-only checks, local topic creation, research, and monitoring as host-local reversible preparation. A model cannot force those actions into confirmation or bypass tool policy by mislabeling their risk; only an exact registered tool may represent an external effect.
 - Project remembered authorization, paired Agent, MCP, smart-device, and resource-health transitions into the encrypted world model without exposing endpoints, account fields, tokens, or device identifiers.
 
 Model output never owns lifecycle or safety state. The Android host validates structured cognition, action vocabularies, plan revisions, resource routes, confirmations, retries, and completion evidence before persistence or execution.

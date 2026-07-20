@@ -1776,7 +1776,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                 )
             } else null
             plannedCognition?.let(newCognitionTasks::add)
-            val plannedTask = if (decision.researchRequired || decision.autonomousPreparationAllowed) {
+            val plannedTask = if (GlobalResearchPlanningPolicy.shouldPlan(settings, decision, understanding)) {
                 GlobalResearchPlanner.plan(event, understanding)?.let { candidate ->
                     if (candidate.depth == GlobalResearchDepth.CONTINUOUS_MONITOR) {
                         candidate.copy(

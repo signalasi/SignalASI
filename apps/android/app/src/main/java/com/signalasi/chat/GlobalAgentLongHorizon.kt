@@ -195,14 +195,7 @@ object GlobalAutonomousReplanPolicy {
         val additions = GlobalAutonomousActionGraphPolicy.resolveAgainst(cancelled, proposedAdditions)
             .map { action ->
                 if (action.status == GlobalAutonomousActionStatus.SKIPPED) action
-                else if (action.kind == GlobalAutonomousActionKind.INVOKE_TOOL) {
-                    action.copy(
-                        status = GlobalAutonomousActionStatus.PENDING,
-                        confirmationGranted = false
-                    )
-                } else if (action.requiresConfirmation) {
-                    action.copy(status = GlobalAutonomousActionStatus.WAITING_CONFIRMATION)
-                } else action.copy(status = GlobalAutonomousActionStatus.PENDING)
+                else GlobalAutonomousActionAuthorityPolicy.prepareProposal(action)
             }
         var actions = GlobalAutonomousActionGraphPolicy.reconcile(cancelled + additions)
         val effectiveGoalState = if (

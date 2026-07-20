@@ -133,6 +133,57 @@ class GlobalAgentCognitionTest {
     }
 
     @Test
+    fun researchAndReversiblePreparationSettingsRemainIndependent() {
+        val event = event(
+            conversationId = "conversation-a",
+            title = "Runtime reliability",
+            content = "Research and prepare a durable runtime plan"
+        )
+        val understanding = GlobalUnderstanding(
+            eventId = event.id,
+            topic = "Runtime reliability",
+            intent = "research",
+            riskCandidates = listOf("A compatibility risk may block delivery"),
+            complexity = 0.82,
+            urgency = 0.62,
+            novelty = 0.8,
+            externalResearchUseful = true,
+            durableFollowUpUseful = true
+        )
+        val reduction = GlobalWorldReduction(PersonalWorldModel(), emptyList(), emptyList())
+        val preparationOnlySettings = GlobalAgentSettings(
+            autonomousResearchEnabled = false,
+            autonomousPreparationEnabled = true
+        )
+        val researchOnlySettings = GlobalAgentSettings(
+            autonomousResearchEnabled = true,
+            autonomousPreparationEnabled = false
+        )
+
+        val preparationOnly = GlobalInterventionPolicy.decide(
+            event,
+            understanding,
+            reduction,
+            GlobalInterventionHistory(),
+            settings = preparationOnlySettings
+        )
+        val researchOnly = GlobalInterventionPolicy.decide(
+            event,
+            understanding,
+            reduction,
+            GlobalInterventionHistory(),
+            settings = researchOnlySettings
+        )
+
+        assertFalse(preparationOnly.researchRequired)
+        assertTrue(preparationOnly.autonomousPreparationAllowed)
+        assertFalse(GlobalResearchPlanningPolicy.shouldPlan(preparationOnlySettings, preparationOnly, understanding))
+        assertTrue(researchOnly.researchRequired)
+        assertFalse(researchOnly.autonomousPreparationAllowed)
+        assertTrue(GlobalResearchPlanningPolicy.shouldPlan(researchOnlySettings, researchOnly, understanding))
+    }
+
+    @Test
     fun contextSelectorIncludesRelevantCrossSessionFactsWithoutDumpingUnrelatedTopics() {
         val world = PersonalWorldModel(items = listOf(
             worldItem(

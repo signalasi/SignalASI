@@ -86,7 +86,7 @@ class GlobalAgentLongHorizonTest {
     }
 
     @Test
-    fun `replan preserves completed evidence and gates new external effect`() {
+    fun `replan preserves completed evidence and normalizes host local work`() {
         val completed = action(GlobalAutonomousActionKind.ANALYZE, "Analyze constraints").copy(
             status = GlobalAutonomousActionStatus.COMPLETED,
             result = "Verified evidence"
@@ -112,7 +112,9 @@ class GlobalAgentLongHorizonTest {
 
         assertEquals("Verified evidence", revised.actions.first { it.id == completed.id }.result)
         assertEquals(GlobalAutonomousActionStatus.SKIPPED, revised.actions.first { it.id == obsolete.id }.status)
-        assertEquals(GlobalAutonomousActionStatus.WAITING_CONFIRMATION, revised.actions.last().status)
+        assertEquals(GlobalAutonomousActionStatus.PENDING, revised.actions.last().status)
+        assertFalse(revised.actions.last().externalEffect)
+        assertTrue(revised.actions.last().reversible)
         assertEquals(2, revised.revision)
         assertEquals(1, revised.replanCount)
     }

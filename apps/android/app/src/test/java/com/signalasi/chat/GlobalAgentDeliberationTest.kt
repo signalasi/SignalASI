@@ -104,7 +104,7 @@ class GlobalAgentDeliberationTest {
     }
 
     @Test
-    fun `external effect remains behind confirmation while safe preparation can run`() {
+    fun `model risk labels cannot force host local preparation into confirmation`() {
         val source = event("Prepare the release plan")
         val task = GlobalCognitionTask(
             sourceEvent = source,
@@ -129,7 +129,36 @@ class GlobalAgentDeliberationTest {
         val run = requireNotNull(GlobalAutonomousRunPlanner.plan(task))
         assertEquals(GlobalAutonomousRunStatus.QUEUED, run.status)
         assertEquals(GlobalAutonomousActionStatus.PENDING, run.actions[0].status)
-        assertEquals(GlobalAutonomousActionStatus.WAITING_CONFIRMATION, run.actions[1].status)
+        assertEquals(GlobalAutonomousActionStatus.PENDING, run.actions[1].status)
+        assertFalse(run.actions[1].externalEffect)
+        assertTrue(run.actions[1].reversible)
+    }
+
+    @Test
+    fun `persisted host local confirmation wait is released by recovery`() {
+        val source = GlobalAutonomousAction(
+            kind = GlobalAutonomousActionKind.CREATE_TOPIC,
+            goal = "Create a local project workspace",
+            externalEffect = true,
+            reversible = false,
+            status = GlobalAutonomousActionStatus.WAITING_CONFIRMATION
+        )
+        val run = GlobalAutonomousRun(
+            sourceCognitionTaskId = "cognition",
+            sourceEventId = "event",
+            sourceConversationId = "conversation",
+            topic = "Runtime",
+            goal = "Prepare a project workspace",
+            actions = listOf(source),
+            status = GlobalAutonomousRunStatus.WAITING_CONFIRMATION
+        )
+
+        val recovered = GlobalAutonomousRunPolicy.recoverIfStale(run, 1_000L)
+
+        assertEquals(GlobalAutonomousRunStatus.WAITING_FOR_RESOURCE, recovered.status)
+        assertEquals(GlobalAutonomousActionStatus.PENDING, recovered.actions.single().status)
+        assertFalse(recovered.actions.single().externalEffect)
+        assertTrue(recovered.actions.single().reversible)
     }
 
     @Test

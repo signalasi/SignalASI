@@ -150,8 +150,37 @@ data class GlobalAutonomousAction(
     val lastError: String = "",
     val startedAtMillis: Long = 0L,
     val completedAtMillis: Long = 0L
-) {
-    val requiresConfirmation: Boolean get() = (externalEffect || !reversible) && !confirmationGranted
+)
+
+object GlobalAutonomousActionAuthorityPolicy {
+    fun prepareProposal(action: GlobalAutonomousAction): GlobalAutonomousAction {
+        if (action.status == GlobalAutonomousActionStatus.SKIPPED) return action
+        return if (action.kind == GlobalAutonomousActionKind.INVOKE_TOOL) {
+            // The registered tool contract, not model-authored fields, owns confirmation.
+            action.copy(
+                status = GlobalAutonomousActionStatus.PENDING,
+                confirmationGranted = false
+            )
+        } else {
+            // Every non-tool action in the supported vocabulary is host-local, reversible preparation.
+            action.copy(
+                externalEffect = false,
+                reversible = true,
+                confirmationGranted = false,
+                status = GlobalAutonomousActionStatus.PENDING
+            )
+        }
+    }
+
+    fun recoverPersisted(action: GlobalAutonomousAction): GlobalAutonomousAction =
+        if (action.kind != GlobalAutonomousActionKind.INVOKE_TOOL &&
+            action.status in setOf(
+                GlobalAutonomousActionStatus.PENDING,
+                GlobalAutonomousActionStatus.WAITING_CONFIRMATION
+            )
+        ) {
+            prepareProposal(action)
+        } else action
 }
 
 object GlobalAutonomousActionGraphPolicy {
@@ -613,17 +642,7 @@ object GlobalAutonomousRunPlanner {
                 GlobalAgentText.stableKey(it.kind.name, it.goal, it.toolId, it.toolInputJson)
             }
             .take(MAX_ACTIONS)
-            .map { action ->
-                if (action.kind == GlobalAutonomousActionKind.INVOKE_TOOL) {
-                    // Tool confirmation is derived from the registered host contract at execution time.
-                    action.copy(
-                        status = GlobalAutonomousActionStatus.PENDING,
-                        confirmationGranted = false
-                    )
-                } else if (action.requiresConfirmation) {
-                    action.copy(status = GlobalAutonomousActionStatus.WAITING_CONFIRMATION)
-                } else action
-            }
+            .map(GlobalAutonomousActionAuthorityPolicy::prepareProposal)
         if (actions.isEmpty()) return null
         val status = GlobalAutonomousRunPolicy.terminalStatus(actions) ?: if (
             actions.all { it.status == GlobalAutonomousActionStatus.WAITING_CONFIRMATION }
@@ -649,7 +668,8 @@ object GlobalAutonomousRunPolicy {
     fun recoverIfStale(run: GlobalAutonomousRun, nowMillis: Long): GlobalAutonomousRun {
         val recoveredReview = GlobalAutonomousReplanPolicy.recoverIfStale(run, nowMillis)
         if (recoveredReview != run) return recoveredReview
-        val actions = run.actions.map { action ->
+        val actions = run.actions.map { storedAction ->
+            val action = GlobalAutonomousActionAuthorityPolicy.recoverPersisted(storedAction)
             if (action.status == GlobalAutonomousActionStatus.RUNNING &&
                 action.leaseExpiresAtMillis in 1..nowMillis
             ) {
