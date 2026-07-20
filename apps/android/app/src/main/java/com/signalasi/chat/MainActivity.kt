@@ -4650,6 +4650,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "global.long_horizon" -> showGlobalLongHorizonGoalsDialog()
             "global.insights" -> showGlobalPendingInsightsDialog()
             "global.learning" -> showGlobalLearningDialog()
+            "global.continuity" -> showGlobalContinuityDialog()
             "profile.nickname" -> openExistingControlCenterPage { showEditNicknameDialog() }
             "profile.copy_id" -> copyText(SignalASICrypto.localSignalasiId(), getString(R.string.security_copied_signalasi_id))
             "profile.copy_fingerprint" -> copyText(SignalASICrypto.localIdentitySha256(), getString(R.string.security_copied_phone_fingerprint))
@@ -4922,6 +4923,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         } else GlobalSuperAgentRuntime.get(this)
         val settings = runtime.settings()
         val dashboard = runtime.dashboard()
+        val continuity = runtime.continuitySnapshot()
         val research = runtime.researchTasks()
         val activeResearch = research.count {
             it.status in setOf(
@@ -5002,6 +5004,29 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             ControlCenterRowSpec("global.research", getString(R.string.cc_global_research_queue_title), getString(R.string.cc_global_research_queue_subtitle), R.drawable.ic_agent_knowledge, activeResearch.toString(), if (activeResearch > 0) ControlCenterTone.BLUE else ControlCenterTone.NEUTRAL),
                             ControlCenterRowSpec("global.insights", getString(R.string.cc_global_pending_insights_title), getString(R.string.cc_global_pending_insights_subtitle), R.drawable.ic_agent_memory, dashboard.pendingInsightCount.toString(), if (dashboard.pendingInsightCount > 0) ControlCenterTone.VIOLET else ControlCenterTone.NEUTRAL),
                             ControlCenterRowSpec("global.learning", getString(R.string.cc_global_learning_title), getString(R.string.cc_global_learning_subtitle), R.drawable.ic_agent_skill, getString(R.string.cc_global_learning_status, dashboard.feedbackCount, dashboard.learnedTopicCount), if (dashboard.feedbackCount > 0) ControlCenterTone.GREEN else ControlCenterTone.NEUTRAL),
+                            ControlCenterRowSpec(
+                                "global.continuity",
+                                getString(R.string.cc_global_continuity_title),
+                                getString(
+                                    R.string.cc_global_continuity_subtitle,
+                                    continuity.pendingEventCount,
+                                    continuity.retryingEvents.size,
+                                    continuity.quarantinedEvents.size
+                                ),
+                                R.drawable.ic_security_shield,
+                                getString(
+                                    when {
+                                        continuity.quarantinedEvents.isNotEmpty() -> R.string.cc_global_continuity_attention
+                                        continuity.retryingEvents.isNotEmpty() || continuity.pendingEventCount > 0 -> R.string.cc_global_continuity_recovering
+                                        else -> R.string.cc_global_continuity_healthy
+                                    }
+                                ),
+                                when {
+                                    continuity.quarantinedEvents.isNotEmpty() -> ControlCenterTone.AMBER
+                                    continuity.retryingEvents.isNotEmpty() || continuity.pendingEventCount > 0 -> ControlCenterTone.BLUE
+                                    else -> ControlCenterTone.GREEN
+                                }
+                            ),
                             ControlCenterRowSpec("global.process_now", getString(R.string.cc_global_process_now_title), getString(R.string.cc_global_process_now_subtitle), R.drawable.ic_reset_data, getString(R.string.cc_global_process_now_action), ControlCenterTone.GREEN, showChevron = false, enabled = settings.enabled)
                         )
                     ),
@@ -5176,6 +5201,60 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .setMessage(message)
             .setPositiveButton(android.R.string.ok, null)
             .show()
+    }
+
+    private fun showGlobalContinuityDialog() {
+        val runtime = if (::globalSuperAgentRuntime.isInitialized) {
+            globalSuperAgentRuntime
+        } else GlobalSuperAgentRuntime.get(this)
+        val snapshot = runtime.continuitySnapshot()
+        val details = buildString {
+            append(getString(
+                R.string.cc_global_continuity_dialog_summary,
+                snapshot.pendingEventCount,
+                snapshot.retryingEvents.size,
+                snapshot.quarantinedEvents.size
+            ))
+            if (snapshot.retryingEvents.isNotEmpty()) {
+                append("\n\n").append(getString(
+                    R.string.cc_global_continuity_retrying_detail,
+                    snapshot.retryingEvents.maxOf(GlobalEventProcessingFailure::attemptCount)
+                ))
+            }
+            if (snapshot.nextRetryAtMillis > System.currentTimeMillis()) {
+                append("\n").append(getString(
+                    R.string.cc_global_continuity_next_retry,
+                    SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(snapshot.nextRetryAtMillis))
+                ))
+            }
+            if (snapshot.quarantinedEvents.isNotEmpty()) {
+                append("\n\n").append(getString(R.string.cc_global_continuity_isolated_detail))
+            } else if (snapshot.pendingEventCount == 0 && snapshot.retryingEvents.isEmpty()) {
+                append("\n\n").append(getString(R.string.cc_global_continuity_healthy_detail))
+            }
+        }
+        val builder = AlertDialog.Builder(this)
+            .setTitle(R.string.cc_global_continuity_title)
+            .setMessage(details)
+            .setPositiveButton(android.R.string.ok, null)
+        if (snapshot.quarantinedEvents.isNotEmpty()) {
+            builder.setNeutralButton(R.string.cc_global_continuity_retry_action) { _, _ ->
+                thread(name = "signalasi-global-continuity-replay") {
+                    val replayed = runtime.replayQuarantinedEvents()
+                    runOnUiThread {
+                        Toast.makeText(
+                            this,
+                            getString(R.string.cc_global_continuity_retry_result, replayed),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        if (controlCenterDestination?.route == ControlCenterRoute.GLOBAL_AGENT) {
+                            renderControlCenterGlobalAgentPage()
+                        }
+                    }
+                }
+            }
+        }
+        builder.show()
     }
 
     private fun showGlobalAutonomousRunsDialog() {

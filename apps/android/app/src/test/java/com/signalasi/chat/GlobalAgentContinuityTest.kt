@@ -207,6 +207,51 @@ class GlobalAgentContinuityTest {
         assertTrue(replay.deadLetters.isEmpty())
     }
 
+    @Test
+    fun upgradeRecoverySelectsOnlyLettersFromOlderVersionsOnce() {
+        val old = deadLetter("old").copy(quarantinedVersionCode = 40)
+        val alreadyAttempted = deadLetter("attempted").copy(
+            quarantinedVersionCode = 40,
+            lastAutoRecoveryVersionCode = 42
+        )
+        val current = deadLetter("current").copy(quarantinedVersionCode = 42)
+
+        val selected = GlobalDeadLetterUpgradeRecoveryPolicy.select(
+            listOf(current, alreadyAttempted, old),
+            currentVersionCode = 42
+        )
+
+        assertEquals(listOf("old"), selected.map { it.event.id })
+    }
+
+    @Test
+    fun legacyDeadLettersBecomeRecoverableAfterAnUpgrade() {
+        val legacy = deadLetter("legacy")
+
+        assertTrue(GlobalDeadLetterUpgradeRecoveryPolicy.eligible(legacy, currentVersionCode = 1))
+        val attempted = GlobalDeadLetterUpgradeRecoveryPolicy.markAttempted(legacy, currentVersionCode = 1)
+        assertFalse(GlobalDeadLetterUpgradeRecoveryPolicy.eligible(attempted, currentVersionCode = 1))
+        assertTrue(GlobalDeadLetterUpgradeRecoveryPolicy.eligible(attempted, currentVersionCode = 2))
+    }
+
+    @Test
+    fun upgradeRecoveryUsesOldestFirstAndRemainsBounded() {
+        val letters = (1..5).map { index ->
+            deadLetter("event-$index").copy(
+                quarantinedAtMillis = 6_000L - index * 1_000L,
+                quarantinedVersionCode = 1
+            )
+        }
+
+        val selected = GlobalDeadLetterUpgradeRecoveryPolicy.select(
+            letters,
+            currentVersionCode = 2,
+            limit = 2
+        )
+
+        assertEquals(listOf("event-5", "event-4"), selected.map { it.event.id })
+    }
+
     private fun deadLetter(id: String): GlobalDeadLetterEvent {
         val failure = GlobalEventRetryPolicy.capacityFailure(id, 1_000L)
         return GlobalDeadLetterEvent(event(id), failure, 1_000L)

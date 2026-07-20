@@ -7,7 +7,8 @@ enum class GlobalRealtimeContextKind {
     COGNITION,
     RESEARCH,
     AUTONOMOUS_RUN,
-    LONG_HORIZON_GOAL
+    LONG_HORIZON_GOAL,
+    CONTINUITY
 }
 
 data class GlobalRealtimeContextItem(
@@ -35,7 +36,8 @@ object GlobalRealtimeContextPolicy {
         excludedKeys: Set<String> = emptySet(),
         nowMillis: Long = System.currentTimeMillis(),
         maximumItems: Int = DEFAULT_MAXIMUM_ITEMS,
-        maximumCharacters: Int = DEFAULT_MAXIMUM_CHARACTERS
+        maximumCharacters: Int = DEFAULT_MAXIMUM_CHARACTERS,
+        continuitySnapshot: GlobalAgentContinuitySnapshot? = null
     ): String = render(
         select(
             project(
@@ -44,7 +46,8 @@ object GlobalRealtimeContextPolicy {
                 autonomousRuns = autonomousRuns,
                 longHorizonGoals = longHorizonGoals,
                 excludedConversationIds = excludedConversationIds,
-                nowMillis = nowMillis
+                nowMillis = nowMillis,
+                continuitySnapshot = continuitySnapshot
             ),
             query = query,
             currentConversationId = currentConversationId,
@@ -61,7 +64,8 @@ object GlobalRealtimeContextPolicy {
         autonomousRuns: List<GlobalAutonomousRun>,
         longHorizonGoals: List<GlobalLongHorizonGoal>,
         excludedConversationIds: Set<String> = emptySet(),
-        nowMillis: Long = System.currentTimeMillis()
+        nowMillis: Long = System.currentTimeMillis(),
+        continuitySnapshot: GlobalAgentContinuitySnapshot? = null
     ): List<GlobalRealtimeContextItem> = buildList {
         cognitionTasks.forEach { task ->
             if (task.sourceEvent.conversationId in excludedConversationIds ||
@@ -196,6 +200,32 @@ object GlobalRealtimeContextPolicy {
                 updatedAtMillis = goal.updatedAtMillis
             ))
         }
+        continuitySnapshot?.let { snapshot ->
+            val retryingCount = snapshot.retryingEvents.size
+            val quarantinedCount = snapshot.quarantinedEvents.size
+            val status = when {
+                quarantinedCount > 0 -> "attention_required"
+                retryingCount > 0 -> "retrying"
+                snapshot.pendingEventCount > 0 -> "catching_up"
+                else -> "healthy"
+            }
+            val latestTransition = buildList {
+                addAll(snapshot.retryingEvents.map(GlobalEventProcessingFailure::lastFailedAtMillis))
+                addAll(snapshot.quarantinedEvents.map(GlobalDeadLetterEvent::quarantinedAtMillis))
+            }.maxOrNull()?.takeIf { it > 0L } ?: nowMillis
+            add(GlobalRealtimeContextItem(
+                key = "continuity:global",
+                kind = GlobalRealtimeContextKind.CONTINUITY,
+                status = status,
+                title = "Global cognition pipeline",
+                topic = "SignalASI runtime",
+                detail = "pending_events=${snapshot.pendingEventCount}; " +
+                    "retrying_events=$retryingCount; quarantined_events=$quarantinedCount",
+                needsAttention = quarantinedCount > 0,
+                active = snapshot.pendingEventCount > 0 || retryingCount > 0,
+                updatedAtMillis = latestTransition
+            ))
+        }
     }.distinctBy(GlobalRealtimeContextItem::key)
 
     fun select(
@@ -326,6 +356,12 @@ object GlobalRealtimeContextPolicy {
         "blocked tasks",
         "system status",
         "agent status",
+        "pipeline status",
+        "pipeline health",
+        "event queue",
+        "not responding",
+        "stuck",
+        "continuity",
         "overall progress",
         "\u6240\u6709\u4efb\u52a1",
         "\u5168\u5c40\u72b6\u6001",
@@ -333,6 +369,12 @@ object GlobalRealtimeContextPolicy {
         "\u8fd0\u884c\u72b6\u6001",
         "\u6b63\u5728\u8fd0\u884c",
         "\u7b49\u5f85\u786e\u8ba4",
+        "\u667a\u80fd\u4f53\u72b6\u6001",
+        "\u8ba4\u77e5\u72b6\u6001",
+        "\u7ba1\u7ebf\u72b6\u6001",
+        "\u4e8b\u4ef6\u961f\u5217",
+        "\u6ca1\u6709\u54cd\u5e94",
+        "\u5361\u4f4f",
         "\u603b\u4f53\u8fdb\u5ea6"
     )
 }
@@ -366,7 +408,13 @@ class GlobalRealtimeContextProvider(context: Context) {
             excludedConversationIds = repository.excludedConversationIds() + locallyExcluded,
             excludedKeys = excludedKeys,
             maximumItems = maximumItems,
-            maximumCharacters = maximumCharacters
+            maximumCharacters = maximumCharacters,
+            continuitySnapshot = GlobalAgentContinuitySnapshot(
+                pendingEventCount = repository.pendingEventCount(),
+                retryingEvents = repository.eventFailures(),
+                quarantinedEvents = repository.deadLetters(),
+                nextRetryAtMillis = repository.nextPendingEventAttemptAt()
+            )
         )
     }
 }

@@ -167,6 +167,82 @@ class GlobalRealtimeContextTest {
         assertFalse(rendered.contains("action-1"))
     }
 
+    @Test
+    fun `global status query includes authoritative cognition pipeline health`() {
+        val rendered = GlobalRealtimeContextPolicy.build(
+            cognitionTasks = emptyList(),
+            researchTasks = emptyList(),
+            autonomousRuns = emptyList(),
+            longHorizonGoals = emptyList(),
+            query = "Show the global Agent status",
+            currentConversationId = "conversation-a",
+            nowMillis = 60L * HOUR,
+            continuitySnapshot = GlobalAgentContinuitySnapshot(
+                pendingEventCount = 3,
+                retryingEvents = listOf(failure("retrying-event")),
+                quarantinedEvents = emptyList(),
+                nextRetryAtMillis = 60L * HOUR + 30_000L
+            )
+        )
+
+        assertTrue(rendered.contains("[continuity/retrying]"))
+        assertTrue(rendered.contains("pending_events=3"))
+        assertTrue(rendered.contains("retrying_events=1"))
+        assertFalse(rendered.contains("retrying-event"))
+    }
+
+    @Test
+    fun `continuity health stays out of unrelated conversation context`() {
+        val rendered = GlobalRealtimeContextPolicy.build(
+            cognitionTasks = emptyList(),
+            researchTasks = emptyList(),
+            autonomousRuns = emptyList(),
+            longHorizonGoals = emptyList(),
+            query = "Translate this sentence",
+            currentConversationId = "conversation-a",
+            nowMillis = 70L * HOUR,
+            continuitySnapshot = GlobalAgentContinuitySnapshot(
+                pendingEventCount = 0,
+                retryingEvents = emptyList(),
+                quarantinedEvents = emptyList(),
+                nextRetryAtMillis = 0L
+            )
+        )
+
+        assertEquals("", rendered)
+    }
+
+    @Test
+    fun `quarantined pipeline state requests attention without leaking failure details`() {
+        val failedEvent = GlobalConversationEvent(
+            id = "secret-event-id",
+            type = GlobalConversationEventType.MESSAGE_CREATED,
+            conversationId = "private-routing-id",
+            actor = GlobalConversationActor.USER,
+            content = "sensitive content"
+        )
+        val failure = failure("secret-event-id").copy(reason = "api_key=secret-value at C:\\private\\path")
+        val projected = GlobalRealtimeContextPolicy.project(
+            cognitionTasks = emptyList(),
+            researchTasks = emptyList(),
+            autonomousRuns = emptyList(),
+            longHorizonGoals = emptyList(),
+            nowMillis = 80L * HOUR,
+            continuitySnapshot = GlobalAgentContinuitySnapshot(
+                pendingEventCount = 1,
+                retryingEvents = emptyList(),
+                quarantinedEvents = listOf(GlobalDeadLetterEvent(failedEvent, failure, 80L * HOUR)),
+                nextRetryAtMillis = 0L
+            )
+        ).single()
+
+        assertEquals(GlobalRealtimeContextKind.CONTINUITY, projected.kind)
+        assertEquals("attention_required", projected.status)
+        assertTrue(projected.needsAttention)
+        assertFalse(projected.detail.contains("secret"))
+        assertFalse(projected.detail.contains("private"))
+    }
+
     private fun cognition(id: String, conversationId: String, topic: String, updatedAtMillis: Long) =
         GlobalCognitionTask(
             id = id,
@@ -248,6 +324,16 @@ class GlobalRealtimeContextTest {
         topic = topic,
         conversationIds = conversationIds,
         updatedAtMillis = updatedAtMillis
+    )
+
+    private fun failure(eventId: String) = GlobalEventProcessingFailure(
+        eventId = eventId,
+        attemptCount = 1,
+        firstFailedAtMillis = 1_000L,
+        lastFailedAtMillis = 2_000L,
+        nextAttemptAtMillis = 32_000L,
+        errorFingerprint = "fingerprint",
+        reason = "temporary failure"
     )
 
     private companion object {

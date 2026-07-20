@@ -47,11 +47,24 @@ data class GlobalAgentNotificationCandidate(
 )
 
 class GlobalAgentRepository(context: Context) {
-    private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE_NAME)
-    private val deliberationStore = GlobalAgentDeliberationStore(context.applicationContext)
-    private val longHorizonStore = GlobalLongHorizonGoalStore(context.applicationContext)
-    private val topicGraphStore = GlobalTopicProjectGraphStore(context.applicationContext)
-    private val proactiveDiscoveryStore = GlobalProactiveDiscoveryStore(context.applicationContext)
+    private val appContext = context.applicationContext
+    private val database = AgentEncryptedDatabase(appContext, DATABASE_NAME)
+    private val deliberationStore = GlobalAgentDeliberationStore(appContext)
+    private val longHorizonStore = GlobalLongHorizonGoalStore(appContext)
+    private val topicGraphStore = GlobalTopicProjectGraphStore(appContext)
+    private val proactiveDiscoveryStore = GlobalProactiveDiscoveryStore(appContext)
+    private val currentVersionCode: Int = runCatching {
+        val info = appContext.packageManager.getPackageInfo(appContext.packageName, 0)
+        val value = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            info.versionCode.toLong()
+        }
+        value.coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
+    }.getOrDefault(1)
+
+    fun appVersionCode(): Int = currentVersionCode
 
     fun enqueue(event: GlobalConversationEvent): Boolean = synchronized(STORE_LOCK) {
         enqueueAllLocked(listOf(event)) > 0
@@ -87,7 +100,12 @@ class GlobalAgentRepository(context: Context) {
             val now = System.currentTimeMillis()
             saveDeadLetters(
                 loadDeadLetters() + mutation.capacityRejected.map { event ->
-                    GlobalDeadLetterEvent(event, GlobalEventRetryPolicy.capacityFailure(event.id, now), now)
+                    GlobalDeadLetterEvent(
+                        event = event,
+                        failure = GlobalEventRetryPolicy.capacityFailure(event.id, now),
+                        quarantinedAtMillis = now,
+                        quarantinedVersionCode = currentVersionCode
+                    )
                 }
             )
         }
@@ -146,10 +164,16 @@ class GlobalAgentRepository(context: Context) {
     fun quarantineEvent(
         event: GlobalConversationEvent,
         failure: GlobalEventProcessingFailure,
-        nowMillis: Long = System.currentTimeMillis()
+        nowMillis: Long = System.currentTimeMillis(),
+        versionCode: Int = currentVersionCode
     ) = synchronized(STORE_LOCK) {
         saveDeadLetters(loadDeadLetters().filterNot { it.event.id == event.id } +
-            GlobalDeadLetterEvent(event, failure.copy(quarantined = true, nextAttemptAtMillis = 0L), nowMillis))
+            GlobalDeadLetterEvent(
+                event = event,
+                failure = failure.copy(quarantined = true, nextAttemptAtMillis = 0L),
+                quarantinedAtMillis = nowMillis,
+                quarantinedVersionCode = versionCode.coerceAtLeast(0)
+            ))
         saveEventFailures(loadEventFailures().filterNot { it.eventId == event.id })
     }
 
@@ -178,6 +202,62 @@ class GlobalAgentRepository(context: Context) {
         saveDeadLetters(mutation.deadLetters)
         clearEventFailure(eventId)
         true
+    }
+
+    fun recoverDeadLettersAfterUpgrade(
+        currentVersionCode: Int,
+        limit: Int = GlobalDeadLetterUpgradeRecoveryPolicy.DEFAULT_RECOVERY_LIMIT
+    ): Int = synchronized(STORE_LOCK) {
+        if (currentVersionCode <= 0) return@synchronized 0
+        var queueState = GlobalEventQueueState(loadEvents(), loadOverflowEvents())
+        var letters = loadDeadLetters()
+        var journal = loadContextJournal()
+        var stateChanged = false
+        var journalChanged = false
+        val replayedEventIds = mutableSetOf<String>()
+        val candidates = GlobalDeadLetterUpgradeRecoveryPolicy.select(letters, currentVersionCode, limit)
+        for (candidate in candidates) {
+            val current = letters.firstOrNull { it.event.id == candidate.event.id } ?: continue
+            val normalizedEvent = GlobalConversationEventPolicy.normalize(current.event)
+            if (normalizedEvent == null) {
+                letters = letters.map { letter ->
+                    if (letter.event.id == current.event.id) {
+                        GlobalDeadLetterUpgradeRecoveryPolicy.markAttempted(letter, currentVersionCode)
+                    } else letter
+                }
+                stateChanged = true
+                continue
+            }
+            val normalizedLetters = letters.map { letter ->
+                if (letter.event.id == current.event.id) letter.copy(event = normalizedEvent) else letter
+            }
+            val mutation = GlobalDeadLetterRecoveryPolicy.replay(
+                state = queueState,
+                deadLetters = normalizedLetters,
+                eventId = current.event.id,
+                readyCapacity = MAX_PENDING_EVENTS,
+                overflowCapacity = MAX_OVERFLOW_EVENTS
+            )
+            if (!mutation.replayed) break
+            queueState = mutation.queueState
+            letters = mutation.deadLetters
+            mutation.enqueuedEvent?.let { event ->
+                journal = GlobalConversationContextJournalPolicy.apply(journal, listOf(event))
+                journalChanged = true
+            }
+            replayedEventIds += current.event.id
+            stateChanged = true
+        }
+        if (stateChanged) {
+            saveEvents(queueState.ready)
+            saveOverflowEvents(queueState.overflow)
+            saveDeadLetters(letters)
+            if (replayedEventIds.isNotEmpty()) {
+                saveEventFailures(loadEventFailures().filterNot { it.eventId in replayedEventIds })
+            }
+        }
+        if (journalChanged) saveContextJournal(journal)
+        replayedEventIds.size
     }
 
     fun removeEvents(eventIds: Set<String>) = synchronized(STORE_LOCK) {
@@ -834,12 +914,20 @@ class GlobalAgentRepository(context: Context) {
         .put("event", encodeEvent(letter.event))
         .put("failure", encodeEventFailure(letter.failure))
         .put("quarantined_at_millis", letter.quarantinedAtMillis)
+        .put("quarantined_version_code", letter.quarantinedVersionCode)
+        .put("last_auto_recovery_version_code", letter.lastAutoRecoveryVersionCode)
 
     private fun decodeDeadLetter(json: JSONObject?): GlobalDeadLetterEvent? {
         if (json == null) return null
         val event = decodeEvent(json.optJSONObject("event")) ?: return null
         val failure = decodeEventFailure(json.optJSONObject("failure")) ?: return null
-        return GlobalDeadLetterEvent(event, failure, json.optLong("quarantined_at_millis"))
+        return GlobalDeadLetterEvent(
+            event = event,
+            failure = failure,
+            quarantinedAtMillis = json.optLong("quarantined_at_millis"),
+            quarantinedVersionCode = json.optInt("quarantined_version_code").coerceAtLeast(0),
+            lastAutoRecoveryVersionCode = json.optInt("last_auto_recovery_version_code").coerceAtLeast(0)
+        )
     }
 
     private fun encodeWorld(world: PersonalWorldModel): JSONObject = JSONObject()
@@ -1454,12 +1542,16 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
 
     init {
         val settings = repository.settings()
+        val recoveredAfterUpgrade = if (settings.enabled) {
+            repository.recoverDeadLettersAfterUpgrade(repository.appVersionCode())
+        } else 0
         val initialDiscoveryDue = settings.proactiveDiscoveryEnabled &&
             settings.modelUnderstandingEnabled &&
             proactiveDiscoveryCoordinator.state().nextScanAtMillis <= 0L
         if (settings.enabled && (
                 repository.persistentContextSyncVersion() < PERSISTENT_CONTEXT_SYNC_VERSION ||
-                    initialDiscoveryDue
+                    initialDiscoveryDue ||
+                    recoveredAfterUpgrade > 0
                 )
         ) {
             GlobalConversationEventBus.requestProcessing(appContext)
@@ -1472,6 +1564,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             return@synchronized GlobalAgentProcessingBatch(0, 0, emptyList(), emptyList())
         }
         synchronizePersistentContext()
+        repository.recoverDeadLettersAfterUpgrade(repository.appVersionCode())
         val events = repository.pendingEvents(maxEvents)
         if (events.isEmpty()) return@synchronized GlobalAgentProcessingBatch(0, 0, emptyList(), emptyList())
         var world = repository.loadWorld()
@@ -1807,6 +1900,19 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     fun replayQuarantinedEvent(eventId: String): Boolean {
         val replayed = repository.replayDeadLetter(eventId)
         if (replayed) {
+            GlobalConversationEventBus.requestProcessing(appContext)
+            scheduleNextWake()
+        }
+        return replayed
+    }
+
+    fun replayQuarantinedEvents(limit: Int = 64): Int {
+        val eventIds = repository.deadLetters()
+            .sortedBy(GlobalDeadLetterEvent::quarantinedAtMillis)
+            .take(limit.coerceIn(1, 256))
+            .map { it.event.id }
+        val replayed = eventIds.count(repository::replayDeadLetter)
+        if (replayed > 0) {
             GlobalConversationEventBus.requestProcessing(appContext)
             scheduleNextWake()
         }

@@ -16,6 +16,7 @@ The global runtime must:
 - Use low-cost local extraction first and request model deliberation only for valuable cross-topic reasoning.
 - Link related conversations into one personal world model without sending complete history to every model.
 - Turn durable goals into persistent checkpoints that survive app restarts and temporary resource outages.
+- Retry transient event-processing failures with bounded backoff, isolate deterministic failures without dropping evidence, and automatically replay older-version isolation records once after a repaired app upgrade.
 - Revise autonomous plans from actual tool, research, and Agent outcomes while preserving completed evidence.
 - Run independent safe work concurrently, with leases, bounded retries, deduplication, and explicit partial states.
 - Keep internal cognition, research, and plan-review responses out of ordinary contact conversations.
@@ -129,6 +130,7 @@ Professional Agent delegation is a host-supervised subtask protocol, not an unre
 The realtime layer is derived on demand from authoritative encrypted task stores. It is not another model-authored memory summary and is not copied into a second database.
 
 - Project active cognition, research, autonomous runs, plan reviews, long-horizon goals, confirmations, resource waits, failures, and recently completed work into one bounded host-state view.
+- Include aggregate cognition-pipeline continuity state so status queries can report pending, retrying, and isolated events without exposing event identifiers, payloads, or failure details.
 - Include only work from the current conversation, a materially related topic, or an explicit global-status query. Do not expose every unrelated background task to every model call.
 - Exclude deleted conversations and the task currently being executed so a worker cannot mistake its own state for separate work.
 - Keep completed work only for a short recency window and retain attention states long enough to support recovery without allowing stale history to dominate current decisions.

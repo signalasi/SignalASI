@@ -14,7 +14,9 @@ data class GlobalEventProcessingFailure(
 data class GlobalDeadLetterEvent(
     val event: GlobalConversationEvent,
     val failure: GlobalEventProcessingFailure,
-    val quarantinedAtMillis: Long
+    val quarantinedAtMillis: Long,
+    val quarantinedVersionCode: Int = 0,
+    val lastAutoRecoveryVersionCode: Int = 0
 )
 
 data class GlobalAgentContinuitySnapshot(
@@ -138,6 +140,39 @@ object GlobalDeadLetterRecoveryPolicy {
             enqueuedEvent = letter.event
         )
     }
+}
+
+object GlobalDeadLetterUpgradeRecoveryPolicy {
+    fun eligible(
+        letter: GlobalDeadLetterEvent,
+        currentVersionCode: Int
+    ): Boolean = currentVersionCode > 0 &&
+        letter.quarantinedVersionCode < currentVersionCode &&
+        letter.lastAutoRecoveryVersionCode < currentVersionCode
+
+    fun select(
+        deadLetters: List<GlobalDeadLetterEvent>,
+        currentVersionCode: Int,
+        limit: Int = DEFAULT_RECOVERY_LIMIT
+    ): List<GlobalDeadLetterEvent> = deadLetters.asSequence()
+        .filter { eligible(it, currentVersionCode) }
+        .sortedWith(compareBy<GlobalDeadLetterEvent>(GlobalDeadLetterEvent::quarantinedAtMillis)
+            .thenBy { it.event.id })
+        .take(limit.coerceIn(1, MAX_RECOVERY_LIMIT))
+        .toList()
+
+    fun markAttempted(
+        letter: GlobalDeadLetterEvent,
+        currentVersionCode: Int
+    ): GlobalDeadLetterEvent = letter.copy(
+        lastAutoRecoveryVersionCode = maxOf(
+            letter.lastAutoRecoveryVersionCode,
+            currentVersionCode.coerceAtLeast(0)
+        )
+    )
+
+    const val DEFAULT_RECOVERY_LIMIT = 64
+    private const val MAX_RECOVERY_LIMIT = 256
 }
 
 object GlobalEventRetryPolicy {
