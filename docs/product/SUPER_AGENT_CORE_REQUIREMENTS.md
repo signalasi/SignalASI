@@ -91,6 +91,20 @@ The global Agent must resolve references inside a topic workspace without resend
 - Purge retracted messages immediately. Deleting a conversation or changing its global visibility to excluded removes its complete journal window before another model call.
 - Use the same bounded window for private cognition, research assignments, reversible autonomous preparation, and dynamic plan review.
 
+### Host-Validated Autonomous Skill Contract
+
+Installed Skills are executable workflows, not prompt text. The global Agent may discover and run a Skill only through a host-owned adapter layered on the native tool registry.
+
+- Expose only installed, enabled, auto-invocable Skills whose steps form a validated deterministic native-tool workflow. General Agent-orchestration Skills remain in the conversational delegation path.
+- Project each eligible Skill as a stable synthetic tool with a bounded description, exact parameter schema, current availability, aggregate risk, permissions, consent requirements, timeout, and required idempotency key.
+- Treat Skill titles, descriptions, trigger examples, resources, and expanded values as untrusted capability data. Never expose Skill resources, secrets, stored credentials, or raw instructions in a model catalog.
+- Re-resolve the installation and every underlying native tool immediately before execution. Disabling, deleting, or invalidating a Skill takes effect without restarting the Agent.
+- Expand typed parameters locally, preserve the declared dependency order, bind workspace tools to the run workspace, and stop on the first failed step.
+- Execute every step through the normal native registry so availability, input and output schemas, Android permissions, consent, cancellation, timeout, idempotency, provenance, and receipts cannot be bypassed by the Skill.
+- Derive the workflow confirmation tier from the highest-risk step and the union of required consents. Model-provided safety claims never lower that tier.
+- Return a verified workflow receipt only when every step completed and produced host-observed native evidence. Record Skill usage only after full success.
+- Keep ordinary, disabled, interactive-only, missing-dependency, and unavailable Skills out of autonomous selection while preserving them for explicit user-controlled workflows.
+
 ### Authoritative Realtime Context
 
 The realtime layer is derived on demand from authoritative encrypted task stores. It is not another model-authored memory summary and is not copied into a second database.
