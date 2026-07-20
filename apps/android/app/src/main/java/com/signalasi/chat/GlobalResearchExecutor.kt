@@ -19,6 +19,7 @@ class GlobalResearchExecutor(context: Context) {
     private val realtimeContext = GlobalRealtimeContextProvider(appContext)
     private val connectorRegistry = AppStoreAgentConnectorRegistry(appContext)
     private val resourceRouter = AgentResourceRouter(appContext)
+    private val modelCallBudget = GlobalModelCallBudgetStore(appContext)
 
     fun executeNext(): GlobalResearchExecutionResult? {
         val claimed = repository.claimResearchTask() ?: return null
@@ -49,8 +50,21 @@ class GlobalResearchExecutor(context: Context) {
         }
         val pending = task.researchPlan.pendingUnits().take(capacity)
         if (pending.isEmpty()) return advanceAfterCollection(task)
-        pending.forEach { unit ->
-            task = dispatchUnit(task, unit, selectResource(task, unit, resources))
+        var budgetDecision: GlobalModelCallBudgetDecision? = null
+        for (unit in pending) {
+            val dispatch = dispatchUnit(task, unit, selectResource(task, unit, resources))
+            task = dispatch.task
+            if (dispatch.budgetDecision != null) {
+                budgetDecision = dispatch.budgetDecision
+                break
+            }
+        }
+        budgetDecision?.let { decision ->
+            return waitForModelBudget(
+                task,
+                decision,
+                releaseClaimAttempt = task.researchPlan.runningUnits().isEmpty()
+            )
         }
         return advanceAfterCollection(task)
     }
@@ -63,6 +77,10 @@ class GlobalResearchExecutor(context: Context) {
                 task.status in setOf(GlobalResearchTaskStatus.RUNNING, GlobalResearchTaskStatus.WAITING_FOR_RESOURCE)
         }
         if (synthesisTask != null) {
+            modelCallBudget.release(
+                GlobalModelCallKind.RESEARCH_SYNTHESIS,
+                synthesisBudgetOwner(synthesisTask)
+            )
             if (response.success && response.content.isNotBlank()) {
                 complete(synthesisTask, response.content, synthesisTask.researchPlan.synthesisResourceId, synthesisTask.evidenceLedger)
             } else {
@@ -80,6 +98,10 @@ class GlobalResearchExecutor(context: Context) {
         }
         if (unitTask != null) {
             val unit = unitTask.researchPlan.units.first { it.sourceMessageId == response.sourceMessageId }
+            modelCallBudget.release(
+                GlobalModelCallKind.RESEARCH_EVIDENCE,
+                evidenceBudgetOwner(unitTask, unit)
+            )
             if (response.success && response.content.isNotBlank()) {
                 completeUnit(unitTask, unit, response.content, unit.resourceId.ifBlank { response.contactId })
             } else {
@@ -116,8 +138,10 @@ class GlobalResearchExecutor(context: Context) {
         task: GlobalResearchTask,
         unit: GlobalResearchUnit,
         resourceId: String
-    ): GlobalResearchTask {
-        if (resourceId.isBlank()) return failUnit(task, unit, "No untried research resource is available")
+    ): UnitDispatchResult {
+        if (resourceId.isBlank()) return UnitDispatchResult(
+            failUnit(task, unit, "No untried research resource is available")
+        )
         val cloud = cloudContact(resourceId)
         return if (cloud != null) dispatchCloudUnit(task, unit, resourceId, cloud)
         else dispatchPairedUnit(task, unit, resourceId)
@@ -128,18 +152,30 @@ class GlobalResearchExecutor(context: Context) {
         unit: GlobalResearchUnit,
         resourceId: String,
         cloud: JSONObject
-    ): GlobalResearchTask {
+    ): UnitDispatchResult {
+        val ownerKey = evidenceBudgetOwner(task, unit, unit.attemptCount + 1)
+        val permit = modelCallBudget.acquire(
+            GlobalModelCallKind.RESEARCH_EVIDENCE,
+            ownerKey,
+            GlobalResearchTaskPolicy.leaseMillis(task.depth),
+            repository.settings()
+        )
+        if (!permit.granted) return UnitDispatchResult(task, permit)
         val running = markUnitRunning(task, unit, resourceId, 0L)
         val runningUnit = running.researchPlan.units.first { it.id == unit.id }
         CLOUD_RESEARCH_EXECUTOR.execute {
             val startedAt = System.currentTimeMillis()
-            val response = runCatching {
-                CloudModelClient.sendStructured(
-                    appContext,
-                    cloud,
-                    RESEARCH_SYSTEM_PROMPT,
-                    buildUnitPrompt(running, runningUnit)
-                )
+            val response = try {
+                runCatching {
+                    CloudModelClient.sendStructured(
+                        appContext,
+                        cloud,
+                        RESEARCH_SYSTEM_PROMPT,
+                        buildUnitPrompt(running, runningUnit)
+                    )
+                }
+            } finally {
+                modelCallBudget.release(GlobalModelCallKind.RESEARCH_EVIDENCE, ownerKey)
             }
             if (response.isSuccess && response.getOrNull().orEmpty().isNotBlank()) {
                 AgentResourceHealthStore(appContext).record(
@@ -163,18 +199,26 @@ class GlobalResearchExecutor(context: Context) {
             }
             GlobalConversationEventBus.requestProcessing(appContext)
         }
-        return running
+        return UnitDispatchResult(running)
     }
 
     private fun dispatchPairedUnit(
         task: GlobalResearchTask,
         unit: GlobalResearchUnit,
         resourceId: String
-    ): GlobalResearchTask {
+    ): UnitDispatchResult {
         val contactId = resolvePairedContact(resourceId)
-            ?: return failUnit(task, unit, "The paired research Agent is unavailable")
+            ?: return UnitDispatchResult(failUnit(task, unit, "The paired research Agent is unavailable"))
         val topic = AppStore.outgoingTopicForContact(appContext, contactId)
-            ?: return failUnit(task, unit, "The paired research route is unavailable")
+            ?: return UnitDispatchResult(failUnit(task, unit, "The paired research route is unavailable"))
+        val ownerKey = evidenceBudgetOwner(task, unit, unit.attemptCount + 1)
+        val permit = modelCallBudget.acquire(
+            GlobalModelCallKind.RESEARCH_EVIDENCE,
+            ownerKey,
+            GlobalResearchTaskPolicy.leaseMillis(task.depth),
+            repository.settings()
+        )
+        if (!permit.granted) return UnitDispatchResult(task, permit)
         val sourceMessageId = correlationId(task.id, unit.id)
         val running = markUnitRunning(task, unit, resourceId, sourceMessageId)
         SignalASIMqttClient.connect(appContext)
@@ -187,9 +231,10 @@ class GlobalResearchExecutor(context: Context) {
             conversationId = "global-research:${task.id}",
             turnId = unit.id
         )
-        return if (published) running else {
+        return if (published) UnitDispatchResult(running) else {
+            modelCallBudget.cancel(GlobalModelCallKind.RESEARCH_EVIDENCE, ownerKey)
             AgentResourceHealthStore(appContext).record("target:$resourceId", false, 0L)
-            failUnit(running, runningUnit, "The paired Agent did not accept the evidence task")
+            UnitDispatchResult(failUnit(running, runningUnit, "The paired Agent did not accept the evidence task"))
         }
     }
 
@@ -389,15 +434,27 @@ class GlobalResearchExecutor(context: Context) {
         val resourceId = resources[plan.synthesisAttemptCount % resources.size]
         val cloud = cloudContact(resourceId)
         if (cloud != null) {
+            val ownerKey = synthesisBudgetOwner(task, plan.synthesisAttemptCount + 1)
+            val permit = modelCallBudget.acquire(
+                GlobalModelCallKind.RESEARCH_SYNTHESIS,
+                ownerKey,
+                GlobalResearchTaskPolicy.leaseMillis(task.depth),
+                repository.settings()
+            )
+            if (!permit.granted) return waitForModelBudget(task, permit, releaseClaimAttempt = true)
             val synthesizing = markSynthesisRunning(task, resourceId, 0L, ledger)
             val startedAt = System.currentTimeMillis()
-            val response = runCatching {
-                CloudModelClient.sendStructured(
-                    appContext,
-                    cloud,
-                    SYNTHESIS_SYSTEM_PROMPT,
-                    buildSynthesisPrompt(synthesizing, ledger)
-                )
+            val response = try {
+                runCatching {
+                    CloudModelClient.sendStructured(
+                        appContext,
+                        cloud,
+                        SYNTHESIS_SYSTEM_PROMPT,
+                        buildSynthesisPrompt(synthesizing, ledger)
+                    )
+                }
+            } finally {
+                modelCallBudget.release(GlobalModelCallKind.RESEARCH_SYNTHESIS, ownerKey)
             }
             return if (response.isSuccess && response.getOrNull().orEmpty().isNotBlank()) {
                 AgentResourceHealthStore(appContext).record("target:$resourceId", true, System.currentTimeMillis() - startedAt)
@@ -413,6 +470,14 @@ class GlobalResearchExecutor(context: Context) {
         if (contactId == null || topic == null) {
             return handleSynthesisFailure(task, "The synthesis Agent route is unavailable")
         }
+        val ownerKey = synthesisBudgetOwner(task, plan.synthesisAttemptCount + 1)
+        val permit = modelCallBudget.acquire(
+            GlobalModelCallKind.RESEARCH_SYNTHESIS,
+            ownerKey,
+            GlobalResearchTaskPolicy.leaseMillis(task.depth),
+            repository.settings()
+        )
+        if (!permit.granted) return waitForModelBudget(task, permit, releaseClaimAttempt = true)
         val sourceMessageId = correlationId(task.id, "synthesis-${plan.synthesisAttemptCount}")
         val synthesizing = markSynthesisRunning(task, resourceId, sourceMessageId, ledger)
         SignalASIMqttClient.connect(appContext)
@@ -424,7 +489,10 @@ class GlobalResearchExecutor(context: Context) {
             conversationId = "global-research:${task.id}",
             turnId = "${task.id}:synthesis"
         )
-        if (!published) return handleSynthesisFailure(synthesizing, "The synthesis Agent did not accept the task")
+        if (!published) {
+            modelCallBudget.cancel(GlobalModelCallKind.RESEARCH_SYNTHESIS, ownerKey)
+            return handleSynthesisFailure(synthesizing, "The synthesis Agent did not accept the task")
+        }
         return GlobalResearchExecutionResult(task.id, GlobalResearchTaskStatus.RUNNING, resourceId, "Evidence synthesis accepted")
     }
 
@@ -614,6 +682,32 @@ class GlobalResearchExecutor(context: Context) {
             leaseExpiresAtMillis = 0L,
             lastError = reason,
             updatedAtMillis = System.currentTimeMillis()
+        )
+        repository.upsertResearchTask(waiting)
+        return GlobalResearchExecutionResult(task.id, waiting.status, detail = reason)
+    }
+
+    private fun waitForModelBudget(
+        task: GlobalResearchTask,
+        decision: GlobalModelCallBudgetDecision,
+        releaseClaimAttempt: Boolean
+    ): GlobalResearchExecutionResult {
+        val now = System.currentTimeMillis()
+        val reason = "The background model-call budget is temporarily unavailable"
+        val current = repository.researchTasks().firstOrNull { it.id == task.id } ?: task
+        val runningLease = current.researchPlan.runningUnits()
+            .maxOfOrNull(GlobalResearchUnit::leaseExpiresAtMillis) ?: 0L
+        val waiting = current.copy(
+            status = if (runningLease > 0L) {
+                GlobalResearchTaskStatus.RUNNING
+            } else GlobalResearchTaskStatus.WAITING_FOR_RESOURCE,
+            attemptCount = if (releaseClaimAttempt) {
+                (current.attemptCount - 1).coerceAtLeast(0)
+            } else current.attemptCount,
+            nextAttemptAtMillis = decision.nextEligibleAtMillis.coerceAtLeast(now + 1_000L),
+            leaseExpiresAtMillis = runningLease,
+            lastError = reason,
+            updatedAtMillis = now
         )
         repository.upsertResearchTask(waiting)
         return GlobalResearchExecutionResult(task.id, waiting.status, detail = reason)
@@ -912,6 +1006,22 @@ class GlobalResearchExecutor(context: Context) {
         ?.take(300)
         ?.ifBlank { null }
         ?: "The research resource failed without a result"
+
+    private fun evidenceBudgetOwner(
+        task: GlobalResearchTask,
+        unit: GlobalResearchUnit,
+        attemptCount: Int = unit.attemptCount
+    ): String = "${task.id}:${unit.id}:$attemptCount"
+
+    private fun synthesisBudgetOwner(
+        task: GlobalResearchTask,
+        attemptCount: Int = task.researchPlan.synthesisAttemptCount
+    ): String = "${task.id}:synthesis:$attemptCount"
+
+    private data class UnitDispatchResult(
+        val task: GlobalResearchTask,
+        val budgetDecision: GlobalModelCallBudgetDecision? = null
+    )
 
     private companion object {
         val CLOUD_RESEARCH_EXECUTOR = Executors.newFixedThreadPool(3) { runnable ->

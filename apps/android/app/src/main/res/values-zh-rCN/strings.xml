@@ -1490,4 +1490,12 @@
     <string name="cc_global_battery_protection_subtitle">省电模式或低电量时延后模型推理与自主工作</string>
     <string name="cc_global_metered_research_title">计费网络研究</string>
     <string name="cc_global_metered_research_subtitle">允许自主研究使用蜂窝网络或其他计费连接</string>
+    <string name="cc_global_daily_model_calls_title">每日后台模型调用</string>
+    <string name="cc_global_daily_model_calls_subtitle">认知、研究、自治工作与计划复核共享滚动 24 小时上限</string>
+    <string name="cc_global_daily_model_calls_status">已用 %1$d / %2$d</string>
+    <string name="cc_global_concurrent_model_calls_title">后台模型并发调用</string>
+    <string name="cc_global_concurrent_model_calls_subtitle">本地、云端与配对 Agent 推理共享同一宿主并发上限</string>
+    <string name="cc_global_concurrent_model_calls_status">活跃 %1$d / %2$d</string>
+    <string name="cc_global_calls_per_day">每 24 小时 %1$d 次</string>
+    <string name="cc_global_concurrent_calls">并发 %1$d 次</string>
 </resources>

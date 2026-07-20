@@ -219,6 +219,7 @@ The realtime layer is derived on demand from authoritative encrypted task stores
 - Support schedules, event triggers, notifications, incoming messages, and long-running remote jobs.
 - Report meaningful state transitions and only notify the user when attention or a result is available.
 - Enforce battery, network, privacy, and execution budgets. The Android host must defer background model cognition, autonomous work, and research before claiming work during power saver or low battery; autonomous research waits for validated networking and, by default, an unmetered connection. Charging, explicit user processing, or an enabled metered-research policy may resume eligible work without consuming a failed attempt.
+- Enforce one encrypted, host-owned rolling 24-hour model-call budget and one cross-executor concurrency lease pool across cognition, research evidence, research synthesis, autonomous reasoning, and plan review. A restart must recover unexpired leases, expired leases must release capacity, unsuccessful transport publication must refund the unused dispatch, and budget deferral must not consume a task retry.
 - Synchronize task state across trusted clients without exposing plaintext to the transport.
 
 ### 10. Structured Multimodal Results

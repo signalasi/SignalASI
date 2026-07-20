@@ -4645,6 +4645,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "global.toggle_metered_research" -> updateGlobalAgentSettings {
                 it.copy(allowMeteredBackgroundResearch = !it.allowMeteredBackgroundResearch)
             }
+            "global.daily_model_calls" -> showGlobalDailyModelCallBudgetDialog()
+            "global.concurrent_model_calls" -> showGlobalConcurrentModelCallBudgetDialog()
             "global.process_now" -> processGlobalAgentNow()
             "global.world.goals" -> showGlobalWorldItemsDialog(GlobalWorldItemKind.GOAL)
             "global.world.tasks" -> showGlobalWorldItemsDialog(GlobalWorldItemKind.TASK)
@@ -4928,6 +4930,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             globalSuperAgentRuntime
         } else GlobalSuperAgentRuntime.get(this)
         val settings = runtime.settings()
+        val modelBudget = runtime.modelCallBudgetSnapshot()
         val dashboard = runtime.dashboard()
         val continuity = runtime.continuitySnapshot()
         val research = runtime.researchTasks()
@@ -5040,7 +5043,31 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         getString(R.string.cc_global_section_resources),
                         listOf(
                             ControlCenterRowSpec("global.toggle_battery_protection", getString(R.string.cc_global_battery_protection_title), getString(R.string.cc_global_battery_protection_subtitle), R.drawable.ic_resource_battery, switchValue = settings.protectBatteryForBackgroundWork, showChevron = false, enabled = settings.enabled),
-                            ControlCenterRowSpec("global.toggle_metered_research", getString(R.string.cc_global_metered_research_title), getString(R.string.cc_global_metered_research_subtitle), R.drawable.ic_resource_network, switchValue = settings.allowMeteredBackgroundResearch, showChevron = false, enabled = settings.enabled && settings.autonomousResearchEnabled)
+                            ControlCenterRowSpec("global.toggle_metered_research", getString(R.string.cc_global_metered_research_title), getString(R.string.cc_global_metered_research_subtitle), R.drawable.ic_resource_network, switchValue = settings.allowMeteredBackgroundResearch, showChevron = false, enabled = settings.enabled && settings.autonomousResearchEnabled),
+                            ControlCenterRowSpec(
+                                "global.daily_model_calls",
+                                getString(R.string.cc_global_daily_model_calls_title),
+                                getString(R.string.cc_global_daily_model_calls_subtitle),
+                                R.drawable.ic_settings_model,
+                                getString(
+                                    R.string.cc_global_daily_model_calls_status,
+                                    modelBudget.dispatchesInWindow,
+                                    modelBudget.dailyLimit
+                                ),
+                                if (modelBudget.dispatchesInWindow >= modelBudget.dailyLimit) ControlCenterTone.AMBER else ControlCenterTone.BLUE
+                            ),
+                            ControlCenterRowSpec(
+                                "global.concurrent_model_calls",
+                                getString(R.string.cc_global_concurrent_model_calls_title),
+                                getString(R.string.cc_global_concurrent_model_calls_subtitle),
+                                R.drawable.ic_agent_history,
+                                getString(
+                                    R.string.cc_global_concurrent_model_calls_status,
+                                    modelBudget.activeCalls,
+                                    modelBudget.concurrencyLimit
+                                ),
+                                if (modelBudget.activeCalls >= modelBudget.concurrencyLimit) ControlCenterTone.AMBER else ControlCenterTone.GREEN
+                            )
                         )
                     ),
                     ControlCenterSectionSpec(
@@ -5060,6 +5087,38 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val runtime = if (::globalSuperAgentRuntime.isInitialized) globalSuperAgentRuntime else GlobalSuperAgentRuntime.get(this)
         runtime.updateSettings(transform)
         renderControlCenterGlobalAgentPage()
+    }
+
+    private fun showGlobalDailyModelCallBudgetDialog() {
+        val runtime = if (::globalSuperAgentRuntime.isInitialized) globalSuperAgentRuntime else GlobalSuperAgentRuntime.get(this)
+        val values = intArrayOf(12, 24, 48, 96, 200)
+        val current = runtime.settings().dailyBackgroundModelCallBudget
+        val selected = values.indices.minByOrNull { kotlin.math.abs(values[it] - current) } ?: 0
+        val labels = values.map { getString(R.string.cc_global_calls_per_day, it) }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(R.string.cc_global_daily_model_calls_title)
+            .setSingleChoiceItems(labels, selected) { dialog, index ->
+                updateGlobalAgentSettings { it.copy(dailyBackgroundModelCallBudget = values[index]) }
+                dialog.dismiss()
+            }
+            .setNegativeButton(R.string.common_cancel, null)
+            .show()
+    }
+
+    private fun showGlobalConcurrentModelCallBudgetDialog() {
+        val runtime = if (::globalSuperAgentRuntime.isInitialized) globalSuperAgentRuntime else GlobalSuperAgentRuntime.get(this)
+        val values = intArrayOf(1, 2, 3, 4, 5, 6)
+        val current = runtime.settings().maxConcurrentBackgroundModelCalls
+        val selected = values.indexOf(current).coerceAtLeast(0)
+        val labels = values.map { getString(R.string.cc_global_concurrent_calls, it) }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(R.string.cc_global_concurrent_model_calls_title)
+            .setSingleChoiceItems(labels, selected) { dialog, index ->
+                updateGlobalAgentSettings { it.copy(maxConcurrentBackgroundModelCalls = values[index]) }
+                dialog.dismiss()
+            }
+            .setNegativeButton(R.string.common_cancel, null)
+            .show()
     }
 
     private fun processGlobalAgentNow() {

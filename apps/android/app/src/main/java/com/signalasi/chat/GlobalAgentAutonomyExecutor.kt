@@ -26,6 +26,7 @@ class GlobalCognitionExecutor(context: Context) {
     private val resources = GlobalAgentResourceResolver(appContext)
     private val goalStore = GlobalLongHorizonGoalStore(appContext)
     private val realtimeContext = GlobalRealtimeContextProvider(appContext)
+    private val modelCallBudget = GlobalModelCallBudgetStore(appContext)
     private val autonomousToolHost by lazy { GlobalAutonomousToolHost(appContext) }
 
     fun executeNext(): GlobalCognitionExecutionResult? {
@@ -44,15 +45,27 @@ class GlobalCognitionExecutor(context: Context) {
         if (resourceId.isBlank()) return waitForResource(task, "No trusted reasoning resource is currently available")
         val cloud = resources.cloudContact(resourceId)
         if (cloud != null) {
+            val ownerKey = cognitionBudgetOwner(task)
+            val permit = modelCallBudget.acquire(
+                GlobalModelCallKind.COGNITION,
+                ownerKey,
+                GlobalCognitionTaskPolicy.LEASE_MILLIS,
+                settings
+            )
+            if (!permit.granted) return waitForModelBudget(task, permit)
             val running = markRunning(task, resourceId, 0L)
             val startedAt = System.currentTimeMillis()
-            val response = runCatching {
-                CloudModelClient.sendStructured(
-                    appContext,
-                    cloud,
-                    COGNITION_SYSTEM_PROMPT,
-                    buildPrompt(running, toolCatalogBlock)
-                )
+            val response = try {
+                runCatching {
+                    CloudModelClient.sendStructured(
+                        appContext,
+                        cloud,
+                        COGNITION_SYSTEM_PROMPT,
+                        buildPrompt(running, toolCatalogBlock)
+                    )
+                }
+            } finally {
+                modelCallBudget.release(GlobalModelCallKind.COGNITION, ownerKey)
             }
             AgentResourceHealthStore(appContext).record(
                 "target:$resourceId",
@@ -67,6 +80,14 @@ class GlobalCognitionExecutor(context: Context) {
             ?: return retryOrFail(task, "The selected reasoning Agent is unavailable")
         val topic = AppStore.outgoingTopicForContact(appContext, contactId)
             ?: return retryOrFail(task, "The selected reasoning route is unavailable")
+        val ownerKey = cognitionBudgetOwner(task)
+        val permit = modelCallBudget.acquire(
+            GlobalModelCallKind.COGNITION,
+            ownerKey,
+            GlobalCognitionTaskPolicy.LEASE_MILLIS,
+            settings
+        )
+        if (!permit.granted) return waitForModelBudget(task, permit)
         val sourceMessageId = correlationId("cognition", task.id)
         val running = markRunning(task, resourceId, sourceMessageId)
         SignalASIMqttClient.connect(appContext)
@@ -80,13 +101,17 @@ class GlobalCognitionExecutor(context: Context) {
         )
         return if (published) {
             GlobalCognitionExecutionResult(task.id, GlobalCognitionTaskStatus.RUNNING, resourceId, "Structured cognition accepted")
-        } else retryOrFail(running, "The reasoning Agent did not accept the cognition task")
+        } else {
+            modelCallBudget.cancel(GlobalModelCallKind.COGNITION, ownerKey)
+            retryOrFail(running, "The reasoning Agent did not accept the cognition task")
+        }
     }
 
     fun consumeConnectorResponse(response: AgentConnectorResponse): Boolean {
         val task = deliberationStore.cognitionTasks().firstOrNull {
             it.status == GlobalCognitionTaskStatus.RUNNING && it.sourceMessageId == response.sourceMessageId
         } ?: return false
+        modelCallBudget.release(GlobalModelCallKind.COGNITION, cognitionBudgetOwner(task))
         if (!response.success) retryOrFail(task, response.content.ifBlank { "The reasoning Agent failed" })
         else complete(task, response.content, task.resourceId.ifBlank { response.contactId })
         return true
@@ -342,6 +367,28 @@ class GlobalCognitionExecutor(context: Context) {
         return GlobalCognitionExecutionResult(task.id, waiting.status, detail = reason)
     }
 
+    private fun waitForModelBudget(
+        task: GlobalCognitionTask,
+        decision: GlobalModelCallBudgetDecision
+    ): GlobalCognitionExecutionResult {
+        val now = System.currentTimeMillis()
+        val reason = "The background model-call budget is temporarily unavailable"
+        val waiting = task.copy(
+            status = GlobalCognitionTaskStatus.WAITING_FOR_RESOURCE,
+            sourceMessageId = 0L,
+            attemptCount = (task.attemptCount - 1).coerceAtLeast(0),
+            nextAttemptAtMillis = decision.nextEligibleAtMillis.coerceAtLeast(now + 1_000L),
+            leaseExpiresAtMillis = 0L,
+            lastError = reason,
+            updatedAtMillis = now
+        )
+        deliberationStore.upsertCognitionTask(waiting)
+        return GlobalCognitionExecutionResult(task.id, waiting.status, detail = reason)
+    }
+
+    private fun cognitionBudgetOwner(task: GlobalCognitionTask): String =
+        "${task.id}:${task.attemptCount}"
+
     private fun retryOrFail(task: GlobalCognitionTask, reason: String): GlobalCognitionExecutionResult {
         val now = System.currentTimeMillis()
         val attempted = (task.attemptedResourceIds + task.resourceId).filter(String::isNotBlank).distinct()
@@ -443,6 +490,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
     private val resources = GlobalAgentResourceResolver(appContext)
     private val resourceHealth = AgentResourceHealthStore(appContext)
     private val realtimeContext = GlobalRealtimeContextProvider(appContext)
+    private val modelCallBudget = GlobalModelCallBudgetStore(appContext)
     private val autonomousToolHost by lazy { GlobalAutonomousToolHost(appContext) }
 
     fun executeNext(): GlobalAutonomousExecutionResult? {
@@ -585,6 +633,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
                 candidate.review.sourceMessageId == response.sourceMessageId
         }
         if (reviewRun != null) {
+            modelCallBudget.release(GlobalModelCallKind.PLAN_REVIEW, reviewBudgetOwner(reviewRun))
             if (response.success && response.content.isNotBlank()) {
                 completePlanReview(reviewRun, response.content)
             } else {
@@ -602,6 +651,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
             }
         } ?: return false
         val action = run.actions.first { it.sourceMessageId == response.sourceMessageId }
+        modelCallBudget.release(GlobalModelCallKind.AUTONOMOUS_ACTION, actionBudgetOwner(run, action))
         val assignment = GlobalSpecialistAssignmentPolicy.create(run, action, action.resourceId)
         val latencyMillis = (System.currentTimeMillis() - action.startedAtMillis)
             .takeIf { action.startedAtMillis > 0L }
@@ -694,10 +744,22 @@ class GlobalAutonomousRunExecutor(context: Context) {
         val prompt = buildActionPrompt(run, action, assignment)
         val cloud = resources.cloudContact(resourceId)
         if (cloud != null) {
+            val ownerKey = actionBudgetOwner(run, action)
+            val permit = modelCallBudget.acquire(
+                GlobalModelCallKind.AUTONOMOUS_ACTION,
+                ownerKey,
+                GlobalAutonomousRunPolicy.LEASE_MILLIS,
+                repository.settings()
+            )
+            if (!permit.granted) return waitForActionModelBudget(run, action, permit)
             val running = markActionRunning(run, action, resourceId, 0L)
             val startedAt = System.currentTimeMillis()
-            val response = runCatching {
-                CloudModelClient.sendStructured(appContext, cloud, AUTONOMY_SYSTEM_PROMPT, prompt)
+            val response = try {
+                runCatching {
+                    CloudModelClient.sendStructured(appContext, cloud, AUTONOMY_SYSTEM_PROMPT, prompt)
+                }
+            } finally {
+                modelCallBudget.release(GlobalModelCallKind.AUTONOMOUS_ACTION, ownerKey)
             }
             resourceHealth.record(
                 "target:$resourceId",
@@ -723,6 +785,14 @@ class GlobalAutonomousRunExecutor(context: Context) {
             ?: return failOrRetryAction(selected, selectedAction, "The selected execution Agent is unavailable")
         val topic = AppStore.outgoingTopicForContact(appContext, contactId)
             ?: return failOrRetryAction(selected, selectedAction, "The selected execution route is unavailable")
+        val ownerKey = actionBudgetOwner(selected, selectedAction)
+        val permit = modelCallBudget.acquire(
+            GlobalModelCallKind.AUTONOMOUS_ACTION,
+            ownerKey,
+            GlobalAutonomousRunPolicy.LEASE_MILLIS,
+            repository.settings()
+        )
+        if (!permit.granted) return waitForActionModelBudget(selected, selectedAction, permit)
         val sourceMessageId = correlationId(run.id, action.id)
         val running = setActionSourceMessageId(selected, action.id, sourceMessageId)
         SignalASIMqttClient.connect(appContext)
@@ -736,11 +806,14 @@ class GlobalAutonomousRunExecutor(context: Context) {
         )
         return if (published) {
             GlobalAutonomousExecutionResult(run.id, GlobalAutonomousRunStatus.RUNNING, resourceId, "Autonomous preparation accepted")
-        } else failOrRetryAction(
-            running,
-            running.actions.first { it.id == action.id },
-            "The execution Agent did not accept the task"
-        )
+        } else {
+            modelCallBudget.cancel(GlobalModelCallKind.AUTONOMOUS_ACTION, ownerKey)
+            failOrRetryAction(
+                running,
+                running.actions.first { it.id == action.id },
+                "The execution Agent did not accept the task"
+            )
+        }
     }
 
     private fun completeDelegatedResponse(
@@ -1120,9 +1193,21 @@ class GlobalAutonomousRunExecutor(context: Context) {
         val prompt = buildPlanReviewPrompt(run)
         val cloud = resources.cloudContact(resourceId)
         if (cloud != null) {
+            val ownerKey = reviewBudgetOwner(run)
+            val permit = modelCallBudget.acquire(
+                GlobalModelCallKind.PLAN_REVIEW,
+                ownerKey,
+                GlobalAutonomousReplanPolicy.LEASE_MILLIS,
+                repository.settings()
+            )
+            if (!permit.granted) return waitForPlanReviewModelBudget(run, permit)
             val running = markPlanReviewRunning(run, resourceId, 0L)
-            val response = runCatching {
-                CloudModelClient.sendStructured(appContext, cloud, REPLAN_SYSTEM_PROMPT, prompt)
+            val response = try {
+                runCatching {
+                    CloudModelClient.sendStructured(appContext, cloud, REPLAN_SYSTEM_PROMPT, prompt)
+                }
+            } finally {
+                modelCallBudget.release(GlobalModelCallKind.PLAN_REVIEW, ownerKey)
             }
             return if (response.isSuccess && response.getOrNull().orEmpty().isNotBlank()) {
                 completePlanReview(running, response.getOrNull().orEmpty())
@@ -1133,6 +1218,14 @@ class GlobalAutonomousRunExecutor(context: Context) {
             ?: return failOrRetryPlanReview(selected, "The selected plan review Agent is unavailable")
         val topic = AppStore.outgoingTopicForContact(appContext, contactId)
             ?: return failOrRetryPlanReview(selected, "The selected plan review route is unavailable")
+        val ownerKey = reviewBudgetOwner(selected)
+        val permit = modelCallBudget.acquire(
+            GlobalModelCallKind.PLAN_REVIEW,
+            ownerKey,
+            GlobalAutonomousReplanPolicy.LEASE_MILLIS,
+            repository.settings()
+        )
+        if (!permit.granted) return waitForPlanReviewModelBudget(selected, permit)
         val sourceMessageId = correlationId("global-replan", run.id, run.revision.toString())
         val running = setPlanReviewSourceMessageId(selected, sourceMessageId)
         SignalASIMqttClient.connect(appContext)
@@ -1151,7 +1244,10 @@ class GlobalAutonomousRunExecutor(context: Context) {
                 resourceId,
                 "Plan review accepted"
             )
-        } else failOrRetryPlanReview(running, "The plan review Agent did not accept the task")
+        } else {
+            modelCallBudget.cancel(GlobalModelCallKind.PLAN_REVIEW, ownerKey)
+            failOrRetryPlanReview(running, "The plan review Agent did not accept the task")
+        }
     }
 
     private fun markPlanReviewRunning(
@@ -1445,6 +1541,95 @@ class GlobalAutonomousRunExecutor(context: Context) {
             append("\nReturn only the review JSON. Cancel only pending action IDs that are obsolete. Add at most six necessary actions with unique key and depends_on fields. INVOKE_TOOL requires an exact listed tool_id and a tool_input object matching its schema. Never turn an external or irreversible action into an unconfirmed action, and never claim completion without evidence satisfying the listed criteria.")
         }.take(28_000)
     }
+
+    private fun waitForActionModelBudget(
+        run: GlobalAutonomousRun,
+        action: GlobalAutonomousAction,
+        decision: GlobalModelCallBudgetDecision
+    ): GlobalAutonomousExecutionResult {
+        val now = System.currentTimeMillis()
+        val nextEligible = decision.nextEligibleAtMillis.coerceAtLeast(now + 1_000L)
+        val reason = "The background model-call budget is temporarily unavailable"
+        val updated = store.updateAutonomousRun(run.id) { current ->
+            var reverted = false
+            val actions = current.actions.map { item ->
+                if (item.id == action.id && item.status == GlobalAutonomousActionStatus.RUNNING &&
+                    item.sourceMessageId == 0L
+                ) {
+                    reverted = true
+                    item.copy(
+                        status = GlobalAutonomousActionStatus.PENDING,
+                        resourceId = "",
+                        sourceMessageId = 0L,
+                        attemptCount = (item.attemptCount - 1).coerceAtLeast(0),
+                        leaseExpiresAtMillis = 0L,
+                        lastError = reason,
+                        startedAtMillis = if (item.attemptCount <= 1) 0L else item.startedAtMillis
+                    )
+                } else item
+            }
+            val activeLease = actions.asSequence()
+                .filter { it.status == GlobalAutonomousActionStatus.RUNNING }
+                .map(GlobalAutonomousAction::leaseExpiresAtMillis)
+                .maxOrNull() ?: 0L
+            current.copy(
+                actions = actions,
+                status = if (activeLease > 0L) {
+                    GlobalAutonomousRunStatus.RUNNING
+                } else GlobalAutonomousRunStatus.WAITING_FOR_RESOURCE,
+                attemptCount = if (reverted) {
+                    (current.attemptCount - 1).coerceAtLeast(0)
+                } else current.attemptCount,
+                nextAttemptAtMillis = nextEligible,
+                leaseExpiresAtMillis = activeLease,
+                lastError = reason,
+                updatedAtMillis = now
+            )
+        } ?: run
+        return GlobalAutonomousExecutionResult(updated.id, updated.status, detail = reason)
+    }
+
+    private fun waitForPlanReviewModelBudget(
+        run: GlobalAutonomousRun,
+        decision: GlobalModelCallBudgetDecision
+    ): GlobalAutonomousExecutionResult {
+        val now = System.currentTimeMillis()
+        val nextEligible = decision.nextEligibleAtMillis.coerceAtLeast(now + 1_000L)
+        val reason = "The background model-call budget is temporarily unavailable"
+        val updated = store.updateAutonomousRun(run.id) { current ->
+            val reviewWasClaimed = current.review.status == GlobalRunReviewStatus.RUNNING &&
+                current.review.sourceMessageId == 0L
+            current.copy(
+                status = GlobalAutonomousRunStatus.REPLANNING,
+                review = current.review.copy(
+                    status = GlobalRunReviewStatus.WAITING_FOR_RESOURCE,
+                    resourceId = "",
+                    sourceMessageId = 0L,
+                    attemptCount = if (reviewWasClaimed) {
+                        (current.review.attemptCount - 1).coerceAtLeast(0)
+                    } else current.review.attemptCount,
+                    nextAttemptAtMillis = nextEligible,
+                    leaseExpiresAtMillis = 0L,
+                    lastError = reason,
+                    updatedAtMillis = now
+                ),
+                attemptCount = if (reviewWasClaimed) {
+                    (current.attemptCount - 1).coerceAtLeast(0)
+                } else current.attemptCount,
+                nextAttemptAtMillis = nextEligible,
+                leaseExpiresAtMillis = 0L,
+                lastError = reason,
+                updatedAtMillis = now
+            )
+        } ?: run
+        return GlobalAutonomousExecutionResult(updated.id, updated.status, detail = reason)
+    }
+
+    private fun actionBudgetOwner(run: GlobalAutonomousRun, action: GlobalAutonomousAction): String =
+        "${run.id}:${action.id}:${action.attemptCount}"
+
+    private fun reviewBudgetOwner(run: GlobalAutonomousRun): String =
+        "${run.id}:review:${run.review.attemptCount}"
 
     private companion object {
         val TERMINAL_RUN_STATUSES = setOf(

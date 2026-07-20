@@ -648,7 +648,7 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 16)
+            .put("version", 17)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("event_overflow", JSONArray().apply { loadOverflowEvents().forEach { put(encodeEvent(it)) } })
             .put("event_failures", JSONArray().apply {
@@ -1440,6 +1440,8 @@ class GlobalAgentRepository(context: Context) {
         .put("adaptive_learning_enabled", settings.adaptiveLearningEnabled)
         .put("protect_battery_for_background_work", settings.protectBatteryForBackgroundWork)
         .put("allow_metered_background_research", settings.allowMeteredBackgroundResearch)
+        .put("daily_background_model_call_budget", settings.dailyBackgroundModelCallBudget)
+        .put("max_concurrent_background_model_calls", settings.maxConcurrentBackgroundModelCalls)
         .put("daily_message_budget", settings.dailyMessageBudget)
         .put("daily_discovery_task_budget", settings.dailyDiscoveryTaskBudget)
         .put("topic_cooldown_millis", settings.topicCooldownMillis)
@@ -1466,6 +1468,16 @@ class GlobalAgentRepository(context: Context) {
             adaptiveLearningEnabled = json.optBoolean("adaptive_learning_enabled", true),
             protectBatteryForBackgroundWork = json.optBoolean("protect_battery_for_background_work", true),
             allowMeteredBackgroundResearch = json.optBoolean("allow_metered_background_research", false),
+            dailyBackgroundModelCallBudget = json.optInt("daily_background_model_call_budget", 48)
+                .coerceIn(
+                    GlobalModelCallBudgetPolicy.MIN_DAILY_LIMIT,
+                    GlobalModelCallBudgetPolicy.MAX_DAILY_LIMIT
+                ),
+            maxConcurrentBackgroundModelCalls = json.optInt("max_concurrent_background_model_calls", 3)
+                .coerceIn(
+                    GlobalModelCallBudgetPolicy.MIN_CONCURRENCY_LIMIT,
+                    GlobalModelCallBudgetPolicy.MAX_CONCURRENCY_LIMIT
+                ),
             dailyMessageBudget = json.optInt("daily_message_budget", 4).coerceIn(0, 20),
             dailyDiscoveryTaskBudget = json.optInt("daily_discovery_task_budget", 3).coerceIn(1, 12),
             topicCooldownMillis = json.optLong("topic_cooldown_millis", 6L * 60L * 60L * 1_000L)
@@ -1543,6 +1555,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     private val longHorizonStore by lazy { GlobalLongHorizonGoalStore(appContext) }
     private val proactiveDiscoveryCoordinator by lazy { GlobalProactiveDiscoveryCoordinator(appContext) }
     private val realtimeContext by lazy { GlobalRealtimeContextProvider(appContext) }
+    private val modelCallBudget by lazy { GlobalModelCallBudgetStore(appContext) }
 
     init {
         val settings = repository.settings()
@@ -1996,6 +2009,9 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
 
     fun settings(): GlobalAgentSettings = repository.settings()
 
+    fun modelCallBudgetSnapshot(nowMillis: Long = System.currentTimeMillis()): GlobalModelCallBudgetSnapshot =
+        modelCallBudget.snapshot(repository.settings(), nowMillis)
+
     fun adaptiveProfile(): GlobalAgentAdaptiveProfile =
         GlobalAgentLearningPolicy.profile(repository.feedback())
 
@@ -2159,6 +2175,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             explicitUserOverride = explicitUserOverride
         )
         if (!budget.allowed) return null
+        if (!modelCallBudget.availability(settings).granted) return null
         return researchExecutor.executeNext()
     }
 
@@ -2171,6 +2188,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             explicitUserOverride = explicitUserOverride
         )
         if (!budget.allowed) return null
+        if (!modelCallBudget.availability(settings).granted) return null
         return cognitionExecutor.executeNext()
     }
 
@@ -2211,18 +2229,26 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             settings,
             nowMillis
         )
+        val modelBudget = modelCallBudget.availability(settings, nowMillis)
         val candidates = buildList {
             repository.nextPendingEventAttemptAt(nowMillis).takeIf { it > 0L }?.let(::add)
             repository.researchTasks().forEach { task ->
                 when (task.status) {
                     GlobalResearchTaskStatus.QUEUED -> add(
-                        if (researchBudget.allowed) nowMillis + MIN_WAKE_DELAY_MILLIS
-                        else researchBudget.nextEligibleAtMillis
+                        when {
+                            !researchBudget.allowed -> researchBudget.nextEligibleAtMillis
+                            !modelBudget.granted -> modelBudget.nextEligibleAtMillis
+                            else -> nowMillis + MIN_WAKE_DELAY_MILLIS
+                        }
                     )
                     GlobalResearchTaskStatus.RUNNING -> task.leaseExpiresAtMillis.takeIf { it > 0L }?.let(::add)
                     GlobalResearchTaskStatus.SCHEDULED,
                     GlobalResearchTaskStatus.WAITING_FOR_RESOURCE -> task.nextAttemptAtMillis.takeIf { it > 0L }?.let {
-                        add(if (researchBudget.allowed) it else maxOf(it, researchBudget.nextEligibleAtMillis))
+                        add(when {
+                            !researchBudget.allowed -> maxOf(it, researchBudget.nextEligibleAtMillis)
+                            !modelBudget.granted -> maxOf(it, modelBudget.nextEligibleAtMillis)
+                            else -> it
+                        })
                     }
                     else -> Unit
                 }
@@ -2230,12 +2256,19 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             deliberationStore.cognitionTasks().forEach { task ->
                 when (task.status) {
                     GlobalCognitionTaskStatus.QUEUED -> add(
-                        if (cognitionBudget.allowed) nowMillis + MIN_WAKE_DELAY_MILLIS
-                        else cognitionBudget.nextEligibleAtMillis
+                        when {
+                            !cognitionBudget.allowed -> cognitionBudget.nextEligibleAtMillis
+                            !modelBudget.granted -> modelBudget.nextEligibleAtMillis
+                            else -> nowMillis + MIN_WAKE_DELAY_MILLIS
+                        }
                     )
                     GlobalCognitionTaskStatus.RUNNING -> task.leaseExpiresAtMillis.takeIf { it > 0L }?.let(::add)
                     GlobalCognitionTaskStatus.WAITING_FOR_RESOURCE -> task.nextAttemptAtMillis.takeIf { it > 0L }?.let {
-                        add(if (cognitionBudget.allowed) it else maxOf(it, cognitionBudget.nextEligibleAtMillis))
+                        add(when {
+                            !cognitionBudget.allowed -> maxOf(it, cognitionBudget.nextEligibleAtMillis)
+                            !modelBudget.granted -> maxOf(it, modelBudget.nextEligibleAtMillis)
+                            else -> it
+                        })
                     }
                     else -> Unit
                 }
@@ -2248,10 +2281,13 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                     )
                     GlobalAutonomousRunStatus.RUNNING -> {
                         if (GlobalAutonomousActionGraphPolicy.readyActions(run.actions).isNotEmpty()) {
-                            add(
-                                if (autonomousBudget.allowed) nowMillis + MIN_WAKE_DELAY_MILLIS
-                                else autonomousBudget.nextEligibleAtMillis
+                            val readyAt = maxOf(
+                                nowMillis + MIN_WAKE_DELAY_MILLIS,
+                                run.nextAttemptAtMillis.takeIf { it > 0L } ?: 0L
                             )
+                            add(if (autonomousBudget.allowed) {
+                                readyAt
+                            } else maxOf(readyAt, autonomousBudget.nextEligibleAtMillis))
                         }
                         run.actions.asSequence()
                             .filter { it.status == GlobalAutonomousActionStatus.RUNNING }

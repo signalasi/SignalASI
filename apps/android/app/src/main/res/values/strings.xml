@@ -1581,4 +1581,12 @@
     <string name="cc_global_battery_protection_subtitle">Defer model reasoning and autonomous work during power saver or low battery</string>
     <string name="cc_global_metered_research_title">Research on metered networks</string>
     <string name="cc_global_metered_research_subtitle">Allow autonomous research to use cellular or another metered connection</string>
+    <string name="cc_global_daily_model_calls_title">Daily background model calls</string>
+    <string name="cc_global_daily_model_calls_subtitle">Rolling 24-hour limit shared by cognition, research, autonomous work, and plan review</string>
+    <string name="cc_global_daily_model_calls_status">%1$d / %2$d used</string>
+    <string name="cc_global_concurrent_model_calls_title">Concurrent background model calls</string>
+    <string name="cc_global_concurrent_model_calls_subtitle">One host-owned limit across local, cloud, and paired Agent reasoning</string>
+    <string name="cc_global_concurrent_model_calls_status">%1$d / %2$d active</string>
+    <string name="cc_global_calls_per_day">%1$d calls per 24 hours</string>
+    <string name="cc_global_concurrent_calls">%1$d concurrent calls</string>
 </resources>
