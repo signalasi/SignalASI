@@ -829,8 +829,10 @@ class GlobalAgentRepository(context: Context) {
 
     private fun encodeResearchPlan(plan: GlobalResearchPlan): JSONObject = JSONObject()
         .put("id", plan.id)
+        .put("depth", plan.depth.name)
         .put("phase", plan.phase.name)
         .put("units", JSONArray().apply { plan.units.forEach { put(encodeResearchUnit(it)) } })
+        .put("quality_expansion_count", plan.qualityExpansionCount)
         .put("synthesis_resource_id", plan.synthesisResourceId)
         .put("synthesis_source_message_id", plan.synthesisSourceMessageId)
         .put("synthesis_lease_expires_at_millis", plan.synthesisLeaseExpiresAtMillis)
@@ -843,12 +845,14 @@ class GlobalAgentRepository(context: Context) {
         val units = json.optJSONArray("units")
         return GlobalResearchPlan(
             id = json.optString("id"),
+            depth = enumValue(json.optString("depth"), GlobalResearchDepth.QUICK_FACT),
             phase = enumValue(json.optString("phase"), GlobalResearchPlanPhase.UNPLANNED),
             units = buildList {
                 if (units != null) for (index in 0 until units.length()) {
                     decodeResearchUnit(units.optJSONObject(index))?.let(::add)
                 }
             },
+            qualityExpansionCount = json.optInt("quality_expansion_count"),
             synthesisResourceId = json.optString("synthesis_resource_id"),
             synthesisSourceMessageId = json.optLong("synthesis_source_message_id"),
             synthesisLeaseExpiresAtMillis = json.optLong("synthesis_lease_expires_at_millis"),
@@ -863,6 +867,10 @@ class GlobalAgentRepository(context: Context) {
         .put("purpose", unit.purpose.name)
         .put("question", unit.question)
         .put("source_focus", unit.sourceFocus)
+        .put("query_candidates", JSONArray(unit.queryCandidates))
+        .put("minimum_independent_sources", unit.minimumIndependentSources)
+        .put("required_source_kinds", JSONArray(unit.requiredSourceKinds.map { it.name }))
+        .put("freshness_window_millis", unit.freshnessWindowMillis)
         .put("status", unit.status.name)
         .put("resource_id", unit.resourceId)
         .put("attempted_resource_ids", JSONArray(unit.attemptedResourceIds))
@@ -882,6 +890,12 @@ class GlobalAgentRepository(context: Context) {
             purpose = enumValue(json.optString("purpose"), GlobalResearchUnitPurpose.CURRENT_FACTS),
             question = json.optString("question"),
             sourceFocus = json.optString("source_focus"),
+            queryCandidates = json.optJSONArray("query_candidates").strings(),
+            minimumIndependentSources = json.optInt("minimum_independent_sources", 1).coerceAtLeast(1),
+            requiredSourceKinds = json.optJSONArray("required_source_kinds").strings().mapNotNull { value ->
+                runCatching { GlobalEvidenceSourceKind.valueOf(value) }.getOrNull()
+            }.toSet(),
+            freshnessWindowMillis = json.optLong("freshness_window_millis").coerceAtLeast(0L),
             status = enumValue(json.optString("status"), GlobalResearchUnitStatus.PENDING),
             resourceId = json.optString("resource_id"),
             attemptedResourceIds = json.optJSONArray("attempted_resource_ids").strings(),
@@ -900,8 +914,13 @@ class GlobalAgentRepository(context: Context) {
         .put("sources", JSONArray().apply { ledger.sources.forEach { put(encodeEvidenceSource(it)) } })
         .put("claims", JSONArray().apply { ledger.claims.forEach { put(encodeEvidenceClaim(it)) } })
         .put("independent_source_count", ledger.independentSourceCount)
+        .put("primary_source_count", ledger.primarySourceCount)
+        .put("fresh_source_count", ledger.freshSourceCount)
+        .put("stale_source_count", ledger.staleSourceCount)
+        .put("undated_source_count", ledger.undatedSourceCount)
         .put("corroborated_claim_count", ledger.corroboratedClaimCount)
         .put("contested_claim_count", ledger.contestedClaimCount)
+        .put("quality_issues", JSONArray(ledger.qualityIssues.map { it.name }))
         .put("overall_confidence", ledger.overallConfidence)
         .put("verified", ledger.verified)
         .put("updated_at_millis", ledger.updatedAtMillis)
@@ -922,8 +941,15 @@ class GlobalAgentRepository(context: Context) {
                 }
             },
             independentSourceCount = json.optInt("independent_source_count"),
+            primarySourceCount = json.optInt("primary_source_count"),
+            freshSourceCount = json.optInt("fresh_source_count"),
+            staleSourceCount = json.optInt("stale_source_count"),
+            undatedSourceCount = json.optInt("undated_source_count"),
             corroboratedClaimCount = json.optInt("corroborated_claim_count"),
             contestedClaimCount = json.optInt("contested_claim_count"),
+            qualityIssues = json.optJSONArray("quality_issues").strings().mapNotNull { value ->
+                runCatching { GlobalEvidenceQualityIssue.valueOf(value) }.getOrNull()
+            }.toSet(),
             overallConfidence = json.optDouble("overall_confidence").coerceIn(0.0, 1.0),
             verified = json.optBoolean("verified"),
             updatedAtMillis = json.optLong("updated_at_millis")
@@ -934,7 +960,10 @@ class GlobalAgentRepository(context: Context) {
         .put("uri", source.uri)
         .put("kind", source.kind.name)
         .put("quality_score", source.qualityScore)
+        .put("authority", source.authority)
         .put("contributing_unit_ids", JSONArray(source.contributingUnitIds.toList()))
+        .put("published_at_millis", source.publishedAtMillis)
+        .put("freshness", source.freshness.name)
         .put("retrieved_at_millis", source.retrievedAtMillis)
 
     private fun decodeEvidenceSource(json: JSONObject?): GlobalEvidenceSource? {
@@ -943,7 +972,12 @@ class GlobalAgentRepository(context: Context) {
             uri = json.optString("uri"),
             kind = enumValue(json.optString("kind"), GlobalEvidenceSourceKind.UNKNOWN),
             qualityScore = json.optDouble("quality_score").coerceIn(0.0, 1.0),
+            authority = json.optString("authority").ifBlank {
+                GlobalEvidenceEvaluator.sourceAuthority(json.optString("uri"))
+            },
             contributingUnitIds = json.optJSONArray("contributing_unit_ids").strings().toSet(),
+            publishedAtMillis = json.optLong("published_at_millis"),
+            freshness = enumValue(json.optString("freshness"), GlobalEvidenceFreshness.UNKNOWN),
             retrievedAtMillis = json.optLong("retrieved_at_millis")
         )
     }
@@ -954,6 +988,8 @@ class GlobalAgentRepository(context: Context) {
         .put("source_uris", JSONArray(claim.sourceUris.toList()))
         .put("contributing_unit_ids", JSONArray(claim.contributingUnitIds.toList()))
         .put("corroboration_count", claim.corroborationCount)
+        .put("independent_source_count", claim.independentSourceCount)
+        .put("primary_source_count", claim.primarySourceCount)
         .put("confidence", claim.confidence)
         .put("contested", claim.contested)
 
@@ -965,6 +1001,8 @@ class GlobalAgentRepository(context: Context) {
             sourceUris = json.optJSONArray("source_uris").strings().toSet(),
             contributingUnitIds = json.optJSONArray("contributing_unit_ids").strings().toSet(),
             corroborationCount = json.optInt("corroboration_count", 1).coerceAtLeast(1),
+            independentSourceCount = json.optInt("independent_source_count"),
+            primarySourceCount = json.optInt("primary_source_count"),
             confidence = json.optDouble("confidence").coerceIn(0.0, 1.0),
             contested = json.optBoolean("contested")
         )
