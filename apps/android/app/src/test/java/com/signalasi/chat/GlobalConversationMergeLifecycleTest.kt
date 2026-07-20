@@ -115,10 +115,23 @@ class GlobalConversationMergeLifecycleTest {
             incoming = listOf(mergeEvent())
         )
 
-        assertEquals(1, journal.size)
-        assertEquals("message", journal.single().id)
-        assertEquals("parent", journal.single().conversationId)
-        assertFalse(journal.any { it.type == GlobalConversationEventType.CONVERSATION_MERGED })
+        val visible = GlobalConversationContextJournalPolicy.select(
+            events = journal,
+            conversationId = "parent",
+            beforeOrAtMillis = Long.MAX_VALUE
+        )
+        assertEquals(1, visible.size)
+        assertEquals("message", visible.single().id)
+        assertEquals("parent", visible.single().conversationId)
+        assertFalse(GlobalConversationContextJournalPolicy.render(journal).contains("conversation_merged"))
+
+        val delayedSource = original.copy(id = "delayed", timestampMillis = 500L)
+        val afterReplay = GlobalConversationContextJournalPolicy.apply(journal, listOf(delayedSource))
+        assertTrue(GlobalConversationContextJournalPolicy.select(
+            events = afterReplay,
+            conversationId = "child",
+            beforeOrAtMillis = Long.MAX_VALUE
+        ).isEmpty())
     }
 
     private fun mergeEvent() = GlobalConversationEvent(

@@ -96,7 +96,7 @@ The global Agent must resolve references inside a topic workspace without resend
 - Select a causal same-conversation window ending at the source event. Exclude the source event itself and any later event so delayed workers cannot reinterpret a request using future instructions.
 - Preserve the selected events in chronological order and stop at the first character-budget boundary instead of creating gaps in recent context.
 - Mark the entire window as untrusted evidence rather than instructions, then combine it with only the relevant topic graph and shareable world-model layers.
-- Purge retracted messages immediately. Deleting a conversation or changing its global visibility to excluded removes its complete journal window before another model call.
+- Purge retracted messages and every causally derived attachment, artifact, task, or tool observation immediately. Keep encrypted, non-renderable retraction and conversation-visibility markers so delayed replay after process death or restart cannot restore withdrawn evidence. Deleting a conversation or changing its global visibility to excluded removes its complete journal window before another model call; resuming tracking admits only later authorized context.
 - Treat private mode and paused global tracking as bidirectional boundaries: neither publish that conversation into global cognition nor inject cross-conversation world or realtime context into its replies.
 - Use the same bounded window for private cognition, research assignments, reversible autonomous preparation, and dynamic plan review.
 

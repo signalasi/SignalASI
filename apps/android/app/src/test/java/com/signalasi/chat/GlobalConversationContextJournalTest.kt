@@ -45,7 +45,58 @@ class GlobalConversationContextJournalTest {
             ))
         )
 
-        assertTrue(afterDeletion.isEmpty())
+        assertTrue(visible(afterDeletion).isEmpty())
+        assertEquals("", GlobalConversationContextJournalPolicy.render(afterDeletion))
+    }
+
+    @Test
+    fun `message deletion retracts every causally derived context event`() {
+        val root = event("transcript-root", "Review the attached report", 1L)
+        val attachment = event("rich-attachment", "Attached file: report.pdf", 2L).copy(
+            type = GlobalConversationEventType.ATTACHMENT_ADDED,
+            causalEventIds = setOf(root.id)
+        )
+        val artifact = event("rich-artifact", "Created file: report-summary.md", 3L).copy(
+            type = GlobalConversationEventType.ARTIFACT_CREATED,
+            actor = GlobalConversationActor.ASSISTANT,
+            causalEventIds = setOf(root.id)
+        )
+        val deletion = event("delete-root", "", 4L).copy(
+            type = GlobalConversationEventType.MESSAGE_DELETED,
+            actor = GlobalConversationActor.SYSTEM,
+            retractedEventIds = setOf(root.id)
+        )
+
+        val stored = GlobalConversationContextJournalPolicy.apply(
+            existing = listOf(root, attachment, artifact),
+            incoming = listOf(deletion)
+        )
+
+        assertTrue(visible(stored).isEmpty())
+        assertFalse(GlobalConversationContextJournalPolicy.render(stored).contains("report.pdf"))
+        assertFalse(GlobalConversationContextJournalPolicy.render(stored).contains("report-summary.md"))
+    }
+
+    @Test
+    fun `durable retraction marker rejects a delayed derived event after restart`() {
+        val root = event("transcript-root", "Temporary request", 1L)
+        val deletion = event("delete-root", "", 2L).copy(
+            type = GlobalConversationEventType.MESSAGE_DELETED,
+            actor = GlobalConversationActor.SYSTEM,
+            retractedEventIds = setOf(root.id)
+        )
+        val persisted = GlobalConversationContextJournalPolicy.apply(listOf(root), listOf(deletion))
+        val delayedArtifact = event("late-artifact", "Created file: stale.txt", 1L).copy(
+            type = GlobalConversationEventType.ARTIFACT_CREATED,
+            actor = GlobalConversationActor.ASSISTANT,
+            causalEventIds = setOf(root.id)
+        )
+
+        val restored = GlobalConversationContextJournalPolicy.apply(emptyList(), persisted)
+        val afterReplay = GlobalConversationContextJournalPolicy.apply(restored, listOf(delayedArtifact))
+
+        assertTrue(visible(afterReplay).isEmpty())
+        assertFalse(GlobalConversationContextJournalPolicy.render(afterReplay).contains("stale.txt"))
     }
 
     @Test
@@ -63,7 +114,35 @@ class GlobalConversationContextJournalTest {
 
         val stored = GlobalConversationContextJournalPolicy.apply(existing, listOf(excluded))
 
-        assertEquals(listOf("b-1"), stored.map { it.id })
+        assertEquals(listOf("b-1"), visible(stored).map { it.id })
+
+        val delayed = event("a-delayed", "Delayed private context", 2L, "conversation-a")
+        val afterReplay = GlobalConversationContextJournalPolicy.apply(stored, listOf(delayed))
+        assertEquals(listOf("b-1"), visible(afterReplay).map { it.id })
+    }
+
+    @Test
+    fun `including a conversation again admits only later context`() {
+        val excluded = event("exclude-a", "", 4L).copy(
+            type = GlobalConversationEventType.CONVERSATION_UPDATED,
+            actor = GlobalConversationActor.SYSTEM,
+            metadata = mapOf("global_visibility" to "excluded")
+        )
+        val included = event("include-a", "", 5L).copy(
+            type = GlobalConversationEventType.CONVERSATION_UPDATED,
+            actor = GlobalConversationActor.SYSTEM,
+            metadata = mapOf("global_visibility" to "included")
+        )
+        val whileExcluded = event("blocked", "Do not keep", 4L)
+        val afterIncluded = event("allowed", "Tracking resumed", 6L)
+
+        val excludedState = GlobalConversationContextJournalPolicy.apply(emptyList(), listOf(excluded, whileExcluded))
+        val resumedState = GlobalConversationContextJournalPolicy.apply(
+            excludedState,
+            listOf(included, afterIncluded)
+        )
+
+        assertEquals(listOf("allowed"), visible(resumedState).map { it.id })
     }
 
     @Test
@@ -76,7 +155,8 @@ class GlobalConversationContextJournalTest {
 
         val stored = GlobalConversationContextJournalPolicy.apply(existing, listOf(deleted))
 
-        assertTrue(stored.isEmpty())
+        assertTrue(visible(stored).isEmpty())
+        assertEquals("", GlobalConversationContextJournalPolicy.render(stored))
     }
 
     @Test
@@ -190,4 +270,19 @@ class GlobalConversationContextJournalTest {
         content = content,
         conversationTitle = "SignalASI"
     )
+
+    private fun visible(events: List<GlobalConversationEvent>): List<GlobalConversationEvent> =
+        GlobalConversationContextJournalPolicy.select(
+            events = events,
+            conversationId = "conversation-a",
+            beforeOrAtMillis = Long.MAX_VALUE,
+            maximumEvents = 100,
+            maximumCharacters = 8_000
+        ) + GlobalConversationContextJournalPolicy.select(
+            events = events,
+            conversationId = "conversation-b",
+            beforeOrAtMillis = Long.MAX_VALUE,
+            maximumEvents = 100,
+            maximumCharacters = 8_000
+        )
 }
