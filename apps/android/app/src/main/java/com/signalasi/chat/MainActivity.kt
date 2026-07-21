@@ -1347,83 +1347,52 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun reconcileRecoverableAgentRuns() {
         if (!::agentRunEventStore.isInitialized || !::agentRunRecorder.isInitialized) return
         val registrations = encryptedAgentRegistry.list()
-        agentRunEventStore.recoverableRuns().forEach { snapshot ->
-            val run = agentRunRecorder.run(snapshot.runId)
-            val registration = registrations.firstOrNull { it.agentId == snapshot.agentId }
-                ?: registrations.firstOrNull { it.deviceId == snapshot.deviceId }
-            val decision = AgentRunRecoveryPolicy.decide(snapshot, run, registration)
-            when (decision.disposition) {
-                AgentRunRecoveryDisposition.RESTORE_LOCAL_WAIT,
-                AgentRunRecoveryDisposition.RECONNECT_DURABLE_REMOTE -> {
-                    if (run == null) return@forEach
-                    snapshot.lastEvent.messageId.takeIf(String::isNotBlank)?.let { messageId ->
-                        agentRunIdsByTurn[messageId] = run.runId
-                    }
-                    appendRunControlEvent(
-                        run = run,
-                        messageId = snapshot.lastEvent.messageId,
-                        taskId = snapshot.taskId,
-                        agentId = snapshot.agentId,
-                        type = AgentRunControlEventType.RUN_RECOVERED,
-                        payload = mapOf(
-                            "recovery" to decision.disposition.name.lowercase(Locale.ROOT),
-                            "reason" to decision.reason,
-                            "last_sequence" to snapshot.lastSequence
-                        ),
-                        stepId = snapshot.lastEvent.stepId,
-                        toolCallId = snapshot.lastEvent.toolCallId
-                    )
-                }
-                AgentRunRecoveryDisposition.FAIL_NON_REPLAYABLE -> {
-                    run?.let { interrupted ->
-                        agentRunRecorder.markInterrupted(interrupted.runId, decision.reason)
-                        appendRunControlEvent(
-                            run = interrupted,
-                            messageId = snapshot.lastEvent.messageId,
-                            taskId = snapshot.taskId,
-                            agentId = snapshot.agentId,
-                            type = AgentRunControlEventType.RUN_FAILED,
-                            payload = mapOf("reason" to decision.reason, "replay_safe" to false)
-                        )
-                    } ?: agentRunEventStore.appendNext(
-                        snapshot.lastEvent.copy(
-                            eventId = UUID.randomUUID().toString(),
-                            type = AgentRunControlEventType.RUN_FAILED,
-                            sequence = 0L,
-                            timestampMillis = System.currentTimeMillis(),
-                            payload = mapOf("reason" to "missing_recorded_run", "replay_safe" to false)
-                        )
-                    )
-                }
-                AgentRunRecoveryDisposition.IGNORE_TERMINAL -> {
-                    val terminalType = when (run?.status) {
-                        AgentRecordedRunStatus.COMPLETED -> AgentRunControlEventType.RUN_COMPLETED
-                        AgentRecordedRunStatus.CANCELLED -> AgentRunControlEventType.RUN_CANCELLED
-                        AgentRecordedRunStatus.FAILED, null -> AgentRunControlEventType.RUN_FAILED
-                        AgentRecordedRunStatus.RUNNING -> return@forEach
-                    }
-                    if (run != null) {
-                        appendRunControlEvent(
-                            run = run,
-                            messageId = snapshot.lastEvent.messageId,
-                            taskId = snapshot.taskId,
-                            agentId = snapshot.agentId,
-                            type = terminalType,
-                            payload = mapOf("reason" to decision.reason)
-                        )
-                    } else {
-                        agentRunEventStore.appendNext(
-                            snapshot.lastEvent.copy(
-                                eventId = UUID.randomUUID().toString(),
-                                type = terminalType,
-                                sequence = 0L,
-                                timestampMillis = System.currentTimeMillis(),
-                                payload = mapOf("reason" to "missing_recorded_run")
-                            )
-                        )
-                    }
-                }
+        val recoverableSource = {
+            agentHandoffStore.active().map { handoff ->
+                AgentRecoverableRun(
+                    handle = AgentRunHandle(
+                        runId = handoff.request.runId,
+                        taskId = handoff.request.taskId,
+                        agentId = handoff.request.toAgentId,
+                        remoteRunId = handoff.sourceMessageId.takeIf { it > 0L }?.toString()
+                            ?: handoff.request.runId,
+                        acceptedAtMillis = handoff.request.createdAtMillis
+                    ),
+                    lastEventSequence = handoff.request.checkpoint["last_event_sequence"]
+                        ?.toString()?.toLongOrNull() ?: 0L,
+                    checkpoint = handoff.request.checkpoint
+                )
             }
+        }
+        val provider = ActionExecutorAgentProvider(
+            registrationSource = { AppStoreAgentConnectorRegistry(this).registrations() },
+            delegate = AndroidAgentActionExecutor(this),
+            recoverableSource = recoverableSource,
+            runStartReceipts = EncryptedAgentRunStartReceiptStore(this)
+        )
+        val directory = AgentAdapterDirectory().apply { register(provider) }
+        val results = runBlocking {
+            AgentRunRecoveryCoordinator(
+                runStore = agentRunEventStore,
+                workspaceStore = EncryptedAgentWorkspaceStore(this@MainActivity),
+                recordedRun = agentRunRecorder::run,
+                registration = { agentId, deviceId ->
+                    registrations.firstOrNull { it.agentId == agentId }
+                        ?: registrations.firstOrNull { it.deviceId == deviceId }
+                },
+                adapterResolver = directory::resolveAdapter,
+                markInterrupted = { runId, reason -> agentRunRecorder.markInterrupted(runId, reason) }
+            ).recover()
+        }
+        results.filter { it.outcome in setOf(
+            AgentRunRecoveryOutcome.RESTORED_LOCAL_WAIT,
+            AgentRunRecoveryOutcome.RECONNECTED_REMOTE,
+            AgentRunRecoveryOutcome.WAITING_FOR_REMOTE,
+            AgentRunRecoveryOutcome.ALREADY_CURRENT
+        ) }.forEach { result ->
+            agentRunEventStore.events(result.runId).lastOrNull()?.messageId
+                ?.takeIf(String::isNotBlank)
+                ?.let { messageId -> agentRunIdsByTurn[messageId] = result.runId }
         }
         reconcileStructuredAgentHandoffs()
     }
@@ -2138,6 +2107,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             sessionId = turnId,
             conversationId = conversationId,
             taskId = turnId,
+            goal = goal,
+            agentId = deterministicAction?.parameters?.get("connector_id").orEmpty()
+                .ifBlank { "signalasi-mobile" },
+            deviceId = AppStore.profile(this).optString("device_id")
+                .ifBlank { AppStore.profile(this).optString("signalasi_id") },
             status = AgentWorkspaceStatus.CREATED
         )
         AgentTaskRuntime.supervisor(this).submit(workspace, AgentTaskLane.READ_REASONING) {
@@ -2172,6 +2146,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 state
             }
             val state = outcome.getOrElse { runtime.snapshot() }
+            persistAgentWorkspaceSnapshot(turnId, state)
             appendEvent(
                 kind = "agent.state",
                 message = state.phase.name,
@@ -2526,6 +2501,119 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             result.success,
             executionResourceId = "skill:${result.skillId}"
         )?.let(::observeCompletedAgentRun)
+    }
+
+    private fun persistAgentWorkspaceSnapshot(turnId: String, state: AgentUiState) {
+        runCatching {
+            val actions = (state.plan?.actionHistory.orEmpty() + state.plan?.actions.orEmpty())
+                .distinctBy(AgentAction::id)
+            val result = state.lastActionResult
+            val toolCalls = actions
+                .filter { it.kind == AgentActionKind.CALL_NATIVE_TOOL || it.kind == AgentActionKind.CALL_CONNECTOR }
+                .map { action ->
+                    val isLast = result?.actionId == action.id
+                    AgentToolCallRecord(
+                        id = if (isLast) result?.metadata?.get("invocation_id").orEmpty()
+                            .ifBlank { action.id } else action.id,
+                        toolName = action.parameters["tool_id"].orEmpty()
+                            .ifBlank { action.parameters["connector_id"].orEmpty() }
+                            .ifBlank { action.kind.name.lowercase(Locale.ROOT) },
+                        status = when (action.status) {
+                            AgentActionStatus.PROPOSED,
+                            AgentActionStatus.PENDING_CONFIRMATION -> AgentToolCallStatus.PENDING
+                            AgentActionStatus.RUNNING,
+                            AgentActionStatus.WAITING_RESPONSE -> AgentToolCallStatus.RUNNING
+                            AgentActionStatus.COMPLETED -> AgentToolCallStatus.SUCCEEDED
+                            AgentActionStatus.FAILED,
+                            AgentActionStatus.BLOCKED,
+                            AgentActionStatus.ROLLED_BACK -> AgentToolCallStatus.FAILED
+                        },
+                        argumentsJson = action.parameters["input_json"].orEmpty()
+                            .ifBlank { JSONObject(action.parameters).toString() },
+                        resultJson = if (isLast) {
+                            result?.metadata?.get("native_tool_output").orEmpty()
+                                .ifBlank { JSONObject(result?.metadata.orEmpty()).put("message", result?.message.orEmpty()).toString() }
+                        } else {
+                            JSONObject().put("message", action.result).toString()
+                        },
+                        errorMessage = if (action.status in setOf(
+                                AgentActionStatus.FAILED,
+                                AgentActionStatus.BLOCKED,
+                                AgentActionStatus.ROLLED_BACK
+                            )
+                        ) action.result else "",
+                        startedAtMillis = if (isLast) {
+                            result?.metadata?.get("started_at_millis")?.toLongOrNull() ?: 0L
+                        } else 0L,
+                        completedAtMillis = if (isLast) {
+                            result?.metadata?.get("completed_at_millis")?.toLongOrNull() ?: 0L
+                        } else 0L
+                    )
+                }
+            val pendingScope = state.pendingAction?.let(AgentConfirmationPolicy::consentKey).orEmpty()
+            val grantIds = if (pendingScope.isBlank()) emptyList() else {
+                EncryptedAgentPermissionGrantStore(this).list(includeInactive = false)
+                    .filter { it.scope == pendingScope }
+                    .map(AgentPermissionGrant::grantId)
+            }
+            val routeTarget = state.plan?.route?.targetId.orEmpty()
+                .ifBlank { state.plan?.selectedAgentOrModel.orEmpty() }
+                .ifBlank { "signalasi-mobile" }
+            val sourceMessageId = result?.metadata?.get("source_message_id").orEmpty()
+            val planJson = JSONArray().apply {
+                actions.forEach { action ->
+                    put(JSONObject()
+                        .put("id", action.id)
+                        .put("kind", action.kind.name)
+                        .put("target", action.target)
+                        .put("status", action.status.name))
+                }
+            }.toString()
+            val resultJson = JSONObject()
+                .put("phase", state.phase.name)
+                .put("message", result?.message.orEmpty())
+                .put("metadata", JSONObject(result?.metadata.orEmpty()))
+                .toString()
+            val profile = AppStore.profile(this)
+            val supervisor = AgentTaskRuntime.supervisor(this)
+            supervisor.recordExecutionSnapshot(
+                turnId,
+                AgentWorkspaceExecutionSnapshot(
+                    status = state.phase.toWorkspaceStatus(),
+                    planSnapshot = planJson,
+                    resultJson = resultJson,
+                    errorMessage = if (state.phase in setOf(AgentPhase.FAILED, AgentPhase.BLOCKED)) {
+                        result?.message.orEmpty()
+                    } else "",
+                    toolCalls = toolCalls,
+                    artifacts = runtimeArtifactsFromResult(result?.metadata?.get("native_tool_output").orEmpty()),
+                    permissionGrantIds = grantIds,
+                    permissionScopes = listOfNotNull(pendingScope.takeIf(String::isNotBlank)),
+                    handoffIds = listOfNotNull(
+                        sourceMessageId.takeIf(String::isNotBlank)?.let { "$routeTarget:$it" }
+                    ),
+                    agentId = routeTarget,
+                    deviceId = profile.optString("device_id").ifBlank { profile.optString("signalasi_id") },
+                    remoteRunId = result?.metadata?.get("remote_task_id").orEmpty()
+                        .ifBlank { sourceMessageId },
+                    lastRemoteEventSequence = result?.metadata?.get("last_event_sequence")?.toLongOrNull() ?: 0L
+                )
+            )
+            supervisor.checkpoint(
+                workspaceId = turnId,
+                checkpointId = "state-${state.sessionId.take(48)}",
+                planSnapshot = planJson,
+                stateJson = JSONObject()
+                    .put("phase", state.phase.name)
+                    .put("pending_action_id", state.pendingAction?.id.orEmpty())
+                    .put("permission_scope", pendingScope)
+                    .put("agent_id", routeTarget)
+                    .put("remote_run_id", result?.metadata?.get("remote_task_id").orEmpty())
+                    .toString()
+            )
+        }.onFailure { error ->
+            Log.w("SignalASIAgent", "workspace_snapshot_failed turn=${turnId.take(8)}", error)
+        }
     }
 
     private fun recordAgentRunFromState(turnId: String, state: AgentUiState) {

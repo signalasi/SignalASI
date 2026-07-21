@@ -190,6 +190,104 @@ class AgentControlPlaneTest {
     }
 
     @Test
+    fun acceptedRunReceiptPreventsDuplicateExecutionAfterProcessRecreation() = runBlocking {
+        val registration = testRegistration()
+        val transport = FakeAgentTransport(registration, registration.protocol)
+        val firstStore = InMemoryAgentRunStartReceiptStore(clock = { 1_000L })
+        val request = AgentRunRequest(
+            conversationId = "conversation",
+            messageId = "message",
+            taskId = "task",
+            runId = "run-durable",
+            goal = "execute once",
+            idempotencyKey = "durable-key"
+        )
+        val first = TransportBackedAgentAdapter(
+            registration,
+            transport,
+            runStartReceipts = firstStore
+        ).startRun(request)
+        val recreatedStore = InMemoryAgentRunStartReceiptStore(
+            firstStore.serializedSnapshot(),
+            clock = { 2_000L }
+        )
+        val replay = TransportBackedAgentAdapter(
+            registration,
+            transport,
+            runStartReceipts = recreatedStore
+        ).startRun(request)
+
+        assertEquals(first, replay)
+        assertEquals(1, transport.startedRuns)
+    }
+
+    @Test
+    fun unresolvedStartRecoversRemoteHandleWithoutReplayingRequest() = runBlocking {
+        val registration = testRegistration()
+        val request = AgentRunRequest(
+            conversationId = "conversation",
+            messageId = "message",
+            taskId = "task",
+            runId = "run-recover",
+            goal = "recover me",
+            idempotencyKey = "recover-key"
+        )
+        val firstStore = InMemoryAgentRunStartReceiptStore(clock = { 1_000L })
+        firstStore.reserve(registration, request)
+        firstStore.markOutcomeUnknown(registration.agentId, request.idempotencyKey, "connection_lost")
+        val recoveredHandle = AgentRunHandle(
+            runId = request.runId,
+            taskId = request.taskId,
+            agentId = registration.agentId,
+            remoteRunId = "remote-123"
+        )
+        val transport = FakeAgentTransport(
+            registration,
+            registration.protocol,
+            recoveredRuns = listOf(AgentRecoverableRun(recoveredHandle, 7L))
+        )
+        val recreatedStore = InMemoryAgentRunStartReceiptStore(firstStore.serializedSnapshot())
+
+        val recovered = TransportBackedAgentAdapter(
+            registration,
+            transport,
+            runStartReceipts = recreatedStore
+        ).startRun(request)
+
+        assertEquals(recoveredHandle, recovered)
+        assertEquals(0, transport.startedRuns)
+        assertEquals(AgentRunStartReceiptStatus.ACCEPTED, recreatedStore.list().single().status)
+    }
+
+    @Test
+    fun unresolvedStartWithoutRemoteEvidenceBlocksDuplicateExecution() = runBlocking {
+        val registration = testRegistration()
+        val request = AgentRunRequest(
+            conversationId = "conversation",
+            messageId = "message",
+            taskId = "task",
+            runId = "run-unknown",
+            goal = "do not duplicate",
+            idempotencyKey = "unknown-key"
+        )
+        val firstStore = InMemoryAgentRunStartReceiptStore(clock = { 1_000L })
+        firstStore.reserve(registration, request)
+        val transport = FakeAgentTransport(registration, registration.protocol)
+
+        val failure = runCatching {
+            TransportBackedAgentAdapter(
+                registration,
+                transport,
+                runStartReceipts = InMemoryAgentRunStartReceiptStore(firstStore.serializedSnapshot())
+            ).startRun(request)
+        }.exceptionOrNull()
+
+        assertTrue(failure is IllegalStateException)
+        assertTrue(failure?.message.orEmpty().contains("duplicate execution was blocked"))
+        assertEquals(0, transport.startedRuns)
+    }
+
+    @Test
     fun teamCoordinatorStartsOneResponderAndObservationMembers() = runBlocking {
         val primaryRegistration = testRegistration()
         val observerRegistration = testRegistration().copy(
@@ -288,7 +386,8 @@ class AgentControlPlaneTest {
 
 private class FakeAgentTransport(
     private val registration: AgentRegistration,
-    private val remoteProtocol: AgentProtocolRange
+    private val remoteProtocol: AgentProtocolRange,
+    private val recoveredRuns: List<AgentRecoverableRun> = emptyList()
 ) : AgentAdapterTransport {
     var sentMessages: Int = 0
         private set
@@ -313,5 +412,5 @@ private class FakeAgentTransport(
 
     override suspend fun cancelRun(runId: String) = Unit
     override fun observeEvents(runId: String): Flow<AgentRunControlEvent> = emptyFlow()
-    override suspend fun recoverRuns(): List<AgentRecoverableRun> = emptyList()
+    override suspend fun recoverRuns(): List<AgentRecoverableRun> = recoveredRuns
 }

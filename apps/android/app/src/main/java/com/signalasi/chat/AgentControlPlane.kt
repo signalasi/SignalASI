@@ -307,6 +307,7 @@ enum class AgentRunControlEventType {
     AGENT_CONNECTED,
     STEP_STARTED,
     TOOL_PERMISSION_REQUIRED,
+    PERMISSION_REVOKED,
     TOOL_STARTED,
     TOOL_PROGRESS,
     TOOL_COMPLETED,
@@ -360,6 +361,11 @@ data class AgentRunControlSnapshot(
     val lastEvent: AgentRunControlEvent
 )
 
+interface AgentRunControlStore {
+    fun appendNext(event: AgentRunControlEvent): AgentRunControlEvent?
+    fun recoverableRuns(): List<AgentRunControlSnapshot>
+}
+
 interface AgentAdapter {
     val registration: AgentRegistration
     suspend fun connect(): AgentProtocolAgreement
@@ -400,11 +406,11 @@ interface AgentAdapterTransport {
 class TransportBackedAgentAdapter(
     initialRegistration: AgentRegistration,
     private val transport: AgentAdapterTransport,
-    private val localProtocol: AgentProtocolRange = initialRegistration.protocol
+    private val localProtocol: AgentProtocolRange = initialRegistration.protocol,
+    private val runStartReceipts: AgentRunStartReceiptStore = InMemoryAgentRunStartReceiptStore()
 ) : AgentAdapter {
     private val connectionMutex = Mutex()
     private val runStartMutex = Mutex()
-    private val runHandlesByIdempotencyKey = linkedMapOf<String, AgentRunHandle>()
     @Volatile private var currentRegistration = initialRegistration
     @Volatile private var agreement: AgentProtocolAgreement? = null
 
@@ -441,26 +447,56 @@ class TransportBackedAgentAdapter(
 
     override suspend fun startRun(request: AgentRunRequest): AgentRunHandle = runStartMutex.withLock {
         require(request.idempotencyKey.isNotBlank()) { "Run idempotency key must not be blank" }
-        runHandlesByIdempotencyKey[request.idempotencyKey]?.let { return@withLock it }
-        val handle = if (request.deliveryMode == AgentDeliveryMode.IGNORE) {
-            AgentRunHandle(
-                runId = request.runId,
-                taskId = request.taskId,
-                agentId = currentRegistration.agentId,
-                remoteRunId = ""
-            )
-        } else {
-            val negotiated = ensureConnected()
-            if (request.deliveryMode == AgentDeliveryMode.OBSERVE) {
-                requireFeature(negotiated, "message.observe")
+        val existedBeforeReservation = runStartReceipts.find(
+            currentRegistration.agentId,
+            request.idempotencyKey
+        ) != null
+        val receipt = runStartReceipts.reserve(currentRegistration, request)
+        when (receipt.status) {
+            AgentRunStartReceiptStatus.ACCEPTED -> return@withLock requireNotNull(receipt.handle) {
+                "Accepted Run receipt is missing its handle"
             }
-            transport.startRun(request)
+            AgentRunStartReceiptStatus.CANCELLED -> throw IllegalStateException(
+                "Run idempotency key belongs to a cancelled Run"
+            )
+            AgentRunStartReceiptStatus.RESERVED,
+            AgentRunStartReceiptStatus.OUTCOME_UNKNOWN -> if (existedBeforeReservation) {
+                recoverReservedRun(request)?.let { recovered ->
+                    return@withLock runStartReceipts.accept(
+                        currentRegistration.agentId,
+                        request.idempotencyKey,
+                        recovered
+                    ).handle!!
+                }
+                throw IllegalStateException(
+                    "Run start outcome is unresolved; duplicate execution was blocked"
+                )
+            }
         }
-        runHandlesByIdempotencyKey[request.idempotencyKey] = handle
-        while (runHandlesByIdempotencyKey.size > MAX_IDEMPOTENCY_HANDLES) {
-            runHandlesByIdempotencyKey.remove(runHandlesByIdempotencyKey.keys.first())
+        try {
+            val handle = if (request.deliveryMode == AgentDeliveryMode.IGNORE) {
+                AgentRunHandle(
+                    runId = request.runId,
+                    taskId = request.taskId,
+                    agentId = currentRegistration.agentId,
+                    remoteRunId = ""
+                )
+            } else {
+                val negotiated = ensureConnected()
+                if (request.deliveryMode == AgentDeliveryMode.OBSERVE) {
+                    requireFeature(negotiated, "message.observe")
+                }
+                transport.startRun(request)
+            }
+            runStartReceipts.accept(currentRegistration.agentId, request.idempotencyKey, handle).handle!!
+        } catch (error: Throwable) {
+            runStartReceipts.markOutcomeUnknown(
+                currentRegistration.agentId,
+                request.idempotencyKey,
+                error.message.orEmpty()
+            )
+            throw error
         }
-        handle
     }
 
     override suspend fun sendMessage(runId: String, message: AgentControlMessage) {
@@ -474,6 +510,7 @@ class TransportBackedAgentAdapter(
     override suspend fun cancelRun(runId: String) {
         requireFeature(ensureConnected(), "run.cancel")
         transport.cancelRun(runId)
+        runStartReceipts.markCancelledByRun(currentRegistration.agentId, runId)
     }
 
     override fun observeEvents(runId: String): Flow<AgentRunControlEvent> = transport.observeEvents(runId)
@@ -485,13 +522,22 @@ class TransportBackedAgentAdapter(
 
     private suspend fun ensureConnected(): AgentProtocolAgreement = agreement ?: connect()
 
+    private suspend fun recoverReservedRun(request: AgentRunRequest): AgentRunHandle? {
+        val negotiated = ensureConnected()
+        if ("run.recover" !in negotiated.features) return null
+        return transport.recoverRuns()
+            .map(AgentRecoverableRun::handle)
+            .firstOrNull { handle ->
+                handle.agentId == currentRegistration.agentId &&
+                    (handle.runId == request.runId ||
+                        (handle.taskId == request.taskId && handle.remoteRunId == request.runId))
+            }
+    }
+
     private fun requireFeature(negotiated: AgentProtocolAgreement, feature: String) {
         require(feature in negotiated.features) { "Agent does not support $feature" }
     }
 
-    companion object {
-        private const val MAX_IDEMPOTENCY_HANDLES = 1_024
-    }
 }
 
 interface AgentProviderTransport {
@@ -505,7 +551,8 @@ interface AgentProviderTransport {
 class TransportBackedAgentProvider(
     override val providerId: String,
     private val transport: AgentProviderTransport,
-    private val localProtocol: AgentProtocolRange
+    private val localProtocol: AgentProtocolRange,
+    private val runStartReceipts: AgentRunStartReceiptStore = InMemoryAgentRunStartReceiptStore()
 ) : AgentProvider {
     private val connectionMutex = Mutex()
     @Volatile private var agreement: AgentProtocolAgreement? = null
@@ -535,7 +582,7 @@ class TransportBackedAgentProvider(
         ensureConnected()
         val (registration, adapterTransport) = transport.adapterTransport(agentId) ?: return null
         require(registration.providerId == providerId) { "Agent belongs to a different provider" }
-        return TransportBackedAgentAdapter(registration, adapterTransport, localProtocol)
+        return TransportBackedAgentAdapter(registration, adapterTransport, localProtocol, runStartReceipts)
     }
 
     override suspend fun recoverRuns(): List<AgentRecoverableRun> {
@@ -695,7 +742,7 @@ object AgentRunRecoveryPolicy {
         recordedRun: AgentRecordedRun?,
         registration: AgentRegistration?
     ): AgentRunRecoveryDecision {
-        if (recordedRun?.status != AgentRecordedRunStatus.RUNNING) {
+        if (recordedRun != null && recordedRun.status != AgentRecordedRunStatus.RUNNING) {
             return AgentRunRecoveryDecision(AgentRunRecoveryDisposition.IGNORE_TERMINAL, "recorded_run_is_terminal")
         }
         if (snapshot.state == AgentRunControlState.WAITING_FOR_USER ||
@@ -845,7 +892,7 @@ class EncryptedAgentRegistry(context: Context) {
     }
 }
 
-class AgentRunEventStore(context: Context) {
+class AgentRunEventStore(context: Context) : AgentRunControlStore {
     private val database = AgentEncryptedDatabase(
         context.applicationContext,
         DATABASE,
@@ -871,7 +918,7 @@ class AgentRunEventStore(context: Context) {
     }
 
     @Synchronized
-    fun appendNext(event: AgentRunControlEvent): AgentRunControlEvent? {
+    override fun appendNext(event: AgentRunControlEvent): AgentRunControlEvent? {
         val currentEvents = events(event.runId)
         val currentState = currentEvents.fold(AgentRunControlState.CREATED) { state, item ->
             reduce(state, item.type)
@@ -902,7 +949,7 @@ class AgentRunEventStore(context: Context) {
     }
 
     @Synchronized
-    fun recoverableRuns(): List<AgentRunControlSnapshot> = runIds().mapNotNull(::snapshot).filter {
+    override fun recoverableRuns(): List<AgentRunControlSnapshot> = runIds().mapNotNull(::snapshot).filter {
         it.state !in setOf(AgentRunControlState.COMPLETED, AgentRunControlState.FAILED, AgentRunControlState.CANCELLED)
     }
 
@@ -954,6 +1001,7 @@ class AgentRunEventStore(context: Context) {
             AgentRunControlEventType.RUN_RECOVERED -> AgentRunControlState.RUNNING
             AgentRunControlEventType.TOOL_PERMISSION_REQUIRED,
             AgentRunControlEventType.WAITING_FOR_USER -> AgentRunControlState.WAITING_FOR_USER
+            AgentRunControlEventType.PERMISSION_REVOKED -> AgentRunControlState.PAUSED
             AgentRunControlEventType.WAITING_FOR_DEVICE -> AgentRunControlState.WAITING_FOR_DEVICE
             AgentRunControlEventType.PAUSED -> AgentRunControlState.PAUSED
             AgentRunControlEventType.RUN_COMPLETED -> AgentRunControlState.COMPLETED

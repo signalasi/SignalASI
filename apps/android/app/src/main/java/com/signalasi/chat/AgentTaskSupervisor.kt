@@ -36,6 +36,8 @@ object AgentTaskEventKinds {
     const val WAITING_RESPONSE = "task.waiting_response"
     const val PAUSED = "task.paused"
     const val BLOCKED = "task.blocked"
+    const val SNAPSHOT = "task.execution_snapshot"
+    const val PERMISSION_REVOKED = "task.permission_revoked"
 }
 
 fun interface AgentTaskResumeHook {
@@ -136,6 +138,9 @@ class AgentTaskContext internal constructor(
         cancellationSource.throwIfCancellationRequested()
         currentCoroutineContext().ensureActive()
     }
+
+    fun recordExecutionSnapshot(snapshot: AgentWorkspaceExecutionSnapshot): AgentWorkspace =
+        supervisor.recordExecutionSnapshot(workspaceKey.workspaceId, snapshot)
 
     fun waitForConfirmation(message: String = ""): Nothing = supervisor.deferTask(
         workspaceId = workspaceKey.workspaceId,
@@ -299,6 +304,25 @@ class AgentTaskSupervisor(
         return changed
     }
 
+    fun pauseForPermissionRevocation(
+        workspaceId: String,
+        reason: String = "A required permission grant was revoked"
+    ): Boolean {
+        val cleanWorkspaceId = workspaceId.trim()
+        if (cleanWorkspaceId.isBlank()) return false
+        val current = workspaceStore.find(cleanWorkspaceId) ?: return false
+        if (current.status.isTerminal || current.cancellationRequested) return false
+        val cleanReason = reason.ifBlank { "A required permission grant was revoked" }
+        transition(
+            workspaceId = cleanWorkspaceId,
+            status = AgentWorkspaceStatus.PAUSED,
+            eventKind = AgentTaskEventKinds.PERMISSION_REVOKED,
+            message = cleanReason
+        )
+        activeByWorkspace[cleanWorkspaceId]?.cancellationSource?.cancelExecution(cleanReason)
+        return true
+    }
+
     fun appendEvent(
         workspaceId: String,
         kind: String,
@@ -344,6 +368,57 @@ class AgentTaskSupervisor(
                 currentPlanSnapshot = checkpoint.planSnapshot,
                 checkpoints = checkpoints,
                 updatedAtMillis = maxOf(withEvent.updatedAtMillis, now)
+            )
+        }
+    }
+
+    fun recordExecutionSnapshot(
+        workspaceId: String,
+        snapshot: AgentWorkspaceExecutionSnapshot
+    ): AgentWorkspace = synchronized(storeMutationLock) {
+        mutateWorkspaceLocked(workspaceId) { current ->
+            val nextStatus = snapshot.status ?: current.status
+            val withEvent = if (nextStatus != current.status) {
+                transitionCandidate(
+                    current = current,
+                    status = nextStatus,
+                    eventKind = AgentTaskEventKinds.SNAPSHOT,
+                    message = nextStatus.name.lowercase()
+                )
+            } else {
+                appendEventCandidate(
+                    current = current,
+                    kind = AgentTaskEventKinds.SNAPSHOT,
+                    message = nextStatus.name.lowercase(),
+                    payloadJson = ""
+                )
+            }
+            withEvent.copy(
+                currentPlanSnapshot = snapshot.planSnapshot.ifBlank { current.currentPlanSnapshot },
+                resultJson = snapshot.resultJson.ifBlank { current.resultJson },
+                errorMessage = snapshot.errorMessage.ifBlank { current.errorMessage },
+                toolCalls = (current.toolCalls + snapshot.toolCalls)
+                    .distinctBy(AgentToolCallRecord::id)
+                    .takeLast(AgentWorkspaceLimits.MAX_TOOL_CALLS),
+                artifacts = (current.artifacts + snapshot.artifacts)
+                    .distinctBy(AgentArtifactReference::id)
+                    .takeLast(AgentWorkspaceLimits.MAX_ARTIFACTS),
+                permissionGrantIds = (current.permissionGrantIds + snapshot.permissionGrantIds)
+                    .distinct()
+                    .takeLast(AgentWorkspaceLimits.MAX_PERMISSION_BINDINGS),
+                permissionScopes = (current.permissionScopes + snapshot.permissionScopes)
+                    .distinct()
+                    .takeLast(AgentWorkspaceLimits.MAX_PERMISSION_BINDINGS),
+                handoffIds = (current.handoffIds + snapshot.handoffIds)
+                    .distinct()
+                    .takeLast(AgentWorkspaceLimits.MAX_HANDOFF_IDS),
+                agentId = snapshot.agentId.ifBlank { current.agentId },
+                deviceId = snapshot.deviceId.ifBlank { current.deviceId },
+                remoteRunId = snapshot.remoteRunId.ifBlank { current.remoteRunId },
+                lastRemoteEventSequence = maxOf(
+                    current.lastRemoteEventSequence,
+                    snapshot.lastRemoteEventSequence
+                )
             )
         }
     }

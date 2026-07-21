@@ -1,7 +1,6 @@
 package com.signalasi.chat
 
 import android.content.Context
-import org.json.JSONArray
 
 enum class AgentConfirmationTier {
     DIRECT,
@@ -19,18 +18,47 @@ interface AgentConfirmationConsentStore {
 
 class SharedPreferencesAgentConfirmationConsentStore(context: Context) : AgentConfirmationConsentStore {
     private val appContext = context.applicationContext
-    private val preferences = AgentEncryptedPreferences(appContext, PREFS)
+    private val grantStore: AgentPermissionGrantStore = EncryptedAgentPermissionGrantStore(appContext)
+    private val revocationCoordinator by lazy {
+        AgentPermissionRevocationCoordinator(
+            grantStore = grantStore,
+            workspaceStore = EncryptedAgentWorkspaceStore(appContext),
+            runEventStore = AgentRunEventStore(appContext),
+            pauseActiveWorkspace = { workspaceId, reason ->
+                AgentTaskRuntime.supervisor(appContext).pauseForPermissionRevocation(workspaceId, reason)
+            }
+        )
+    }
 
-    override fun isRemembered(consentKey: String): Boolean = consentKey in readKeys()
+    override fun isRemembered(consentKey: String): Boolean {
+        val cleanKey = consentKey.trim()
+        if (cleanKey.isBlank()) return false
+        return grantStore.authorize(permissionRequest(cleanKey)).granted
+    }
 
-    override fun rememberedKeys(): Set<String> = readKeys()
+    override fun rememberedKeys(): Set<String> = grantStore.list(includeInactive = false)
+        .asSequence()
+        .filter { it.subjectType == AgentPermissionSubjectType.CONSEQUENTIAL_ACTION }
+        .map(AgentPermissionGrant::scope)
+        .toSet()
 
     override fun remember(consentKey: String) {
-        if (consentKey.isBlank()) return
-        val before = readKeys()
-        if (consentKey in before) return
-        val after = before + consentKey
-        preferences.writeString(KEY_CONSENTS, JSONArray(after.sorted()).toString())
+        val cleanKey = consentKey.trim()
+        if (cleanKey.isBlank()) return
+        val before = rememberedKeys()
+        if (cleanKey in before) return
+        grantStore.grant(
+            AgentPermissionGrant(
+                subjectType = AgentPermissionSubjectType.CONSEQUENTIAL_ACTION,
+                subjectId = HOST_SUBJECT_ID,
+                scope = cleanKey,
+                action = cleanKey,
+                issuer = AgentPermissionGrantIssuer.USER,
+                evidence = "user_confirmed_once",
+                lifetime = AgentPermissionGrantLifetime.PERMANENT
+            )
+        )
+        val after = rememberedKeys()
         GlobalConversationEventBus.publishCapabilityEvents(
             appContext,
             GlobalCapabilityObservationExtractor.authorizationMutations(before, after)
@@ -38,10 +66,15 @@ class SharedPreferencesAgentConfirmationConsentStore(context: Context) : AgentCo
     }
 
     override fun forget(consentKey: String): Boolean {
-        val before = readKeys()
-        if (consentKey !in before) return false
-        val after = before - consentKey
-        preferences.writeString(KEY_CONSENTS, JSONArray(after.sorted()).toString())
+        val cleanKey = consentKey.trim()
+        val before = rememberedKeys()
+        if (cleanKey !in before) return false
+        val revocation = revocationCoordinator.revokeScope(
+            cleanKey,
+            "user_revoked_remembered_confirmation"
+        ).revocation
+        if (revocation.revokedGrantIds.isEmpty()) return false
+        val after = rememberedKeys()
         GlobalConversationEventBus.publishCapabilityEvents(
             appContext,
             GlobalCapabilityObservationExtractor.authorizationMutations(before, after)
@@ -49,22 +82,17 @@ class SharedPreferencesAgentConfirmationConsentStore(context: Context) : AgentCo
         return true
     }
 
-    override fun clear() = preferences.clear()
+    override fun clear() = grantStore.clear()
 
-    private fun readKeys(): Set<String> {
-        val array = runCatching {
-            JSONArray(preferences.readString(KEY_CONSENTS, "[]"))
-        }.getOrDefault(JSONArray())
-        return buildSet {
-            for (index in 0 until array.length()) {
-                array.optString(index).trim().takeIf(String::isNotBlank)?.let(::add)
-            }
-        }
-    }
+    private fun permissionRequest(consentKey: String) = AgentPermissionRequest(
+        subjectType = AgentPermissionSubjectType.CONSEQUENTIAL_ACTION,
+        subjectId = HOST_SUBJECT_ID,
+        scope = consentKey,
+        action = consentKey
+    )
 
     private companion object {
-        const val PREFS = "signalasi_agent_confirmation_consents"
-        const val KEY_CONSENTS = "remembered_consents"
+        const val HOST_SUBJECT_ID = "signalasi-host"
     }
 }
 

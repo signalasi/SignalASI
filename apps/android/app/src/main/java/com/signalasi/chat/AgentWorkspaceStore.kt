@@ -74,8 +74,20 @@ data class AgentWorkspace(
     val sessionId: String,
     val conversationId: String,
     val taskId: String,
+    val goal: String = "",
+    val parentRunId: String = "",
+    val agentId: String = "",
+    val deviceId: String = "",
+    val remoteRunId: String = "",
+    val deliveryMode: String = AgentDeliveryMode.RESPOND.name,
     val status: AgentWorkspaceStatus = AgentWorkspaceStatus.CREATED,
     val currentPlanSnapshot: String = "",
+    val resultJson: String = "{}",
+    val errorMessage: String = "",
+    val permissionGrantIds: List<String> = emptyList(),
+    val permissionScopes: List<String> = emptyList(),
+    val handoffIds: List<String> = emptyList(),
+    val lastRemoteEventSequence: Long = 0L,
     val eventSequence: Long = 0L,
     val eventJournal: List<AgentWorkspaceEvent> = emptyList(),
     val toolCalls: List<AgentToolCallRecord> = emptyList(),
@@ -89,6 +101,22 @@ data class AgentWorkspace(
     val key: AgentWorkspaceKey
         get() = AgentWorkspaceKey(workspaceId, sessionId, conversationId, taskId)
 }
+
+data class AgentWorkspaceExecutionSnapshot(
+    val status: AgentWorkspaceStatus? = null,
+    val planSnapshot: String = "",
+    val resultJson: String = "{}",
+    val errorMessage: String = "",
+    val toolCalls: List<AgentToolCallRecord> = emptyList(),
+    val artifacts: List<AgentArtifactReference> = emptyList(),
+    val permissionGrantIds: List<String> = emptyList(),
+    val permissionScopes: List<String> = emptyList(),
+    val handoffIds: List<String> = emptyList(),
+    val agentId: String = "",
+    val deviceId: String = "",
+    val remoteRunId: String = "",
+    val lastRemoteEventSequence: Long = 0L
+)
 
 class AgentWorkspaceRevisionConflictException(
     val workspaceId: String,
@@ -111,6 +139,11 @@ object AgentWorkspaceLimits {
     internal const val MAX_EVENT_MESSAGE_CHARS = 1_024
     internal const val MAX_EVENT_PAYLOAD_CHARS = 4_096
     internal const val MAX_PLAN_CHARS = 32 * 1024
+    internal const val MAX_GOAL_CHARS = 32 * 1024
+    internal const val MAX_RESULT_JSON_CHARS = 128 * 1024
+    internal const val MAX_ERROR_MESSAGE_CHARS = 4 * 1024
+    internal const val MAX_PERMISSION_BINDINGS = 128
+    internal const val MAX_HANDOFF_IDS = 128
     internal const val MAX_TOOL_NAME_CHARS = 160
     internal const val MAX_TOOL_ARGUMENTS_CHARS = 4_096
     internal const val MAX_TOOL_RESULT_CHARS = 8_192
@@ -439,9 +472,9 @@ class EncryptedAgentWorkspaceStore(
 }
 
 object AgentWorkspaceJsonCodec {
-    const val VERSION = 1
+    const val VERSION = 2
 
-    fun emptyDocument(): String = "{\"version\":1,\"workspaces\":[]}"
+    fun emptyDocument(): String = "{\"version\":2,\"workspaces\":[]}"
 
     fun encode(workspace: AgentWorkspace): String {
         val normalized = AgentWorkspaceBounds.normalizeOrNull(workspace)
@@ -482,8 +515,26 @@ object AgentWorkspaceJsonCodec {
         string("session_id", workspace.sessionId)
         string("conversation_id", workspace.conversationId)
         string("task_id", workspace.taskId)
+        string("goal", workspace.goal)
+        string("parent_run_id", workspace.parentRunId)
+        string("agent_id", workspace.agentId)
+        string("device_id", workspace.deviceId)
+        string("remote_run_id", workspace.remoteRunId)
+        string("delivery_mode", workspace.deliveryMode)
         string("status", workspace.status.name)
         string("current_plan_snapshot", workspace.currentPlanSnapshot)
+        string("result_json", workspace.resultJson)
+        string("error_message", workspace.errorMessage)
+        array("permission_grant_ids") {
+            workspace.permissionGrantIds.forEach(::stringValue)
+        }
+        array("permission_scopes") {
+            workspace.permissionScopes.forEach(::stringValue)
+        }
+        array("handoff_ids") {
+            workspace.handoffIds.forEach(::stringValue)
+        }
+        number("last_remote_event_sequence", workspace.lastRemoteEventSequence)
         number("event_sequence", workspace.eventSequence)
         array("event_journal") {
             workspace.eventJournal.forEach { event ->
@@ -547,8 +598,23 @@ object AgentWorkspaceJsonCodec {
                 sessionId = json.string("session_id"),
                 conversationId = json.string("conversation_id"),
                 taskId = json.string("task_id"),
+                goal = json.string("goal"),
+                parentRunId = json.string("parent_run_id"),
+                agentId = json.string("agent_id"),
+                deviceId = json.string("device_id"),
+                remoteRunId = json.string("remote_run_id"),
+                deliveryMode = json.string("delivery_mode").ifBlank { AgentDeliveryMode.RESPOND.name },
                 status = status,
                 currentPlanSnapshot = json.string("current_plan_snapshot"),
+                resultJson = json.string("result_json").ifBlank { "{}" },
+                errorMessage = json.string("error_message"),
+                permissionGrantIds = json.array("permission_grant_ids")
+                    .mapNotNull { (it as? WorkspaceJsonString)?.value },
+                permissionScopes = json.array("permission_scopes")
+                    .mapNotNull { (it as? WorkspaceJsonString)?.value },
+                handoffIds = json.array("handoff_ids")
+                    .mapNotNull { (it as? WorkspaceJsonString)?.value },
+                lastRemoteEventSequence = json.long("last_remote_event_sequence"),
                 eventSequence = json.long("event_sequence"),
                 eventJournal = json.array("event_journal").mapNotNull { value ->
                     val item = value as? WorkspaceJsonObject ?: return@mapNotNull null
@@ -639,7 +705,8 @@ internal object AgentWorkspaceBounds {
         val sessionId = identifier(workspace.sessionId) ?: return null
         val conversationId = identifier(workspace.conversationId) ?: return null
         val taskId = identifier(workspace.taskId) ?: return null
-        if (workspace.eventSequence < 0L || workspace.createdAtMillis < 0L ||
+        if (workspace.eventSequence < 0L || workspace.lastRemoteEventSequence < 0L ||
+            workspace.createdAtMillis < 0L ||
             workspace.updatedAtMillis < 0L || workspace.revision < 0L
         ) return null
 
@@ -674,7 +741,25 @@ internal object AgentWorkspaceBounds {
             sessionId = sessionId,
             conversationId = conversationId,
             taskId = taskId,
+            goal = workspace.goal.take(AgentWorkspaceLimits.MAX_GOAL_CHARS),
+            parentRunId = optionalIdentifier(workspace.parentRunId),
+            agentId = optionalIdentifier(workspace.agentId),
+            deviceId = optionalIdentifier(workspace.deviceId),
+            remoteRunId = optionalIdentifier(workspace.remoteRunId),
+            deliveryMode = workspace.deliveryMode.trim().take(AgentWorkspaceLimits.MAX_IDENTIFIER_CHARS)
+                .ifBlank { AgentDeliveryMode.RESPOND.name },
             currentPlanSnapshot = workspace.currentPlanSnapshot.take(AgentWorkspaceLimits.MAX_PLAN_CHARS),
+            resultJson = workspace.resultJson.take(AgentWorkspaceLimits.MAX_RESULT_JSON_CHARS).ifBlank { "{}" },
+            errorMessage = workspace.errorMessage.take(AgentWorkspaceLimits.MAX_ERROR_MESSAGE_CHARS),
+            permissionGrantIds = normalizeBindings(
+                workspace.permissionGrantIds,
+                AgentWorkspaceLimits.MAX_PERMISSION_BINDINGS
+            ),
+            permissionScopes = normalizeBindings(
+                workspace.permissionScopes,
+                AgentWorkspaceLimits.MAX_PERMISSION_BINDINGS
+            ),
+            handoffIds = normalizeBindings(workspace.handoffIds, AgentWorkspaceLimits.MAX_HANDOFF_IDS),
             eventSequence = eventSequence,
             eventJournal = events,
             toolCalls = toolCalls,
@@ -769,6 +854,12 @@ internal object AgentWorkspaceBounds {
                 workspace.currentPlanSnapshot.length > 1_024 -> workspace.copy(
                     currentPlanSnapshot = workspace.currentPlanSnapshot.take(workspace.currentPlanSnapshot.length / 2)
                 )
+                workspace.resultJson.length > 1_024 -> workspace.copy(
+                    resultJson = workspace.resultJson.take(workspace.resultJson.length / 2)
+                )
+                workspace.goal.length > 1_024 -> workspace.copy(
+                    goal = workspace.goal.take(workspace.goal.length / 2)
+                )
                 else -> return workspace
             }
         }
@@ -782,6 +873,18 @@ internal object AgentWorkspaceBounds {
         val clean = value.trim()
         return clean.takeIf { it.isNotBlank() && it.length <= AgentWorkspaceLimits.MAX_IDENTIFIER_CHARS }
     }
+
+    private fun optionalIdentifier(value: String): String = value.trim()
+        .take(AgentWorkspaceLimits.MAX_IDENTIFIER_CHARS)
+
+    private fun normalizeBindings(values: List<String>, limit: Int): List<String> = values
+        .asSequence()
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .map { it.take(AgentWorkspaceLimits.MAX_IDENTIFIER_CHARS) }
+        .distinct()
+        .take(limit)
+        .toList()
 
     private fun <T, K> dedupe(
         items: List<T>,
@@ -997,6 +1100,12 @@ private class WorkspaceJsonObjectWriter(private val output: StringBuilder) {
 
 private class WorkspaceJsonArrayWriter(private val output: StringBuilder) {
     private var first = true
+
+    fun stringValue(value: String) {
+        if (!first) output.append(',')
+        first = false
+        output.appendJsonString(value)
+    }
 
     fun objectValue(block: WorkspaceJsonObjectWriter.() -> Unit) {
         if (!first) output.append(',')

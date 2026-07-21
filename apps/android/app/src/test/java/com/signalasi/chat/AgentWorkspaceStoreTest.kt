@@ -88,7 +88,19 @@ class AgentWorkspaceStoreTest {
     fun deterministicCodecRoundTripsEveryWorkspaceRecordType() {
         val workspace = workspace(
             status = AgentWorkspaceStatus.WAITING_CONFIRMATION,
+            goal = "Build and verify the project",
+            parentRunId = "parent-run",
+            agentId = "codex",
+            deviceId = "desktop-1",
+            remoteRunId = "remote-run-1",
+            deliveryMode = AgentDeliveryMode.RESPOND.name,
             currentPlanSnapshot = "Plan \"A\"\nthen B",
+            resultJson = "{\"status\":\"waiting\"}",
+            errorMessage = "approval required",
+            permissionGrantIds = listOf("grant-1"),
+            permissionScopes = listOf("filesystem.write"),
+            handoffIds = listOf("handoff-1"),
+            lastRemoteEventSequence = 14L,
             eventSequence = 1L,
             eventJournal = listOf(
                 AgentWorkspaceEvent(1L, "tool_result", "done", "{\"ok\":true}", 200L)
@@ -127,8 +139,65 @@ class AgentWorkspaceStoreTest {
 
         assertEquals(workspace, decoded)
         assertEquals(encoded, AgentWorkspaceJsonCodec.encode(requireNotNull(decoded)))
-        assertTrue(encoded.startsWith("{\"version\":1,\"workspace_id\":"))
+        assertTrue(encoded.startsWith("{\"version\":2,\"workspace_id\":"))
         assertNull(AgentWorkspaceJsonCodec.decode("{not-json}"))
+    }
+
+    @Test
+    fun processRecreationRestoresCompleteRunExecutionContext() {
+        val first = InMemoryAgentWorkspaceStore(clock = { 1_000L })
+        val created = first.upsert(workspace(
+            workspaceId = "run-1",
+            status = AgentWorkspaceStatus.WAITING_RESPONSE,
+            goal = "Inspect, modify, and verify the project",
+            parentRunId = "run-parent",
+            agentId = "codex",
+            deviceId = "desktop-a",
+            remoteRunId = "remote-42",
+            currentPlanSnapshot = "[{\"step\":1}]",
+            resultJson = "{\"partial\":true}",
+            errorMessage = "remote response pending",
+            permissionGrantIds = listOf("grant-files"),
+            permissionScopes = listOf("filesystem.project.write"),
+            handoffIds = listOf("handoff-codex"),
+            lastRemoteEventSequence = 27L,
+            eventSequence = 1L,
+            eventJournal = listOf(AgentWorkspaceEvent(1L, "remote.progress", "working", "{}", 900L)),
+            toolCalls = listOf(AgentToolCallRecord(
+                id = "tool-1",
+                toolName = "shell",
+                status = AgentToolCallStatus.RUNNING,
+                argumentsJson = "{\"cmd\":\"gradle test\"}",
+                startedAtMillis = 800L
+            )),
+            checkpoints = listOf(AgentWorkspaceCheckpoint(
+                id = "checkpoint-27",
+                eventSequence = 1L,
+                planSnapshot = "[{\"step\":1}]",
+                stateJson = "{\"cursor\":27,\"permission_wait\":true}",
+                createdAtMillis = 950L
+            )),
+            artifacts = listOf(AgentArtifactReference(
+                id = "artifact-1",
+                uri = "content://signalasi/patch.diff",
+                name = "patch.diff",
+                createdAtMillis = 920L
+            ))
+        ))
+
+        val recreated = InMemoryAgentWorkspaceStore(
+            initialWorkspaces = AgentWorkspaceJsonCodec.decodeList(first.serializedSnapshot()),
+            clock = { 2_000L }
+        )
+        val restored = requireNotNull(recreated.find(created.workspaceId))
+
+        assertEquals(created, restored)
+        assertEquals("Inspect, modify, and verify the project", restored.goal)
+        assertEquals(listOf("grant-files"), restored.permissionGrantIds)
+        assertEquals(27L, restored.lastRemoteEventSequence)
+        assertEquals(AgentToolCallStatus.RUNNING, restored.toolCalls.single().status)
+        assertEquals("checkpoint-27", restored.checkpoints.single().id)
+        assertEquals("handoff-codex", restored.handoffIds.single())
     }
 
     @Test
@@ -155,7 +224,19 @@ class AgentWorkspaceStoreTest {
     private fun workspace(
         workspaceId: String = "workspace-1",
         status: AgentWorkspaceStatus = AgentWorkspaceStatus.CREATED,
+        goal: String = "",
+        parentRunId: String = "",
+        agentId: String = "",
+        deviceId: String = "",
+        remoteRunId: String = "",
+        deliveryMode: String = AgentDeliveryMode.RESPOND.name,
         currentPlanSnapshot: String = "",
+        resultJson: String = "{}",
+        errorMessage: String = "",
+        permissionGrantIds: List<String> = emptyList(),
+        permissionScopes: List<String> = emptyList(),
+        handoffIds: List<String> = emptyList(),
+        lastRemoteEventSequence: Long = 0L,
         eventSequence: Long = 0L,
         eventJournal: List<AgentWorkspaceEvent> = emptyList(),
         toolCalls: List<AgentToolCallRecord> = emptyList(),
@@ -169,8 +250,20 @@ class AgentWorkspaceStoreTest {
         sessionId = "session-1",
         conversationId = "conversation-1",
         taskId = "task-1",
+        goal = goal,
+        parentRunId = parentRunId,
+        agentId = agentId,
+        deviceId = deviceId,
+        remoteRunId = remoteRunId,
+        deliveryMode = deliveryMode,
         status = status,
         currentPlanSnapshot = currentPlanSnapshot,
+        resultJson = resultJson,
+        errorMessage = errorMessage,
+        permissionGrantIds = permissionGrantIds,
+        permissionScopes = permissionScopes,
+        handoffIds = handoffIds,
+        lastRemoteEventSequence = lastRemoteEventSequence,
         eventSequence = eventSequence,
         eventJournal = eventJournal,
         toolCalls = toolCalls,

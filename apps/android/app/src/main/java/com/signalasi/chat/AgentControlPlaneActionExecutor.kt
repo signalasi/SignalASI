@@ -21,6 +21,7 @@ class AgentControlPlaneActionExecutor private constructor(
         provider = ActionExecutorAgentProvider(
             registrationSource = { AppStoreAgentConnectorRegistry(context).registrations() },
             delegate = delegate,
+            runStartReceipts = EncryptedAgentRunStartReceiptStore(context),
             recoverableSource = {
                 EncryptedAgentHandoffStore(context).active().map { handoff ->
                     AgentRecoverableRun(
@@ -133,6 +134,7 @@ internal class ActionExecutorAgentProvider(
     private val registrationSource: () -> List<AgentRegistration>,
     private val delegate: AgentActionExecutor,
     private val recoverableSource: () -> List<AgentRecoverableRun> = { emptyList() },
+    private val runStartReceipts: AgentRunStartReceiptStore = InMemoryAgentRunStartReceiptStore(),
     override val providerId: String = "signalasi-connectors",
     private val protocol: AgentProtocolRange = AgentProtocolRange(
         preferred = "1.0",
@@ -163,7 +165,7 @@ internal class ActionExecutorAgentProvider(
         val transport = transports.computeIfAbsent(agentId) {
             ActionExecutorAgentTransport(registrationSource, delegate, recoverableSource, agentId)
         }
-        val adapter = TransportBackedAgentAdapter(registration, transport, protocol)
+        val adapter = TransportBackedAgentAdapter(registration, transport, protocol, runStartReceipts)
         return adapters.putIfAbsent(agentId, adapter) ?: adapter
     }
 
