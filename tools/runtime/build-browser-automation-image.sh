@@ -45,7 +45,7 @@ cp -aL /ms-playwright /out/lib/ms-playwright
 [[ ! -d /usr/share/fonts ]] || cp -aL /usr/share/fonts /out/share/fonts
 
 while IFS= read -r binary; do
-  ldd "$binary" 2>/dev/null | awk '
+  { ldd "$binary" 2>/dev/null || true; } | awk '
     /=> \/[^ ]+/ { print $3 }
     /^\/[[:graph:]]+/ { print $1 }
   '
