@@ -90,6 +90,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 private class BaselineShiftSpan(private val shiftPx: Int) : CharacterStyle(), UpdateAppearance {
@@ -134,6 +135,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val MAX_VISIBLE_AGENT_PROCESS_STEPS = 20
         private const val AGENT_PROCESS_TIMER_TICK_MS = 250L
         private const val GLOBAL_AGENT_FOREGROUND_RETRY_MILLIS = 5_000L
+        private const val AGENT_BRAND_LOGO_BASE_DP = 39
+        private const val AGENT_BRAND_LOGO_MIN_DP = 32
+        private const val AGENT_BRAND_LOGO_MAX_DP = 56
         private const val EXTRA_REOPEN_CONTROL_CENTER_CHILD = "signalasi_reopen_control_center_child"
         private const val CONTROL_CENTER_CHILD_TEXT_SIZE = "text_size"
         private const val CAPABILITY_KIND_MCP = "mcp"
@@ -236,6 +240,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentHoldToTalkController: AppleHoldToTalkController
     private lateinit var agentAttachButton: ImageButton
     private lateinit var agentSubmitButton: ImageButton
+    private lateinit var agentBrandLogo: ImageView
     private lateinit var agentAttachmentPreviewScroll: HorizontalScrollView
     private lateinit var agentAttachmentPreviewList: LinearLayout
     private lateinit var contactPage: LinearLayout
@@ -543,6 +548,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentRecordingTimer = findViewById(R.id.agentRecordingTimer)
         agentAttachButton = findViewById(R.id.agentAttachButton)
         agentSubmitButton = findViewById(R.id.agentSubmitButton)
+        agentBrandLogo = findViewById(R.id.agentBrandLogo)
+        applyAgentBrandLogoTextScale()
         agentAttachmentPreviewScroll = findViewById(R.id.agentAttachmentPreviewScroll)
         agentAttachmentPreviewList = findViewById(R.id.agentAttachmentPreviewList)
         contactPage = findViewById(R.id.contactPage)
@@ -12176,6 +12183,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (tab == PAGE_SETTINGS) refreshSettingsControlCenter()
         if (tab == PAGE_AGENT) refreshGlobalInsightIndicator()
 
+    }
+
+    private fun applyAgentBrandLogoTextScale() {
+        val sizeDp = (AGENT_BRAND_LOGO_BASE_DP * resources.configuration.fontScale)
+            .roundToInt()
+            .coerceIn(AGENT_BRAND_LOGO_MIN_DP, AGENT_BRAND_LOGO_MAX_DP)
+        agentBrandLogo.layoutParams = agentBrandLogo.layoutParams.apply {
+            width = dp(sizeDp)
+            height = dp(sizeDp)
+        }
     }
 
     private fun configureMessages() {
