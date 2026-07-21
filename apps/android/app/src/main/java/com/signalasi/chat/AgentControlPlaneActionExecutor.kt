@@ -51,6 +51,9 @@ class AgentControlPlaneActionExecutor private constructor(
 
     override fun execute(action: AgentAction, screen: ScreenContext): AgentActionResult {
         if (action.kind != AgentActionKind.CALL_CONNECTOR) return provider.executeDelegate(action, screen)
+        if (action.parameters[AGENT_TEAM_SPEC_PARAMETER].orEmpty().isNotBlank()) {
+            return provider.executeDelegate(action, screen)
+        }
         val requestedAgentId = action.parameters["connector_id"].orEmpty().ifBlank { action.target }
         val agentId = provider.resolveAgentId(requestedAgentId)
             ?: return provider.executeDelegate(action, screen)

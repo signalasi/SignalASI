@@ -88,6 +88,42 @@ class AgentCollaborationRuntimeTest {
     }
 
     @Test
+    fun memberScopedKnowledgeOverridesTheSupervisorDefault() = runBlocking {
+        val runtime = AgentTeamExecutionRuntime(InMemoryAgentTeamExecutionStore())
+        val definition = AgentTeamDefinition(
+            teamId = "scoped-team",
+            primaryAgentId = "primary",
+            members = listOf(
+                AgentTeamMember(
+                    "primary",
+                    AgentDeliveryMode.RESPOND,
+                    context = mapOf("_signalasi_agent_knowledge_context" to "lead-only")
+                ),
+                AgentTeamMember(
+                    "researcher",
+                    AgentDeliveryMode.OBSERVE,
+                    context = mapOf("_signalasi_agent_knowledge_context" to "research-only")
+                )
+            )
+        )
+        val observed = linkedMapOf<String, String>()
+
+        runtime.start(
+            definition,
+            request().copy(context = mapOf("_signalasi_agent_knowledge_context" to "shared-default"))
+        ) { context ->
+            observed[context.member.agentId] = context.request.context[
+                "_signalasi_agent_knowledge_context"
+            ].toString()
+            AgentSubagentOutput(if (context.member.agentId == "primary") "final" else "evidence")
+        }.await()
+        runtime.close()
+
+        assertEquals("lead-only", observed["primary"])
+        assertEquals("research-only", observed["researcher"])
+    }
+
+    @Test
     fun teamRejectsMultipleRespondersAndUnknownDependencies() {
         val store = InMemoryAgentTeamExecutionStore()
         val runtime = AgentTeamExecutionRuntime(store)

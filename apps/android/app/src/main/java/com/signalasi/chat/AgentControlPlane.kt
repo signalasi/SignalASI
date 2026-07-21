@@ -285,7 +285,8 @@ data class AgentTeamMember(
     val requiredCapabilities: Set<AgentCapability> = emptySet(),
     val role: String = "",
     val objective: String = "",
-    val dependsOnAgentIds: Set<String> = emptySet()
+    val dependsOnAgentIds: Set<String> = emptySet(),
+    val context: Map<String, String> = emptyMap()
 )
 
 data class AgentTeamDefinition(

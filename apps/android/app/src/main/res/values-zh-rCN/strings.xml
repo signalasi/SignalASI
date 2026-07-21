@@ -429,6 +429,8 @@
     <string name="agent_team_state_cancelled">已取消</string>
     <string name="agent_team_state_interrupted">已中断</string>
     <string name="agent_team_member_state_skipped">已跳过</string>
+    <string name="agent_team_failed_response">Agent 团队未能完成任务。</string>
+    <string name="agent_team_failed_response_with_reason">Agent 团队未能完成任务：%1$s</string>
     <string name="about_product_subtitle">连接用户、Agent、模型与设备的安全超级智能体</string>
     <string name="about_section_product">产品信息</string>
     <string name="about_version">版本</string>

@@ -3,11 +3,17 @@ package com.signalasi.chat
 import android.content.Context
 import java.io.Closeable
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
@@ -358,7 +364,7 @@ class AgentTeamExecutionRuntime(
                 requiredCapabilities = member.requiredCapabilities + if (member.agentId == definition.primaryAgentId) {
                     request.requiredCapabilities
                 } else emptySet(),
-                context = request.context + mapOf(
+                context = request.context + member.context + mapOf(
                     "team_id" to definition.teamId,
                     "team_role" to member.role,
                     "team_visibility" to definition.visibilityMode.name.lowercase()
@@ -561,6 +567,9 @@ class ActionExecutorAgentTeamMemberWorker internal constructor(
         val managedRequest = context.request.copy(
             context = context.request.context + (MANAGED_TEAM_CONTEXT_KEY to true)
         )
+        val forwardedContext = context.request.context
+            .filterKeys { it.startsWith("_signalasi_") }
+            .mapValues { (_, value) -> value?.toString().orEmpty() }
         val action = AgentAction(
             id = "team-${managedRequest.runId}",
             kind = AgentActionKind.CALL_CONNECTOR,
@@ -568,7 +577,7 @@ class ActionExecutorAgentTeamMemberWorker internal constructor(
             risk = AgentRisk.LOW,
             status = AgentActionStatus.RUNNING,
             description = "Run supervised Agent team assignment",
-            parameters = mapOf(
+            parameters = forwardedContext + mapOf(
                 "connector_id" to registration.agentId,
                 "prompt" to teamPrompt(context),
                 "original_goal" to context.request.goal,
@@ -625,21 +634,25 @@ class AgentProductionTeamController(
     private val store: AgentTeamExecutionStore = EncryptedAgentTeamExecutionStore(context),
     private val worker: AgentTeamMemberWorker = ActionExecutorAgentTeamMemberWorker(context),
     private val managedResponses: AgentManagedResponseLedger = EncryptedAgentManagedResponseLedger(context),
+    private val completionSink: AgentTeamCompletionSink = AgentConnectorTeamCompletionSink(context),
     limits: AgentSubagentLimits = AgentSubagentLimits(maxChildren = 12, maxConcurrency = 4)
 ) : Closeable {
     private val runtime = AgentTeamExecutionRuntime(store, limits)
     private val lateResponseListener = AgentLateManagedResponseListener(::applyLateResponse)
+    private val completionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val watchedRuns = ConcurrentHashMap.newKeySet<String>()
 
     init {
         runtime.recoverInterrupted()
         AgentLateManagedResponseBus.addListener(lateResponseListener)
         reconcileLateResponses()
+        publishTerminalSnapshots()
     }
 
     fun start(
         definition: AgentTeamDefinition,
         request: AgentRunRequest
-    ): AgentTeamExecutionHandle = runtime.start(definition, request, worker)
+    ): AgentTeamExecutionHandle = runtime.start(definition, request, worker).also(::watch)
 
     fun snapshot(supervisorRunId: String): AgentTeamExecutionSnapshot? = runtime.snapshot(supervisorRunId)
 
@@ -651,22 +664,47 @@ class AgentProductionTeamController(
     fun recoverInterrupted(nowMillis: Long = System.currentTimeMillis()): List<AgentTeamExecutionSnapshot> =
         runtime.recoverInterrupted(nowMillis)
 
-    fun reconcileLateResponses(): Int = managedResponses.completedUnapplied().count(::applyLateResponse)
+    fun reconcileLateResponses(): Int {
+        val count = managedResponses.completedUnapplied().count(::applyLateResponse)
+        publishTerminalSnapshots()
+        return count
+    }
 
     fun clear() {
         store.clear()
         managedResponses.clear()
+        completionSink.clear()
     }
 
     override fun close() {
         AgentLateManagedResponseBus.removeListener(lateResponseListener)
+        completionScope.cancel()
         runtime.close()
     }
 
     private fun applyLateResponse(record: AgentManagedResponseRecord): Boolean {
         val applied = store.applyLateResponse(record)
-        if (applied) managedResponses.markApplied(record.ownerRunId)
+        if (applied) {
+            managedResponses.markApplied(record.ownerRunId)
+            store.snapshot(record.supervisorRunId)?.let(completionSink::publish)
+        }
         return applied
+    }
+
+    private fun watch(handle: AgentTeamExecutionHandle) {
+        if (!watchedRuns.add(handle.supervisorRunId)) return
+        completionScope.launch {
+            try {
+                runCatching { handle.await() }
+                store.snapshot(handle.supervisorRunId)?.let(completionSink::publish)
+            } finally {
+                watchedRuns.remove(handle.supervisorRunId)
+            }
+        }
+    }
+
+    private fun publishTerminalSnapshots() {
+        store.snapshots().forEach(completionSink::publish)
     }
 }
 
@@ -879,7 +917,8 @@ private object AgentTeamExecutionCodec {
                     .put("required_capabilities", JSONArray(member.requiredCapabilities.map(AgentCapability::name)))
                     .put("role", member.role)
                     .put("objective", member.objective)
-                    .put("depends_on", JSONArray(member.dependsOnAgentIds.toList())))
+                    .put("depends_on", JSONArray(member.dependsOnAgentIds.toList()))
+                    .put("context", JSONObject(member.context)))
             }
         })
 
@@ -898,7 +937,8 @@ private object AgentTeamExecutionCodec {
                         .mapNotNull { value -> enumOrNull<AgentCapability>(value) }.toSet(),
                     role = item.optString("role").take(80),
                     objective = item.optString("objective").take(8_000),
-                    dependsOnAgentIds = strings(item.optJSONArray("depends_on")).toSet()
+                    dependsOnAgentIds = strings(item.optJSONArray("depends_on")).toSet(),
+                    context = stringMap(item.optJSONObject("context"))
                 ))
             }
         }
@@ -1031,6 +1071,16 @@ private object AgentTeamExecutionCodec {
     private fun strings(array: JSONArray?): List<String> = buildList {
         array ?: return@buildList
         for (index in 0 until array.length()) array.optString(index).takeIf(String::isNotBlank)?.let(::add)
+    }
+
+    private fun stringMap(json: JSONObject?): Map<String, String> {
+        json ?: return emptyMap()
+        return json.keys().asSequence()
+            .mapNotNull { key ->
+                key.takeIf { it.startsWith("_signalasi_") }
+                    ?.let { it to json.optString(it).take(8_000) }
+            }
+            .toMap()
     }
 
     private fun JSONObject?.toNativeObject(): AgentNativeJsonObject {

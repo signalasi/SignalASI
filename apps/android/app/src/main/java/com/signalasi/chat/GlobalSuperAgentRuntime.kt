@@ -2988,6 +2988,9 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
 
     fun agentTeamSnapshots(): List<AgentTeamExecutionSnapshot> = agentTeamController.snapshots()
 
+    fun agentTeamSnapshot(supervisorRunId: String): AgentTeamExecutionSnapshot? =
+        agentTeamController.snapshot(supervisorRunId)
+
     fun agentTeamProgress(
         supervisorRunId: String,
         expanded: Boolean = false
