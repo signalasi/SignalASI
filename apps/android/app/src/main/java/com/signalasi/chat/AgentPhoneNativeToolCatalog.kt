@@ -126,6 +126,8 @@ object AgentPhoneNativeToolCatalog {
         ).registerAll(
             AgentNotificationNativeTools.androidDefinitions(context.applicationContext, clock)
         ).registerAll(
+            AgentHomeAssistantNativeTools.androidDefinitions(context.applicationContext, clock)
+        ).registerAll(
             AgentAndroidSystemNativeTools.definitions(context.applicationContext)
         ).registerAll(
             AgentMcpNativeTools.definitions(context.applicationContext)
