@@ -10,6 +10,7 @@ typealias AgentNativeJsonObject = Map<String, Any?>
 
 enum class AgentNativeToolLocation(val wireValue: String) {
     PHONE("phone"),
+    DESKTOP("desktop"),
     APPLICATION("application"),
     ANDROID_SYSTEM("android_system"),
     ACCESSIBILITY_SERVICE("accessibility_service"),

@@ -488,6 +488,7 @@ class MobileNativeAgent(
         if (toolId == AgentOnDeviceRuntimeTools.LIST_PACKS) return renderRuntimePackList(output, zh)
         if (toolId == AgentOnDeviceRuntimeTools.EXECUTE) return renderRuntimeExecution(output, message, zh)
         if (toolId == AgentOnDeviceRuntimeTools.INSTALL_PACK) return renderRuntimePackInstallation(output, zh)
+        if (toolId in AgentDesktopRemoteNativeTools.toolIds) return renderDesktopNativeToolResult(toolId, message, output, zh)
         renderAndroidSystemSummary(toolId, output, zh)?.let { return it }
         if (zh) return renderNativeToolResultChinese(toolId, message, output)
         fun bool(name: String) = output[name] as? Boolean ?: false
@@ -599,6 +600,85 @@ class MobileNativeAgent(
             } else {
                 message
             }
+        }
+    }
+
+    private fun renderDesktopNativeToolResult(
+        toolId: String,
+        message: String,
+        output: AgentNativeJsonObject,
+        zh: Boolean
+    ): String {
+        fun long(name: String) = (output[name] as? Number)?.toLong()
+        fun text(name: String) = output[name]?.toString().orEmpty()
+        fun maps(name: String) = (output[name] as? Iterable<*>)?.mapNotNull { it as? Map<*, *> }.orEmpty()
+        fun heading(chinese: String, english: String) = if (zh) chinese else english
+        return when (toolId) {
+            AgentDesktopRemoteNativeTools.SYSTEM_STATUS -> {
+                val available = formatBytes(long("memory_available_bytes") ?: 0L)
+                val total = formatBytes(long("memory_total_bytes") ?: 0L)
+                if (zh) {
+                    "Windows ${text("release")}\uff0c${text("architecture")}\uff0c${long("logical_cpu_count") ?: 0} \u4e2a\u903b\u8f91\u5904\u7406\u5668\u3002\u53ef\u7528\u5185\u5b58 $available / $total\u3002"
+                } else {
+                    "Windows ${text("release")} on ${text("architecture")} with ${long("logical_cpu_count") ?: 0} logical processors. Available memory: $available of $total."
+                }
+            }
+            AgentDesktopRemoteNativeTools.PROCESS_LIST -> {
+                val processes = maps("processes")
+                val lines = processes.take(20).map { row ->
+                    val name = row["name"]?.toString().orEmpty()
+                    val pid = row["pid"]?.toString().orEmpty()
+                    val memoryMb = ((row["memory_kb"] as? Number)?.toLong() ?: 0L) / 1_024L
+                    "- $name (PID $pid, ${memoryMb} MB)"
+                }
+                heading("\u627e\u5230 ${processes.size} \u4e2a Windows \u8fdb\u7a0b\uff1a", "Found ${processes.size} Windows processes:") +
+                    if (lines.isEmpty()) "" else "\n" + lines.joinToString("\n")
+            }
+            AgentDesktopRemoteNativeTools.FILE_LIST -> {
+                val entries = maps("entries")
+                val lines = entries.take(40).map { row ->
+                    val suffix = if (row["type"] == "directory") "/" else ""
+                    "- ${row["path"]}$suffix"
+                }
+                heading("Desktop \u5de5\u4f5c\u533a\u5305\u542b ${entries.size} \u9879\uff1a", "Desktop workspace contains ${entries.size} entries:") +
+                    if (lines.isEmpty()) "" else "\n" + lines.joinToString("\n")
+            }
+            AgentDesktopRemoteNativeTools.FILE_READ_TEXT -> {
+                val path = text("path")
+                val body = text("text").take(12_000)
+                heading("\u5df2\u8bfb\u53d6 $path\uff1a", "Read $path:") + "\n\n```text\n$body\n```"
+            }
+            AgentDesktopRemoteNativeTools.FILE_WRITE_TEXT ->
+                heading("\u5df2\u5199\u5165 ${text("path")}\uff08${formatBytes(long("size_bytes") ?: 0L)}\uff09\u3002", "Wrote ${text("path")} (${formatBytes(long("size_bytes") ?: 0L)}).")
+            AgentDesktopRemoteNativeTools.FILE_SHA256 ->
+                heading("${text("path")} \u7684 SHA-256\uff1a${text("sha256")}", "SHA-256 for ${text("path")}: ${text("sha256")}")
+            AgentDesktopRemoteNativeTools.ARCHIVE_CREATE ->
+                heading("\u5df2\u521b\u5efa ${text("path")}\uff0c\u5305\u542b ${long("entry_count") ?: 0} \u4e2a\u6587\u4ef6\u3002", "Created ${text("path")} with ${long("entry_count") ?: 0} files.")
+            AgentDesktopRemoteNativeTools.TERMINAL_RUN -> {
+                val exitCode = long("exit_code") ?: 0L
+                val stdout = text("stdout").trim().take(12_000)
+                val stderr = text("stderr").trim().take(6_000)
+                buildList {
+                    add(heading("Desktop \u547d\u4ee4\u5df2\u5b8c\u6210\uff0c\u9000\u51fa\u7801 $exitCode\u3002", "Desktop command completed with exit code $exitCode."))
+                    if (stdout.isNotBlank()) add("```text\n$stdout\n```")
+                    if (stderr.isNotBlank()) add(heading("\u9519\u8bef\u8f93\u51fa\uff1a", "Error output:") + "\n```text\n$stderr\n```")
+                }.joinToString("\n\n")
+            }
+            AgentDesktopRemoteNativeTools.OFFICE_INSPECT -> {
+                val documentType = text("document_type")
+                val details = if (documentType == "excel") {
+                    (output["rows"] as? Iterable<*>)?.take(30)?.joinToString("\n") { row ->
+                        (row as? Iterable<*>)?.joinToString("\t") { it?.toString().orEmpty() }.orEmpty()
+                    }.orEmpty()
+                } else {
+                    (output["text_items"] as? Iterable<*>)?.take(40)?.joinToString("\n") { "- ${it?.toString().orEmpty()}" }.orEmpty()
+                }
+                heading("\u5df2\u68c0\u67e5 ${text("path")}\uff08$documentType\uff09\u3002", "Inspected ${text("path")} ($documentType).") +
+                    details.takeIf(String::isNotBlank)?.let { "\n\n$it" }.orEmpty()
+            }
+            AgentDesktopRemoteNativeTools.OFFICE_CONVERT ->
+                heading("\u5df2\u751f\u6210 ${text("path")}\uff08${formatBytes(long("size_bytes") ?: 0L)}\uff09\u3002", "Created ${text("path")} (${formatBytes(long("size_bytes") ?: 0L)}).")
+            else -> message.trim()
         }
     }
 

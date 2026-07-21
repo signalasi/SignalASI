@@ -11,6 +11,21 @@ import org.junit.Test
 
 class AgentNativeToolRegistryTest {
     @Test
+    fun canonicalDigestMatchesDesktopConfirmationContract() {
+        val value = mapOf(
+            "workspace_id" to "abc",
+            "path" to "a b.txt",
+            "recursive" to false,
+            "max_entries" to 10
+        )
+
+        assertEquals(
+            "e68f4ceb5babcb632bb3dfa6422c5382a62b406df06c5bc060be8f49be395171",
+            AgentNativeJsonCodec.sha256(value)
+        )
+    }
+
+    @Test
     fun protectsStableIdsAndSupportsLookup() {
         val first = definition(descriptor(id = "phone.test.echo"))
         val registry = AgentNativeToolRegistry().register(first)

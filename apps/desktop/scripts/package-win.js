@@ -38,6 +38,7 @@ const backendFiles = [
   "custom_agent_stdio.py",
   "desktop_agent_adapters.py",
   "desktop_file_tools.py",
+  "desktop_native_tools.py",
   "file_server.py",
   "link_delivery.py",
   "link_protocol.py",
