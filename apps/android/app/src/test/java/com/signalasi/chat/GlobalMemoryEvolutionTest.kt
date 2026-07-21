@@ -113,7 +113,17 @@ class GlobalMemoryEvolutionTest {
             nowMillis = 3_000L
         )
         assertEquals("Prefer concise responses", approvedWorld.items.single().value)
+        assertEquals(GlobalMemoryTemporalState.CURRENT, approvedWorld.items.single().temporalState)
         assertEquals(GlobalMemoryCandidateStatus.APPROVED, approvedInbox.candidates.single().status)
+        assertEquals(GlobalMemoryTemporalState.CURRENT, approvedInbox.candidates.single().temporalState)
+        val compiled = GlobalMemoryPromptCompiler.compile(
+            approvedWorld,
+            GlobalTopicProjectGraph(),
+            GlobalEntityMemoryGraph(),
+            "What response style do I prefer?",
+            "conversation-a"
+        )
+        assertTrue(compiled.contains("Prefer concise responses"))
     }
 
     @Test
@@ -142,6 +152,55 @@ class GlobalMemoryEvolutionTest {
         assertEquals("", result.candidates.single().item.value)
         assertFalse(result.candidates.single().item.topic.contains("account", ignoreCase = true))
         assertEquals(GlobalMemoryCandidateRisk.PRIVATE_BLOCKED, result.candidates.single().risk)
+    }
+
+    @Test
+    fun approvingAChangedPreferenceDeprecatesThePreviousPreference() {
+        val previous = item(
+            "previous-preference",
+            GlobalWorldItemKind.PREFERENCE,
+            layer = GlobalWorldLayer.USER,
+            topic = "Response style",
+            value = "Prefer detailed responses",
+            eventId = "previous-preference-event"
+        )
+        val source = event(
+            "new-preference-event",
+            "Prefer concise responses",
+            metadata = mapOf("memory_kind" to AgentMemoryKind.PREFERENCE.name)
+        )
+        val incoming = item(
+            "new-preference",
+            GlobalWorldItemKind.PREFERENCE,
+            layer = GlobalWorldLayer.USER,
+            topic = "Response style",
+            value = source.content,
+            eventId = source.id
+        )
+        val evolved = GlobalMemoryEvolutionPolicy.evolve(
+            PersonalWorldModel(items = listOf(previous)),
+            GlobalWorldReduction(
+                world = PersonalWorldModel(items = listOf(previous, incoming), processedEventIds = listOf(source.id)),
+                changedItems = listOf(incoming),
+                conflicts = emptyList()
+            ),
+            GlobalMemoryInbox(),
+            source,
+            understanding(source, incoming.topic)
+        )
+        val (approvedWorld, _) = GlobalMemoryEvolutionPolicy.approve(
+            evolved.reduction.world,
+            evolved.inbox,
+            evolved.inbox.pending().single().id,
+            nowMillis = 3_000L
+        )
+        val old = approvedWorld.items.first { it.id == previous.id }
+        val current = approvedWorld.items.first { it.id == incoming.id }
+
+        assertEquals(GlobalWorldItemStatus.SUPERSEDED, old.status)
+        assertEquals(GlobalMemoryTemporalState.DEPRECATED, old.temporalState)
+        assertEquals(GlobalWorldItemStatus.ACTIVE, current.status)
+        assertEquals(GlobalMemoryTemporalState.CURRENT, current.temporalState)
     }
 
     @Test
@@ -448,6 +507,63 @@ class GlobalMemoryEvolutionTest {
             GlobalMemoryTemporalState.DEPRECATED,
             evolved.nodes.first { it.label.equals("Screen understanding", ignoreCase = true) }.temporalState
         )
+        assertFalse(evolved.relations.any {
+            it.kind == GlobalEntityRelationKind.OWNS &&
+                it.temporalState == GlobalMemoryTemporalState.CURRENT
+        })
+    }
+
+    @Test
+    fun removedEntityRetiresInboundAndOutboundRelationsFromCurrentGraph() {
+        val supportEvent = event("support-event", "SignalASI supports Screen understanding")
+        val supportItem = item(
+            "support-item",
+            GlobalWorldItemKind.FACT,
+            topic = "SignalASI screen features",
+            value = supportEvent.content,
+            eventId = supportEvent.id
+        )
+        val initial = GlobalEntityMemoryGraphReducer.reduce(
+            GlobalEntityMemoryGraph(),
+            supportEvent,
+            understanding(supportEvent, supportItem.topic, setOf("SignalASI", "Screen understanding")),
+            reduction(supportEvent, supportItem)
+        )
+        assertTrue(initial.relations.any {
+            it.kind == GlobalEntityRelationKind.SUPPORTS &&
+                it.temporalState == GlobalMemoryTemporalState.CURRENT
+        })
+
+        val removalEvent = event("remove-event", "Screen understanding has been removed")
+        val removalItem = item(
+            "remove-item",
+            GlobalWorldItemKind.STATE,
+            topic = "Screen understanding",
+            value = removalEvent.content,
+            eventId = removalEvent.id
+        )
+        val evolved = GlobalEntityMemoryGraphReducer.reduce(
+            initial,
+            removalEvent,
+            understanding(removalEvent, removalItem.topic, setOf("Screen understanding")),
+            reduction(removalEvent, removalItem)
+        )
+        val support = evolved.relations.first { it.kind == GlobalEntityRelationKind.SUPPORTS }
+
+        assertEquals(GlobalMemoryTemporalState.DEPRECATED, support.temporalState)
+        assertTrue(support.validUntilMillis > 0L)
+        assertFalse(
+            evolved.relevant("Does SignalASI support Screen understanding?").relations.any {
+                it.kind == GlobalEntityRelationKind.SUPPORTS
+            }
+        )
+        assertTrue(
+            evolved.relevant(
+                "Did SignalASI previously support Screen understanding?",
+                includeHistorical = true,
+                historicalOnly = true
+            ).relations.any { it.kind == GlobalEntityRelationKind.SUPPORTS }
+        )
     }
 
     @Test
@@ -753,7 +869,42 @@ class GlobalMemoryEvolutionTest {
         assertEquals(2, restored.size)
         assertEquals(GlobalMemoryEvolutionOutcome.WAITING_REVIEW, restored.first().outcome)
         assertEquals(GlobalMemoryEvolutionOutcome.APPROVED, restored.last().outcome)
+        assertEquals(GlobalMemoryTemporalState.CURRENT, restored.last().temporalState)
         assertEquals(8_000L, restored.last().createdAtMillis)
+    }
+
+    @Test
+    fun criticClassifiesStaleInboxItemsSeparatelyFromLowConfidenceMemory() {
+        val source = event(
+            "stale-candidate-event",
+            "Prefer concise replies",
+            metadata = mapOf("memory_kind" to AgentMemoryKind.PREFERENCE.name)
+        )
+        val preference = item(
+            "stale-preference",
+            GlobalWorldItemKind.PREFERENCE,
+            layer = GlobalWorldLayer.USER,
+            topic = "Response style",
+            value = source.content,
+            eventId = source.id
+        )
+        val evolved = GlobalMemoryEvolutionPolicy.evolve(
+            PersonalWorldModel(),
+            reduction(source, preference),
+            GlobalMemoryInbox(),
+            source,
+            understanding(source, preference.topic)
+        )
+        val monthLater = 32L * 24L * 60L * 60L * 1_000L
+
+        val (_, report) = GlobalMemoryCritic.audit(
+            PersonalWorldModel(),
+            evolved.inbox,
+            nowMillis = monthLater
+        )
+
+        assertTrue(report.findings.any { it.kind == GlobalMemoryAuditFindingKind.STALE_CANDIDATE })
+        assertFalse(report.findings.any { it.kind == GlobalMemoryAuditFindingKind.LOW_CONFIDENCE_REUSED })
     }
 
     @Test
@@ -771,6 +922,14 @@ class GlobalMemoryEvolutionTest {
             GlobalMemoryQueryPlanner.plan("What response style do I prefer?").type
         )
         assertEquals(
+            GlobalMemoryQueryType.PERSONAL_IDENTITY,
+            GlobalMemoryQueryPlanner.plan("Who am I?").type
+        )
+        assertEquals(
+            GlobalMemoryQueryType.SECURITY_STATE,
+            GlobalMemoryQueryPlanner.plan("What is my current privacy and authorization state?").type
+        )
+        assertEquals(
             GlobalMemoryQueryType.RELATIONSHIP,
             GlobalMemoryQueryPlanner.plan("How is the gateway connected to the phone?").type
         )
@@ -782,6 +941,38 @@ class GlobalMemoryEvolutionTest {
             GlobalMemoryQueryType.TOOL_EVIDENCE,
             GlobalMemoryQueryPlanner.plan("What output did the command produce?").type
         )
+    }
+
+    @Test
+    fun identityQueryRetrievesApprovedShareableUserMemoryOnly() {
+        val identity = item(
+            "identity",
+            GlobalWorldItemKind.FACT,
+            layer = GlobalWorldLayer.USER,
+            topic = "Profile",
+            value = "The user display name is Ada",
+            eventId = "identity-event"
+        )
+        val privateIdentity = item(
+            "private-identity",
+            GlobalWorldItemKind.FACT,
+            layer = GlobalWorldLayer.USER,
+            topic = "Private profile",
+            value = "private-identity-value",
+            eventId = "private-identity-event",
+            visibility = GlobalWorldContextVisibility.LOCAL_ONLY
+        )
+
+        val prompt = GlobalMemoryPromptCompiler.compile(
+            PersonalWorldModel(items = listOf(identity, privateIdentity)),
+            GlobalTopicProjectGraph(),
+            GlobalEntityMemoryGraph(),
+            "Who am I?",
+            "conversation-a"
+        )
+
+        assertTrue(prompt.contains("The user display name is Ada"))
+        assertFalse(prompt.contains("private-identity-value"))
     }
 
     @Test

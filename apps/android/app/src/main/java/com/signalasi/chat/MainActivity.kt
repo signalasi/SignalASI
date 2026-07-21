@@ -6498,6 +6498,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             GlobalMemoryAuditFindingKind.EXPIRED -> R.string.cc_memory_audit_expired
             GlobalMemoryAuditFindingKind.DUPLICATE -> R.string.cc_memory_audit_duplicate
             GlobalMemoryAuditFindingKind.LOW_CONFIDENCE_REUSED -> R.string.cc_memory_audit_low_confidence
+            GlobalMemoryAuditFindingKind.STALE_CANDIDATE -> R.string.cc_memory_audit_stale_candidate
             GlobalMemoryAuditFindingKind.UNRESOLVED_CONFLICT -> R.string.cc_memory_audit_conflict
             GlobalMemoryAuditFindingKind.SKILL_CANDIDATE -> R.string.cc_memory_audit_skill_candidate
             GlobalMemoryAuditFindingKind.COMPLETED_GOAL -> R.string.cc_memory_audit_completed_goal

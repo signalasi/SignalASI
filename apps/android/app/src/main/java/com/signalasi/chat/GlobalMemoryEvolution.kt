@@ -216,11 +216,10 @@ object GlobalMemoryEvolutionPolicy {
                 GlobalMemoryCandidateStatus.CONFLICTED
             )
         } ?: return world to inbox
+        val approvedTemporalState = resolvedTemporalState(candidate)
         val approved = candidate.copy(
             status = GlobalMemoryCandidateStatus.APPROVED,
-            temporalState = if (candidate.temporalState == GlobalMemoryTemporalState.CONFLICTED) {
-                GlobalMemoryTemporalState.CURRENT
-            } else candidate.temporalState,
+            temporalState = approvedTemporalState,
             reviewedAtMillis = nowMillis
         )
         val incoming = approved.item.copy(
@@ -237,7 +236,11 @@ object GlobalMemoryEvolutionPolicy {
                     GlobalAgentText.tokens(incoming.topic)
                 ) >= 0.45
             if (sameSubject && existing.status in setOf(GlobalWorldItemStatus.ACTIVE, GlobalWorldItemStatus.CONFLICTED)) {
-                existing.copy(status = GlobalWorldItemStatus.SUPERSEDED, conflictGroupId = "")
+                existing.copy(
+                    status = GlobalWorldItemStatus.SUPERSEDED,
+                    temporalState = GlobalMemoryTemporalState.DEPRECATED,
+                    conflictGroupId = ""
+                )
             } else existing
         }.filterNot { it.id == incoming.id } + incoming
         val updatedWorld = world.copy(
@@ -703,15 +706,26 @@ object GlobalMemoryEvolutionPolicy {
             kind = candidate.kind,
             action = candidate.action,
             outcome = outcome,
-            temporalState = if (outcome == GlobalMemoryEvolutionOutcome.APPROVED &&
-                candidate.temporalState == GlobalMemoryTemporalState.CONFLICTED
-            ) GlobalMemoryTemporalState.CURRENT else candidate.temporalState,
+            temporalState = if (outcome == GlobalMemoryEvolutionOutcome.APPROVED) {
+                resolvedTemporalState(candidate)
+            } else candidate.temporalState,
             subject = subject,
             targetItemIds = candidate.targetItemIds.take(MAX_EVOLUTION_TARGETS),
             resultingItemId = resultingItemId,
             evidenceCount = candidate.item.evidenceCount.coerceAtLeast(0),
             createdAtMillis = createdAtMillis
         )
+    }
+
+    private fun resolvedTemporalState(candidate: GlobalMemoryCandidate): GlobalMemoryTemporalState = when {
+        candidate.temporalState !in setOf(
+            GlobalMemoryTemporalState.PENDING,
+            GlobalMemoryTemporalState.CONFLICTED
+        ) -> candidate.temporalState
+        candidate.item.status == GlobalWorldItemStatus.COMPLETED -> GlobalMemoryTemporalState.HISTORICAL
+        candidate.item.status == GlobalWorldItemStatus.SUPERSEDED -> GlobalMemoryTemporalState.DEPRECATED
+        candidate.kind == GlobalMemoryCandidateKind.GOAL -> GlobalMemoryTemporalState.PLANNED
+        else -> GlobalMemoryTemporalState.CURRENT
     }
 
     private val REPLACEMENT_SIGNALS = listOf(
@@ -754,6 +768,7 @@ enum class GlobalMemoryAuditFindingKind {
     EXPIRED,
     DUPLICATE,
     LOW_CONFIDENCE_REUSED,
+    STALE_CANDIDATE,
     UNRESOLVED_CONFLICT,
     SKILL_CANDIDATE,
     COMPLETED_GOAL
@@ -850,7 +865,7 @@ object GlobalMemoryCritic {
         val stalePending = inbox.pending().count { nowMillis - it.createdAtMillis > PENDING_REVIEW_WARNING_MILLIS }
         if (stalePending > 0) {
             findings += GlobalMemoryAuditFinding(
-                GlobalMemoryAuditFindingKind.LOW_CONFIDENCE_REUSED,
+                GlobalMemoryAuditFindingKind.STALE_CANDIDATE,
                 "memory-inbox",
                 "$stalePending memory candidates are still awaiting review",
                 stalePending

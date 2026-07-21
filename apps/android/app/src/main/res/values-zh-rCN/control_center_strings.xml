@@ -604,6 +604,7 @@
     <string name="cc_memory_audit_expired">过期状态已退役</string>
     <string name="cc_memory_audit_duplicate">重复记忆</string>
     <string name="cc_memory_audit_low_confidence">低置信度记忆需要审核</string>
+    <string name="cc_memory_audit_stale_candidate">候选记忆等待审核</string>
     <string name="cc_memory_audit_conflict">未解决的记忆冲突</string>
     <string name="cc_memory_audit_skill_candidate">工作流可固化为技能</string>
     <string name="cc_memory_audit_completed_goal">已完成目标可归档</string>

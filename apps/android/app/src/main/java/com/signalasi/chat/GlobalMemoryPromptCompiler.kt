@@ -6,7 +6,9 @@ enum class GlobalMemoryQueryType {
     PROJECT_STATE,
     DEVICE_CAPABILITY,
     HISTORICAL_DECISION,
+    PERSONAL_IDENTITY,
     PERSONAL_PREFERENCE,
+    SECURITY_STATE,
     LONG_TERM_GOAL,
     TOOL_EVIDENCE,
     RELATIONSHIP,
@@ -41,7 +43,9 @@ object GlobalMemoryQueryPlanner {
             if (containsAny(normalized, HISTORICAL_TERMS)) add(GlobalMemoryQueryType.HISTORICAL_DECISION)
             if (containsAny(normalized, RELATIONSHIP_TERMS)) add(GlobalMemoryQueryType.RELATIONSHIP)
             if (containsAny(normalized, DEVICE_TERMS)) add(GlobalMemoryQueryType.DEVICE_CAPABILITY)
+            if (containsAny(normalized, IDENTITY_TERMS)) add(GlobalMemoryQueryType.PERSONAL_IDENTITY)
             if (containsAny(normalized, PREFERENCE_TERMS)) add(GlobalMemoryQueryType.PERSONAL_PREFERENCE)
+            if (containsAny(normalized, SECURITY_TERMS)) add(GlobalMemoryQueryType.SECURITY_STATE)
             if (containsAny(normalized, GOAL_TERMS)) add(GlobalMemoryQueryType.LONG_TERM_GOAL)
             if (containsAny(normalized, TOOL_TERMS)) add(GlobalMemoryQueryType.TOOL_EVIDENCE)
             if (containsAny(normalized, PROJECT_TERMS)) add(GlobalMemoryQueryType.PROJECT_STATE)
@@ -96,6 +100,15 @@ object GlobalMemoryQueryPlanner {
                 worldItems = 24,
                 graphNodes = 24
             )
+            GlobalMemoryQueryType.PERSONAL_IDENTITY -> plan(
+                type,
+                setOf(GlobalWorldItemKind.FACT, GlobalWorldItemKind.STATE, GlobalWorldItemKind.PREFERENCE),
+                setOf(GlobalWorldLayer.USER),
+                historical = false,
+                hops = 2,
+                worldItems = 12,
+                graphNodes = 16
+            )
             GlobalMemoryQueryType.PERSONAL_PREFERENCE -> plan(
                 type,
                 setOf(GlobalWorldItemKind.PREFERENCE, GlobalWorldItemKind.DECISION),
@@ -104,6 +117,15 @@ object GlobalMemoryQueryPlanner {
                 hops = 1,
                 worldItems = 12,
                 graphNodes = 12
+            )
+            GlobalMemoryQueryType.SECURITY_STATE -> plan(
+                type,
+                setOf(GlobalWorldItemKind.RISK, GlobalWorldItemKind.DECISION, GlobalWorldItemKind.STATE, GlobalWorldItemKind.FACT),
+                setOf(GlobalWorldLayer.USER, GlobalWorldLayer.TOPIC, GlobalWorldLayer.REALTIME),
+                historical = false,
+                hops = 2,
+                worldItems = 14,
+                graphNodes = 18
             )
             GlobalMemoryQueryType.LONG_TERM_GOAL -> plan(
                 type,
@@ -185,6 +207,14 @@ object GlobalMemoryQueryPlanner {
     private val PREFERENCE_TERMS = listOf(
         "prefer", "preference", "favorite", "default style", "my style",
         "\u504f\u597d", "\u559c\u6b22", "\u9ed8\u8ba4", "\u6211\u7684\u98ce\u683c"
+    )
+    private val IDENTITY_TERMS = listOf(
+        "who am i", "my identity", "my name", "my profile", "about me", "account owner",
+        "\u6211\u662f\u8c01", "\u6211\u7684\u8eab\u4efd", "\u6211\u7684\u540d\u5b57", "\u6211\u7684\u8d44\u6599", "\u5173\u4e8e\u6211"
+    )
+    private val SECURITY_TERMS = listOf(
+        "security", "privacy", "permission", "authorization", "trust", "trusted device", "safety policy",
+        "\u5b89\u5168", "\u9690\u79c1", "\u6743\u9650", "\u6388\u6743", "\u4fe1\u4efb", "\u53ef\u4fe1\u8bbe\u5907", "\u5b89\u5168\u7b56\u7565"
     )
     private val GOAL_TERMS = listOf(
         "goal", "objective", "roadmap", "long term", "long-term", "next milestone",
@@ -338,7 +368,12 @@ object GlobalMemoryPromptCompiler {
             }
             .filter { (item, overlap) ->
                 overlap >= 0.08 ||
-                    (GlobalMemoryQueryType.PERSONAL_PREFERENCE in plan.types &&
+                    (plan.types.any {
+                        it in setOf(
+                            GlobalMemoryQueryType.PERSONAL_IDENTITY,
+                            GlobalMemoryQueryType.PERSONAL_PREFERENCE
+                        )
+                    } &&
                         item.layer == GlobalWorldLayer.USER && item.kind in plan.preferredKinds)
             }
             .map { (item, overlap) ->

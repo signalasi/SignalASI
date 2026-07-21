@@ -221,6 +221,9 @@ object GlobalEntityMemoryGraphReducer {
         explicitTriples(acceptedContent).take(MAX_RELATIONS_PER_EVENT).forEach { triple ->
             val from = upsertNode(nodes, triple.from, classify(triple.from, project), evidence, acceptedEvent)
             val to = upsertNode(nodes, triple.to, classify(triple.to, project), evidence, acceptedEvent)
+            if (triple.kind == GlobalEntityRelationKind.REMOVED) {
+                retireEntityRelations(relations, from.id, event.timestampMillis)
+            }
             closeSupersededRelations(relations, from.id, triple.kind, event.timestampMillis)
             upsertRelation(
                 relations,
@@ -348,6 +351,30 @@ object GlobalEntityMemoryGraphReducer {
         }
     }
 
+    private fun retireEntityRelations(
+        relations: MutableList<GlobalEntityRelation>,
+        entityNodeId: String,
+        nowMillis: Long
+    ) {
+        relations.indices.forEach { index ->
+            val current = relations[index]
+            if ((current.fromNodeId == entityNodeId || current.toNodeId == entityNodeId) &&
+                current.temporalState in setOf(
+                    GlobalMemoryTemporalState.CURRENT,
+                    GlobalMemoryTemporalState.PLANNED,
+                    GlobalMemoryTemporalState.PENDING,
+                    GlobalMemoryTemporalState.CONFLICTED
+                )
+            ) {
+                relations[index] = current.copy(
+                    temporalState = GlobalMemoryTemporalState.DEPRECATED,
+                    validUntilMillis = nowMillis,
+                    lastSeenAtMillis = maxOf(current.lastSeenAtMillis, nowMillis)
+                )
+            }
+        }
+    }
+
     private fun explicitTriples(content: String): List<ExplicitTriple> {
         val clean = content.replace(Regex("\\s+"), " ").trim().take(2_400)
         if (clean.isBlank() || AgentLearningAnalyzer.containsSensitiveData(clean)) return emptyList()
@@ -433,7 +460,10 @@ object GlobalEntityMemoryGraphReducer {
     private data class RelationPattern(val regex: Regex, val kind: GlobalEntityRelationKind)
 
     private val RELATION_PATTERNS = listOf(
-        RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:owns|has)\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.OWNS),
+        RelationPattern(
+            Regex("(?i)([^.!?;]{2,80}?)\\s+(?:owns|has(?!\\s+(?:been\\s+)?(?:removed|deleted)\\b))\\s+([^.!?;]{1,120})"),
+            GlobalEntityRelationKind.OWNS
+        ),
         RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:uses|use)\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.USES),
         RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+supports\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.SUPPORTS),
         RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:contains|includes|has component|is composed of)\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.HAS_COMPONENT),

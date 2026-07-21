@@ -585,6 +585,7 @@
     <string name="cc_memory_audit_expired">Expired state retired</string>
     <string name="cc_memory_audit_duplicate">Duplicate memory</string>
     <string name="cc_memory_audit_low_confidence">Low-confidence memory needs review</string>
+    <string name="cc_memory_audit_stale_candidate">Memory candidate awaiting review</string>
     <string name="cc_memory_audit_conflict">Unresolved memory conflict</string>
     <string name="cc_memory_audit_skill_candidate">Workflow may become a Skill</string>
     <string name="cc_memory_audit_completed_goal">Completed goal can be archived</string>
