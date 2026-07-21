@@ -39,6 +39,8 @@ Run `npm run test:release:local` to execute the non-device local release gates s
 
 Run `npm run test:release:device` to execute the Android device gates sequentially on a connected phone or emulator.
 
+Run `npm run test:android:team-process-death` after installing the debug APK and Android test APK. The two-phase device test persists a supervised team, force-stops the Android process, delivers observer and primary responses through the real background service, and verifies one recovered final response without ordinary-chat leakage or duplicate delivery. The script wakes the device and relaunches SignalASI when it finishes.
+
 Run `npm run audit:release` to print the release gate checklist and the latest public GitHub Actions status. Run `npm run audit:release:strict` after the local gates and GitHub Actions should be green; strict mode fails if the working tree is dirty or the required workflows are not successful for the current commit.
 
 ## Product Coverage
@@ -61,5 +63,6 @@ Run `npm run audit:release` to print the release gate checklist and the latest p
 - Send text messages from Android to Hermes and Codex and confirm live Agent replies arrive on the phone. Automated display evidence: `npm run smoke:android:agent-replies`.
 - Send a voice message to Hermes and confirm Desktop STT is used when configured. Automated STT evidence: `npm run smoke:desktop:voice-stt`. Automated reply-panel evidence: `npm run smoke:android:voice-reply`.
 - Exercise the Voice page wake loop on a real microphone and confirm replies are preserved in the voice response panel. Automated preservation evidence: `npm run smoke:android:voice-reply`.
+- Force-stop SignalASI while a paired Agent team is running, then let Desktop replies arrive after restart. The deterministic process-recreation half of this scenario is covered by `npm run test:android:team-process-death`; release acceptance still requires naturally late paired Desktop replies.
 - Clear Android app data and confirm a new identity fingerprint, empty contacts, and a new welcome notification are created. Automated evidence: `npm run smoke:android:reset`.
 - Verify exported APK, Desktop EXE, local databases, logs, screenshots, pairing state, tokens, and `node_modules` are not staged for Git.

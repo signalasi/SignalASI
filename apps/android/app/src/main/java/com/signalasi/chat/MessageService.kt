@@ -131,7 +131,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
                     globalAgentExecutor.execute(::processGlobalAgentEvents)
                     return
                 }
-                AgentConnectorResponseBus.publish(this, response)
+                if (AgentConnectorResponseBus.publish(this, response)) return
             }
         }
         val stored = ChatHistoryStore.appendIncoming(this, payload) ?: return
@@ -467,10 +467,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
             intent?.getStringExtra("signalasi_debug_service_payload")?.trim().orEmpty()
         }
         if (payload.isBlank()) return
-        ChatHistoryStore.appendIncoming(this, payload)?.let {
-            showIncomingNotification(it)
-            ChatHistoryStore.markNotified(this, it.contactId, it.messageId)
-        }
+        onMessage(payload)
     }
 
 }

@@ -6,6 +6,8 @@ import org.json.JSONArray
 interface AgentTeamCompletionSink {
     fun publish(snapshot: AgentTeamExecutionSnapshot): Boolean
 
+    fun remove(supervisorRunId: String) = Unit
+
     fun clear() = Unit
 }
 
@@ -56,6 +58,8 @@ internal class AgentConnectorTeamCompletionSink(
 
     override fun clear() = ledger.clear()
 
+    override fun remove(supervisorRunId: String) = ledger.remove(supervisorRunId)
+
     private companion object {
         val DELIVERABLE_STATES = setOf(
             AgentTeamExecutionState.SUCCEEDED,
@@ -80,6 +84,13 @@ internal class AgentTeamCompletionDeliveryLedger(context: Context) {
         if (clean.isBlank()) return
         val values = read().filterNot { it == clean }.plus(clean).takeLast(MAX_RECORDS)
         database.writeString(KEY_DELIVERED, JSONArray(values).toString())
+    }
+
+    @Synchronized
+    fun remove(supervisorRunId: String) {
+        val clean = supervisorRunId.trim()
+        if (clean.isBlank()) return
+        database.writeString(KEY_DELIVERED, JSONArray(read().filterNot { it == clean }).toString())
     }
 
     @Synchronized
