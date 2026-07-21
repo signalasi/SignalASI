@@ -40,16 +40,28 @@ set -euo pipefail
 npm install --prefix /tmp/signalasi --omit=dev --ignore-scripts "playwright@${PLAYWRIGHT_VERSION}"
 mkdir -p /out/lib/node_modules /out/lib/runtime-libs /out/share
 cp -aL /tmp/signalasi/node_modules/playwright /tmp/signalasi/node_modules/playwright-core /out/lib/node_modules/
-cp -aL /ms-playwright /out/lib/ms-playwright
+mkdir -p /out/lib/ms-playwright
+shopt -s nullglob
+chromium_roots=(/ms-playwright/chromium-*)
+headless_roots=(/ms-playwright/chromium_headless_shell-*)
+ffmpeg_roots=(/ms-playwright/ffmpeg-*)
+if [[ ${#chromium_roots[@]} -eq 0 || ${#headless_roots[@]} -eq 0 || ${#ffmpeg_roots[@]} -eq 0 ]]; then
+  echo "The pinned Playwright image is missing Chromium runtime components." >&2
+  exit 2
+fi
+browser_roots=("${chromium_roots[@]}" "${headless_roots[@]}" "${ffmpeg_roots[@]}")
+cp -aL "${browser_roots[@]}" /out/lib/ms-playwright/
 [[ ! -d /etc/fonts ]] || cp -aL /etc/fonts /out/lib/fontconfig
 [[ ! -d /usr/share/fonts ]] || cp -aL /usr/share/fonts /out/share/fonts
 
 while IFS= read -r binary; do
-  { ldd "$binary" 2>/dev/null || true; } | awk '
+  ldd_output="$(ldd "$binary" 2>/dev/null || true)"
+  [[ -n "$ldd_output" ]] || continue
+  awk '
     /=> \/[^ ]+/ { print $3 }
     /^\/[[:graph:]]+/ { print $1 }
-  '
-done < <(find /ms-playwright -type f -perm /111 -print) | sort -u | while IFS= read -r library; do
+  ' <<<"$ldd_output"
+done < <(find "${browser_roots[@]}" -type f -perm /111 -print) | sort -u | while IFS= read -r library; do
   [[ -f "$library" ]] || continue
   case "$(basename "$library")" in
     ld-linux-*|libc.so.*) continue ;;
