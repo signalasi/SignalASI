@@ -945,6 +945,10 @@ object GlobalMemoryCritic {
     fun due(lastAuditMillis: Long, processedEvents: Int, nowMillis: Long = System.currentTimeMillis()): Boolean =
         processedEvents >= 20 || lastAuditMillis <= 0L || nowMillis - lastAuditMillis >= AUDIT_INTERVAL_MILLIS
 
+    fun nextAuditAt(lastAuditMillis: Long, nowMillis: Long = System.currentTimeMillis()): Long =
+        if (lastAuditMillis <= 0L) nowMillis
+        else (lastAuditMillis + AUDIT_INTERVAL_MILLIS).coerceAtLeast(nowMillis)
+
     private const val AUDIT_INTERVAL_MILLIS = 24L * 60L * 60L * 1_000L
     private const val PENDING_REVIEW_WARNING_MILLIS = 30L * 24L * 60L * 60L * 1_000L
     private const val MAX_FINDINGS = 200

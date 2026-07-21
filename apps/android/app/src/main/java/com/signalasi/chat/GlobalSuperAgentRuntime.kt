@@ -2433,6 +2433,10 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         val modelBudget = modelCallBudget.availability(settings, nowMillis)
         val candidates = buildList {
             repository.nextPendingEventAttemptAt(nowMillis).takeIf { it > 0L }?.let(::add)
+            GlobalMemoryCritic.nextAuditAt(
+                repository.memoryAuditReport().createdAtMillis,
+                nowMillis
+            ).takeIf { it > 0L }?.let(::add)
             repository.researchTasks().forEach { task ->
                 when (task.status) {
                     GlobalResearchTaskStatus.QUEUED -> add(

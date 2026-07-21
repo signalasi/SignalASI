@@ -70,10 +70,12 @@ data class GlobalEntityMemoryGraph(
         query: String,
         hops: Int = 2,
         limit: Int = 24,
-        includeHistorical: Boolean = false
+        includeHistorical: Boolean = false,
+        historicalOnly: Boolean = false,
+        preferredRelationKinds: Set<GlobalEntityRelationKind> = emptySet()
     ): GlobalEntityGraphSelection {
         val tokens = GlobalAgentText.tokens(query)
-        val allowedStates = if (includeHistorical) {
+        val nodeStates = if (includeHistorical) {
             GlobalMemoryTemporalState.entries.toSet()
         } else setOf(
             GlobalMemoryTemporalState.CURRENT,
@@ -81,11 +83,20 @@ data class GlobalEntityMemoryGraph(
             GlobalMemoryTemporalState.CONFLICTED,
             GlobalMemoryTemporalState.PENDING
         )
+        val relationStates = if (historicalOnly) {
+            setOf(GlobalMemoryTemporalState.HISTORICAL, GlobalMemoryTemporalState.DEPRECATED)
+        } else nodeStates
+        val preferredNodeIds = if (preferredRelationKinds.isEmpty()) emptySet() else relations.asSequence()
+            .filter { it.kind in preferredRelationKinds && it.temporalState in relationStates }
+            .flatMap { sequenceOf(it.fromNodeId, it.toNodeId) }
+            .toSet()
         val rankedSeeds = nodes.asSequence()
-            .filter { it.temporalState in allowedStates }
+            .filter { it.temporalState in nodeStates }
             .map { node ->
                 val text = (listOf(node.label) + node.aliases).joinToString(" ")
-                node to (GlobalAgentText.overlap(tokens, GlobalAgentText.tokens(text)) + node.confidence * 0.15)
+                val overlap = GlobalAgentText.overlap(tokens, GlobalAgentText.tokens(text))
+                val relationBoost = if (overlap > 0.0 && node.id in preferredNodeIds) 0.14 else 0.0
+                node to (overlap + node.confidence * 0.15 + relationBoost)
             }
             .filter { (_, score) -> score >= 0.16 }
             .sortedByDescending(Pair<GlobalEntityNode, Double>::second)
@@ -96,9 +107,11 @@ data class GlobalEntityMemoryGraph(
         val selectedIds = rankedSeeds.mapTo(mutableSetOf(), GlobalEntityNode::id)
         repeat(hops.coerceIn(0, 3)) {
             val neighbors = relations.asSequence()
-                .filter { it.temporalState in allowedStates }
+                .filter { it.temporalState in relationStates }
                 .filter { it.fromNodeId in selectedIds || it.toNodeId in selectedIds }
-                .sortedByDescending(GlobalEntityRelation::confidence)
+                .sortedWith(compareByDescending<GlobalEntityRelation> { it.kind in preferredRelationKinds }
+                    .thenByDescending(GlobalEntityRelation::confidence)
+                    .thenByDescending(GlobalEntityRelation::lastSeenAtMillis))
                 .flatMap { sequenceOf(it.fromNodeId, it.toNodeId) }
                 .filterNot(selectedIds::contains)
                 .take(limit)
@@ -111,8 +124,11 @@ data class GlobalEntityMemoryGraph(
             .take(limit.coerceIn(1, 60))
         val boundedIds = selectedNodes.map(GlobalEntityNode::id).toSet()
         val selectedRelations = relations.filter {
-            it.fromNodeId in boundedIds && it.toNodeId in boundedIds && it.temporalState in allowedStates
-        }.sortedByDescending(GlobalEntityRelation::confidence).take(limit.coerceIn(1, 60) * 2)
+            it.fromNodeId in boundedIds && it.toNodeId in boundedIds && it.temporalState in relationStates
+        }.sortedWith(compareByDescending<GlobalEntityRelation> { it.kind in preferredRelationKinds }
+            .thenByDescending(GlobalEntityRelation::confidence)
+            .thenByDescending(GlobalEntityRelation::lastSeenAtMillis))
+            .take(limit.coerceIn(1, 60) * 2)
         return GlobalEntityGraphSelection(selectedNodes, selectedRelations)
     }
 }

@@ -784,6 +784,40 @@ class GlobalMemoryEvolutionTest {
         )
     }
 
+    @Test
+    fun plannerCombinesDomainAndTemporalIntentWithoutLosingEither() {
+        val plan = GlobalMemoryQueryPlanner.plan(
+            "What changed between the previous and current Project SignalASI device status?"
+        )
+
+        assertEquals(GlobalMemoryQueryType.HISTORICAL_DECISION, plan.type)
+        assertTrue(GlobalMemoryQueryType.PROJECT_STATE in plan.types)
+        assertTrue(GlobalMemoryQueryType.DEVICE_CAPABILITY in plan.types)
+        assertEquals(GlobalMemoryTemporalQueryScope.CURRENT_AND_HISTORY, plan.temporalScope)
+        assertTrue(GlobalWorldItemKind.DECISION in plan.preferredKinds)
+        assertTrue(GlobalWorldItemKind.STATE in plan.preferredKinds)
+    }
+
+    @Test
+    fun plannerInfersTypedGraphRelationHints() {
+        val plan = GlobalMemoryQueryPlanner.plan(
+            "What model does the phone support and which runtime does it depend on?"
+        )
+
+        assertTrue(GlobalMemoryQueryType.RELATIONSHIP in plan.types)
+        assertTrue(GlobalEntityRelationKind.SUPPORTS in plan.preferredRelationKinds)
+        assertTrue(GlobalEntityRelationKind.DEPENDS_ON in plan.preferredRelationKinds)
+    }
+
+    @Test
+    fun memoryAuditProvidesAStableDailyWakeDeadline() {
+        val day = 24L * 60L * 60L * 1_000L
+
+        assertEquals(1_000L, GlobalMemoryCritic.nextAuditAt(0L, 1_000L))
+        assertEquals(day + 500L, GlobalMemoryCritic.nextAuditAt(500L, 1_000L))
+        assertEquals(day + 501L, GlobalMemoryCritic.nextAuditAt(500L, day + 501L))
+    }
+
     private fun event(
         id: String,
         content: String,

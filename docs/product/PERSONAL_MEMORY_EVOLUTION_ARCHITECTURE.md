@@ -74,13 +74,14 @@ The graph projects ownership, use, support, components, state, naming, dependenc
 
 ## Query Planner And Prompt Compiler
 
-Before retrieval, the query planner classifies the request as project state, device capability, historical decision, personal preference, long-term goal, tool evidence, or general memory.
+Before retrieval, the query planner classifies the request into one or more facets: project state, device capability, historical decision, personal preference, long-term goal, tool evidence, relationship, or general memory. A request can therefore combine device, project, relationship, and historical intent instead of losing all but the first match.
 
 The plan controls:
 
 - preferred world-item kinds and layers;
-- whether superseded history is eligible;
+- current-only, history-only, or current-and-history temporal scope;
 - graph traversal depth;
+- preferred typed relationships used to rerank graph traversal;
 - item and character budgets;
 - project namespace isolation.
 
@@ -90,7 +91,7 @@ Compiled entries carry bounded evidence counts and opaque memory references. Pla
 
 ## Memory Critic
 
-An encrypted on-device audit runs after meaningful event batches and at least daily when the runtime wakes. It identifies:
+An encrypted on-device audit runs after meaningful event batches. Its next daily deadline is also part of the durable AlarmManager wake schedule, so the audit does not depend on a new chat event arriving. It identifies:
 
 - expired current state;
 - unresolved conflicts;
@@ -129,8 +130,11 @@ The regression suite follows LoCoMo-style categories adapted to SignalASI:
 - reusable tool evidence;
 - long-horizon goal continuity;
 - relationship-graph multi-hop queries;
-- candidate review and rejection;
-- event replay idempotency.
+- unresolved-conflict labeling;
+- causal deletion of candidates and graph evidence;
+- candidate review, rejection, and event replay idempotency.
+
+`GlobalMemoryLoCoMoRegressionTest` is the stable cross-session corpus. Scenario names describe the user-visible memory contract rather than implementation details, which allows retrieval internals to evolve without weakening the acceptance criteria.
 
 An isolated unit test is not sufficient release evidence. Production acceptance also requires encrypted backup/restore, process-death replay, real-device review UI, causal deletion, and model-context inspection.
 
