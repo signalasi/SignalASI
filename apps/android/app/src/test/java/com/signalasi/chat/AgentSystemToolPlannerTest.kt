@@ -292,6 +292,13 @@ class AgentSystemToolPlannerTest {
     }
 
     @Test
+    fun recognizesBoundedMicrophoneRecordingCommands() {
+        assertTrue(AgentSystemToolPlanner.isMicrophoneCaptureGoal("record audio for five seconds"))
+        assertTrue(AgentSystemToolPlanner.isMicrophoneCaptureGoal("\u5f55\u97f3 5 \u79d2"))
+        assertFalse(AgentSystemToolPlanner.isMicrophoneCaptureGoal("Explain how microphones work"))
+    }
+
+    @Test
     fun parsesSpokenTimerDurations() {
         assertTrue(AgentSystemToolPlanner.timerSecondsForGoal("set timer one minute") == 60)
         assertTrue(AgentSystemToolPlanner.timerSecondsForGoal("set timer fifteen seconds") == 15)
@@ -414,7 +421,14 @@ class AgentSystemToolPlannerTest {
         assertEquals("SignalASI", JSONObject(appSearch.parameters.getValue("input_json")).getString("query"))
         assertEquals("read-device-status", planner.deterministicLocalAction(request("\u67e5\u770b\u624b\u673a\u72b6\u6001", screen, nativeTools))?.id)
         assertEquals("open-installed-app", planner.deterministicLocalAction(request("\u6253\u5f00WeChat", screen, nativeTools))?.id)
-        assertEquals("open-camera", planner.deterministicLocalAction(request("\u6253\u5f00\u76f8\u673a", screen, nativeTools))?.id)
+        val camera = requireNotNull(planner.deterministicLocalAction(request("\u6253\u5f00\u76f8\u673a", screen, nativeTools)))
+        assertEquals("open-camera", camera.id)
+        assertEquals(AgentActionKind.CALL_NATIVE_TOOL, camera.kind)
+        assertEquals(AgentVisibleCaptureNativeTools.CAMERA_CAPTURE, camera.parameters["tool_id"])
+        val microphone = requireNotNull(planner.deterministicLocalAction(request("\u5f55\u97f3 8 \u79d2", screen, nativeTools)))
+        assertEquals(AgentActionKind.CALL_NATIVE_TOOL, microphone.kind)
+        assertEquals(AgentVisibleCaptureNativeTools.MICROPHONE_RECORD, microphone.parameters["tool_id"])
+        assertEquals(8, JSONObject(microphone.parameters.getValue("input_json")).getInt("max_duration_seconds"))
         assertEquals("set-timer", planner.deterministicLocalAction(request("\u8bbe\u7f6e3\u5206\u949f\u5012\u8ba1\u65f6", screen, nativeTools))?.id)
         assertNotNull(planner.deterministicLocalAction(request("\u5173\u95ed\u624b\u7535\u7b52", screen, nativeTools)))
     }

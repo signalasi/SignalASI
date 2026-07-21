@@ -96,22 +96,49 @@ class SignalASINotificationListenerService : NotificationListenerService() {
     private fun reply(notificationKey: String, text: String): AgentNotificationReplyResult {
         val cleanText = text.trim().take(MAX_REPLY_CHARACTERS)
         if (notificationKey.isBlank() || cleanText.isBlank()) {
-            return AgentNotificationReplyResult(false, "Notification reply target or text is missing")
+            return AgentNotificationReplyResult(
+                false,
+                "Notification reply target or text is missing",
+                code = "invalid_notification_reply"
+            )
         }
         val notification = synchronized(lock) { latestNotifications[notificationKey] }
-            ?: return AgentNotificationReplyResult(false, "The notification is no longer available")
+            ?: return AgentNotificationReplyResult(
+                false,
+                "The notification is no longer available",
+                code = "notification_stale",
+                retryable = true
+            )
         val item = notificationItem(notification)
         if (item.sensitiveFlags.isNotEmpty() || item.category == "system" || item.category == "call") {
-            return AgentNotificationReplyResult(false, "Replies to sensitive or system notifications are blocked")
+            return AgentNotificationReplyResult(
+                false,
+                "Replies to sensitive or system notifications are blocked",
+                code = "notification_reply_blocked",
+                notificationPackage = item.packageName,
+                notificationTitle = item.title
+            )
         }
         val action = replyAction(notification.notification)
-            ?: return AgentNotificationReplyResult(false, "This notification does not support direct reply")
+            ?: return AgentNotificationReplyResult(
+                false,
+                "This notification does not support direct reply",
+                code = "notification_reply_unsupported",
+                notificationPackage = item.packageName,
+                notificationTitle = item.title
+            )
         val remoteInputs = action.remoteInputs
             ?.filter { it.allowFreeFormInput }
             ?.toTypedArray()
             .orEmpty()
         if (remoteInputs.isEmpty()) {
-            return AgentNotificationReplyResult(false, "This notification has no text reply field")
+            return AgentNotificationReplyResult(
+                false,
+                "This notification has no text reply field",
+                code = "notification_reply_unsupported",
+                notificationPackage = item.packageName,
+                notificationTitle = item.title
+            )
         }
         return runCatching {
             val resultIntent = Intent()
@@ -120,9 +147,22 @@ class SignalASINotificationListenerService : NotificationListenerService() {
             }
             RemoteInput.addResultsToIntent(remoteInputs, resultIntent, results)
             action.actionIntent.send(this, 0, resultIntent)
-            AgentNotificationReplyResult(true, "Reply sent to ${item.title.ifBlank { item.packageName }}")
+            AgentNotificationReplyResult(
+                true,
+                "Reply dispatched to ${item.title.ifBlank { item.packageName }}",
+                code = "notification_reply_dispatched",
+                notificationPackage = item.packageName,
+                notificationTitle = item.title
+            )
         }.getOrElse { error ->
-            AgentNotificationReplyResult(false, error.message ?: "Notification reply failed")
+            AgentNotificationReplyResult(
+                false,
+                error.message ?: "Notification reply failed",
+                code = "notification_reply_failed",
+                retryable = true,
+                notificationPackage = item.packageName,
+                notificationTitle = item.title
+            )
         }
     }
 
@@ -148,11 +188,12 @@ class SignalASINotificationListenerService : NotificationListenerService() {
         @Volatile
         private var activeService: SignalASINotificationListenerService? = null
 
-        fun currentContext(): AgentNotificationContext = synchronized(lock) {
+        fun currentContext(limit: Int = 6): AgentNotificationContext = synchronized(lock) {
             AgentNotificationContext(
                 hasAccess = connected,
-                items = latestItems.take(6),
-                sensitiveFlags = latestItems.flatMap { it.sensitiveFlags }.distinct().take(6)
+                items = latestItems.take(limit.coerceIn(1, MAX_ITEMS)),
+                sensitiveFlags = latestItems.flatMap { it.sensitiveFlags }.distinct().take(6),
+                totalCount = latestItems.size
             )
         }
 
@@ -164,13 +205,18 @@ class SignalASINotificationListenerService : NotificationListenerService() {
 
 data class AgentNotificationReplyResult(
     val success: Boolean,
-    val message: String
+    val message: String,
+    val code: String = "",
+    val retryable: Boolean = false,
+    val notificationPackage: String = "",
+    val notificationTitle: String = ""
 )
 
 data class AgentNotificationContext(
     val hasAccess: Boolean = false,
     val items: List<AgentNotificationItem> = emptyList(),
-    val sensitiveFlags: List<String> = emptyList()
+    val sensitiveFlags: List<String> = emptyList(),
+    val totalCount: Int = items.size
 )
 
 data class AgentNotificationItem(

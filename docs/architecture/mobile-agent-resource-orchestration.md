@@ -52,6 +52,8 @@ This contract allows the router to compare resources without pretending that a m
 
 The Android host compiles native tools, deterministic system actions, and external connectors into one `AgentRuntimeCapabilityMatrix` for every runtime context. A record can be available, require setup, be unavailable, or be policy-blocked. All records remain visible to Control Center diagnostics, while only currently available, non-blocked records are eligible for model catalogs or execution. Dynamic availability providers are resolved when a catalog or subset is created and again immediately before invocation, so revoking a permission, backgrounding a foreground-only operation, removing a runtime pack, or opening a policy circuit takes effect without restarting the Agent.
 
+Camera and microphone access use explicit foreground capture activities. They return content URIs as conversation-bound artifacts and never expose silent background capture. Notification reads are bounded and redact sensitive rows before model access. Notification replies require a live, non-sensitive free-form `RemoteInput`, reject stale targets, and report only that Android accepted the dispatch; they do not claim delivery or receipt.
+
 ## Selection strategy
 
 Hard constraints are evaluated before scoring:

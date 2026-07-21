@@ -91,6 +91,10 @@ class AgentPhoneCapabilityCatalogTest {
     @Test
     fun boundedHardwareCapabilitiesDeclareRegisteredNativeCoverage() {
         val expected = setOf(
+            AgentPhoneCapabilityId.NOTIFICATION_READ,
+            AgentPhoneCapabilityId.NOTIFICATION_REPLY,
+            AgentPhoneCapabilityId.CAMERA,
+            AgentPhoneCapabilityId.MICROPHONE,
             AgentPhoneCapabilityId.LOCATION,
             AgentPhoneCapabilityId.SENSORS,
             AgentPhoneCapabilityId.BLUETOOTH,
@@ -105,7 +109,9 @@ class AgentPhoneCapabilityCatalogTest {
         assertTrue(AgentPhoneCapabilityNativeCoverage.toolIdsByCapability.values.all { it.isNotEmpty() })
         val registeredIds = AgentHardwareNativeTools.toolIds +
             AgentAndroidSystemNativeTools.toolIds +
-            AgentWebMediaNativeTools.toolIds
+            AgentWebMediaNativeTools.toolIds +
+            AgentVisibleCaptureNativeTools.toolIds +
+            AgentNotificationNativeTools.toolIds
         assertTrue(
             AgentPhoneCapabilityNativeCoverage.toolIdsByCapability.values.flatten().all { it in registeredIds }
         )

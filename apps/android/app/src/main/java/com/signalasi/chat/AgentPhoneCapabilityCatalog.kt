@@ -130,6 +130,18 @@ data class AgentPhoneCapabilityStatus(
 
 object AgentPhoneCapabilityNativeCoverage {
     val toolIdsByCapability: Map<AgentPhoneCapabilityId, Set<String>> = mapOf(
+        AgentPhoneCapabilityId.NOTIFICATION_READ to setOf(
+            AgentNotificationNativeTools.NOTIFICATIONS_LIST
+        ),
+        AgentPhoneCapabilityId.NOTIFICATION_REPLY to setOf(
+            AgentNotificationNativeTools.NOTIFICATION_REPLY
+        ),
+        AgentPhoneCapabilityId.CAMERA to setOf(
+            AgentVisibleCaptureNativeTools.CAMERA_CAPTURE
+        ),
+        AgentPhoneCapabilityId.MICROPHONE to setOf(
+            AgentVisibleCaptureNativeTools.MICROPHONE_RECORD
+        ),
         AgentPhoneCapabilityId.LOCATION to setOf(
             AgentHardwareNativeTools.LOCATION_FOREGROUND_READ
         ),
@@ -517,14 +529,20 @@ object AgentPhoneCapabilityCatalog {
         AgentPhoneCapabilityId.NOTIFICATION_READ -> {
             val connected = SignalASINotificationListenerService.currentContext().hasAccess
             AgentPhoneCapabilityObservation(
+                implementationPresent = AgentPhoneCapabilityNativeCoverage.isImplemented(id),
                 specialAccessGranted = connected,
-                evidence = if (connected) "Notification listener connected" else "Notification listener not connected"
+                evidence = if (connected) {
+                    "Typed, bounded notification-list tool is registered and the listener is connected"
+                } else {
+                    "Notification listener not connected"
+                }
             )
         }
 
         AgentPhoneCapabilityId.NOTIFICATION_REPLY -> {
             val notificationContext = SignalASINotificationListenerService.currentContext()
             AgentPhoneCapabilityObservation(
+                implementationPresent = AgentPhoneCapabilityNativeCoverage.isImplemented(id),
                 specialAccessGranted = notificationContext.hasAccess,
                 limited = notificationContext.hasAccess,
                 evidence = when {
@@ -543,14 +561,24 @@ object AgentPhoneCapabilityCatalog {
 
         AgentPhoneCapabilityId.CAMERA -> AgentPhoneCapabilityObservation(
             platformSupported = context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY),
+            implementationPresent = AgentPhoneCapabilityNativeCoverage.isImplemented(id),
             permissionsGranted = permissionGranted(context, Manifest.permission.CAMERA),
-            evidence = permissionEvidence(context, Manifest.permission.CAMERA)
+            evidence = if (permissionGranted(context, Manifest.permission.CAMERA)) {
+                "Foreground autofocus capture tool is registered; silent background capture remains excluded"
+            } else {
+                permissionEvidence(context, Manifest.permission.CAMERA)
+            }
         )
 
         AgentPhoneCapabilityId.MICROPHONE -> AgentPhoneCapabilityObservation(
             platformSupported = context.packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE),
+            implementationPresent = AgentPhoneCapabilityNativeCoverage.isImplemented(id),
             permissionsGranted = permissionGranted(context, Manifest.permission.RECORD_AUDIO),
-            evidence = permissionEvidence(context, Manifest.permission.RECORD_AUDIO)
+            evidence = if (permissionGranted(context, Manifest.permission.RECORD_AUDIO)) {
+                "Bounded foreground recording tool is registered; silent background recording remains excluded"
+            } else {
+                permissionEvidence(context, Manifest.permission.RECORD_AUDIO)
+            }
         )
 
         AgentPhoneCapabilityId.LOCATION -> {

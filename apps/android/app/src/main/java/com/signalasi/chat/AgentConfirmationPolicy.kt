@@ -100,6 +100,9 @@ object AgentConfirmationPolicy {
     fun tier(action: AgentAction): AgentConfirmationTier {
         val value = searchableValue(action)
         val nativeToolId = action.parameters["tool_id"].orEmpty()
+        if (nativeToolId in ALWAYS_CONFIRM_NATIVE_TOOL_IDS) {
+            return AgentConfirmationTier.CONFIRM_ALWAYS
+        }
         if (nativeToolId in CONFIRM_ONCE_NATIVE_TOOL_IDS) {
             return AgentConfirmationTier.CONFIRM_ONCE
         }
@@ -186,6 +189,7 @@ object AgentConfirmationPolicy {
         AgentHardwareNativeTools.BLUETOOTH_STATUS,
         AgentHardwareNativeTools.NFC_STATUS,
         AgentHardwareNativeTools.FLASHLIGHT_SET,
+        AgentVisibleCaptureNativeTools.CAMERA_CAPTURE,
         AgentWebMediaNativeTools.WEB_SEARCH,
         AgentOnDeviceRuntimeTools.EXECUTE,
         AgentHardwareNativeTools.BLUETOOTH_PAIRING_HANDOFF,
@@ -198,11 +202,17 @@ object AgentConfirmationPolicy {
     )
 
     private val CONFIRM_ONCE_NATIVE_TOOL_IDS = setOf(
+        AgentVisibleCaptureNativeTools.MICROPHONE_RECORD,
+        AgentNotificationNativeTools.NOTIFICATIONS_LIST,
         AgentHardwareNativeTools.BLUETOOTH_DISCOVERY_FOREGROUND,
         AgentHardwareNativeTools.INSTALLED_APPS_LIST,
         AgentHardwareNativeTools.PACKAGE_DETAIL,
         AgentAndroidSystemNativeTools.WIFI_SCAN_START,
         AgentOnDeviceRuntimeTools.INSTALL_PACK
+    )
+
+    private val ALWAYS_CONFIRM_NATIVE_TOOL_IDS = setOf(
+        AgentNotificationNativeTools.NOTIFICATION_REPLY
     )
 
     private val ALWAYS_CONFIRM_TERMS = listOf(
