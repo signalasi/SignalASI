@@ -244,7 +244,8 @@ object AgentModelPlanParser {
     private fun resolveNativeTool(input: JSONObject, request: AgentRequest): Map<String, String>? {
         val toolId = input.optString("tool_id").trim()
         val descriptor = request.runtimeContext.nativeTools.firstOrNull {
-            it.id == toolId && it.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE
+            it.id == toolId &&
+                request.runtimeContext.isNativeToolExecutable(it.id)
         } ?: return null
         val arguments = input.optJSONObject("arguments") ?: JSONObject()
         val inputJson = arguments.toString()

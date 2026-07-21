@@ -118,7 +118,11 @@ class GuardedModelAgentPlanner(
                 descriptor.risk == AgentNativeToolRisk.LOW &&
                 descriptor.requiredConsents.none { it.required }
         }
-        val catalog = safeRegistry.descriptors()
+        val catalog = safeRegistry.descriptors().filter { descriptor ->
+            descriptor.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE &&
+                descriptor.risk == AgentNativeToolRisk.LOW &&
+                descriptor.requiredConsents.none { it.required }
+        }
         if (catalog.isEmpty()) {
             return CloudModelClient.sendStructured(appContext, contact, MODEL_PLANNER_SYSTEM_PROMPT, prompt)
         }
@@ -294,7 +298,7 @@ private object AgentModelPlanningPrompt {
     }
 
     private fun prioritizedNativeTools(request: AgentRequest): List<AgentNativeToolDescriptor> {
-        val tools = request.runtimeContext.nativeTools
+        val tools = request.runtimeContext.nativeTools.filter { request.runtimeContext.isNativeToolExecutable(it.id) }
         val priority = DEVELOPMENT_TOOL_PRIORITY.mapIndexed { index, id -> id to index }.toMap()
         return tools.sortedWith(
             compareBy<AgentNativeToolDescriptor> { priority[it.id] ?: Int.MAX_VALUE }

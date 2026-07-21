@@ -1521,4 +1521,13 @@
     <string name="cc_global_daily_reported_cost_title">每日已报告模型费用</string>
     <string name="cc_global_daily_reported_cost_subtitle">仅统计提供方报告的费用；当前有 %1$d 次调用未报告价格</string>
     <string name="cc_global_daily_reported_cost_status">已报告 %1$s / %2$s</string>
+    <string name="agent_audio_capture_title">录制音频</string>
+    <string name="agent_audio_capture_preparing">正在准备麦克风...</string>
+    <string name="agent_audio_capture_recording">正在录制 · 剩余 %1$d 秒</string>
+    <string name="agent_audio_capture_stop">使用录音</string>
+    <string name="agent_audio_capture_cancel">取消</string>
+    <string name="agent_audio_capture_failed">无法完成录音</string>
+    <string name="agent_audio_capture_save_failed">无法保存录音</string>
+    <string name="agent_audio_capture_permission_required">需要麦克风权限</string>
+    <string name="agent_audio_capture_request_missing">录音请求已失效</string>
 </resources>

@@ -14,6 +14,7 @@ class AgentConfirmationPolicyTest {
         assertEquals(AgentConfirmationTier.DIRECT, nativeTier(AgentAndroidSystemNativeTools.AUDIO_VOLUME_SET, "Set Android stream volume"))
         assertEquals(AgentConfirmationTier.DIRECT, nativeTier(AgentAndroidSystemNativeTools.WIFI_HOTSPOT_PANEL_OPEN, "Open hotspot settings"))
         assertEquals(AgentConfirmationTier.DIRECT, nativeTier(AgentHardwareNativeTools.BLUETOOTH_PAIRING_HANDOFF, "Open Bluetooth pairing settings"))
+        assertEquals(AgentConfirmationTier.DIRECT, nativeTier(AgentVisibleCaptureNativeTools.CAMERA_CAPTURE, "Capture a photo"))
     }
 
     @Test
@@ -29,6 +30,8 @@ class AgentConfirmationPolicyTest {
             AgentConfirmationTier.CONFIRM_ONCE,
             nativeTier(AgentHardwareNativeTools.INSTALLED_APPS_LIST, "List query-visible installed apps")
         )
+        assertEquals(AgentConfirmationTier.CONFIRM_ONCE, nativeTier(AgentVisibleCaptureNativeTools.MICROPHONE_RECORD, "Record audio"))
+        assertEquals(AgentConfirmationTier.CONFIRM_ONCE, nativeTier(AgentNotificationNativeTools.NOTIFICATIONS_LIST, "Read notifications"))
     }
 
     @Test
@@ -53,6 +56,10 @@ class AgentConfirmationPolicyTest {
         assertEquals(AgentConfirmationTier.CONFIRM_ALWAYS, tier("sms-send", AgentActionKind.CALL_NATIVE_TOOL, "Send SMS message"))
         assertEquals(AgentConfirmationTier.CONFIRM_ALWAYS, tier("delete-file", AgentActionKind.CALL_NATIVE_TOOL, "Delete file"))
         assertEquals(AgentConfirmationTier.CONFIRM_ALWAYS, tier("lock", AgentActionKind.LOCK_SCREEN, "Lock device"))
+        assertEquals(
+            AgentConfirmationTier.CONFIRM_ALWAYS,
+            nativeTier(AgentNotificationNativeTools.NOTIFICATION_REPLY, "Reply to a notification")
+        )
     }
 
     @Test

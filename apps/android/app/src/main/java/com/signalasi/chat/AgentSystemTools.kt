@@ -20,6 +20,17 @@ object AgentSystemToolPlanner {
         return lower.contains("\u62cd\u7167") || (hasCamera && hasOpenAction)
     }
 
+    internal fun isMicrophoneCaptureGoal(goal: String): Boolean {
+        val lower = goal.trim().lowercase()
+        return lower.contains("record audio") ||
+            lower.contains("record voice") ||
+            lower.contains("record with microphone") ||
+            lower.contains("use microphone to record") ||
+            lower.contains("\u5f55\u97f3") ||
+            (lower.contains("\u9ea6\u514b\u98ce") &&
+                listOf("\u8c03\u7528", "\u4f7f\u7528", "\u5f00\u59cb", "\u5f55\u5236").any(lower::contains))
+    }
+
     internal fun timerSecondsForGoal(goal: String): Int? {
         val chineseMatch = Regex("""(\d+)\s*(\u79d2\u949f?|\u5206\u949f?|\u5c0f\u65f6)""").find(goal)
         if (chineseMatch != null) {
@@ -317,12 +328,21 @@ object AgentSystemToolPlanner {
             packageName = "com.tencent.mm",
             risk = AgentRisk.MEDIUM
         )
-        isCameraCaptureGoal(goal) -> intentAction(
+        isCameraCaptureGoal(goal) -> nativeToolAction(
             id = "open-camera",
             target = "Camera",
-            description = "Open camera",
-            intentAction = MediaStore.ACTION_IMAGE_CAPTURE,
+            description = "Take one user-visible photo",
+            toolId = AgentVisibleCaptureNativeTools.CAMERA_CAPTURE,
+            input = mapOf("facing" to "back"),
             risk = AgentRisk.LOW
+        )
+        isMicrophoneCaptureGoal(goal) -> nativeToolAction(
+            id = "record-audio",
+            target = "Microphone",
+            description = "Record user-visible audio",
+            toolId = AgentVisibleCaptureNativeTools.MICROPHONE_RECORD,
+            input = mapOf("max_duration_seconds" to (timerSecondsForGoal(goal)?.coerceIn(1, 30) ?: 5)),
+            risk = AgentRisk.MEDIUM
         )
         lower.contains("open gallery") || lower.contains("open photos") -> intentAction(
             id = "open-gallery",
@@ -540,6 +560,26 @@ object AgentSystemToolPlanner {
                 if (value.isNotBlank()) put(key, value)
             }
         }
+    )
+
+    private fun nativeToolAction(
+        id: String,
+        target: String,
+        description: String,
+        toolId: String,
+        input: AgentNativeJsonObject,
+        risk: AgentRisk
+    ): AgentAction = AgentAction(
+        id = id,
+        kind = AgentActionKind.CALL_NATIVE_TOOL,
+        target = target,
+        risk = risk,
+        status = AgentActionStatus.PENDING_CONFIRMATION,
+        description = description,
+        parameters = mapOf(
+            "tool_id" to toolId,
+            "input_json" to AgentNativeJsonCodec.stringify(input)
+        )
     )
 
     private fun textEditAction(

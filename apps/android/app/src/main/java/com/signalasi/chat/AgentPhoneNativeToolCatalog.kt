@@ -122,6 +122,10 @@ object AgentPhoneNativeToolCatalog {
                 AgentHardwareNativeTools.androidFacade(context.applicationContext, clock)
             )
         ).registerAll(
+            AgentVisibleCaptureNativeTools.androidDefinitions(context.applicationContext)
+        ).registerAll(
+            AgentNotificationNativeTools.androidDefinitions(context.applicationContext, clock)
+        ).registerAll(
             AgentAndroidSystemNativeTools.definitions(context.applicationContext)
         ).registerAll(
             AgentMcpNativeTools.definitions(context.applicationContext)

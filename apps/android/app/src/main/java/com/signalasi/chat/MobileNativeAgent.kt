@@ -388,10 +388,12 @@ class MobileNativeAgent(
             renderNativeToolResult(toolId, nativeMessage, result.output, zh)
                 .ifBlank { renderedOutput }
         }
-        val richOutput = if (toolId == AgentOnDeviceRuntimeTools.EXECUTE && developmentFile.isNotBlank()) {
-            AgentRuntimeArtifactUi.richOutput(result.output, userMessage, developmentFile, zh)
-        } else {
-            ""
+        val richOutput = when {
+            toolId == AgentOnDeviceRuntimeTools.EXECUTE && developmentFile.isNotBlank() ->
+                AgentRuntimeArtifactUi.richOutput(result.output, userMessage, developmentFile, zh)
+            toolId in AgentVisibleCaptureNativeTools.toolIds && result.isSuccess ->
+                captureArtifactRichOutput(toolId, result.output, zh)
+            else -> ""
         }
         return AgentActionResult(
             actionId = action.id,
@@ -493,6 +495,15 @@ class MobileNativeAgent(
         fun number(name: String) = (output[name] as? Number)?.toDouble()
         fun text(name: String) = output[name]?.toString().orEmpty()
         return when (toolId) {
+            AgentVisibleCaptureNativeTools.CAMERA_CAPTURE ->
+                "Photo captured and attached."
+            AgentVisibleCaptureNativeTools.MICROPHONE_RECORD -> {
+                val durationSeconds = ((long("duration_ms") ?: 0L) / 1_000.0)
+                "Audio recorded and attached (${String.format(Locale.US, "%.1f", durationSeconds)} s)."
+            }
+            AgentNotificationNativeTools.NOTIFICATIONS_LIST -> renderNotificationList(output, zh = false)
+            AgentNotificationNativeTools.NOTIFICATION_REPLY ->
+                "The reply was dispatched to ${text("target_title").ifBlank { text("package_name") }.ifBlank { "the notification" }}. Android did not provide a delivery receipt."
             AgentHardwareNativeTools.BATTERY_STATUS -> {
                 val percent = long("percent")?.toString() ?: "unknown"
                 val charging = bool("charging")
@@ -824,6 +835,15 @@ class MobileNativeAgent(
         fun number(name: String) = (output[name] as? Number)?.toDouble()
         fun text(name: String) = output[name]?.toString().orEmpty()
         return when (toolId) {
+            AgentVisibleCaptureNativeTools.CAMERA_CAPTURE ->
+                "\u5df2\u62cd\u6444\u7167\u7247\u5e76\u6dfb\u52a0\u5230\u5f53\u524d\u4f1a\u8bdd\u3002"
+            AgentVisibleCaptureNativeTools.MICROPHONE_RECORD -> {
+                val durationSeconds = ((long("duration_ms") ?: 0L) / 1_000.0)
+                "\u5df2\u5f55\u5236\u8bed\u97f3\u5e76\u6dfb\u52a0\u5230\u5f53\u524d\u4f1a\u8bdd\uff08${String.format(Locale.US, "%.1f", durationSeconds)} \u79d2\uff09\u3002"
+            }
+            AgentNotificationNativeTools.NOTIFICATIONS_LIST -> renderNotificationList(output, zh = true)
+            AgentNotificationNativeTools.NOTIFICATION_REPLY ->
+                "\u5df2\u5c06\u56de\u590d\u4ea4\u7ed9 ${text("target_title").ifBlank { text("package_name") }.ifBlank { "\u8be5\u901a\u77e5" }} \u53d1\u9001\u3002Android \u672a\u63d0\u4f9b\u9001\u8fbe\u56de\u6267\u3002"
             AgentHardwareNativeTools.BATTERY_STATUS -> {
                 val percent = long("percent")?.toString() ?: "\u672a\u77e5"
                 when {
@@ -927,6 +947,69 @@ class MobileNativeAgent(
                 else "The operation did not complete. Check the current device state and try again."
             }
         }
+    }
+
+    private fun renderNotificationList(output: AgentNativeJsonObject, zh: Boolean): String {
+        val notifications = (output["notifications"] as? Iterable<*>)
+            ?.mapNotNull { it as? Map<*, *> }
+            .orEmpty()
+        if (notifications.isEmpty()) {
+            return if (zh) "\u5f53\u524d\u6ca1\u6709\u53ef\u8bfb\u7684\u901a\u77e5\u3002" else "There are no readable notifications right now."
+        }
+        val lines = notifications.map { row ->
+            val redacted = row["redacted"] as? Boolean == true
+            val packageName = row["package_name"]?.toString().orEmpty()
+            if (redacted) {
+                if (zh) "- $packageName\uff1a\u654f\u611f\u5185\u5bb9\u5df2\u9690\u85cf" else "- $packageName: sensitive content hidden"
+            } else {
+                val title = row["title"]?.toString().orEmpty().ifBlank { packageName }
+                val preview = row["text_preview"]?.toString().orEmpty().replace(Regex("\\s+"), " ").take(160)
+                "- $title${preview.takeIf(String::isNotBlank)?.let { ": $it" }.orEmpty()}"
+            }
+        }
+        val heading = if (zh) "\u5f53\u524d\u901a\u77e5\uff1a" else "Current notifications:"
+        val suffix = if (output["truncated"] as? Boolean == true) {
+            if (zh) "\n- \u5176\u4ed6\u901a\u77e5\u5df2\u7701\u7565" else "\n- More notifications omitted"
+        } else ""
+        return "$heading\n${lines.joinToString("\n")}$suffix"
+    }
+
+    private fun captureArtifactRichOutput(
+        toolId: String,
+        output: AgentNativeJsonObject,
+        zh: Boolean
+    ): String {
+        val uri = output["content_uri"]?.toString().orEmpty()
+        if (uri.isBlank()) return ""
+        val isPhoto = toolId == AgentVisibleCaptureNativeTools.CAMERA_CAPTURE
+        val title = when {
+            isPhoto && zh -> "\u5df2\u62cd\u6444\u7167\u7247"
+            isPhoto -> "Captured photo"
+            zh -> "\u5df2\u5f55\u5236\u8bed\u97f3"
+            else -> "Recorded audio"
+        }
+        val message = when {
+            isPhoto && zh -> "\u5df2\u62cd\u6444\u7167\u7247\u5e76\u6dfb\u52a0\u5230\u5f53\u524d\u4f1a\u8bdd\u3002"
+            isPhoto -> "Photo captured and attached."
+            zh -> "\u5df2\u5f55\u5236\u8bed\u97f3\u5e76\u6dfb\u52a0\u5230\u5f53\u524d\u4f1a\u8bdd\u3002"
+            else -> "Audio recorded and attached."
+        }
+        val mediaBlock = AgentRichBlock(
+            id = "visible-capture:${AgentNativeJsonCodec.sha256(uri).take(24)}",
+            type = if (isPhoto) AgentRichBlockType.IMAGE else AgentRichBlockType.AUDIO,
+            title = title,
+            uri = uri,
+            mimeType = output["mime_type"]?.toString().orEmpty(),
+            fallbackText = title,
+            metadata = mapOf(
+                "user_visible" to "true",
+                "size_bytes" to ((output["size_bytes"] as? Number)?.toLong() ?: 0L).toString(),
+                "width_px" to ((output["width_px"] as? Number)?.toInt() ?: 0).toString(),
+                "height_px" to ((output["height_px"] as? Number)?.toInt() ?: 0).toString(),
+                "duration_ms" to ((output["duration_ms"] as? Number)?.toLong() ?: 0L).toString()
+            )
+        )
+        return AgentRichContentCodec.encode(AgentRichContentCodec.fromText(message) + mediaBlock)
     }
 
     private fun formatBytes(bytes: Long): String {
@@ -5830,22 +5913,30 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             )
             lower.contains("read notifications") || lower.contains("scan notifications") -> AgentAction(
                 id = "read-notifications",
-                kind = AgentActionKind.READ_SCREEN,
+                kind = AgentActionKind.CALL_NATIVE_TOOL,
                 target = "Notification Context",
-                risk = AgentRisk.LOW,
+                risk = AgentRisk.MEDIUM,
                 status = AgentActionStatus.PENDING_CONFIRMATION,
-                description = "Read current notification context"
+                description = "Read current notification context",
+                parameters = mapOf(
+                    "tool_id" to AgentNotificationNativeTools.NOTIFICATIONS_LIST,
+                    "input_json" to AgentNativeJsonCodec.stringify(mapOf("limit" to 6))
+                )
             )
             lower.contains("read sms") ||
                 lower.contains("read messages") ||
                 lower.contains("read calls") ||
                 lower.contains("missed calls") -> AgentAction(
                     id = "read-notifications",
-                    kind = AgentActionKind.READ_SCREEN,
+                    kind = AgentActionKind.CALL_NATIVE_TOOL,
                     target = "Communication Notifications",
-                    risk = AgentRisk.LOW,
+                    risk = AgentRisk.MEDIUM,
                     status = AgentActionStatus.PENDING_CONFIRMATION,
-                    description = "Read current communication notification context"
+                    description = "Read current communication notification context",
+                    parameters = mapOf(
+                        "tool_id" to AgentNotificationNativeTools.NOTIFICATIONS_LIST,
+                        "input_json" to AgentNativeJsonCodec.stringify(mapOf("limit" to 6))
+                    )
                 )
             lower.contains("device status") ||
                 lower.contains("phone status") ||
@@ -6143,7 +6234,8 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             AgentResourceRouter(appContext).route(
                 goal = request.goal,
                 targets = request.targets,
-                tools = request.runtimeContext.systemTools
+                tools = request.runtimeContext.systemTools,
+                nativeTools = request.runtimeContext.nativeTools
             )
         }
         val available = request.targets.filter { target ->
@@ -6204,7 +6296,8 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             } ?: return null
         val explicitResource = AgentResourceCatalog.build(
             request.targets,
-            request.runtimeContext.systemTools
+            request.runtimeContext.systemTools,
+            request.runtimeContext.nativeTools
         ).firstOrNull { it.targetId == target.id }
         if (AgentTaskRequirementAnalyzer.analyze(request.goal).localOnly &&
             explicitResource?.location == AgentResourceLocation.CLOUD
@@ -6215,7 +6308,8 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             AgentResourceRouter(appContext).route(
                 goal = request.goal,
                 targets = request.targets,
-                tools = request.runtimeContext.systemTools
+                tools = request.runtimeContext.systemTools,
+                nativeTools = request.runtimeContext.nativeTools
             )
         }?.let { decision ->
             val ordered = listOfNotNull(decision.primary) + decision.fallbacks
@@ -6288,7 +6382,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         val risk = if (blockedReason.isNotBlank()) AgentRisk.BLOCKED else AgentRisk.HIGH
         return AgentAction(
             id = "reply-notification",
-            kind = AgentActionKind.REPLY_NOTIFICATION,
+            kind = AgentActionKind.CALL_NATIVE_TOOL,
             target = item?.title?.ifBlank { item.packageName } ?: query,
             risk = risk,
             status = AgentActionStatus.PENDING_CONFIRMATION,
@@ -6298,9 +6392,15 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 "Reply to ${item.title.ifBlank { item.packageName }}"
             },
             parameters = mapOf(
+                "tool_id" to AgentNotificationNativeTools.NOTIFICATION_REPLY,
+                "input_json" to AgentNativeJsonCodec.stringify(
+                    mapOf(
+                        "notification_key" to item?.key.orEmpty(),
+                        "reply_text" to replyText
+                    )
+                ),
                 "notification_key" to item?.key.orEmpty(),
                 "notification_package" to item?.packageName.orEmpty(),
-                "reply_text" to replyText,
                 "blocked_reason" to blockedReason
             )
         )

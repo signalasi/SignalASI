@@ -30,7 +30,7 @@ class AgentWebMediaNativeToolsTest {
         )
 
         assertEquals(AgentNativeToolResultStatus.UNAVAILABLE, result.status)
-        assertEquals("tool_unavailable", result.error?.code)
+        assertEquals("tool_blocked", result.error?.code)
         assertTrue(result.error?.message.orEmpty().contains("FFmpeg"))
         setOf(
             AgentWebMediaNativeTools.WEB_SEARCH,

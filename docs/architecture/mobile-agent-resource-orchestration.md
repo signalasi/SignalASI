@@ -50,6 +50,10 @@ This contract allows the router to compare resources without pretending that a m
 6. Execute through the normal safety and confirmation layer. Record success, failure, and latency for future routing.
 7. Validate the result. Tasks requiring changing information must contain live grounding; device tasks must report an observed controller result; screen actions must be verified against the resulting screen.
 
+The Android host compiles native tools, deterministic system actions, and external connectors into one `AgentRuntimeCapabilityMatrix` for every runtime context. A record can be available, require setup, be unavailable, or be policy-blocked. All records remain visible to Control Center diagnostics, while only currently available, non-blocked records are eligible for model catalogs or execution. Dynamic availability providers are resolved when a catalog or subset is created and again immediately before invocation, so revoking a permission, backgrounding a foreground-only operation, removing a runtime pack, or opening a policy circuit takes effect without restarting the Agent.
+
+Camera and microphone access use explicit foreground capture activities. They return content URIs as conversation-bound artifacts and never expose silent background capture. Notification reads are bounded and redact sensitive rows before model access. Notification replies require a live, non-sensitive free-form `RemoteInput`, reject stale targets, and report only that Android accepted the dispatch; they do not claim delivery or receipt.
+
 ## Selection strategy
 
 Hard constraints are evaluated before scoring:
@@ -127,7 +131,7 @@ Token cost is not optimized in isolation. The router first protects correctness 
 
 The phone records per-resource successes, failures, consecutive failures, and average end-to-end latency. Three consecutive failures open a short circuit so new tasks immediately choose another compatible resource. A successful response closes the failure streak. Pairing, API configuration, encrypted session state, and controller configuration are checked before a target becomes eligible.
 
-When all compatible resources are unavailable, SignalASI returns a setup or availability result instead of sending the task to an unrelated provider. This is especially important for private data and device operations.
+When all compatible resources are unavailable, SignalASI returns a setup or availability result instead of sending the task to an unrelated provider. This is especially important for private data and device operations. Control Center reports exact live tool states and partial category ratios instead of marking an entire category available when only one member works.
 
 ## Current implementation boundary
 

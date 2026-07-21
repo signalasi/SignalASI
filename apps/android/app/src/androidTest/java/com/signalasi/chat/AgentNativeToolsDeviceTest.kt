@@ -15,6 +15,9 @@ import java.io.File
 import java.util.Base64
 import java.util.UUID
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -59,7 +62,7 @@ class AgentNativeToolsDeviceTest {
     @Test
     fun testAllRegisteredPhoneToolsOnDevice() {
         val descriptors = registry.descriptors()
-        assertEquals("The native tool inventory changed; update the device matrix", 97, descriptors.size)
+        assertEquals("The native tool inventory changed; update the device matrix", 101, descriptors.size)
 
         runWorkspaceLifecycle()
         descriptors
@@ -70,6 +73,40 @@ class AgentNativeToolsDeviceTest {
         assertEquals(descriptors.map { it.id }.toSet(), testedIds)
         writeReport(descriptors.size)
         temporaryUris.forEach { uri -> runCatching { instrumentation.targetContext.contentResolver.delete(uri, null, null) } }
+    }
+
+    @Test
+    fun runtimeCapabilityMatrixMatchesLiveDeviceAvailability() {
+        val descriptors = registry.descriptors()
+        val snapshot = AgentRuntimeCapabilityMatrix.build(
+            nativeTools = descriptors,
+            systemTools = AgentSystemToolPlanner.availableTools(),
+            targets = emptyList()
+        )
+        val expectedExecutable = descriptors.filter {
+            it.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE &&
+                it.risk != AgentNativeToolRisk.BLOCKED
+        }.mapTo(linkedSetOf()) { it.id }
+
+        assertEquals(expectedExecutable, snapshot.availableNativeToolIds)
+        descriptors.filter {
+            it.availability.status != AgentNativeToolAvailabilityStatus.AVAILABLE ||
+                it.risk == AgentNativeToolRisk.BLOCKED
+        }.forEach { descriptor ->
+            assertFalse(descriptor.id, snapshot.isNativeToolExecutable(descriptor.id))
+        }
+
+        val statuses = AgentPhoneCapabilityCatalog.probe(instrumentation.targetContext).associateBy {
+            it.boundary.id
+        }
+        AgentPhoneCapabilityNativeCoverage.toolIdsByCapability.keys.forEach { capabilityId ->
+            assertNotEquals(
+                capabilityId.name,
+                AgentPhoneCapabilityAvailability.NOT_IMPLEMENTED,
+                statuses.getValue(capabilityId).availability
+            )
+        }
+        assertTrue(snapshot.entries.any { it.source == AgentRuntimeCapabilitySource.SYSTEM_TOOL })
     }
 
     private fun testRegisteredTool(descriptor: AgentNativeToolDescriptor) {
@@ -94,6 +131,7 @@ class AgentNativeToolsDeviceTest {
             AgentAndroidSystemNativeTools.BIOMETRIC_STATUS,
             AgentAndroidSystemNativeTools.VPN_STATUS,
             AgentAndroidSystemNativeTools.DEVICE_POLICY_STATUS,
+            AgentNotificationNativeTools.NOTIFICATIONS_LIST,
             AgentWebMediaNativeTools.WEB_SEARCH,
             AgentWebMediaNativeTools.WEB_OPEN,
             AgentWebMediaNativeTools.BROWSER_RENDER,
@@ -119,6 +157,8 @@ class AgentNativeToolsDeviceTest {
             )
 
             AgentHardwareNativeTools.FLASHLIGHT_SET -> testFlashlight(descriptor)
+            AgentVisibleCaptureNativeTools.CAMERA_CAPTURE,
+            AgentVisibleCaptureNativeTools.MICROPHONE_RECORD -> testVisibleCapture(descriptor)
             AgentAndroidSystemNativeTools.AUDIO_VOLUME_SET -> testVolumeWithoutChangingState(descriptor)
             AgentAndroidSystemNativeTools.AUDIO_MUTE_SET -> testMuteWithoutChangingState(descriptor)
             AgentAndroidSystemNativeTools.DOWNLOAD_ENQUEUE -> testDownloadManagerLifecycle(descriptor)
@@ -195,6 +235,13 @@ class AgentNativeToolsDeviceTest {
         val music = ((status.output["streams"] as? Map<*, *>)?.get("music") as? Map<*, *>)
         val muted = music?.get("muted") as? Boolean ?: false
         execute(descriptor, mapOf("stream" to "music", "muted" to muted), "real_control_same_value")
+    }
+
+    private fun testVisibleCapture(descriptor: AgentNativeToolDescriptor) {
+        val result = invoke(descriptor, inputFor(descriptor.id))
+        val uri = result.output["content_uri"]?.toString()?.takeIf { it.isNotBlank() }?.let(Uri::parse)
+        if (uri != null) temporaryUris += uri
+        record(descriptor, "real_user_visible_capture", result)
     }
 
     private fun testDownloadManagerLifecycle(enqueueDescriptor: AgentNativeToolDescriptor) {
@@ -343,6 +390,13 @@ class AgentNativeToolsDeviceTest {
             AgentWebMediaNativeTools.MEDIA_METADATA -> mapOf("content_uri" to "content://invalid/device-test")
             AgentWebMediaNativeTools.MEDIA_PLAYBACK_HANDOFF -> mapOf("content_uri" to "content://invalid/device-test")
             AgentWebMediaNativeTools.MEDIA_FFMPEG_TRANSCODE -> mapOf("content_uri" to "content://invalid/device-test", "target_format" to "mp3")
+            AgentVisibleCaptureNativeTools.CAMERA_CAPTURE -> mapOf("facing" to "back")
+            AgentVisibleCaptureNativeTools.MICROPHONE_RECORD -> mapOf("max_duration_seconds" to 1)
+            AgentNotificationNativeTools.NOTIFICATIONS_LIST -> mapOf("limit" to 6, "reply_capable_only" to false)
+            AgentNotificationNativeTools.NOTIFICATION_REPLY -> mapOf(
+                "notification_key" to "signalasi-device-test-notification",
+                "reply_text" to "SignalASI device test"
+            )
             else -> genericInput(requireNotNull(registry.lookup(id)).descriptor.inputSchema.document)
         }
     }

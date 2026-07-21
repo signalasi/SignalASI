@@ -1612,4 +1612,13 @@
     <string name="cc_global_daily_reported_cost_title">Daily reported model spend</string>
     <string name="cc_global_daily_reported_cost_subtitle">Only provider-reported cost is counted; %1$d calls currently have no reported price</string>
     <string name="cc_global_daily_reported_cost_status">%1$s / %2$s reported</string>
+    <string name="agent_audio_capture_title">Audio capture</string>
+    <string name="agent_audio_capture_preparing">Preparing the microphone...</string>
+    <string name="agent_audio_capture_recording">Recording · %1$d s remaining</string>
+    <string name="agent_audio_capture_stop">Use recording</string>
+    <string name="agent_audio_capture_cancel">Cancel</string>
+    <string name="agent_audio_capture_failed">Could not complete the recording</string>
+    <string name="agent_audio_capture_save_failed">Could not save the recording</string>
+    <string name="agent_audio_capture_permission_required">Microphone permission is required</string>
+    <string name="agent_audio_capture_request_missing">The recording request is no longer active</string>
 </resources>

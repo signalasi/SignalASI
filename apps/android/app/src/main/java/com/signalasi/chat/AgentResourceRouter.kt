@@ -91,7 +91,8 @@ data class AgentRoutingDecision(
     val requirements: AgentTaskRequirements,
     val primary: AgentResourceCandidate?,
     val fallbacks: List<AgentResourceCandidate>,
-    val environment: AgentRuntimeEnvironment = AgentRuntimeEnvironment()
+    val environment: AgentRuntimeEnvironment = AgentRuntimeEnvironment(),
+    val catalog: List<AgentResourceDescriptor> = emptyList()
 ) {
     val orderedTargetIds: List<String>
         get() = listOfNotNull(primary?.resource?.targetId?.takeIf { it.isNotBlank() }) +
@@ -388,9 +389,15 @@ object AgentRuntimeEnvironmentProbe {
 }
 
 object AgentResourceCatalog {
-    fun build(targets: List<AgentCallableTarget>, tools: List<AgentSystemTool>): List<AgentResourceDescriptor> {
+    fun build(
+        targets: List<AgentCallableTarget>,
+        tools: List<AgentSystemTool>,
+        nativeTools: List<AgentNativeToolDescriptor> = emptyList()
+    ): List<AgentResourceDescriptor> {
+        val capabilityMatrix = AgentRuntimeCapabilityMatrix.build(nativeTools, tools, targets)
         val callable = targets.map(::fromTarget)
         val localTools = tools.map { tool ->
+            val capability = capabilityMatrix.entry(AgentRuntimeCapabilitySource.SYSTEM_TOOL, tool.id)
             AgentResourceDescriptor(
                 id = "tool:${tool.id}",
                 title = tool.title,
@@ -400,7 +407,7 @@ object AgentResourceCatalog {
                     else -> AgentResourceType.LOCAL_TOOL
                 },
                 location = AgentResourceLocation.PHONE,
-                status = AgentConnectorStatus.AVAILABLE,
+                status = capability?.state.toConnectorStatus(),
                 capabilities = tool.capabilities.toSet(),
                 cost = AgentResourceCost.FREE,
                 latency = AgentResourceLatency.INSTANT,
@@ -415,7 +422,81 @@ object AgentResourceCatalog {
                 failureDomain = "phone"
             )
         }
-        return callable + localTools
+        val registeredNativeTools = nativeTools.map { tool ->
+            fromNativeTool(
+                tool,
+                capabilityMatrix.entry(AgentRuntimeCapabilitySource.NATIVE_TOOL, tool.id)
+            )
+        }
+        return callable + localTools + registeredNativeTools
+    }
+
+    private fun fromNativeTool(
+        tool: AgentNativeToolDescriptor,
+        capability: AgentRuntimeCapabilityEntry?
+    ): AgentResourceDescriptor = AgentResourceDescriptor(
+        id = "native:${tool.id}",
+        title = tool.title,
+        type = when {
+            tool.id.contains(".mcp.") || tool.id.startsWith("mcp.") -> AgentResourceType.LOCAL_MCP
+            tool.id.contains(".skill.") || tool.id.startsWith("skill.") -> AgentResourceType.LOCAL_SKILL
+            else -> AgentResourceType.LOCAL_TOOL
+        },
+        location = AgentResourceLocation.PHONE,
+        status = capability?.state.toConnectorStatus(),
+        capabilities = nativeCapabilities(tool),
+        cost = AgentResourceCost.FREE,
+        latency = AgentResourceLatency.INSTANT,
+        quality = AgentResourceQuality.STANDARD,
+        supportsTools = true,
+        trust = AgentResourceTrust.PHONE_SYSTEM,
+        energy = if (tool.id.contains("runtime") || tool.id.contains("ffmpeg")) {
+            AgentResourceEnergy.HIGH
+        } else {
+            AgentResourceEnergy.MINIMAL
+        },
+        contextWindowTokens = 0,
+        supportsStreaming = false,
+        supportsBackground = tool.location == AgentNativeToolLocation.APPLICATION,
+        maxParallelTasks = 4,
+        failureDomain = "phone"
+    )
+
+    private fun nativeCapabilities(tool: AgentNativeToolDescriptor): Set<AgentCapability> {
+        val text = (tool.id + " " + tool.capabilities.joinToString(" ")).lowercase(Locale.US)
+        return buildSet {
+            add(AgentCapability.TOOL_USE)
+            if (listOf("web", "http", "browser", "network").any(text::contains)) {
+                add(AgentCapability.LIVE_DATA)
+            }
+            if (listOf("web", "research", "search").any(text::contains)) add(AgentCapability.RESEARCH)
+            if (listOf("workspace", "runtime", "python", "node", "compile", "ffmpeg").any(text::contains)) {
+                add(AgentCapability.CODE)
+                add(AgentCapability.TASK_EXECUTION)
+            }
+            if (text.contains("mcp")) add(AgentCapability.MCP)
+            if (text.contains("skill")) add(AgentCapability.SKILL)
+            if (text.contains("screen") || text.contains("ocr")) add(AgentCapability.SCREEN_READING)
+            if (text.contains("clipboard")) add(AgentCapability.CLIPBOARD)
+            if (text.contains("settings")) add(AgentCapability.SYSTEM_SETTINGS)
+            if (text.contains("app") || text.contains("package")) add(AgentCapability.APP_NAVIGATION)
+            if (text.contains("alarm") || text.contains("timer")) add(AgentCapability.ALARM)
+            if (listOf(
+                    "hardware", "device", "location", "sensor", "bluetooth", "nfc", "wifi",
+                    "audio", "telephony", "sms", "contact", "calendar", "battery", "power", "storage"
+                ).any(text::contains)
+            ) {
+                add(AgentCapability.DEVICE_CONTROL)
+            }
+        }
+    }
+
+    private fun AgentRuntimeCapabilityState?.toConnectorStatus(): AgentConnectorStatus = when (this) {
+        AgentRuntimeCapabilityState.AVAILABLE -> AgentConnectorStatus.AVAILABLE
+        AgentRuntimeCapabilityState.REQUIRES_SETUP -> AgentConnectorStatus.NEEDS_SETUP
+        AgentRuntimeCapabilityState.UNAVAILABLE,
+        AgentRuntimeCapabilityState.BLOCKED,
+        null -> AgentConnectorStatus.DISCONNECTED
     }
 
     private fun fromTarget(target: AgentCallableTarget): AgentResourceDescriptor {
@@ -508,7 +589,12 @@ class AgentResourceRouter(context: Context) {
     private val modelUsageStore = GlobalModelCallBudgetStore(appContext)
     private val selfModelStore = AgentSelfModelStore(appContext)
 
-    fun route(goal: String, targets: List<AgentCallableTarget>, tools: List<AgentSystemTool>): AgentRoutingDecision {
+    fun route(
+        goal: String,
+        targets: List<AgentCallableTarget>,
+        tools: List<AgentSystemTool>,
+        nativeTools: List<AgentNativeToolDescriptor> = emptyList()
+    ): AgentRoutingDecision {
         val requirements = AgentTaskRequirementAnalyzer.analyze(goal)
         val environment = AgentRuntimeEnvironmentProbe.probe(appContext)
         val hasPairedDesktop = SignalASILinkProtocol.allServerLinks(appContext).any { it.paired }
@@ -516,7 +602,8 @@ class AgentResourceRouter(context: Context) {
         val registrations = EncryptedAgentRegistry(appContext).list()
         val observedUsage = modelUsageStore.resourceUsageSnapshots()
         val selfModel = selfModelStore.snapshot()
-        val candidates = AgentResourceCatalog.build(targets, tools)
+        val catalog = AgentResourceCatalog.build(targets, tools, nativeTools)
+        val candidates = catalog
             .asSequence()
             .map { resource -> projectRegistration(resource, registrations) }
             .filter { it.targetId.isNotBlank() }
@@ -555,7 +642,7 @@ class AgentResourceRouter(context: Context) {
                     .thenByDescending { it.score }
             )
             .take(fallbackLimit)
-        return AgentRoutingDecision(requirements, primary, fallbacks, environment)
+        return AgentRoutingDecision(requirements, primary, fallbacks, environment, catalog)
     }
 
     private fun projectRegistration(

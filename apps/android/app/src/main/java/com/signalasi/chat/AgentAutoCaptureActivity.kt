@@ -47,15 +47,25 @@ class AgentAutoCaptureActivity : Activity(), TextureView.SurfaceTextureListener 
     private var previewRequest: CaptureRequest.Builder? = null
     private var cameraId: String = ""
     private var sensorOrientation: Int = 90
+    private var lensFacing: Int = CameraCharacteristics.LENS_FACING_BACK
     private var supportsAutoFocus = false
     private var openingCamera = false
+    private var requestId: String = ""
+    private var requestedFacing: String = "back"
+    private var captureWidth: Int = 0
+    private var captureHeight: Int = 0
     private val captureStarted = AtomicBoolean(false)
+    private val outcomeReported = AtomicBoolean(false)
     private var workerThread: HandlerThread? = null
     private var worker: Handler? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (!acceptCaptureLaunch()) {
+        requestId = intent.getStringExtra(AgentVisibleCaptureContract.EXTRA_REQUEST_ID).orEmpty()
+        requestedFacing = intent.getStringExtra(AgentVisibleCaptureContract.EXTRA_CAMERA_FACING)
+            ?.takeIf { it in setOf("back", "front", "any") }
+            ?: "back"
+        if (requestId.isBlank() && !acceptCaptureLaunch()) {
             Log.i(LOG_TAG, "Ignoring duplicate automatic capture launch")
             finish()
             return
@@ -78,6 +88,15 @@ class AgentAutoCaptureActivity : Activity(), TextureView.SurfaceTextureListener 
             addView(status, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
         }
         setContentView(root)
+        if (requestId.isNotBlank() && !AgentVisibleCaptureCoordinator.attach(
+                requestId,
+                AgentVisibleCaptureKind.PHOTO,
+                this
+            )
+        ) {
+            failAndFinish("The camera capture request is no longer active", "capture_request_missing")
+            return
+        }
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA)
         }
@@ -94,6 +113,18 @@ class AgentAutoCaptureActivity : Activity(), TextureView.SurfaceTextureListener 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         Log.i(LOG_TAG, "Ignoring duplicate automatic capture intent")
+    }
+
+    @Deprecated("Deprecated in Android")
+    override fun onBackPressed() {
+        reportOutcome(
+            AgentVisibleCaptureOutcome(
+                AgentVisibleCaptureStatus.CANCELLED,
+                code = "capture_cancelled",
+                message = "The user cancelled the photo capture"
+            )
+        )
+        super.onBackPressed()
     }
 
     override fun onPause() {
@@ -120,17 +151,26 @@ class AgentAutoCaptureActivity : Activity(), TextureView.SurfaceTextureListener 
     @SuppressLint("MissingPermission")
     private fun openCamera() {
         if (openingCamera || cameraDevice != null || checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
-        val selected = cameraManager.cameraIdList
+        val candidates = cameraManager.cameraIdList
             .map { it to cameraManager.getCameraCharacteristics(it) }
-            .firstOrNull { (_, characteristics) ->
-                characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
-            } ?: cameraManager.cameraIdList.firstOrNull()?.let { it to cameraManager.getCameraCharacteristics(it) }
+        val desiredFacing = when (requestedFacing) {
+            "front" -> CameraCharacteristics.LENS_FACING_FRONT
+            "back" -> CameraCharacteristics.LENS_FACING_BACK
+            else -> null
+        }
+        val selected = desiredFacing?.let { facing ->
+            candidates.firstOrNull { (_, characteristics) ->
+                characteristics.get(CameraCharacteristics.LENS_FACING) == facing
+            }
+        } ?: candidates.firstOrNull()
         if (selected == null) {
             failAndFinish(getString(R.string.agent_camera_unavailable))
             return
         }
         cameraId = selected.first
         val characteristics = selected.second
+        lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING)
+            ?: CameraCharacteristics.LENS_FACING_BACK
         sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
         val modes = characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: intArrayOf()
         supportsAutoFocus = modes.contains(CaptureRequest.CONTROL_AF_MODE_AUTO)
@@ -144,6 +184,8 @@ class AgentAutoCaptureActivity : Activity(), TextureView.SurfaceTextureListener 
             failAndFinish(getString(R.string.agent_camera_unavailable))
             return
         }
+        captureWidth = captureSize.width
+        captureHeight = captureSize.height
         imageReader = ImageReader.newInstance(captureSize.width, captureSize.height, android.graphics.ImageFormat.JPEG, 2).apply {
             setOnImageAvailableListener({ reader ->
                 val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
@@ -157,6 +199,21 @@ class AgentAutoCaptureActivity : Activity(), TextureView.SurfaceTextureListener 
                 }
                 runOnUiThread {
                     status.text = getString(R.string.agent_camera_saved)
+                    reportOutcome(
+                        AgentVisibleCaptureOutcome(
+                            AgentVisibleCaptureStatus.SUCCEEDED,
+                            artifact = AgentVisibleCaptureArtifact(
+                                kind = AgentVisibleCaptureKind.PHOTO,
+                                contentUri = uri.toString(),
+                                mimeType = "image/jpeg",
+                                sizeBytes = bytes.size.toLong(),
+                                widthPixels = captureWidth,
+                                heightPixels = captureHeight,
+                                capturedAtEpochMillis = System.currentTimeMillis(),
+                                completedBy = "autofocus_capture"
+                            )
+                        )
+                    )
                     setResult(RESULT_OK, android.content.Intent().setData(uri))
                     status.postDelayed(::finish, 700L)
                 }
@@ -260,7 +317,11 @@ class AgentAutoCaptureActivity : Activity(), TextureView.SurfaceTextureListener 
             Surface.ROTATION_270 -> 180
             else -> 90
         }
-        return (deviceOrientation + sensorOrientation + 270) % 360
+        return if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+            (sensorOrientation - deviceOrientation + 360) % 360
+        } else {
+            (deviceOrientation + sensorOrientation + 270) % 360
+        }
     }
 
     private fun savePhoto(bytes: ByteArray): Uri {
@@ -285,9 +346,21 @@ class AgentAutoCaptureActivity : Activity(), TextureView.SurfaceTextureListener 
         return Uri.fromFile(file)
     }
 
-    private fun failAndFinish(message: String) {
+    private fun failAndFinish(message: String, code: String = "camera_capture_failed") {
+        reportOutcome(
+            AgentVisibleCaptureOutcome(
+                AgentVisibleCaptureStatus.FAILED,
+                code = code,
+                message = message
+            )
+        )
         status.text = message
         status.postDelayed(::finish, 1_200L)
+    }
+
+    private fun reportOutcome(outcome: AgentVisibleCaptureOutcome) {
+        if (requestId.isBlank() || !outcomeReported.compareAndSet(false, true)) return
+        AgentVisibleCaptureCoordinator.complete(requestId, outcome)
     }
 
     private fun closeCamera() {
@@ -311,6 +384,19 @@ class AgentAutoCaptureActivity : Activity(), TextureView.SurfaceTextureListener 
         runCatching { workerThread?.join(1_000L) }
         workerThread = null
         worker = null
+    }
+
+    override fun onDestroy() {
+        if (requestId.isNotBlank() && !outcomeReported.get()) {
+            reportOutcome(
+                AgentVisibleCaptureOutcome(
+                    AgentVisibleCaptureStatus.CANCELLED,
+                    code = "capture_surface_closed",
+                    message = "The visible camera surface closed before capture completed"
+                )
+            )
+        }
+        super.onDestroy()
     }
 
     private companion object {

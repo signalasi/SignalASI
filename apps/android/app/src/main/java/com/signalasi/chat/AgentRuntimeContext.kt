@@ -13,10 +13,28 @@ data class AgentRuntimeContext(
     val memories: List<AgentMemoryItem>,
     val knowledgeItems: List<AgentKnowledgeItem>,
     val knowledgeStats: AgentKnowledgeStats,
-    val createdAtMillis: Long = System.currentTimeMillis()
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val capabilityMatrix: AgentRuntimeCapabilitySnapshot = AgentRuntimeCapabilitySnapshot.EMPTY
 ) {
     val callableCount: Int
-        get() = nativeTools.size + callableTargets.size
+        get() = if (capabilityMatrix.entries.isEmpty()) {
+            nativeTools.count { it.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE } +
+                callableTargets.count { it.status == AgentConnectorStatus.AVAILABLE }
+        } else {
+            capabilityMatrix.availableEntries.count {
+                it.source == AgentRuntimeCapabilitySource.NATIVE_TOOL ||
+                    it.source == AgentRuntimeCapabilitySource.CONNECTOR
+            }
+        }
+
+    fun isNativeToolExecutable(id: String): Boolean = if (capabilityMatrix.entries.isEmpty()) {
+        nativeTools.firstOrNull { it.id == id }?.let { descriptor ->
+            descriptor.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE &&
+                descriptor.risk != AgentNativeToolRisk.BLOCKED
+        } == true
+    } else {
+        capabilityMatrix.isNativeToolExecutable(id)
+    }
 
     fun compactSummary(): String = buildString {
         append("session=").append(sessionId)
@@ -29,7 +47,14 @@ data class AgentRuntimeContext(
         append("; network=").append(screen.deviceStatus.network)
         append("; tools=").append(systemTools.size)
         append("; native_tools=").append(nativeTools.size)
+        append("; native_tools_available=").append(capabilityMatrix.availableNativeToolIds.size)
+        append("; native_tools_setup=").append(
+            capabilityMatrix.setupRequiredEntries.count { it.source == AgentRuntimeCapabilitySource.NATIVE_TOOL }
+        )
         append("; targets=").append(callableTargets.size)
+        append("; targets_available=").append(
+            capabilityMatrix.availableEntries.count { it.source == AgentRuntimeCapabilitySource.CONNECTOR }
+        )
         append("; memories=").append(memories.size)
         append("; knowledge=").append(knowledgeStats.itemCount)
         append("; knowledge_hits=").append(knowledgeItems.size)
@@ -61,18 +86,26 @@ object AgentRuntimeContextBuilder {
         nativeTools: List<AgentNativeToolDescriptor> = emptyList(),
         knowledgeItems: List<AgentKnowledgeItem> = emptyList(),
         knowledgeStats: AgentKnowledgeStats = AgentKnowledgeStats()
-    ): AgentRuntimeContext = AgentRuntimeContext(
-        sessionId = sessionId,
-        goal = goal,
-        screen = screen,
-        permissionMode = permissionMode,
-        highRiskGuard = highRiskGuard,
-        memoryCapture = memoryCapture,
-        systemTools = systemTools,
-        nativeTools = nativeTools,
-        callableTargets = callableTargets,
-        memories = memories,
-        knowledgeItems = knowledgeItems,
-        knowledgeStats = knowledgeStats
-    )
+    ): AgentRuntimeContext {
+        val capabilityMatrix = AgentRuntimeCapabilityMatrix.build(
+            nativeTools = nativeTools,
+            systemTools = systemTools,
+            targets = callableTargets
+        )
+        return AgentRuntimeContext(
+            sessionId = sessionId,
+            goal = goal,
+            screen = screen,
+            permissionMode = permissionMode,
+            highRiskGuard = highRiskGuard,
+            memoryCapture = memoryCapture,
+            systemTools = systemTools,
+            nativeTools = nativeTools,
+            callableTargets = callableTargets,
+            memories = memories,
+            knowledgeItems = knowledgeItems,
+            knowledgeStats = knowledgeStats,
+            capabilityMatrix = capabilityMatrix
+        )
+    }
 }
