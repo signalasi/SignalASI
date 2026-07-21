@@ -140,6 +140,7 @@ object AgentPrivateDataInventory {
         ),
         localOnly("permission_grants", "Host permission grants", "database:signalasi_permission_grants_v1", AgentPrivateDataSensitivity.SECRET),
         localOnly("run_start_receipts", "Cross-end idempotency receipts", "database:signalasi_run_start_receipts_v1", AgentPrivateDataSensitivity.EPHEMERAL),
+        localOnly("provider_health", "Per-runtime health and circuit state", "database:signalasi_agent_provider_health", AgentPrivateDataSensitivity.EPHEMERAL),
         localOnly("run_workspaces", "Active Run workspaces and checkpoints", "database:signalasi_agent_workspaces", AgentPrivateDataSensitivity.EPHEMERAL),
         localOnly("run_events", "Run event ledger", "database:signalasi_agent_runs", AgentPrivateDataSensitivity.EPHEMERAL),
         localOnly("connector_responses", "Pending connector responses", "encrypted_prefs:signalasi_agent_connector_responses", AgentPrivateDataSensitivity.EPHEMERAL),

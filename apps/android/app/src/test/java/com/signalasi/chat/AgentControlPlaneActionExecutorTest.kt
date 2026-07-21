@@ -33,6 +33,7 @@ class AgentControlPlaneActionExecutorTest {
         assertEquals(1, executions.get())
         assertEquals(first.metadata["control_plane_run_id"], replay.metadata["control_plane_run_id"])
         assertEquals("codex", first.metadata["control_plane_agent_id"])
+        assertEquals("codex", first.metadata["control_plane_adapter_family"])
     }
 
     @Test
@@ -86,6 +87,47 @@ class AgentControlPlaneActionExecutorTest {
         assertEquals(0, executions.get())
     }
 
+    @Test
+    fun repeatedDispatchFailuresOpenOnlyTheSelectedRuntimeCircuit() {
+        val executions = AtomicInteger()
+        val health = InMemoryAgentProviderHealthLedger()
+        val registration = registration().copy(
+            adapterType = "codex-app-server-or-cli",
+            runtimeFailureDomain = "desktop-installation:codex"
+        )
+        val provider = ActionExecutorAgentProvider(
+            registrationSource = { listOf(registration) },
+            delegate = object : AgentActionExecutor {
+                override fun execute(action: AgentAction, screen: ScreenContext): AgentActionResult {
+                    executions.incrementAndGet()
+                    return AgentActionResult(action.id, false, "Codex execution failed")
+                }
+            },
+            healthLedger = health
+        )
+        val executor = AgentControlPlaneActionExecutor(provider)
+        val screen = ScreenContext(foregroundApp = "SignalASI", pageTitle = "Agent")
+
+        repeat(3) { index ->
+            val action = connectorAction().copy(
+                id = "route-codex-$index",
+                parameters = connectorAction().parameters + ("_signalasi_turn_id" to "turn-$index")
+            )
+            assertFalse(executor.execute(action, screen).success)
+        }
+        val blocked = executor.execute(
+            connectorAction().copy(
+                id = "route-codex-blocked",
+                parameters = connectorAction().parameters + ("_signalasi_turn_id" to "turn-blocked")
+            ),
+            screen
+        )
+
+        assertFalse(blocked.success)
+        assertEquals("true", blocked.metadata["provider_circuit_open"])
+        assertEquals(3, executions.get())
+    }
+
     private fun connectorAction() = AgentAction(
         id = "route-codex",
         kind = AgentActionKind.CALL_CONNECTOR,
@@ -119,6 +161,8 @@ class AgentControlPlaneActionExecutorTest {
             features = setOf("run.cancel", "run.recover", "run.events", "message.respond", "message.observe")
         ),
         connectionKind = AgentConnectionKind.SIGNALASI_LINK,
-        trust = AgentResourceTrust.VERIFIED_PAIRED
+        trust = AgentResourceTrust.VERIFIED_PAIRED,
+        adapterType = "codex-app-server-or-cli",
+        runtimeFailureDomain = "desktop-installation:codex"
     )
 }

@@ -66,6 +66,9 @@ data class AgentRegistration(
     val maxParallelRuns: Int = 1,
     val capabilitiesHash: String = "",
     val failureDomain: String = "",
+    val runtimeFailureDomain: String = "",
+    val adapterType: String = "",
+    val independentlyUpgradeable: Boolean = true,
     val lastHeartbeatMillis: Long = 0L,
     val updatedAtMillis: Long = System.currentTimeMillis()
 ) {
@@ -1040,6 +1043,9 @@ private fun AgentRegistration.toJson(): JSONObject = JSONObject()
     .put("max_parallel_runs", maxParallelRuns)
     .put("capabilities_hash", capabilitiesHash)
     .put("failure_domain", failureDomain)
+    .put("runtime_failure_domain", runtimeFailureDomain)
+    .put("adapter_type", adapterType)
+    .put("independently_upgradeable", independentlyUpgradeable)
     .put("last_heartbeat_millis", lastHeartbeatMillis)
     .put("updated_at_millis", updatedAtMillis)
 
@@ -1071,6 +1077,9 @@ private fun JSONObject.toRegistration(): AgentRegistration? = runCatching {
         maxParallelRuns = optInt("max_parallel_runs", 1).coerceAtLeast(1),
         capabilitiesHash = optString("capabilities_hash"),
         failureDomain = optString("failure_domain"),
+        runtimeFailureDomain = optString("runtime_failure_domain"),
+        adapterType = optString("adapter_type"),
+        independentlyUpgradeable = optBoolean("independently_upgradeable", true),
         lastHeartbeatMillis = optLong("last_heartbeat_millis"),
         updatedAtMillis = optLong("updated_at_millis", System.currentTimeMillis())
     )

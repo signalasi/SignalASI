@@ -1315,7 +1315,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         previous.trust != candidate.trust ||
         previous.maxParallelRuns != candidate.maxParallelRuns ||
         previous.capabilitiesHash != candidate.capabilitiesHash ||
-        previous.failureDomain != candidate.failureDomain
+        previous.failureDomain != candidate.failureDomain ||
+        previous.runtimeFailureDomain != candidate.runtimeFailureDomain ||
+        previous.adapterType != candidate.adapterType ||
+        previous.independentlyUpgradeable != candidate.independentlyUpgradeable
 
     private fun updateAgentRegistryTaskHeartbeat(contactId: String, taskStatus: String) {
         if (contactId.isBlank() || !::encryptedAgentRegistry.isInitialized) return
@@ -1368,7 +1371,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             registrationSource = { AppStoreAgentConnectorRegistry(this).registrations() },
             delegate = AndroidAgentActionExecutor(this),
             recoverableSource = recoverableSource,
-            runStartReceipts = EncryptedAgentRunStartReceiptStore(this)
+            runStartReceipts = EncryptedAgentRunStartReceiptStore(this),
+            healthLedger = EncryptedAgentProviderHealthLedger(this)
         )
         val directory = AgentAdapterDirectory().apply { register(provider) }
         val results = runBlocking {

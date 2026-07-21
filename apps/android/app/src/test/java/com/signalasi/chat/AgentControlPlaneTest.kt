@@ -63,6 +63,9 @@ class AgentControlPlaneTest {
         assertTrue(AgentCapability.CODE in codex.capabilities)
         assertTrue("message.observe" in codex.protocol.features)
         assertEquals(64, codex.capabilitiesHash.length)
+        assertEquals("codex-app-server-or-cli", codex.adapterType)
+        assertEquals(AgentAdapterFamily.CODEX, codex.adapterFamily())
+        assertTrue(codex.independentlyUpgradeable)
     }
 
     @Test

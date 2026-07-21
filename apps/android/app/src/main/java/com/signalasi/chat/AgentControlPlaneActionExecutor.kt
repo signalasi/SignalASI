@@ -22,6 +22,7 @@ class AgentControlPlaneActionExecutor private constructor(
             registrationSource = { AppStoreAgentConnectorRegistry(context).registrations() },
             delegate = delegate,
             runStartReceipts = EncryptedAgentRunStartReceiptStore(context),
+            healthLedger = EncryptedAgentProviderHealthLedger(context),
             recoverableSource = {
                 EncryptedAgentHandoffStore(context).active().map { handoff ->
                     AgentRecoverableRun(
@@ -73,16 +74,27 @@ class AgentControlPlaneActionExecutor private constructor(
             idempotencyKey = action.parameters["idempotency_key"].orEmpty().ifBlank { runId }
         )
         provider.prepare(agentId, request, action, screen)
+        val dispatchStartedAtMillis = System.currentTimeMillis()
         return try {
             val adapter = runBlocking { directory.resolveAdapter(agentId) }
                 ?: return provider.executeDelegate(action, screen)
             val handle = runBlocking { adapter.startRun(request) }
             val dispatchResult = provider.result(agentId, handle.runId)
+            dispatchResult?.let { result ->
+                provider.recordDispatchOutcome(
+                    agentId,
+                    result,
+                    System.currentTimeMillis() - dispatchStartedAtMillis
+                )
+            }
+            val classified = adapter as? ClassifiedAgentAdapter
             dispatchResult
                 ?.copy(metadata = dispatchResult.metadata + mapOf(
                     "control_plane_run_id" to handle.runId,
                     "control_plane_agent_id" to handle.agentId,
-                    "control_plane_remote_run_id" to handle.remoteRunId
+                    "control_plane_remote_run_id" to handle.remoteRunId,
+                    "control_plane_adapter_family" to classified?.family?.wireName.orEmpty(),
+                    "control_plane_health_scope" to classified?.healthScopeId.orEmpty()
                 ))
                 ?: if (request.deliveryMode == AgentDeliveryMode.IGNORE) {
                     AgentActionResult(
@@ -99,13 +111,17 @@ class AgentControlPlaneActionExecutor private constructor(
                     AgentActionResult(action.id, false, "Agent Adapter returned no dispatch receipt")
                 }
         } catch (error: Throwable) {
+            val circuit = error as? AgentProviderCircuitOpenException
             AgentActionResult(
                 actionId = action.id,
                 success = false,
                 message = error.message ?: "Agent Adapter dispatch failed",
                 metadata = mapOf(
                     "control_plane_run_id" to runId,
-                    "control_plane_agent_id" to agentId
+                    "control_plane_agent_id" to agentId,
+                    "provider_circuit_open" to (circuit != null).toString(),
+                    "provider_health_scope" to circuit?.scopeId.orEmpty(),
+                    "provider_retry_at_millis" to circuit?.retryAtMillis?.toString().orEmpty()
                 )
             )
         } finally {
@@ -135,6 +151,7 @@ internal class ActionExecutorAgentProvider(
     private val delegate: AgentActionExecutor,
     private val recoverableSource: () -> List<AgentRecoverableRun> = { emptyList() },
     private val runStartReceipts: AgentRunStartReceiptStore = InMemoryAgentRunStartReceiptStore(),
+    private val healthLedger: AgentProviderHealthLedger = InMemoryAgentProviderHealthLedger(),
     override val providerId: String = "signalasi-connectors",
     private val protocol: AgentProtocolRange = AgentProtocolRange(
         preferred = "1.0",
@@ -165,7 +182,13 @@ internal class ActionExecutorAgentProvider(
         val transport = transports.computeIfAbsent(agentId) {
             ActionExecutorAgentTransport(registrationSource, delegate, recoverableSource, agentId)
         }
-        val adapter = TransportBackedAgentAdapter(registration, transport, protocol, runStartReceipts)
+        val adapter = AgentProductionAdapterFactory.create(
+            registration = registration,
+            transport = transport,
+            localProtocol = protocol,
+            runStartReceipts = runStartReceipts,
+            healthLedger = healthLedger
+        )
         return adapters.putIfAbsent(agentId, adapter) ?: adapter
     }
 
@@ -197,6 +220,22 @@ internal class ActionExecutorAgentProvider(
     }
 
     fun result(agentId: String, runId: String): AgentActionResult? = transports[agentId]?.result(runId)
+
+    fun recordDispatchOutcome(agentId: String, result: AgentActionResult, latencyMillis: Long) {
+        val registration = registration(agentId) ?: return
+        val now = System.currentTimeMillis()
+        if (result.success) {
+            healthLedger.recordSuccess(registration, "start_run", latencyMillis, now)
+        } else {
+            healthLedger.recordFailure(
+                registration = registration,
+                operation = "start_run",
+                kind = AgentProviderFailureClassifier.from(result),
+                latencyMillis = latencyMillis,
+                nowMillis = now
+            )
+        }
+    }
 
     fun discardPrepared(agentId: String, runId: String) = transports[agentId]?.discardPrepared(runId)
 

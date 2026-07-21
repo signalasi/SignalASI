@@ -932,6 +932,7 @@ object AppStore {
         context.getSharedPreferences("signalasi_agent_safety", Context.MODE_PRIVATE).edit().clear().commit()
         SharedPreferencesAgentConfirmationConsentStore(context).clear()
         EncryptedAgentRunStartReceiptStore(context).clear()
+        EncryptedAgentProviderHealthLedger(context).clear()
         GlobalAgentRepository(context).clear()
         context.getSharedPreferences("signalasi_agent_workflows", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_workflow_schedules", Context.MODE_PRIVATE).edit().clear().commit()

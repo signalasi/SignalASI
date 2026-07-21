@@ -8949,8 +8949,29 @@ interface AgentConnectorRegistry {
             capabilitiesHash = MessageDigest.getInstance("SHA-256")
                 .digest(capabilities.map { it.name }.sorted().joinToString("\n").toByteArray(Charsets.UTF_8))
                 .joinToString("") { "%02x".format(it) },
-            failureDomain = target.failureDomain
+            failureDomain = target.failureDomain,
+            runtimeFailureDomain = target.runtimeFailureDomain.ifBlank {
+                val installation = target.failureDomain.ifBlank { "installation:${target.id}" }
+                "$installation:${target.adapterType.ifBlank { target.id }}"
+            },
+            adapterType = target.adapterType.ifBlank { defaultAdapterType(target) },
+            independentlyUpgradeable = target.independentlyUpgradeable
         )
+    }
+
+    private fun defaultAdapterType(target: AgentCallableTarget): String {
+        val identity = "${target.id} ${target.title}".lowercase(Locale.ROOT)
+        return when {
+            "codex" in identity -> "codex-app-server-or-cli"
+            "claude" in identity -> "claude-code-cli"
+            "openclaw" in identity -> "openclaw-cli"
+            "hermes" in identity -> "hermes-cli"
+            "home-assistant" in identity || "home assistant" in identity -> "home-assistant-api"
+            target.kind == AgentConnectorKind.MODEL && target.id == "local-llm" -> "local-model-api"
+            target.kind == AgentConnectorKind.MODEL -> "cloud-model-api"
+            target.kind == AgentConnectorKind.DEVICE -> "custom-device-api"
+            else -> "custom-agent"
+        }
     }
 }
 
@@ -8966,14 +8987,16 @@ class StaticAgentConnectorRegistry : AgentConnectorRegistry {
                 AgentCapability.REASONING,
                 AgentCapability.LIVE_DATA,
                 AgentCapability.TOOL_USE
-            )
+            ),
+            adapterType = "cloud-model-api"
         ),
         AgentCallableTarget(
             id = "local-llm",
             title = "Local LLM",
             kind = AgentConnectorKind.MODEL,
             status = AgentConnectorStatus.NEEDS_SETUP,
-            capabilities = listOf(AgentCapability.CHAT, AgentCapability.LOCAL_INFERENCE)
+            capabilities = listOf(AgentCapability.CHAT, AgentCapability.LOCAL_INFERENCE),
+            adapterType = "local-model-api"
         ),
         AgentCallableTarget(
             id = "hermes",
@@ -8987,7 +9010,8 @@ class StaticAgentConnectorRegistry : AgentConnectorRegistry {
                 AgentCapability.TOOL_USE,
                 AgentCapability.MCP,
                 AgentCapability.SKILL
-            )
+            ),
+            adapterType = "hermes-cli"
         ),
         AgentCallableTarget(
             id = "codex",
@@ -9004,7 +9028,8 @@ class StaticAgentConnectorRegistry : AgentConnectorRegistry {
                 AgentCapability.TOOL_USE,
                 AgentCapability.MCP,
                 AgentCapability.SKILL
-            )
+            ),
+            adapterType = "codex-app-server-or-cli"
         ),
         AgentCallableTarget(
             id = "claude-code",
@@ -9017,7 +9042,8 @@ class StaticAgentConnectorRegistry : AgentConnectorRegistry {
                 AgentCapability.TOOL_USE,
                 AgentCapability.MCP,
                 AgentCapability.SKILL
-            )
+            ),
+            adapterType = "claude-code-cli"
         ),
         AgentCallableTarget(
             id = "openclaw",
@@ -9032,21 +9058,24 @@ class StaticAgentConnectorRegistry : AgentConnectorRegistry {
                 AgentCapability.TOOL_USE,
                 AgentCapability.MCP,
                 AgentCapability.SKILL
-            )
+            ),
+            adapterType = "openclaw-cli"
         ),
         AgentCallableTarget(
             id = "home-assistant",
             title = "Home Assistant",
             kind = AgentConnectorKind.DEVICE,
             status = AgentConnectorStatus.NEEDS_SETUP,
-            capabilities = listOf(AgentCapability.SMART_HOME, AgentCapability.DEVICE_CONTROL)
+            capabilities = listOf(AgentCapability.SMART_HOME, AgentCapability.DEVICE_CONTROL),
+            adapterType = "home-assistant-api"
         )
     )
 }
 
 class AppStoreAgentConnectorRegistry(
     context: Context,
-    private val fallback: AgentConnectorRegistry = StaticAgentConnectorRegistry()
+    private val fallback: AgentConnectorRegistry = StaticAgentConnectorRegistry(),
+    private val providerHealthLedger: AgentProviderHealthLedger = EncryptedAgentProviderHealthLedger(context)
 ) : AgentConnectorRegistry {
     private val appContext = context.applicationContext
 
@@ -9067,7 +9096,8 @@ class AppStoreAgentConnectorRegistry(
             }
             val status = if (projectedStatus == AgentEndpointStatus.ONLINE) reportedStatus else projectedStatus
             val desktopId = contact.optString("desktop_id")
-            registration.copy(
+            val adapterDescriptor = contact.optJSONObject("adapter") ?: JSONObject()
+            val projected = registration.copy(
                 installationId = contact.optString("installation_id")
                     .ifBlank { desktopId }
                     .ifBlank { registration.installationId },
@@ -9087,9 +9117,34 @@ class AppStoreAgentConnectorRegistry(
                 ),
                 activeRuns = contact.optInt("active_runs", registration.activeRuns).coerceAtLeast(0),
                 maxParallelRuns = contact.optInt("max_parallel_runs", registration.maxParallelRuns).coerceAtLeast(1),
-                capabilitiesHash = contact.optString("capabilities_hash"),
+                capabilitiesHash = contact.optString("capabilities_hash").ifBlank { registration.capabilitiesHash },
+                runtimeFailureDomain = registration.runtimeFailureDomain.ifBlank {
+                    val installation = contact.optString("installation_id")
+                        .ifBlank { desktopId }
+                        .ifBlank { registration.installationId }
+                    "$installation:${adapterDescriptor.optString("adapter_type").ifBlank { registration.adapterType }}"
+                },
+                adapterType = adapterDescriptor.optString("adapter_type").ifBlank { registration.adapterType },
+                independentlyUpgradeable = adapterDescriptor.optBoolean(
+                    "independently_upgradeable",
+                    registration.independentlyUpgradeable
+                ),
                 lastHeartbeatMillis = contact.optLong("setup_updated_at", registration.lastHeartbeatMillis),
                 updatedAtMillis = contact.optLong("setup_updated_at", registration.updatedAtMillis)
+            )
+            val healthState = providerHealthLedger.snapshot(projected).circuitState(System.currentTimeMillis())
+            projected.copy(
+                status = when {
+                    projected.status !in setOf(
+                        AgentEndpointStatus.ONLINE,
+                        AgentEndpointStatus.IDLE,
+                        AgentEndpointStatus.BUSY,
+                        AgentEndpointStatus.DEGRADED
+                    ) -> projected.status
+                    healthState == AgentProviderCircuitState.OPEN -> AgentEndpointStatus.UNREACHABLE
+                    healthState == AgentProviderCircuitState.HALF_OPEN -> AgentEndpointStatus.DEGRADED
+                    else -> projected.status
+                }
             )
         }
 
@@ -9113,7 +9168,10 @@ class AppStoreAgentConnectorRegistry(
                 title = connector.name,
                 kind = AgentConnectorKind.DEVICE,
                 status = if (connector.configured) AgentConnectorStatus.AVAILABLE else AgentConnectorStatus.NEEDS_SETUP,
-                capabilities = listOf(AgentCapability.DEVICE_CONTROL)
+                capabilities = listOf(AgentCapability.DEVICE_CONTROL),
+                failureDomain = "custom-device:${connector.id}",
+                runtimeFailureDomain = "custom-device:${connector.id}",
+                adapterType = "custom-device-api"
             )
         }
         return (builtIn + cloudProviders + desktopExtensions + customDevices).distinctBy { it.id }
@@ -9146,6 +9204,8 @@ class AppStoreAgentConnectorRegistry(
                         kind = AgentConnectorKind.MODEL,
                         status = if (ready) AgentConnectorStatus.AVAILABLE else AgentConnectorStatus.NEEDS_SETUP,
                         failureDomain = "cloud:${selected.optString("cloud_provider").ifBlank { id }}",
+                        runtimeFailureDomain = "cloud:${selected.optString("cloud_provider").ifBlank { id }}:$id",
+                        adapterType = "cloud-model-api",
                         capabilities = buildList {
                             add(AgentCapability.CHAT)
                             add(AgentCapability.REASONING)
@@ -9190,6 +9250,7 @@ class AppStoreAgentConnectorRegistry(
                     else -> AgentConnectorKind.AGENT
                 }
                 val advertisedCapabilities = advertisedCapabilities(contact)
+                val adapterDescriptor = contact.optJSONObject("adapter") ?: JSONObject()
                 val capabilities = advertisedCapabilities.ifEmpty { buildList {
                     add(AgentCapability.CHAT)
                     when {
@@ -9229,6 +9290,16 @@ class AppStoreAgentConnectorRegistry(
                         kind = kind,
                         status = if (contactReady(id)) AgentConnectorStatus.AVAILABLE else AgentConnectorStatus.DISCONNECTED,
                         failureDomain = contact.optString("desktop_id").ifBlank { "desktop:$id" },
+                        runtimeFailureDomain = adapterDescriptor.optString("failure_domain").ifBlank {
+                            val installation = contact.optString("installation_id")
+                                .ifBlank { contact.optString("desktop_id") }
+                                .ifBlank { "desktop:$id" }
+                            "$installation:${adapterDescriptor.optString("adapter_type").ifBlank { agentIdForContact(contact, id) }}"
+                        },
+                        adapterType = adapterDescriptor.optString("adapter_type").ifBlank {
+                            defaultDesktopAdapterType(contact, id)
+                        },
+                        independentlyUpgradeable = adapterDescriptor.optBoolean("independently_upgradeable", true),
                         capabilities = capabilities
                     )
                 )
@@ -9263,6 +9334,27 @@ class AppStoreAgentConnectorRegistry(
                 }
             }
         }.toList()
+    }
+
+    private fun agentIdForContact(contact: JSONObject, fallbackId: String): String =
+        contact.optString("agent_id").ifBlank { fallbackId.substringAfter(':', fallbackId) }
+
+    private fun defaultDesktopAdapterType(contact: JSONObject, fallbackId: String): String {
+        val identity = listOf(
+            contact.optString("agent_id"),
+            contact.optString("agent_kind"),
+            contact.optString("name"),
+            fallbackId
+        ).joinToString(" ").lowercase(Locale.ROOT)
+        return when {
+            "codex" in identity -> "codex-app-server-or-cli"
+            "claude" in identity -> "claude-code-cli"
+            "openclaw" in identity -> "openclaw-cli"
+            "hermes" in identity -> "hermes-cli"
+            "local-llm" in identity || "local model" in identity -> "local-model-api"
+            "windows" in identity -> "windows-host-tools"
+            else -> "custom-agent"
+        }
     }
 
     private fun statusFor(target: AgentCallableTarget): AgentConnectorStatus = when (target.id) {
@@ -10130,7 +10222,10 @@ data class AgentCallableTarget(
     val kind: AgentConnectorKind,
     val status: AgentConnectorStatus,
     val capabilities: List<AgentCapability>,
-    val failureDomain: String = ""
+    val failureDomain: String = "",
+    val runtimeFailureDomain: String = "",
+    val adapterType: String = "",
+    val independentlyUpgradeable: Boolean = true
 )
 
 data class ScreenContext(
