@@ -4873,6 +4873,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             "memory.manage" -> openExistingControlCenterPage { showAgentMemoryPage() }
             "memory.inbox" -> openExistingControlCenterPage { showGlobalMemoryInboxPage() }
+            "memory.evolution_history" -> openExistingControlCenterPage { showGlobalMemoryEvolutionHistoryPage() }
             "memory.graph" -> openExistingControlCenterPage { showGlobalMemoryGraphPage() }
             "memory.audit" -> openExistingControlCenterPage { showGlobalMemoryAuditPage() }
             "memory.toggle_capture" -> {
@@ -6124,6 +6125,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val snapshot = mobileNativeAgent.memorySnapshot()
         val globalMemory = GlobalSuperAgentRuntime.get(this)
         val pendingCandidates = globalMemory.memoryInboxSnapshot().pending()
+        val evolutionRecords = globalMemory.memoryEvolutionRecordsSnapshot()
         val entityGraph = globalMemory.entityMemoryGraphSnapshot()
         val memoryAudit = globalMemory.memoryAuditSnapshot()
         val captureEnabled = mobileNativeAgent.safetySettings().memoryCapture
@@ -6223,6 +6225,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                                 R.drawable.ic_agent_memory,
                                 pendingCandidates.size.toString(),
                                 if (pendingCandidates.isEmpty()) ControlCenterTone.GREEN else ControlCenterTone.AMBER
+                            ),
+                            ControlCenterRowSpec(
+                                "memory.evolution_history",
+                                getString(R.string.cc_memory_evolution_history_title),
+                                getString(R.string.cc_memory_evolution_history_subtitle),
+                                R.drawable.ic_agent_history,
+                                evolutionRecords.size.toString(),
+                                ControlCenterTone.VIOLET
                             ),
                             ControlCenterRowSpec(
                                 "memory.graph",
@@ -6366,6 +6376,42 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
+    private fun showGlobalMemoryEvolutionHistoryPage() {
+        val records = GlobalSuperAgentRuntime.get(this).memoryEvolutionRecordsSnapshot()
+            .sortedByDescending(GlobalMemoryEvolutionRecord::createdAtMillis)
+        showFeaturePage(getString(R.string.cc_memory_evolution_history_title))
+        featureContent.addView(featureHeroCard(
+            getString(R.string.cc_memory_evolution_history_hero_title),
+            getString(R.string.cc_memory_evolution_history_hero_subtitle),
+            R.drawable.ic_agent_history,
+            "#6C5CE7",
+            records.size.toString()
+        ))
+        addSectionTitle(getString(R.string.cc_memory_evolution_history_recent))
+        if (records.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.cc_memory_evolution_history_empty),
+                getString(R.string.cc_memory_evolution_history_empty_subtitle),
+                R.drawable.ic_agent_history,
+                ""
+            ))
+            return
+        }
+        records.take(100).forEach { record ->
+            featureContent.addView(featureRow(
+                record.subject,
+                getString(
+                    R.string.cc_memory_evolution_history_item_subtitle,
+                    memoryEvolutionActionLabel(record.action),
+                    memoryEvolutionOutcomeLabel(record.outcome),
+                    record.evidenceCount
+                ),
+                R.drawable.ic_agent_history,
+                securityTime(record.createdAtMillis)
+            ))
+        }
+    }
+
     private fun showGlobalMemoryAuditPage(runNow: Boolean = false) {
         val runtime = GlobalSuperAgentRuntime.get(this)
         val report = if (runNow) runtime.runMemoryAudit() else runtime.memoryAuditSnapshot()
@@ -6455,6 +6501,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             GlobalMemoryAuditFindingKind.UNRESOLVED_CONFLICT -> R.string.cc_memory_audit_conflict
             GlobalMemoryAuditFindingKind.SKILL_CANDIDATE -> R.string.cc_memory_audit_skill_candidate
             GlobalMemoryAuditFindingKind.COMPLETED_GOAL -> R.string.cc_memory_audit_completed_goal
+        }
+    )
+
+    private fun memoryEvolutionOutcomeLabel(outcome: GlobalMemoryEvolutionOutcome): String = getString(
+        when (outcome) {
+            GlobalMemoryEvolutionOutcome.APPLIED -> R.string.cc_memory_evolution_outcome_applied
+            GlobalMemoryEvolutionOutcome.WAITING_REVIEW -> R.string.cc_memory_evolution_outcome_waiting
+            GlobalMemoryEvolutionOutcome.CONFLICTED -> R.string.cc_memory_evolution_outcome_conflicted
+            GlobalMemoryEvolutionOutcome.PRIVATE_BLOCKED -> R.string.cc_memory_evolution_outcome_private_blocked
+            GlobalMemoryEvolutionOutcome.APPROVED -> R.string.cc_memory_evolution_outcome_approved
+            GlobalMemoryEvolutionOutcome.REJECTED -> R.string.cc_memory_evolution_outcome_rejected
         }
     )
 

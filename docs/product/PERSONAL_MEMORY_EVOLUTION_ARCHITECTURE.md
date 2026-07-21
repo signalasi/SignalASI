@@ -23,6 +23,8 @@ The append-only event and evidence history is never rewritten. Evolution changes
 
 Every accepted world item now persists its temporal state directly. New evidence is assigned an explicit evolution action (`CREATE`, `STRENGTHEN`, `SUPERSEDE`, `LINK`, `CONSOLIDATE`, `REVIEW_CONFLICT`, or `BLOCK_PRIVATE`) together with bounded target item IDs. This makes the materialized transition explainable and prevents a planned goal from being compiled as current state.
 
+Every proposal and review decision also emits a bounded encrypted evolution record. The record contains the subject, action, outcome, temporal state, target IDs, resulting item ID, and evidence count, but never copies the candidate value. Private candidates use a fixed non-sensitive subject. Record IDs are deterministic, so event replay and process recovery cannot duplicate the history.
+
 ## Core Invariants
 
 1. Session-private content never enters durable memory, candidate payloads, relationship graphs, exports, or model context.
@@ -110,6 +112,7 @@ Terminal Runs update a separate encrypted Agent self-model. The self-model learn
 The Memory and Personalization page exposes:
 
 - candidate memory inbox with approve and reject actions;
+- encrypted evolution history showing applied, waiting, conflicting, blocked, approved, and rejected transitions;
 - temporal relationship graph with entity and relation counts;
 - memory health findings and a manual on-device audit;
 - existing explicit memory editing, conflict resolution, pinning, and deletion.

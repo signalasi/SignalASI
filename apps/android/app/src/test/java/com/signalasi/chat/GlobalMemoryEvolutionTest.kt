@@ -537,8 +537,9 @@ class GlobalMemoryEvolutionTest {
             eventId = "workflow-event"
         ).copy(evidenceCount = 4)
 
+        val before = PersonalWorldModel(items = listOf(expired, repeated))
         val (world, report) = GlobalMemoryCritic.audit(
-            PersonalWorldModel(items = listOf(expired, repeated)),
+            before,
             GlobalMemoryInbox(),
             nowMillis = 2_000L
         )
@@ -546,6 +547,9 @@ class GlobalMemoryEvolutionTest {
         assertEquals(GlobalWorldItemStatus.SUPERSEDED, world.items.first { it.id == "expired" }.status)
         assertTrue(report.findings.any { it.kind == GlobalMemoryAuditFindingKind.EXPIRED })
         assertTrue(report.findings.any { it.kind == GlobalMemoryAuditFindingKind.SKILL_CANDIDATE })
+        val records = GlobalMemoryEvolutionPolicy.auditRecords(before, world, report.createdAtMillis)
+        assertEquals(GlobalMemoryEvolutionAction.SUPERSEDE, records.single().action)
+        assertEquals(GlobalMemoryTemporalState.DEPRECATED, records.single().temporalState)
     }
 
     @Test
@@ -579,8 +583,9 @@ class GlobalMemoryEvolutionTest {
             eventId = "goal-event"
         ).copy(conversationIds = setOf("conversation-d"), lastSeenAtMillis = 1_000L)
 
+        val before = PersonalWorldModel(items = listOf(duplicateOne, duplicateTwo, decision, goal))
         val (world, report) = GlobalMemoryCritic.audit(
-            PersonalWorldModel(items = listOf(duplicateOne, duplicateTwo, decision, goal)),
+            before,
             GlobalMemoryInbox(),
             nowMillis = 5_000L
         )
@@ -588,6 +593,9 @@ class GlobalMemoryEvolutionTest {
         assertEquals(1, world.items.count { it.kind == GlobalWorldItemKind.FACT && it.status == GlobalWorldItemStatus.ACTIVE })
         assertTrue(report.findings.any { it.kind == GlobalMemoryAuditFindingKind.DUPLICATE })
         assertTrue(report.themes.any { it.title == "SignalASI runtime" && it.itemCount >= 3 })
+        val records = GlobalMemoryEvolutionPolicy.auditRecords(before, world, report.createdAtMillis)
+        assertEquals(GlobalMemoryEvolutionAction.CONSOLIDATE, records.single().action)
+        assertTrue(records.single().resultingItemId.isNotBlank())
     }
 
     @Test
@@ -640,6 +648,115 @@ class GlobalMemoryEvolutionTest {
     }
 
     @Test
+    fun explicitCorrectionSupersedesOldStateAndProducesEvolutionRecord() {
+        val previous = item(
+            "settings-old",
+            GlobalWorldItemKind.DECISION,
+            topic = "Settings page name",
+            value = "The settings page is named Settings",
+            eventId = "settings-old-event"
+        )
+        val incoming = item(
+            "settings-new",
+            GlobalWorldItemKind.DECISION,
+            topic = "Settings page name",
+            value = "The settings page should be Control Center",
+            eventId = "settings-correction"
+        )
+        val event = event(
+            "settings-correction",
+            "I was wrong; the settings page name should be Control Center"
+        )
+        val result = GlobalMemoryEvolutionPolicy.evolve(
+            PersonalWorldModel(items = listOf(previous)),
+            GlobalWorldReduction(
+                PersonalWorldModel(items = listOf(previous, incoming), processedEventIds = listOf(event.id)),
+                listOf(incoming),
+                emptyList()
+            ),
+            GlobalMemoryInbox(),
+            event,
+            understanding(event, incoming.topic)
+        )
+
+        assertEquals(GlobalWorldItemStatus.SUPERSEDED, result.reduction.world.items.first { it.id == previous.id }.status)
+        assertEquals(GlobalWorldItemStatus.ACTIVE, result.reduction.world.items.first { it.id == incoming.id }.status)
+        val record = result.records.single()
+        assertEquals(GlobalMemoryEvolutionAction.SUPERSEDE, record.action)
+        assertEquals(GlobalMemoryEvolutionOutcome.APPLIED, record.outcome)
+        assertEquals(listOf(previous.id), record.targetItemIds)
+        assertEquals(incoming.id, record.resultingItemId)
+    }
+
+    @Test
+    fun privateEvolutionRecordNeverContainsPrivateSubjectOrValue() {
+        val secret = "account-secret-123"
+        val event = event(
+            "private-record",
+            secret,
+            sensitivity = GlobalConversationSensitivity.SESSION_PRIVATE
+        )
+        val privateItem = item(
+            "private-record-item",
+            GlobalWorldItemKind.FACT,
+            topic = "Private $secret",
+            value = secret,
+            eventId = event.id
+        )
+        val result = GlobalMemoryEvolutionPolicy.evolve(
+            PersonalWorldModel(),
+            reduction(event, privateItem),
+            GlobalMemoryInbox(),
+            event,
+            understanding(event, privateItem.topic)
+        )
+
+        val record = result.records.single()
+        assertEquals(GlobalMemoryEvolutionOutcome.PRIVATE_BLOCKED, record.outcome)
+        assertFalse(record.subject.contains(secret))
+        assertTrue(record.resultingItemId.isBlank())
+    }
+
+    @Test
+    fun reviewOutcomeAndEvolutionRecordsSurvivePersistenceRoundTrip() {
+        val event = event(
+            "review-record",
+            "Prefer concise responses",
+            metadata = mapOf("memory_kind" to AgentMemoryKind.PREFERENCE.name)
+        )
+        val preference = item(
+            "review-record-item",
+            GlobalWorldItemKind.PREFERENCE,
+            layer = GlobalWorldLayer.USER,
+            topic = "Response style",
+            value = event.content,
+            eventId = event.id
+        )
+        val evolved = GlobalMemoryEvolutionPolicy.evolve(
+            PersonalWorldModel(),
+            reduction(event, preference),
+            GlobalMemoryInbox(),
+            event,
+            understanding(event, preference.topic)
+        )
+        val candidate = evolved.inbox.pending().single()
+        val approved = GlobalMemoryEvolutionPolicy.reviewRecord(
+            candidate,
+            GlobalMemoryEvolutionOutcome.APPROVED,
+            nowMillis = 8_000L
+        )
+
+        val restored = GlobalMemoryEvolutionCodec.decodeRecords(
+            GlobalMemoryEvolutionCodec.encodeRecords(evolved.records + approved).toString()
+        )
+
+        assertEquals(2, restored.size)
+        assertEquals(GlobalMemoryEvolutionOutcome.WAITING_REVIEW, restored.first().outcome)
+        assertEquals(GlobalMemoryEvolutionOutcome.APPROVED, restored.last().outcome)
+        assertEquals(8_000L, restored.last().createdAtMillis)
+    }
+
+    @Test
     fun plannerChoosesSpecializedRetrievalStrategies() {
         assertEquals(
             GlobalMemoryQueryType.DEVICE_CAPABILITY,
@@ -656,6 +773,14 @@ class GlobalMemoryEvolutionTest {
         assertEquals(
             GlobalMemoryQueryType.RELATIONSHIP,
             GlobalMemoryQueryPlanner.plan("How is the gateway connected to the phone?").type
+        )
+        assertEquals(
+            GlobalMemoryQueryType.LONG_TERM_GOAL,
+            GlobalMemoryQueryPlanner.plan("What is the next long-term milestone?").type
+        )
+        assertEquals(
+            GlobalMemoryQueryType.TOOL_EVIDENCE,
+            GlobalMemoryQueryPlanner.plan("What output did the command produce?").type
         )
     }
 

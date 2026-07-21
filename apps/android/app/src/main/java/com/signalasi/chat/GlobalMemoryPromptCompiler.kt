@@ -137,7 +137,7 @@ object GlobalMemoryQueryPlanner {
         "\u504f\u597d", "\u559c\u6b22", "\u9ed8\u8ba4", "\u6211\u7684\u98ce\u683c"
     )
     private val GOAL_TERMS = listOf(
-        "goal", "objective", "roadmap", "long term", "next milestone",
+        "goal", "objective", "roadmap", "long term", "long-term", "next milestone",
         "\u76ee\u6807", "\u8def\u7ebf\u56fe", "\u957f\u671f", "\u91cc\u7a0b\u7891", "\u4e0b\u4e00\u6b65"
     )
     private val TOOL_TERMS = listOf(

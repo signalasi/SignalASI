@@ -79,7 +79,33 @@ data class GlobalMemoryInbox(
 data class GlobalMemoryEvolutionResult(
     val reduction: GlobalWorldReduction,
     val inbox: GlobalMemoryInbox,
-    val candidates: List<GlobalMemoryCandidate>
+    val candidates: List<GlobalMemoryCandidate>,
+    val records: List<GlobalMemoryEvolutionRecord> = emptyList()
+)
+
+enum class GlobalMemoryEvolutionOutcome {
+    APPLIED,
+    WAITING_REVIEW,
+    CONFLICTED,
+    PRIVATE_BLOCKED,
+    APPROVED,
+    REJECTED
+}
+
+data class GlobalMemoryEvolutionRecord(
+    val id: String,
+    val sourceEventId: String,
+    val conversationId: String,
+    val candidateId: String,
+    val kind: GlobalMemoryCandidateKind,
+    val action: GlobalMemoryEvolutionAction,
+    val outcome: GlobalMemoryEvolutionOutcome,
+    val temporalState: GlobalMemoryTemporalState,
+    val subject: String,
+    val targetItemIds: List<String>,
+    val resultingItemId: String,
+    val evidenceCount: Int,
+    val createdAtMillis: Long
 )
 
 object GlobalMemoryEvolutionPolicy {
@@ -109,7 +135,73 @@ object GlobalMemoryEvolutionPolicy {
                 .takeLast(MAX_PROCESSED_EVENT_IDS),
             updatedAtMillis = maxOf(inbox.updatedAtMillis, event.timestampMillis)
         )
-        return GlobalMemoryEvolutionResult(evolved, updatedInbox, candidates)
+        return GlobalMemoryEvolutionResult(
+            reduction = evolved,
+            inbox = updatedInbox,
+            candidates = candidates,
+            records = candidates.map(::recordForCandidate)
+        )
+    }
+
+    fun reviewRecord(
+        candidate: GlobalMemoryCandidate,
+        outcome: GlobalMemoryEvolutionOutcome,
+        nowMillis: Long = System.currentTimeMillis()
+    ): GlobalMemoryEvolutionRecord {
+        require(outcome in setOf(GlobalMemoryEvolutionOutcome.APPROVED, GlobalMemoryEvolutionOutcome.REJECTED))
+        return recordForCandidate(candidate, outcome, nowMillis)
+    }
+
+    fun auditRecords(
+        worldBefore: PersonalWorldModel,
+        worldAfter: PersonalWorldModel,
+        nowMillis: Long
+    ): List<GlobalMemoryEvolutionRecord> {
+        val afterById = worldAfter.items.associateBy(GlobalWorldItem::id)
+        return worldBefore.items.mapNotNull { previous ->
+            val updated = afterById[previous.id] ?: return@mapNotNull null
+            if (previous.status == updated.status && previous.temporalState == updated.temporalState) {
+                return@mapNotNull null
+            }
+            if (updated.status != GlobalWorldItemStatus.SUPERSEDED &&
+                updated.temporalState != GlobalMemoryTemporalState.DEPRECATED
+            ) return@mapNotNull null
+            val consolidatedInto = worldAfter.items.firstOrNull { candidate ->
+                candidate.id != updated.id &&
+                    candidate.status == GlobalWorldItemStatus.ACTIVE &&
+                    candidate.layer == updated.layer &&
+                    equivalentAssertion(candidate, updated)
+            }
+            val sourceEventId = updated.evidenceProvenance.maxByOrNull(GlobalEvidenceRef::timestampMillis)?.eventId
+                ?: updated.evidenceEventIds.lastOrNull()
+                ?: "memory-audit:${updated.id}"
+            val action = if (consolidatedInto == null) {
+                GlobalMemoryEvolutionAction.SUPERSEDE
+            } else GlobalMemoryEvolutionAction.CONSOLIDATE
+            GlobalMemoryEvolutionRecord(
+                id = GlobalAgentText.stableKey(
+                    "memory-audit-record",
+                    updated.id,
+                    action.name,
+                    updated.temporalState.name,
+                    consolidatedInto?.id.orEmpty(),
+                    updated.lastSeenAtMillis.toString()
+                ),
+                sourceEventId = sourceEventId,
+                conversationId = updated.conversationIds.firstOrNull().orEmpty(),
+                candidateId = "",
+                kind = candidateKind(updated),
+                action = action,
+                outcome = GlobalMemoryEvolutionOutcome.APPLIED,
+                temporalState = updated.temporalState,
+                subject = updated.topic.replace(Regex("\\s+"), " ").trim().take(160)
+                    .ifBlank { updated.kind.name.lowercase(Locale.ROOT) },
+                targetItemIds = listOf(updated.id),
+                resultingItemId = consolidatedInto?.id.orEmpty(),
+                evidenceCount = updated.evidenceCount.coerceAtLeast(0),
+                createdAtMillis = nowMillis
+            )
+        }
     }
 
     fun approve(
@@ -481,6 +573,14 @@ object GlobalMemoryEvolutionPolicy {
         }
     }
 
+    private fun candidateKind(item: GlobalWorldItem): GlobalMemoryCandidateKind = when (item.kind) {
+        GlobalWorldItemKind.PREFERENCE -> GlobalMemoryCandidateKind.PREFERENCE
+        GlobalWorldItemKind.DECISION -> GlobalMemoryCandidateKind.DECISION
+        GlobalWorldItemKind.GOAL -> GlobalMemoryCandidateKind.GOAL
+        GlobalWorldItemKind.STATE, GlobalWorldItemKind.TASK -> GlobalMemoryCandidateKind.PROJECT_STATE
+        else -> GlobalMemoryCandidateKind.FACT
+    }
+
     private fun temporalState(
         event: GlobalConversationEvent,
         item: GlobalWorldItem,
@@ -561,9 +661,64 @@ object GlobalMemoryEvolutionPolicy {
             .take(MAX_INBOX_CANDIDATES)
     }
 
+    private fun recordForCandidate(
+        candidate: GlobalMemoryCandidate,
+        explicitOutcome: GlobalMemoryEvolutionOutcome? = null,
+        createdAtMillis: Long = candidate.createdAtMillis
+    ): GlobalMemoryEvolutionRecord {
+        val outcome = explicitOutcome ?: when (candidate.status) {
+            GlobalMemoryCandidateStatus.AUTO_MERGED -> GlobalMemoryEvolutionOutcome.APPLIED
+            GlobalMemoryCandidateStatus.PENDING_REVIEW -> GlobalMemoryEvolutionOutcome.WAITING_REVIEW
+            GlobalMemoryCandidateStatus.CONFLICTED -> GlobalMemoryEvolutionOutcome.CONFLICTED
+            GlobalMemoryCandidateStatus.APPROVED -> GlobalMemoryEvolutionOutcome.APPROVED
+            GlobalMemoryCandidateStatus.REJECTED -> if (candidate.risk == GlobalMemoryCandidateRisk.PRIVATE_BLOCKED) {
+                GlobalMemoryEvolutionOutcome.PRIVATE_BLOCKED
+            } else GlobalMemoryEvolutionOutcome.REJECTED
+            GlobalMemoryCandidateStatus.SUPERSEDED -> GlobalMemoryEvolutionOutcome.APPLIED
+        }
+        val resultingItemId = when {
+            outcome in setOf(
+                GlobalMemoryEvolutionOutcome.WAITING_REVIEW,
+                GlobalMemoryEvolutionOutcome.CONFLICTED,
+                GlobalMemoryEvolutionOutcome.PRIVATE_BLOCKED,
+                GlobalMemoryEvolutionOutcome.REJECTED
+            ) -> ""
+            candidate.action == GlobalMemoryEvolutionAction.STRENGTHEN ->
+                candidate.targetItemIds.firstOrNull().orEmpty()
+            else -> candidate.item.id
+        }
+        val subject = if (candidate.risk == GlobalMemoryCandidateRisk.PRIVATE_BLOCKED) {
+            "Private memory candidate"
+        } else candidate.item.topic.replace(Regex("\\s+"), " ").trim().take(160)
+            .ifBlank { candidate.kind.name.lowercase(Locale.ROOT) }
+        return GlobalMemoryEvolutionRecord(
+            id = GlobalAgentText.stableKey(
+                "memory-evolution-record",
+                candidate.id,
+                outcome.name
+            ),
+            sourceEventId = candidate.sourceEventId,
+            conversationId = candidate.conversationId,
+            candidateId = candidate.id,
+            kind = candidate.kind,
+            action = candidate.action,
+            outcome = outcome,
+            temporalState = if (outcome == GlobalMemoryEvolutionOutcome.APPROVED &&
+                candidate.temporalState == GlobalMemoryTemporalState.CONFLICTED
+            ) GlobalMemoryTemporalState.CURRENT else candidate.temporalState,
+            subject = subject,
+            targetItemIds = candidate.targetItemIds.take(MAX_EVOLUTION_TARGETS),
+            resultingItemId = resultingItemId,
+            evidenceCount = candidate.item.evidenceCount.coerceAtLeast(0),
+            createdAtMillis = createdAtMillis
+        )
+    }
+
     private val REPLACEMENT_SIGNALS = listOf(
         "no longer", "removed", "deleted", "deprecated", "renamed to", "changed to", "replaced by", "disabled",
-        "\u4e0d\u518d", "\u5df2\u79fb\u9664", "\u53bb\u6389", "\u5220\u6389", "\u5220\u9664", "\u5e9f\u5f03", "\u6539\u6210", "\u66ff\u6362\u4e3a", "\u5173\u95ed"
+        "correction", "corrected to", "actually", "instead", "i was wrong", "should be",
+        "\u4e0d\u518d", "\u5df2\u79fb\u9664", "\u53bb\u6389", "\u5220\u6389", "\u5220\u9664", "\u5e9f\u5f03", "\u6539\u6210", "\u6539\u4e3a", "\u66ff\u6362\u4e3a", "\u5173\u95ed",
+        "\u66f4\u6b63", "\u4fee\u6b63", "\u5e94\u8be5\u662f", "\u4e0d\u662f", "\u800c\u662f", "\u6211\u8bf4\u9519\u4e86"
     )
     private val REMOVAL_SIGNALS = listOf(
         "no longer", "removed", "deleted", "deprecated", "disabled",
@@ -819,20 +974,44 @@ class GlobalMemoryEvolutionStore(context: Context) {
         database.writeString(KEY_AUDIT, GlobalMemoryEvolutionCodec.encodeAudit(report).toString())
     }
 
+    fun evolutionRecords(): List<GlobalMemoryEvolutionRecord> = synchronized(STORE_LOCK) {
+        GlobalMemoryEvolutionCodec.decodeRecords(database.readString(KEY_RECORDS, ""))
+    }
+
+    fun appendEvolutionRecords(records: List<GlobalMemoryEvolutionRecord>) = synchronized(STORE_LOCK) {
+        if (records.isEmpty()) return@synchronized
+        val incomingIds = records.mapTo(mutableSetOf(), GlobalMemoryEvolutionRecord::id)
+        val merged = (evolutionRecords().filterNot { it.id in incomingIds } + records)
+            .sortedBy(GlobalMemoryEvolutionRecord::createdAtMillis)
+            .takeLast(MAX_EVOLUTION_RECORDS)
+        database.writeString(KEY_RECORDS, GlobalMemoryEvolutionCodec.encodeRecords(merged).toString())
+    }
+
     fun export(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
             .put("inbox", GlobalMemoryEvolutionCodec.encodeInbox(inbox()))
             .put("audit", GlobalMemoryEvolutionCodec.encodeAudit(auditReport()))
+            .put("records", GlobalMemoryEvolutionCodec.encodeRecords(evolutionRecords()))
     }
 
     fun restore(payload: JSONObject) = synchronized(STORE_LOCK) {
         payload.optJSONObject("inbox")?.let { saveInbox(GlobalMemoryEvolutionCodec.decodeInbox(it.toString())) }
         payload.optJSONObject("audit")?.let { saveAudit(GlobalMemoryEvolutionCodec.decodeAudit(it.toString())) }
+        payload.optJSONArray("records")?.let { records ->
+            database.writeString(
+                KEY_RECORDS,
+                GlobalMemoryEvolutionCodec.encodeRecords(
+                    GlobalMemoryEvolutionCodec.decodeRecords(records.toString())
+                ).toString()
+            )
+        }
     }
 
     private companion object {
         const val KEY_INBOX = "memory_evolution_inbox"
         const val KEY_AUDIT = "memory_evolution_audit"
+        const val KEY_RECORDS = "memory_evolution_records"
+        const val MAX_EVOLUTION_RECORDS = 2_000
         val STORE_LOCK = Any()
     }
 }
@@ -856,6 +1035,56 @@ internal object GlobalMemoryEvolutionCodec {
             updatedAtMillis = root.optLong("updated_at_millis")
         )
     }.getOrDefault(GlobalMemoryInbox())
+
+    fun encodeRecords(records: List<GlobalMemoryEvolutionRecord>): JSONArray = JSONArray().apply {
+        records.forEach { record ->
+            put(JSONObject()
+                .put("id", record.id)
+                .put("source_event_id", record.sourceEventId)
+                .put("conversation_id", record.conversationId)
+                .put("candidate_id", record.candidateId)
+                .put("kind", record.kind.name)
+                .put("action", record.action.name)
+                .put("outcome", record.outcome.name)
+                .put("temporal_state", record.temporalState.name)
+                .put("subject", record.subject)
+                .put("target_item_ids", JSONArray(record.targetItemIds))
+                .put("resulting_item_id", record.resultingItemId)
+                .put("evidence_count", record.evidenceCount)
+                .put("created_at_millis", record.createdAtMillis))
+        }
+    }
+
+    fun decodeRecords(raw: String): List<GlobalMemoryEvolutionRecord> = runCatching {
+        if (raw.isBlank()) return@runCatching emptyList()
+        val array = JSONArray(raw)
+        buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val id = item.optString("id")
+                val sourceEventId = item.optString("source_event_id")
+                if (id.isBlank() || sourceEventId.isBlank()) continue
+                add(GlobalMemoryEvolutionRecord(
+                    id = id.take(160),
+                    sourceEventId = sourceEventId.take(240),
+                    conversationId = item.optString("conversation_id").take(240),
+                    candidateId = item.optString("candidate_id").take(160),
+                    kind = enumValue(item.optString("kind"), GlobalMemoryCandidateKind.FACT),
+                    action = enumValue(item.optString("action"), GlobalMemoryEvolutionAction.CREATE),
+                    outcome = enumValue(item.optString("outcome"), GlobalMemoryEvolutionOutcome.APPLIED),
+                    temporalState = enumValue(
+                        item.optString("temporal_state"),
+                        GlobalMemoryTemporalState.CURRENT
+                    ),
+                    subject = item.optString("subject").replace(Regex("\\s+"), " ").trim().take(160),
+                    targetItemIds = strings(item.optJSONArray("target_item_ids")).take(12),
+                    resultingItemId = item.optString("resulting_item_id").take(160),
+                    evidenceCount = item.optInt("evidence_count").coerceAtLeast(0),
+                    createdAtMillis = item.optLong("created_at_millis").coerceAtLeast(0L)
+                ))
+            }
+        }.takeLast(2_000)
+    }.getOrDefault(emptyList())
 
     fun encodeAudit(report: GlobalMemoryAuditReport): JSONObject = JSONObject()
         .put("findings", JSONArray().apply {
