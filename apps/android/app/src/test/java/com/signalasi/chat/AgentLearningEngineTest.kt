@@ -227,6 +227,75 @@ class AgentLearningEngineTest {
         assertEquals(String(left.signingPayload()), String(right.signingPayload()))
     }
 
+    @Test
+    fun selfModelLearnsEveryTerminalRunExactlyOnce() {
+        val run = completedRun("run-1", "Debug C:\\Work\\alpha.py", "codex")
+
+        val first = AgentSelfModelReducer.observeRun(AgentSelfModel(), run)
+        val duplicate = AgentSelfModelReducer.observeRun(first.after, run)
+
+        assertTrue(first.changed)
+        assertFalse(duplicate.changed)
+        assertEquals(1, first.after.totalRuns)
+        assertEquals(1, first.after.successfulRuns)
+        assertEquals("codex", first.belief?.resourceKey)
+    }
+
+    @Test
+    fun selfModelCalibratesRoutingFromRepeatedEvidenceWithoutOverridingSafety() {
+        var model = AgentSelfModel()
+        repeat(3) { index ->
+            model = AgentSelfModelReducer.observeRun(
+                model,
+                completedRun("success-$index", "Debug C:\\Work\\task-$index.py", "codex")
+            ).after
+        }
+        var failedModel = AgentSelfModel()
+        repeat(2) { index ->
+            failedModel = AgentSelfModelReducer.observeRun(
+                failedModel,
+                failedRun("failure-$index", "Debug C:\\Work\\task-$index.py").copy(executionResourceId = "hermes")
+            ).after
+        }
+        val requirements = AgentTaskRequirementAnalyzer.analyze("Debug C:\\Temp\\next.py")
+        val positive = AgentSelfModelReducer.calibration(model, "Debug C:\\Temp\\next.py", "codex", requirements)
+        val negative = AgentSelfModelReducer.calibration(failedModel, "Debug C:\\Temp\\next.py", "hermes", requirements)
+
+        assertTrue(positive.scoreAdjustment > 0)
+        assertTrue(negative.scoreAdjustment < 0)
+        assertTrue(model.strengths().isNotEmpty())
+        assertTrue(failedModel.limitations().isNotEmpty())
+        assertTrue(positive.scoreAdjustment <= 120)
+        assertTrue(negative.scoreAdjustment >= -180)
+    }
+
+    @Test
+    fun selfModelStoresNoSensitiveRequestOrUnknownResourceIdentifier() {
+        val request = "Use token=secret-value on private-device-name"
+        val model = AgentSelfModelReducer.observeRun(
+            AgentSelfModel(),
+            completedRun("sensitive", request, "private-device-name")
+        ).after
+        val encoded = AgentSelfModelCodec.encode(model).toString()
+
+        assertFalse(encoded.contains("secret-value"))
+        assertFalse(encoded.contains("private-device-name"))
+        assertTrue(model.beliefs.single().taskFamily.startsWith("capabilities:"))
+        assertTrue(model.beliefs.single().resourceKey.startsWith("resource:"))
+    }
+
+    @Test
+    fun selfModelTreatsUserCorrectionAsIdempotentCalibrationEvidence() {
+        val run = completedRun("corrected", "Summarize C:\\Work\\alpha.pdf", "codex")
+        val observed = AgentSelfModelReducer.observeRun(AgentSelfModel(), run).after
+        val first = AgentSelfModelReducer.observeFeedback(observed, run, "No, use the local source instead")
+        val duplicate = AgentSelfModelReducer.observeFeedback(first.after, run, "No, use the local source instead")
+
+        assertTrue(first.changed)
+        assertFalse(duplicate.changed)
+        assertEquals(1, first.belief?.correctionCount)
+    }
+
     private fun runtimeManifest(
         capabilities: List<String>,
         dependencies: List<String>
@@ -251,5 +320,16 @@ class AgentLearningEngineTest {
         taskThreadId = "thread",
         originalRequest = request,
         status = AgentRecordedRunStatus.FAILED
+    )
+
+    private fun completedRun(id: String, request: String, resourceId: String) = AgentRecordedRun(
+        runId = id,
+        conversationId = "conversation",
+        taskThreadId = "thread",
+        originalRequest = request,
+        executionResourceId = resourceId,
+        status = AgentRecordedRunStatus.COMPLETED,
+        createdAtMillis = 1_000L,
+        completedAtMillis = 2_000L
     )
 }

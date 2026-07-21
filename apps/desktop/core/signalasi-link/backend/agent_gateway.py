@@ -23,6 +23,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_config import cloud_model_config, command_for, custom_agent_config, custom_agent_configs, local_model_config
+from desktop_agent_adapters import (
+    AgentAdapterDescriptor,
+    AgentAdapterExecutionError,
+    AgentAdapterRequest,
+    AgentDeliveryMode,
+    DesktopAgentProvider,
+    DesktopAgentStateStore,
+)
 
 EXECUTION_LOG_MAX_BYTES = 512 * 1024
 AGENT_RUNTIME_FAILURE_TTL_SECONDS = 5 * 60
@@ -30,6 +38,8 @@ AGENT_RUNTIME_FAILURE_TTL_SECONDS = 5 * 60
 _agent_runtime_lock = threading.RLock()
 _agent_runtime: dict[str, dict] = {}
 _agent_runtime_loaded = False
+_agent_adapter_lock = threading.RLock()
+_agent_adapter_provider: DesktopAgentProvider | None = None
 
 
 def _agent_runtime_path() -> Path:
@@ -38,6 +48,10 @@ def _agent_runtime_path() -> Path:
 
 def _execution_log_path() -> Path:
     return _state_root() / "agent-execution.jsonl"
+
+
+def _agent_adapter_state_path() -> Path:
+    return _state_root() / "agent-adapter-state.json"
 
 
 def _state_root() -> Path:
@@ -103,6 +117,7 @@ class AgentSpec:
     env_key: str | None = None
     note: str = ""
     output_cleaner: str = "default"
+    capabilities: tuple[str, ...] = ()
 
 
 BASE_AGENTS: dict[str, AgentSpec] = {
@@ -114,6 +129,7 @@ BASE_AGENTS: dict[str, AgentSpec] = {
         timeout=60,
         note="Hermes CLI",
         output_cleaner="hermes",
+        capabilities=("conversation", "research", "tools", "files"),
     ),
     "codex": AgentSpec(
         id="codex",
@@ -126,6 +142,7 @@ BASE_AGENTS: dict[str, AgentSpec] = {
         timeout=120,
         env_key="SIGNALASI_CODEX_CMD",
         note="Codex CLI wrapped by SignalASI Desktop",
+        capabilities=("conversation", "code", "terminal", "files", "web", "tasks"),
     ),
     "claude": AgentSpec(
         id="claude",
@@ -135,6 +152,18 @@ BASE_AGENTS: dict[str, AgentSpec] = {
         timeout=120,
         env_key="SIGNALASI_CLAUDE_CMD",
         note="Claude Code CLI wrapped by SignalASI Desktop",
+        capabilities=("conversation", "code", "terminal", "files", "tasks"),
+    ),
+    "openclaw": AgentSpec(
+        id="openclaw",
+        name="OpenClaw",
+        kind="local-cli",
+        command=["openclaw", "agent", "--agent", "main", "--message", "{prompt}", "--json"],
+        timeout=600,
+        env_key="SIGNALASI_OPENCLAW_CMD",
+        note="OpenClaw CLI wrapped by SignalASI Desktop",
+        output_cleaner="openclaw",
+        capabilities=("conversation", "research", "tools", "files", "automation", "tasks"),
     ),
     "local-llm": AgentSpec(
         id="local-llm",
@@ -143,6 +172,7 @@ BASE_AGENTS: dict[str, AgentSpec] = {
         command=None,
         timeout=120,
         note="Ollama or local OpenAI-compatible endpoint",
+        capabilities=("conversation", "local_inference"),
     ),
     "cloud-model": AgentSpec(
         id="cloud-model",
@@ -151,6 +181,7 @@ BASE_AGENTS: dict[str, AgentSpec] = {
         command=None,
         timeout=120,
         note="Cloud API endpoint configured by the user",
+        capabilities=("conversation", "cloud_inference"),
     ),
     "custom-agent": AgentSpec(
         id="custom-agent",
@@ -160,6 +191,7 @@ BASE_AGENTS: dict[str, AgentSpec] = {
         timeout=120,
         env_key="SIGNALASI_CUSTOM_AGENT_CMD",
         note="Any CLI or MCP wrapper command exposed as a SignalASI contact",
+        capabilities=("conversation", "custom_tools"),
     ),
 }
 
@@ -180,6 +212,11 @@ SETUP_GUIDES: dict[str, dict] = {
         "mobile_contact_id": "claude",
         "pairing": "Pair Hermes once. Claude Code is exposed as a connector-managed contact over the verified PC tunnel.",
         "setup": "Install Claude Code CLI or set a custom command in SignalASI Desktop. Example: claude -p",
+    },
+    "openclaw": {
+        "mobile_contact_id": "openclaw",
+        "pairing": "Pair once. OpenClaw is exposed as a connector-managed contact over the verified PC tunnel.",
+        "setup": "Install OpenClaw CLI or set a custom command. Default: openclaw agent --agent main --message {prompt} --json",
     },
     "local-llm": {
         "mobile_contact_id": "local-llm",
@@ -212,6 +249,7 @@ def _setup_code(spec: AgentSpec) -> str:
         "hermes": "setup_hermes_cli",
         "codex": "setup_codex_cli",
         "claude": "setup_claude_code",
+        "openclaw": "setup_openclaw_cli",
         "local-llm": "setup_local_model",
         "custom-agent": "setup_custom_agent",
     }
@@ -286,6 +324,40 @@ def clean_hermes_output(raw: str, prompt: str = "") -> str:
     return _strip_prompt_echo("\n".join(cleaned_lines).strip(), prompt)
 
 
+def clean_openclaw_output(raw: str, prompt: str = "") -> str:
+    """Extract the final assistant text from OpenClaw's optional JSON output."""
+    text = clean_output(raw)
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return _strip_prompt_echo(text, prompt)
+
+    def extract(value) -> list[str]:
+        if isinstance(value, str):
+            return [value.strip()] if value.strip() else []
+        if isinstance(value, list):
+            output: list[str] = []
+            for item in value:
+                output.extend(extract(item))
+            return output
+        if not isinstance(value, dict):
+            return []
+        for key in ("final", "reply", "response", "output", "content", "text", "message"):
+            if key in value:
+                selected = extract(value.get(key))
+                if selected:
+                    return selected
+        for key in ("result", "data", "payload", "messages"):
+            if key in value:
+                selected = extract(value.get(key))
+                if selected:
+                    return selected
+        return []
+
+    candidates = extract(payload)
+    return _strip_prompt_echo("\n".join(dict.fromkeys(candidates)).strip() or text, prompt)
+
+
 def _strip_prompt_echo(text: str, prompt: str) -> str:
     if not text or not prompt:
         return text
@@ -315,6 +387,8 @@ def _strip_prompt_echo(text: str, prompt: str) -> str:
 def clean_agent_output(spec: AgentSpec, raw: str, prompt: str = "") -> str:
     if spec.output_cleaner == "hermes":
         return clean_hermes_output(raw, prompt)
+    if spec.output_cleaner == "openclaw":
+        return clean_openclaw_output(raw, prompt)
     return clean_output(raw)
 
 
@@ -328,6 +402,7 @@ def all_agent_specs() -> dict[str, AgentSpec]:
             command=None,
             timeout=120,
             note="User-defined CLI or MCP wrapper exposed as a SignalASI contact",
+            capabilities=("conversation", "custom_tools"),
         )
     return specs
 
@@ -338,6 +413,68 @@ def visible_agent_specs() -> dict[str, AgentSpec]:
         for agent_id, spec in all_agent_specs().items()
         if agent_id not in DESKTOP_HIDDEN_AGENT_IDS
     }
+
+
+def _adapter_display_name(spec: AgentSpec) -> str:
+    if spec.id == "local-llm":
+        return local_model_config()["name"]
+    if spec.id == "cloud-model":
+        return cloud_model_config()["name"]
+    if spec.id == "custom-agent":
+        return custom_agent_config()["name"]
+    return spec.name
+
+
+def _agent_adapter_descriptors() -> list[AgentAdapterDescriptor]:
+    return [
+        AgentAdapterDescriptor(
+            agent_id=spec.id,
+            name=_adapter_display_name(spec),
+            kind=spec.kind,
+            adapter_type="pending-selection",
+            timeout_seconds=max(1, spec.timeout),
+            capabilities=spec.capabilities,
+        )
+        for spec in all_agent_specs().values()
+    ]
+
+
+def _execute_agent_adapter_request(agent_id: str, request: AgentAdapterRequest) -> str:
+    from response_policy import apply_response_policy, sanitize_assistant_response
+
+    spec = all_agent_specs().get(agent_id)
+    styled_prompt = apply_response_policy(request.prompt)
+    reply = sanitize_assistant_response(
+        _ask_agent_sync_inner(agent_id, styled_prompt, spec, task_id=request.run_id)
+    )
+    if not reply or _agent_reply_failed(reply):
+        raise AgentAdapterExecutionError(reply or f"{agent_id} returned no response")
+    return reply
+
+
+def _cancel_agent_adapter_run(run_id: str) -> None:
+    try:
+        from agent_task_manager import agent_task_manager
+
+        agent_task_manager.cancel(run_id)
+    except Exception:
+        pass
+
+
+def desktop_agent_provider() -> DesktopAgentProvider:
+    global _agent_adapter_provider
+    descriptors = _agent_adapter_descriptors()
+    with _agent_adapter_lock:
+        if _agent_adapter_provider is None:
+            _agent_adapter_provider = DesktopAgentProvider(
+                descriptors=descriptors,
+                store=DesktopAgentStateStore(_agent_adapter_state_path()),
+                executor=_execute_agent_adapter_request,
+                cancel_executor=_cancel_agent_adapter_run,
+            )
+        else:
+            _agent_adapter_provider.sync(descriptors)
+        return _agent_adapter_provider
 
 
 def list_agents() -> list[dict]:
@@ -380,7 +517,15 @@ def connector_diagnostics(quick: bool = False) -> dict:
             "agent_execution_log",
             "api_response_codes",
             "agent_diagnostics_codes",
+            "agent_adapter_provider",
+            "respond_observe_ignore",
+            "durable_agent_run_receipts",
+            "agent_protocol_negotiation",
         ],
+        "adapter_provider": {
+            "agents": desktop_agent_provider().enumerate(),
+            "recoverable_runs": [item.public() for item in desktop_agent_provider().recover()],
+        },
         "ready": ready,
         "needs_setup": needs_setup,
         "agents": agents,
@@ -425,6 +570,13 @@ def agent_status(spec: AgentSpec, quick: bool = False) -> dict:
         status = runtime_status
         detail = str(runtime.get("detail") or detail)
     detail_code = _agent_detail_code(spec, status in {"ready", "busy", "degraded"}, detail)
+    adapter_descriptor = next(
+        (
+            item for item in desktop_agent_provider().enumerate()
+            if item.get("agent_id") == spec.id
+        ),
+        {},
+    )
     return {
         "id": spec.id,
         "name": display_name,
@@ -437,6 +589,7 @@ def agent_status(spec: AgentSpec, quick: bool = False) -> dict:
         "runtime_status": runtime_status or "unknown",
         "runtime_updated_at": int(float(runtime.get("updated_at") or 0) * 1000),
         "active_tasks": int(runtime.get("active_tasks") or 0),
+        "adapter": adapter_descriptor,
     }
 
 
@@ -549,6 +702,7 @@ def _normalize_command(agent_id: str, command: list[str] | None) -> list[str] | 
         return None
     preferred = {
         "claude": "claude.cmd",
+        "openclaw": "openclaw.cmd",
     }.get(agent_id)
     if preferred and command[0].lower() == preferred.removesuffix(".cmd"):
         resolved = shutil.which(preferred)
@@ -669,42 +823,76 @@ def _cloud_model_available() -> tuple[bool, str]:
 
 # Keep user-facing Chinese strings as Unicode escapes so this gateway remains
 # stable across Windows console/codepage changes.
-def ask_agent_sync(contact_id: str, text: str, task_id: str = "") -> str:
+def deliver_agent_sync(
+    contact_id: str,
+    text: str,
+    task_id: str = "",
+    delivery_mode: str | AgentDeliveryMode = AgentDeliveryMode.RESPOND,
+    conversation_id: str = "",
+    source_message_id: str = "",
+    return_path: str = "",
+    protocol: str = "1.0",
+    required_features: tuple[str, ...] = (),
+) -> dict:
     spec = all_agent_specs().get(contact_id)
+    if spec is None:
+        raise AgentAdapterExecutionError(f"Unknown Agent: {contact_id}")
+    mode = AgentDeliveryMode.parse(delivery_mode)
     start = time.perf_counter()
-    from response_policy import apply_response_policy, sanitize_assistant_response
-    styled_text = apply_response_policy(text)
-    _agent_execution_started(contact_id)
+    if mode == AgentDeliveryMode.RESPOND:
+        _agent_execution_started(contact_id)
     try:
-        reply = sanitize_assistant_response(
-            _ask_agent_sync_inner(contact_id, styled_text, spec, task_id=task_id)
+        result = desktop_agent_provider().deliver(
+            AgentAdapterRequest(
+                agent_id=contact_id,
+                prompt=text,
+                run_id=task_id,
+                idempotency_key=task_id,
+                delivery_mode=mode,
+                protocol=protocol,
+                required_features=frozenset(required_features),
+                conversation_id=conversation_id,
+                source_message_id=source_message_id,
+                return_path=return_path,
+            )
         )
-        reply_ok = bool(reply and not _agent_reply_failed(reply))
-        if not reply_ok:
-            raise RuntimeError(reply or "Agent returned no response")
-        _append_execution_log(
-            spec=spec,
-            contact_id=contact_id,
-            prompt=text,
-            reply=reply,
-            duration_ms=int((time.perf_counter() - start) * 1000),
-            ok=True,
-        )
-        _agent_execution_finished(contact_id, True, "Agent is ready")
-        return reply
+        if mode == AgentDeliveryMode.RESPOND:
+            if result.state != "completed" or not result.reply:
+                raise AgentAdapterExecutionError(
+                    result.error or f"Agent Run {result.run_id} is {result.state}"
+                )
+            _append_execution_log(
+                spec=spec,
+                contact_id=contact_id,
+                prompt=text,
+                reply=result.reply,
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                ok=True,
+            )
+            _agent_execution_finished(
+                contact_id,
+                True,
+                "Agent result replayed from a durable receipt" if result.replayed else "Agent is ready",
+            )
+        return result.public()
     except Exception as exc:
-        if _agent_runtime_snapshot(contact_id).get("status") == "busy":
+        if mode == AgentDeliveryMode.RESPOND and _agent_runtime_snapshot(contact_id).get("status") == "busy":
             _agent_execution_finished(contact_id, False, str(exc))
-        _append_execution_log(
-            spec=spec,
-            contact_id=contact_id,
-            prompt=text,
-            reply="",
-            duration_ms=int((time.perf_counter() - start) * 1000),
-            ok=False,
-            error=str(exc)[:200],
-        )
+        if mode == AgentDeliveryMode.RESPOND:
+            _append_execution_log(
+                spec=spec,
+                contact_id=contact_id,
+                prompt=text,
+                reply="",
+                duration_ms=int((time.perf_counter() - start) * 1000),
+                ok=False,
+                error=str(exc)[:200],
+            )
         raise
+
+
+def ask_agent_sync(contact_id: str, text: str, task_id: str = "") -> str:
+    return str(deliver_agent_sync(contact_id, text, task_id=task_id).get("reply") or "")
 
 
 def _ask_agent_sync_inner(contact_id: str, text: str, spec: AgentSpec | None, task_id: str = "") -> str:

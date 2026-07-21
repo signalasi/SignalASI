@@ -506,6 +506,7 @@ class AgentResourceRouter(context: Context) {
     private val appContext = context.applicationContext
     private val healthStore = AgentResourceHealthStore(appContext)
     private val modelUsageStore = GlobalModelCallBudgetStore(appContext)
+    private val selfModelStore = AgentSelfModelStore(appContext)
 
     fun route(goal: String, targets: List<AgentCallableTarget>, tools: List<AgentSystemTool>): AgentRoutingDecision {
         val requirements = AgentTaskRequirementAnalyzer.analyze(goal)
@@ -514,6 +515,7 @@ class AgentResourceRouter(context: Context) {
         val preferredTargets = preferredTargetOrder(requirements, hasPairedDesktop)
         val registrations = EncryptedAgentRegistry(appContext).list()
         val observedUsage = modelUsageStore.resourceUsageSnapshots()
+        val selfModel = selfModelStore.snapshot()
         val candidates = AgentResourceCatalog.build(targets, tools)
             .asSequence()
             .map { resource -> projectRegistration(resource, registrations) }
@@ -527,9 +529,19 @@ class AgentResourceRouter(context: Context) {
                     observedUsage[resource.targetId] ?: GlobalModelResourceUsageSnapshot(resource.targetId)
                 )
                 val preference = preferenceBonus(resource.targetId, preferredTargets)
+                val selfCalibration = AgentSelfModelReducer.calibration(
+                    model = selfModel,
+                    goal = goal,
+                    resourceId = resource.targetId,
+                    requirements = requirements
+                )
                 candidate.copy(
-                    score = candidate.score + preference,
-                    reasons = candidate.reasons + "preference_bonus:$preference"
+                    score = candidate.score + preference + selfCalibration.scoreAdjustment,
+                    reasons = candidate.reasons + "preference_bonus:$preference" + listOfNotNull(
+                        selfCalibration.reason.takeIf(String::isNotBlank)?.let { reason ->
+                            "$reason:${selfCalibration.scoreAdjustment}"
+                        }
+                    )
                 )
             }
             .filter { it.score > -1_000 }

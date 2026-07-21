@@ -126,6 +126,7 @@
     <string name="agent_private_assistant_subtitle">私有 AI 助手，已接入 PC 端</string>
     <string name="agent_codex_subtitle">本地编程与工程协作助手</string>
     <string name="agent_claude_subtitle">终端协作与代码编辑助手</string>
+    <string name="agent_openclaw_subtitle">通过桌面运行的独立自动化智能体</string>
     <string name="agent_local_llm_subtitle">本地模型推理和任务规划</string>
     <string name="agent_custom_subtitle">任意 CLI 或 MCP 包装命令</string>
     <string name="agent_news_subtitle">资讯抓取与晨间简报</string>

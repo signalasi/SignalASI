@@ -420,6 +420,7 @@ object GlobalRecordedRunObservationExtractor {
         "task_thread_id" to run.taskThreadId,
         "task_status" to status,
         "active_skill_id" to run.activeSkillId.take(160),
+        "execution_resource_id" to AgentSelfModelReducer.resourceKey(run.executionResourceId),
         "revision" to run.revisionNumber.toString()
     )
 

@@ -12,6 +12,7 @@ const syncStatusToPhoneSecondaryButton = document.getElementById("syncStatusToPh
 const runSelfTestButton = document.getElementById("runSelfTest");
 const includeAgentCalls = document.getElementById("includeAgentCalls");
 const openClaudeDocsButton = document.getElementById("openClaudeDocs");
+const openOpenClawDocsButton = document.getElementById("openOpenClawDocs");
 const copyDefaultCommandsButton = document.getElementById("copyDefaultCommands");
 const useCustomStdinTemplateButton = document.getElementById("useCustomStdinTemplate");
 const useCustomMcpTemplateButton = document.getElementById("useCustomMcpTemplate");
@@ -24,6 +25,7 @@ const jumpSelfTestButton = document.getElementById("jumpSelfTest");
 const pairingSelfTestButton = document.getElementById("pairingSelfTest");
 const forgetPhoneButton = document.getElementById("forgetPhone");
 const testClaudeConfigButton = document.getElementById("testClaudeConfig");
+const testOpenClawConfigButton = document.getElementById("testOpenClawConfig");
 const testCustomAgentConfigButton = document.getElementById("testCustomAgentConfig");
 const useOllamaPresetButton = document.getElementById("useOllamaPreset");
 const useLmStudioPresetButton = document.getElementById("useLmStudioPreset");
@@ -78,6 +80,7 @@ const fields = {
   cmdHermes: document.getElementById("cmdHermes"),
   cmdCodex: document.getElementById("cmdCodex"),
   cmdClaude: document.getElementById("cmdClaude"),
+  cmdOpenClaw: document.getElementById("cmdOpenClaw"),
   customAgentName: document.getElementById("customAgentName"),
   cmdCustomAgent: document.getElementById("cmdCustomAgent"),
   localModelName: document.getElementById("localModelName"),
@@ -93,15 +96,18 @@ const agentLabels = {
   hermes: "Hermes Agent",
   codex: "Codex Agent",
   claude: "Claude Code",
+  openclaw: "OpenClaw",
   "local-llm": "Local LLM",
   "custom-agent": "Custom Agent"
 };
 
 const CLAUDE_SETUP_URL = "https://code.claude.com/docs/en/setup";
+const OPENCLAW_SETUP_URL = "https://docs.openclaw.ai/cli/agent";
 const DEFAULT_COMMANDS_TEXT = [
   "Hermes: hermes chat -q",
   "Codex: codex exec --skip-git-repo-check --ephemeral --model gpt-5.6-sol -c model_reasoning_effort=\"low\" -",
   "Claude Code: claude -p",
+  "OpenClaw: openclaw agent --agent main --message {prompt} --json",
   "Custom Agent name: Custom Agent",
   "Custom Agent command: python custom_agent_stdio.py -",
   "Additional custom agent: research-agent / Research Agent / python custom_agent_stdio.py -",
@@ -112,6 +118,7 @@ const CONTACT_MAP_TEXT = [
   "hermes -> Hermes Agent",
   "codex -> Codex Agent",
   "claude -> Claude Code",
+  "openclaw -> OpenClaw",
   "local-llm -> Local LLM",
   "custom-agent -> Custom Agent",
   "custom agents -> configured dynamically in SignalASI Desktop"
@@ -121,6 +128,7 @@ const simulationProof = {
   hermes: "Real CLI diagnostics + mobile delivery smoke",
   codex: "Real CLI diagnostics + mobile delivery smoke",
   claude: "Simulated by smoke:e2e until Claude CLI is installed",
+  openclaw: "Simulated by smoke:e2e until OpenClaw CLI is installed",
   "local-llm": "Simulated by smoke:e2e until a local endpoint is configured",
   "custom-agent": "Simulated by smoke:e2e until a custom command is configured"
 };
@@ -290,6 +298,7 @@ function renderSetupGuide(diagnostics, pairingStatus = {}) {
   const hermesReady = agentIsReady(diagnostics, "hermes");
   const codexReady = agentIsReady(diagnostics, "codex");
   const claudeReady = agentIsReady(diagnostics, "claude");
+  const openClawReady = agentIsReady(diagnostics, "openclaw");
   const localReady = agentIsReady(diagnostics, "local-llm");
   const customReady = agentIsReady(diagnostics, "custom-agent");
   const items = [
@@ -322,6 +331,13 @@ function renderSetupGuide(diagnostics, pairingStatus = {}) {
       t("Add Claude Code"),
       claudeReady ? t("Claude Code is ready through the desktop connector.") : t("Install Claude Code or set a custom command such as claude -p."),
       t("Configure Claude"),
+      "agents"
+    ),
+    setupItem(
+      openClawReady ? "done" : "todo",
+      t("Add OpenClaw"),
+      openClawReady ? t("OpenClaw is ready through the desktop connector.") : t("Install OpenClaw or set its agent command."),
+      t("Configure OpenClaw"),
       "agents"
     ),
     setupItem(
@@ -432,6 +448,7 @@ function fillConfig(config) {
   fields.cmdHermes.value = config.commands?.hermes || "";
   fields.cmdCodex.value = config.commands?.codex || "";
   fields.cmdClaude.value = config.commands?.claude || "";
+  fields.cmdOpenClaw.value = config.commands?.openclaw || "";
   fields.customAgentName.value = config.custom_agent?.name || "Custom Agent";
   fields.cmdCustomAgent.value = config.commands?.["custom-agent"] || "";
   renderCustomAgentRows(config.custom_agents || []);
@@ -448,6 +465,7 @@ function readConfig() {
       hermes: fields.cmdHermes.value.trim(),
       codex: fields.cmdCodex.value.trim(),
       claude: fields.cmdClaude.value.trim(),
+      openclaw: fields.cmdOpenClaw.value.trim(),
       "custom-agent": fields.cmdCustomAgent.value.trim()
     },
     local_model: {
@@ -897,10 +915,12 @@ copyContactMapButton.addEventListener("click", () => copyText(CONTACT_MAP_TEXT, 
 copyDefaultCommandsButton.addEventListener("click", () => copyText(DEFAULT_COMMANDS_TEXT, "Default commands"));
 jumpSelfTestButton.addEventListener("click", scrollToSelfTest);
 openClaudeDocsButton.addEventListener("click", () => window.signalasi.openExternal(CLAUDE_SETUP_URL));
+openOpenClawDocsButton.addEventListener("click", () => window.signalasi.openExternal(OPENCLAW_SETUP_URL));
 useCustomStdinTemplateButton.addEventListener("click", useCustomStdinTemplate);
 useCustomMcpTemplateButton.addEventListener("click", useCustomMcpTemplate);
 addCustomAgentButton.addEventListener("click", addDefaultCustomAgent);
 testClaudeConfigButton.addEventListener("click", () => saveThenTestAgent("claude", testClaudeConfigButton, "Test Claude Code"));
+testOpenClawConfigButton.addEventListener("click", () => saveThenTestAgent("openclaw", testOpenClawConfigButton, "Test OpenClaw"));
 testCustomAgentConfigButton.addEventListener("click", () => saveThenTestAgent("custom-agent", testCustomAgentConfigButton, "Test Custom Agent"));
 useOllamaPresetButton.addEventListener("click", useOllamaPreset);
 useLmStudioPresetButton.addEventListener("click", useLmStudioPreset);

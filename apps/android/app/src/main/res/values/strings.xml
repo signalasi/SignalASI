@@ -126,6 +126,7 @@
     <string name="agent_private_assistant_subtitle">Private AI assistant connected through the PC endpoint</string>
     <string name="agent_codex_subtitle">Local coding and engineering collaboration assistant</string>
     <string name="agent_claude_subtitle">Terminal collaboration and code editing assistant</string>
+    <string name="agent_openclaw_subtitle">Independent automation Agent through Desktop</string>
     <string name="agent_local_llm_subtitle">Local model inference and task planning</string>
     <string name="agent_custom_subtitle">Any CLI or MCP wrapper command</string>
     <string name="agent_news_subtitle">News collection and morning briefs</string>

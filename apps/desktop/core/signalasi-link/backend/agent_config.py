@@ -26,6 +26,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "hermes": "hermes chat -q",
         "codex": "codex exec --skip-git-repo-check --ephemeral --model gpt-5.6-sol -c model_reasoning_effort=\"low\" -",
         "claude": "claude -p",
+        "openclaw": "openclaw agent --agent main --message {prompt} --json",
         "custom-agent": "",
     },
     "local_model": {
@@ -138,7 +139,7 @@ def custom_agent_configs(config: dict[str, Any] | None = None) -> list[dict[str,
         return []
     agents: list[dict[str, str]] = []
     seen: set[str] = set()
-    reserved = {"hermes", "codex", "claude", "local-llm", "cloud-model", "custom-agent"}
+    reserved = {"hermes", "codex", "claude", "openclaw", "local-llm", "cloud-model", "custom-agent"}
     for item in data[:12]:
         if not isinstance(item, dict):
             continue

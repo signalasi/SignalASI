@@ -569,6 +569,7 @@ object AppStore {
             Triple("hermes", "Hermes Agent", "local-cli"),
             Triple("codex", "Codex Agent", "local-cli"),
             Triple("claude", "Claude Code", "local-cli"),
+            Triple("openclaw", "OpenClaw", "local-cli"),
             Triple("local-llm", "Local LLM", "local-model"),
             Triple("custom-agent", "Custom Agent", "custom-cli")
         ).forEach { (agentId, name, kind) ->
@@ -681,6 +682,18 @@ object AppStore {
         contact.put("identity_fingerprint", fingerprint)
         contact.put("desktop_fingerprint", fingerprint)
         contact.put("agent_kind", agent.optString("kind", contact.optString("agent_kind", "custom-cli")))
+        val adapter = agent.optJSONObject("adapter") ?: JSONObject()
+        val capabilities = agent.optJSONArray("capabilities") ?: adapter.optJSONArray("capabilities") ?: JSONArray()
+        val protocols = agent.optJSONArray("protocols") ?: adapter.optJSONArray("protocols") ?: JSONArray()
+        val protocolFeatures = adapter.optJSONArray("features") ?: JSONArray()
+        contact.put("adapter", adapter)
+        contact.put("capabilities", capabilities)
+        contact.put("protocols", protocols)
+        contact.put("protocol_version", protocols.optString(0, "1.0"))
+        contact.put("protocol_min_version", protocols.optString(protocols.length() - 1, "1.0"))
+        contact.put("protocol_max_version", protocols.optString(0, "1.0"))
+        contact.put("protocol_features", protocolFeatures)
+        contact.put("capabilities_hash", capabilities.toString().hashCode().toUInt().toString(16))
         contact.put("setup_status", agent.optString("status", "needs_setup"))
         contact.put("setup_detail", agent.optString("detail"))
         contact.put("setup_next_step", agent.optString("setup"))
@@ -927,6 +940,7 @@ object AppStore {
         SignalASILinkProtocol.clear(context)
         SignalASILinkDeliveryStore.clear(context)
         AgentEncryptedDatabase(context, "signalasi_agent_runs").clear()
+        AgentSelfModelStore(context).clear()
         AgentEncryptedDatabase(context, EncryptedAgentWorkspaceStore.DATABASE_NAME).clear()
         context.databaseList().forEach { database -> runCatching { context.deleteDatabase(database) } }
         clearAllSharedPreferences(context)
@@ -1203,6 +1217,7 @@ object AppStore {
         return listOf(
             connectorAgentContact("codex", "Codex Agent", "local-cli", fingerprint, now),
             connectorAgentContact("claude", "Claude Code", "local-cli", fingerprint, now),
+            connectorAgentContact("openclaw", "OpenClaw", "local-cli", fingerprint, now),
             connectorAgentContact("local-llm", "Local LLM", "local-model", fingerprint, now),
             connectorAgentContact("custom-agent", "Custom Agent", "custom-cli", fingerprint, now),
         )

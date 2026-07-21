@@ -189,6 +189,53 @@ object GlobalCapabilityObservationExtractor {
         )
     }
 
+    fun selfModelTransition(
+        before: AgentSelfModel,
+        after: AgentSelfModel,
+        belief: AgentSelfCapabilityBelief,
+        run: AgentRecordedRun,
+        timestampMillis: Long = System.currentTimeMillis()
+    ): GlobalConversationEvent? {
+        if (before == after || belief.key.isBlank()) return null
+        val idHash = safeId("self-belief", belief.key)
+        val stableKey = "capability:self:$idHash"
+        val summary = buildString {
+            append("SignalASI observed ").append(belief.evaluatedRuns).append(" evaluated runs for a generalized task family using ")
+            append(belief.resourceKey).append(": ")
+            append(belief.successfulRuns).append(" succeeded and ").append(belief.failedRuns).append(" failed")
+            if (belief.correctionCount > 0) append(" with ").append(belief.correctionCount).append(" user corrections")
+            append('.')
+        }
+        return GlobalConversationEvent(
+            id = "capability-self-model:$idHash:${run.runId}:$timestampMillis",
+            type = GlobalConversationEventType.RESOURCE_UPDATED,
+            conversationId = CAPABILITY_CONVERSATION_ID,
+            messageId = idHash,
+            actor = GlobalConversationActor.SYSTEM,
+            timestampMillis = timestampMillis,
+            content = summary,
+            contentRef = "encrypted://agent-self-model/$idHash",
+            conversationTitle = SELF_MODEL_TOPIC,
+            topicHints = setOf(SELF_MODEL_TOPIC),
+            metadata = mapOf(
+                "origin" to "agent_self_model",
+                "identity_stable_key" to stableKey,
+                "identity_summary" to summary,
+                "identity_kind" to GlobalWorldItemKind.FACT.name,
+                "identity_layer" to GlobalWorldLayer.TOPIC.name,
+                "identity_topic" to SELF_MODEL_TOPIC,
+                "replace_stable_keys" to stableKey,
+                "context_visibility" to GlobalWorldContextVisibility.LOCAL_ONLY.name,
+                "projection" to "replace",
+                "evaluated_runs" to belief.evaluatedRuns.toString(),
+                "success_rate_percent" to (belief.successRate * 100.0).toInt().coerceIn(0, 100).toString(),
+                "confidence_percent" to (belief.confidence * 100.0).toInt().coerceIn(0, 100).toString(),
+                "last_outcome" to belief.lastOutcome.name.lowercase(Locale.ROOT),
+                "last_failure_category" to belief.lastFailureCategory
+            )
+        )
+    }
+
     private fun authorizationEvent(
         consentKey: String,
         granted: Boolean,
@@ -598,6 +645,7 @@ object GlobalCapabilityObservationExtractor {
     private const val CAPABILITY_CONVERSATION_ID = "global-capabilities"
     private const val CAPABILITY_TOPIC = "Available capabilities"
     private const val AUTHORIZATION_TOPIC = "Local authorization"
+    private const val SELF_MODEL_TOPIC = "Agent self model"
     private const val HOME_ASSISTANT_ID = "home-assistant"
     private const val MAX_LABEL_CHARACTERS = 120
 }

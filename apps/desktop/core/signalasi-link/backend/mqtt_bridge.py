@@ -20,7 +20,7 @@ from typing import Any, Callable, Mapping
 import paho.mqtt.client as mqtt
 
 from api_response import api_error, api_ok
-from agent_gateway import ask_agent_sync, connector_diagnostics
+from agent_gateway import ask_agent_sync, connector_diagnostics, deliver_agent_sync
 from agent_task_manager import agent_task_manager
 from codex_app_server import CodexAppServer
 import phone_tool_broker as phone_tool
@@ -1059,7 +1059,15 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
 
     def run_task(task) -> str:
         log.info(f"Agent task running task_id={task.task_id} contact_id={contact_id} agent_id={agent_id}")
-        reply = ask_agent_sync(agent_id, content_with_attachments(task.task_id), task_id=task.task_id)
+        delivery = deliver_agent_sync(
+            agent_id,
+            content_with_attachments(task.task_id),
+            task_id=task.task_id,
+            conversation_id=str(payload.get("conversation_id") or ""),
+            source_message_id=source_message_id,
+            return_path=_wire_down_topic(wire_payload),
+        )
+        reply = str(delivery.get("reply") or "")
         if msg_type in {"audio", "voice"}:
             marker = "Voice message received."
             if marker in reply:
@@ -1616,6 +1624,9 @@ def mobile_connector_agents(client_route_id: str = "") -> list[dict]:
             "detail": agent.get("detail") or "",
             "setup": agent.get("setup") or "",
             "kind": agent.get("kind") or "",
+            "adapter": agent.get("adapter") or {},
+            "capabilities": (agent.get("adapter") or {}).get("capabilities") or [],
+            "protocols": (agent.get("adapter") or {}).get("protocols") or [],
             "mqtt_topic": up_topic,
             "updated_at": int(time.time() * 1000),
         })
@@ -1635,7 +1646,7 @@ def capability_manifest(client_route_id: str = "") -> dict:
         },
         "agents": mobile_connector_agents(client_route_id),
         "models": [],
-        "tools": ["agent_tasks", "voice_stt", "file_transfer"],
+        "tools": ["agent_tasks", "agent_adapters", "voice_stt", "file_transfer"],
         "features": [
             "tasks",
             "task_events",
@@ -1644,6 +1655,9 @@ def capability_manifest(client_route_id: str = "") -> dict:
             "reliable_delivery",
             "multi_client",
             "phone_native_tool_session_v1",
+            "respond_observe_ignore",
+            "durable_agent_run_receipts",
+            "agent_protocol_negotiation",
         ],
         "limits": {
             "max_parallel_tasks": int(os.environ.get("SIGNALASI_MAX_PARALLEL_TASKS", "4")),
@@ -1921,7 +1935,16 @@ def start_agent_task(
     agent_id = _agent_id_from_contact(cleaned_contact_id)
 
     def run_task(task) -> str:
-        return ask_agent_sync(agent_id, cleaned_prompt, task_id=task.task_id)
+        return str(
+            deliver_agent_sync(
+                agent_id,
+                cleaned_prompt,
+                task_id=task.task_id,
+                source_message_id=str(source_message_id or ""),
+                return_path=f"client:{client_route_id}" if client_route_id else "paired-client",
+            ).get("reply")
+            or ""
+        )
 
     def publish_result(task: dict) -> None:
         publish_agent_push_message(

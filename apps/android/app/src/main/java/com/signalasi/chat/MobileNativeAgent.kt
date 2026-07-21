@@ -9020,6 +9020,21 @@ class StaticAgentConnectorRegistry : AgentConnectorRegistry {
             )
         ),
         AgentCallableTarget(
+            id = "openclaw",
+            title = "OpenClaw",
+            kind = AgentConnectorKind.AGENT,
+            status = AgentConnectorStatus.NEEDS_SETUP,
+            capabilities = listOf(
+                AgentCapability.CHAT,
+                AgentCapability.RESEARCH,
+                AgentCapability.LIVE_DATA,
+                AgentCapability.TASK_EXECUTION,
+                AgentCapability.TOOL_USE,
+                AgentCapability.MCP,
+                AgentCapability.SKILL
+            )
+        ),
+        AgentCallableTarget(
             id = "home-assistant",
             title = "Home Assistant",
             kind = AgentConnectorKind.DEVICE,
@@ -9174,7 +9189,8 @@ class AppStoreAgentConnectorRegistry(
                     "device" in kindText -> AgentConnectorKind.DEVICE
                     else -> AgentConnectorKind.AGENT
                 }
-                val capabilities = buildList {
+                val advertisedCapabilities = advertisedCapabilities(contact)
+                val capabilities = advertisedCapabilities.ifEmpty { buildList {
                     add(AgentCapability.CHAT)
                     when {
                         "codex" in search -> {
@@ -9203,7 +9219,7 @@ class AppStoreAgentConnectorRegistry(
                             add(AgentCapability.TOOL_USE)
                         }
                     }
-                }
+                } }
                 add(
                     AgentCallableTarget(
                         id = id,
@@ -9218,6 +9234,35 @@ class AppStoreAgentConnectorRegistry(
                 )
             }
         }
+    }
+
+    private fun advertisedCapabilities(contact: JSONObject): List<AgentCapability> {
+        val values = contact.optJSONArray("capabilities") ?: return emptyList()
+        return buildSet {
+            for (index in 0 until values.length()) {
+                when (values.optString(index).lowercase(Locale.US)) {
+                    "conversation", "chat" -> add(AgentCapability.CHAT)
+                    "reasoning", "cloud_inference" -> add(AgentCapability.REASONING)
+                    "research" -> add(AgentCapability.RESEARCH)
+                    "web", "live_data" -> add(AgentCapability.LIVE_DATA)
+                    "tools", "tool_use", "terminal" -> add(AgentCapability.TOOL_USE)
+                    "mcp" -> add(AgentCapability.MCP)
+                    "skill", "skills" -> add(AgentCapability.SKILL)
+                    "local_inference" -> add(AgentCapability.LOCAL_INFERENCE)
+                    "code" -> add(AgentCapability.CODE)
+                    "tasks", "task_execution", "automation", "files", "custom_tools" ->
+                        add(AgentCapability.TASK_EXECUTION)
+                    "smart_home" -> add(AgentCapability.SMART_HOME)
+                    "device_control" -> add(AgentCapability.DEVICE_CONTROL)
+                    "knowledge_search" -> add(AgentCapability.KNOWLEDGE_SEARCH)
+                    "screen_reading" -> add(AgentCapability.SCREEN_READING)
+                    "clipboard" -> add(AgentCapability.CLIPBOARD)
+                    "system_settings" -> add(AgentCapability.SYSTEM_SETTINGS)
+                    "app_navigation" -> add(AgentCapability.APP_NAVIGATION)
+                    "alarm" -> add(AgentCapability.ALARM)
+                }
+            }
+        }.toList()
     }
 
     private fun statusFor(target: AgentCallableTarget): AgentConnectorStatus = when (target.id) {

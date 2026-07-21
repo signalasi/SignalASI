@@ -28,7 +28,7 @@
       <header class="topbar">
         <div>
           <h2>Local Agent Connector</h2>
-          <p>Hermes, Codex, Claude Code, local models, and custom agents do not need native SignalASI support. This desktop connector wraps them as secure mobile contacts.</p>
+          <p>Hermes, Codex, Claude Code, OpenClaw, local models, and custom agents do not need native SignalASI support. This desktop connector wraps them as secure mobile contacts.</p>
         </div>
         <div class="topbar-actions">
           <label class="language-switch">
@@ -104,6 +104,7 @@
             <div><strong>Hermes</strong><span>contact: hermes</span><p>Default assistant contact. Uses Hermes CLI or bridge.</p></div>
             <div><strong>Codex</strong><span>contact: codex</span><p>Uses <code>gpt-5.6-sol</code> with low reasoning by default.</p></div>
             <div><strong>Claude Code</strong><span>contact: claude</span><p>Wrapped through <code>claude -p</code>; no native SignalASI plugin required.</p></div>
+            <div><strong>OpenClaw</strong><span>contact: openclaw</span><p>Uses the independently installed OpenClaw CLI through its agent JSON interface.</p></div>
             <div><strong>Local LLM</strong><span>contact: local-llm</span><p>Ollama, LM Studio, vLLM, or OpenAI-compatible localhost.</p></div>
             <div><strong>Custom Agent</strong><span>contact: custom-agent</span><p>Any CLI or MCP wrapper command using <code>{prompt}</code> or stdin.</p></div>
           </div>
@@ -165,7 +166,7 @@
           <div class="panel-head">
             <div>
               <h3>Mobile pairing</h3>
-              <p>Scan this QR code in SignalASI mobile. One verified desktop identity exposes Hermes, Codex, Claude, Local LLM, and Custom Agent contacts. Cloud models are added directly in the mobile app.</p>
+              <p>Scan this QR code in SignalASI mobile. One verified desktop identity exposes Hermes, Codex, Claude, OpenClaw, Local LLM, and Custom Agent contacts. Cloud models are added directly in the mobile app.</p>
             </div>
             <button id="refreshPairing">Refresh</button>
           </div>
@@ -200,7 +201,7 @@
           <div class="panel-head">
             <div>
               <h3>Remote Agent tasks</h3>
-              <p>Live lifecycle state for Codex, Hermes, Claude Code, local models, and custom agents.</p>
+              <p>Live lifecycle state for Codex, Hermes, Claude Code, OpenClaw, local models, and custom agents.</p>
             </div>
             <button id="refreshAgentTasks">Refresh tasks</button>
           </div>
@@ -216,7 +217,7 @@
             <button id="refreshExecutionLog">Refresh log</button>
           </div>
           <div class="permission-grid">
-            <div><strong>local_process</strong><span>Hermes, Codex, Claude Code, Custom Agent</span></div>
+            <div><strong>local_process</strong><span>Hermes, Codex, Claude Code, OpenClaw, Custom Agent</span></div>
             <div><strong>local_http</strong><span>Ollama, LM Studio, vLLM, local OpenAI-compatible APIs</span></div>
             <div><strong>cloud_http</strong><span>Cloud APIs are configured directly on the mobile app</span></div>
           </div>
@@ -243,6 +244,10 @@
             <label>
               <span>Claude Code command</span>
               <input id="cmdClaude" spellcheck="false">
+            </label>
+            <label>
+              <span>OpenClaw command</span>
+              <input id="cmdOpenClaw" spellcheck="false">
             </label>
             <label>
               <span>Custom Agent name</span>
@@ -272,9 +277,11 @@
           <div class="action-row">
             <button id="copyDefaultCommands">Copy default commands</button>
             <button id="openClaudeDocs">Open Claude Code docs</button>
+            <button id="openOpenClawDocs">Open OpenClaw docs</button>
             <button id="useCustomStdinTemplate">Use stdin template</button>
             <button id="useCustomMcpTemplate">Use MCP wrapper template</button>
             <button id="testClaudeConfig">Test Claude Code</button>
+            <button id="testOpenClawConfig">Test OpenClaw</button>
             <button id="testCustomAgentConfig">Test Custom Agent</button>
           </div>
           <div class="hint">
@@ -344,6 +351,7 @@
             <option value="hermes">Hermes Agent</option>
             <option value="codex">Codex Agent</option>
             <option value="claude">Claude Code</option>
+            <option value="openclaw">OpenClaw</option>
             <option value="local-llm">Local LLM</option>
             <option value="custom-agent">Custom Agent</option>
           </select>

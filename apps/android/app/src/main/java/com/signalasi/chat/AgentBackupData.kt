@@ -22,7 +22,7 @@ object AgentBackupData {
         val homeAssistant = HomeAssistantSettingsStore.load(context)
         val customDevices = CustomDeviceConnectorStore(context).exportJson()
         return JSONObject()
-            .put("version", 24)
+            .put("version", 25)
             .put("memory", readDatabaseArray(context, MEMORY_DATABASE, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS))
             .put("knowledge", readArray(context, KNOWLEDGE_PREFS, MAX_KNOWLEDGE_ITEMS, MAX_KNOWLEDGE_ITEM_CHARACTERS))
             .put("tasks", if (includeSessionHistory) readArray(context, TASK_PREFS, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS) else JSONArray())
@@ -61,6 +61,7 @@ object AgentBackupData {
             )
             .put("custom_device_connectors", customDevices)
             .put("global_super_agent", GlobalAgentRepository(context).exportSnapshot())
+            .put("agent_self_model", AgentSelfModelStore(context).exportJson())
             .put(
                 "model_planner",
                 JSONObject()
@@ -188,6 +189,9 @@ object AgentBackupData {
         }
         payload.optJSONObject("global_super_agent")?.let { snapshot ->
             GlobalAgentRepository(context).restoreSnapshot(snapshot)
+        }
+        payload.optJSONObject("agent_self_model")?.let { snapshot ->
+            AgentSelfModelStore(context).restoreJson(snapshot)
         }
         payload.optJSONObject("model_planner")?.let { json ->
             AgentModelPlannerSettingsStore(context).save(

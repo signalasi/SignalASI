@@ -52,6 +52,8 @@ class GlobalAgentRepository(context: Context) {
     private val deliberationStore = GlobalAgentDeliberationStore(appContext)
     private val longHorizonStore = GlobalLongHorizonGoalStore(appContext)
     private val topicGraphStore = GlobalTopicProjectGraphStore(appContext)
+    private val memoryEvolutionStore = GlobalMemoryEvolutionStore(appContext)
+    private val entityMemoryGraphStore = GlobalEntityMemoryGraphStore(appContext)
     private val proactiveDiscoveryStore = GlobalProactiveDiscoveryStore(appContext)
     private val currentVersionCode: Int = runCatching {
         val info = appContext.packageManager.getPackageInfo(appContext.packageName, 0)
@@ -315,6 +317,18 @@ class GlobalAgentRepository(context: Context) {
     fun topicGraph(): GlobalTopicProjectGraph = topicGraphStore.load()
 
     fun saveTopicGraph(graph: GlobalTopicProjectGraph) = topicGraphStore.save(graph)
+
+    fun memoryInbox(): GlobalMemoryInbox = memoryEvolutionStore.inbox()
+
+    fun saveMemoryInbox(inbox: GlobalMemoryInbox) = memoryEvolutionStore.saveInbox(inbox)
+
+    fun memoryAuditReport(): GlobalMemoryAuditReport = memoryEvolutionStore.auditReport()
+
+    fun saveMemoryAudit(report: GlobalMemoryAuditReport) = memoryEvolutionStore.saveAudit(report)
+
+    fun entityMemoryGraph(): GlobalEntityMemoryGraph = entityMemoryGraphStore.load()
+
+    fun saveEntityMemoryGraph(graph: GlobalEntityMemoryGraph) = entityMemoryGraphStore.save(graph)
 
     fun researchTasks(): List<GlobalResearchTask> = synchronized(STORE_LOCK) { loadResearchTasks() }
 
@@ -652,7 +666,7 @@ class GlobalAgentRepository(context: Context) {
 
     fun exportSnapshot(): JSONObject = synchronized(STORE_LOCK) {
         JSONObject()
-            .put("version", 17)
+            .put("version", 18)
             .put("events", JSONArray().apply { loadEvents().forEach { put(encodeEvent(it)) } })
             .put("event_overflow", JSONArray().apply { loadOverflowEvents().forEach { put(encodeEvent(it)) } })
             .put("event_failures", JSONArray().apply {
@@ -666,6 +680,8 @@ class GlobalAgentRepository(context: Context) {
             })
             .put("world", encodeWorld(loadWorld()))
             .put("topic_project_graph", topicGraphStore.export())
+            .put("memory_evolution", memoryEvolutionStore.export())
+            .put("entity_memory_graph", entityMemoryGraphStore.export())
             .put("research_tasks", JSONArray().apply {
                 loadResearchTasks().forEach { put(encodeResearchTask(it)) }
             })
@@ -719,6 +735,8 @@ class GlobalAgentRepository(context: Context) {
         })
         payload.optJSONObject("world")?.let { saveWorld(decodeWorld(it.toString())) }
         payload.optJSONObject("topic_project_graph")?.let(topicGraphStore::restore)
+        payload.optJSONObject("memory_evolution")?.let(memoryEvolutionStore::restore)
+        payload.optJSONObject("entity_memory_graph")?.let(entityMemoryGraphStore::restore)
         payload.optJSONArray("research_tasks")?.let { array ->
             saveResearchTasks(buildList {
                 for (index in 0 until array.length()) decodeResearchTask(array.optJSONObject(index))?.let(::add)
@@ -1601,9 +1619,14 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         synchronizePersistentContext()
         repository.recoverDeadLettersAfterUpgrade(repository.appVersionCode())
         val events = repository.pendingEvents(maxEvents)
-        if (events.isEmpty()) return@synchronized GlobalAgentProcessingBatch(0, 0, emptyList(), emptyList())
+        if (events.isEmpty()) {
+            auditMemoryIfDue(0)
+            return@synchronized GlobalAgentProcessingBatch(0, 0, emptyList(), emptyList())
+        }
         var world = repository.loadWorld()
         var topicGraph = repository.topicGraph()
+        var memoryInbox = repository.memoryInbox()
+        var entityGraph = repository.entityMemoryGraph()
         val history = repository.interventionHistory()
         val adaptiveProfile = if (settings.adaptiveLearningEnabled) {
             GlobalAgentLearningPolicy.profile(repository.feedback())
@@ -1623,6 +1646,8 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         events.forEach { event ->
             val worldBefore = world
             val topicGraphBefore = topicGraph
+            val memoryInboxBefore = memoryInbox
+            val entityGraphBefore = entityGraph
             val existingTasksBefore = existingTasks.toList()
             val existingCognitionBefore = existingCognitionTasks.toList()
             val existingMessagesBefore = existingMessages.toList()
@@ -1787,8 +1812,18 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                 autonomousRunExecutor.consumeResearchEvent(event)
             }
             val understanding = understandingPipeline.understand(event, world)
-            val reduction = GlobalWorldModelReducer.reduce(world, event, understanding)
+            val baseReduction = GlobalWorldModelReducer.reduce(world, event, understanding)
+            val evolution = GlobalMemoryEvolutionPolicy.evolve(
+                worldBefore = world,
+                reduction = baseReduction,
+                inbox = memoryInbox,
+                event = event,
+                understanding = understanding
+            )
+            val reduction = evolution.reduction
             world = reduction.world
+            memoryInbox = evolution.inbox
+            entityGraph = GlobalEntityMemoryGraphReducer.reduce(entityGraph, event, understanding, reduction)
             topicGraph = GlobalTopicProjectGraphReducer.reduce(topicGraph, event, understanding, reduction)
             changedItems += reduction.changedItems.size
             val decision = GlobalInterventionPolicy.decide(
@@ -1858,6 +1893,8 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             } catch (error: Exception) {
                 world = worldBefore
                 topicGraph = topicGraphBefore
+                memoryInbox = memoryInboxBefore
+                entityGraph = entityGraphBefore
                 existingTasks.clear()
                 existingTasks.addAll(existingTasksBefore)
                 existingCognitionTasks.clear()
@@ -1883,8 +1920,16 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
                 }
             }
         }
+        val lastAudit = repository.memoryAuditReport()
+        if (GlobalMemoryCritic.due(lastAudit.createdAtMillis, handledEventIds.size)) {
+            val (auditedWorld, auditReport) = GlobalMemoryCritic.audit(world, memoryInbox)
+            world = auditedWorld
+            repository.saveMemoryAudit(auditReport)
+        }
         repository.saveWorld(world)
         repository.saveTopicGraph(topicGraph)
+        repository.saveMemoryInbox(memoryInbox)
+        repository.saveEntityMemoryGraph(entityGraph)
         if (researchTasksInvalidated || newTasks.isNotEmpty()) {
             repository.saveResearchTasks(existingTasks + newTasks)
         }
@@ -1898,14 +1943,24 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         GlobalAgentProcessingBatch(handledEventIds.size, changedItems, newTasks, newMessages, newCognitionTasks)
     }
 
+    private fun auditMemoryIfDue(processedEvents: Int) {
+        val lastAudit = repository.memoryAuditReport()
+        if (!GlobalMemoryCritic.due(lastAudit.createdAtMillis, processedEvents)) return
+        val inbox = repository.memoryInbox()
+        val (auditedWorld, report) = GlobalMemoryCritic.audit(repository.loadWorld(), inbox)
+        repository.saveWorld(auditedWorld)
+        repository.saveMemoryAudit(report)
+    }
+
     fun augmentContext(context: AgentConversationContext, query: String): AgentConversationContext {
         if (!context.allowsGlobalContext) return context.copy(globalContext = "")
-        val durableContext = GlobalAgentContextSelector.buildWithGraph(
-            repository.loadWorld(),
-            repository.topicGraph(),
-            query,
-            context.conversationId,
-            maxCharacters = 5_500
+        val durableContext = GlobalMemoryPromptCompiler.compile(
+            world = repository.loadWorld(),
+            topicGraph = repository.topicGraph(),
+            entityGraph = repository.entityMemoryGraph(),
+            query = query,
+            currentConversationId = context.conversationId,
+            maximumCharacters = 5_500
         )
         val realtimeState = realtimeContext.build(
             query = query,
@@ -1923,6 +1978,70 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     fun worldSnapshot(): PersonalWorldModel = repository.loadWorld()
 
     fun topicGraphSnapshot(): GlobalTopicProjectGraph = repository.topicGraph()
+
+    fun entityMemoryGraphSnapshot(): GlobalEntityMemoryGraph = repository.entityMemoryGraph()
+
+    fun memoryInboxSnapshot(): GlobalMemoryInbox = repository.memoryInbox()
+
+    fun memoryAuditSnapshot(): GlobalMemoryAuditReport = repository.memoryAuditReport()
+
+    fun runMemoryAudit(): GlobalMemoryAuditReport = synchronized(PROCESS_LOCK) {
+        val inbox = repository.memoryInbox()
+        val (auditedWorld, report) = GlobalMemoryCritic.audit(repository.loadWorld(), inbox)
+        repository.saveWorld(auditedWorld)
+        repository.saveMemoryAudit(report)
+        report
+    }
+
+    fun approveMemoryCandidate(candidateId: String): Boolean = synchronized(PROCESS_LOCK) {
+        val world = repository.loadWorld()
+        val inbox = repository.memoryInbox()
+        val candidate = inbox.candidates.firstOrNull { it.id == candidateId } ?: return@synchronized false
+        val (updatedWorld, updatedInbox) = GlobalMemoryEvolutionPolicy.approve(world, inbox, candidateId)
+        if (updatedInbox == inbox) return@synchronized false
+        repository.saveWorld(updatedWorld)
+        repository.saveMemoryInbox(updatedInbox)
+        val approvalEvent = GlobalConversationEvent(
+            id = "memory-approval:${candidate.id}",
+            type = GlobalConversationEventType.MEMORY_UPDATED,
+            conversationId = candidate.conversationId,
+            actor = GlobalConversationActor.USER,
+            timestampMillis = System.currentTimeMillis(),
+            content = candidate.item.value,
+            conversationTitle = candidate.item.topic,
+            metadata = mapOf("memory_candidate_id" to candidate.id),
+            causalEventIds = setOf(candidate.sourceEventId)
+        )
+        val graphItem = candidate.item.copy(
+            evidenceEventIds = (candidate.item.evidenceEventIds + approvalEvent.id).distinct(),
+            evidenceProvenance = (candidate.item.evidenceProvenance + approvalEvent.evidenceRef())
+                .distinctBy(GlobalEvidenceRef::eventId)
+        )
+        val graphReduction = GlobalWorldReduction(updatedWorld, listOf(graphItem), emptyList())
+        val graphUnderstanding = GlobalUnderstanding(
+            eventId = approvalEvent.id,
+            topic = candidate.item.topic,
+            intent = "approved_memory",
+            entities = setOf(candidate.item.topic).filter(String::isNotBlank).toSet()
+        )
+        repository.saveEntityMemoryGraph(
+            GlobalEntityMemoryGraphReducer.reduce(
+                repository.entityMemoryGraph(),
+                approvalEvent,
+                graphUnderstanding,
+                graphReduction
+            )
+        )
+        true
+    }
+
+    fun rejectMemoryCandidate(candidateId: String): Boolean = synchronized(PROCESS_LOCK) {
+        val inbox = repository.memoryInbox()
+        val updated = GlobalMemoryEvolutionPolicy.reject(inbox, candidateId)
+        if (updated == inbox) return@synchronized false
+        repository.saveMemoryInbox(updated)
+        true
+    }
 
     fun continuitySnapshot(nowMillis: Long = System.currentTimeMillis()): GlobalAgentContinuitySnapshot =
         GlobalAgentContinuitySnapshot(

@@ -25,6 +25,7 @@ data class AgentRecordedRun(
     val artifacts: List<AgentArtifactReference> = emptyList(),
     val userFeedback: List<String> = emptyList(),
     val activeSkillId: String = "",
+    val executionResourceId: String = "",
     val parentRunId: String = "",
     val revisionNumber: Int = 1,
     val status: AgentRecordedRunStatus = AgentRecordedRunStatus.RUNNING,
@@ -94,7 +95,8 @@ class AgentRunRecorder(context: Context) {
         renderSpecJson: String,
         artifacts: List<AgentArtifactReference>,
         success: Boolean = true,
-        finalStatus: AgentRecordedRunStatus? = null
+        finalStatus: AgentRecordedRunStatus? = null,
+        executionResourceId: String = ""
     ): AgentRecordedRun? {
         val completed = update(runId) { current ->
             current.copy(
@@ -106,10 +108,13 @@ class AgentRunRecorder(context: Context) {
                 finalOutputJson = sanitizeSecrets(safeJson(finalOutputJson, "{}", MAX_RESULT_CHARS)),
                 renderSpecJson = sanitizeSecrets(safeJson(renderSpecJson, "{}", MAX_RENDER_CHARS)),
                 artifacts = artifacts.take(MAX_ARTIFACTS),
+                executionResourceId = executionResourceId.trim().take(MAX_RESOURCE_ID_CHARS)
+                    .ifBlank { current.executionResourceId },
                 status = finalStatus ?: if (success) AgentRecordedRunStatus.COMPLETED else AgentRecordedRunStatus.FAILED,
                 completedAtMillis = System.currentTimeMillis()
             )
         } ?: return null
+        AgentSelfModelStore(appContext).observeRun(completed)
         GlobalConversationEventBus.publishRecordedRunCompleted(appContext, completed)
         return completed
     }
@@ -122,6 +127,7 @@ class AgentRunRecorder(context: Context) {
         val updated = update(active.runId) { run ->
             run.copy(userFeedback = (run.userFeedback + cleanFeedback).takeLast(32))
         } ?: return null
+        AgentSelfModelStore(appContext).observeFeedback(updated, cleanFeedback)
         GlobalConversationEventBus.publishRecordedRunFeedback(appContext, updated, cleanFeedback)
         return updated
     }
@@ -171,6 +177,7 @@ class AgentRunRecorder(context: Context) {
             )
         } ?: return null
         if (previous.status != interrupted.status) {
+            AgentSelfModelStore(appContext).observeRun(interrupted)
             GlobalConversationEventBus.publishRecordedRunCompleted(appContext, interrupted)
         }
         return interrupted
@@ -276,6 +283,7 @@ class AgentRunRecorder(context: Context) {
         .put("artifacts", JSONArray().apply { artifacts.forEach { put(it.toJson()) } })
         .put("user_feedback", JSONArray(userFeedback))
         .put("active_skill_id", activeSkillId)
+        .put("execution_resource_id", executionResourceId)
         .put("parent_run_id", parentRunId)
         .put("revision_number", revisionNumber)
         .put("status", status.name)
@@ -299,6 +307,7 @@ class AgentRunRecorder(context: Context) {
             artifacts = optJSONArray("artifacts")?.objects().orEmpty().mapNotNull { it.toArtifact() },
             userFeedback = optJSONArray("user_feedback")?.strings().orEmpty(),
             activeSkillId = optString("active_skill_id"),
+            executionResourceId = optString("execution_resource_id").take(MAX_RESOURCE_ID_CHARS),
             parentRunId = optString("parent_run_id"),
             revisionNumber = optInt("revision_number", 1).coerceAtLeast(1),
             status = runCatching { AgentRecordedRunStatus.valueOf(optString("status")) }.getOrDefault(AgentRecordedRunStatus.FAILED),
@@ -379,6 +388,7 @@ class AgentRunRecorder(context: Context) {
         private const val MAX_RESULT_CHARS = 96_000
         private const val MAX_RENDER_CHARS = 24_000
         private const val MAX_FEEDBACK_CHARS = 4_000
+        private const val MAX_RESOURCE_ID_CHARS = 240
         private const val MAX_TOOL_CALLS = 64
         private const val MAX_ARTIFACTS = 64
     }

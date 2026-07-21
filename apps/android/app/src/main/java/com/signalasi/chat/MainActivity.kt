@@ -2497,7 +2497,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             finalOutputJson = JSONObject().put("text", result.message).toString(),
             renderSpecJson = "{}",
             artifacts = runtimeArtifactsFromResult(nativeResultJson),
-            success = result.success
+            success = result.success,
+            executionResourceId = "signalasi-mobile"
         )?.let(::observeCompletedAgentRun)
     }
 
@@ -2522,7 +2523,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "{}",
             result.toolResults.flatMap { runtimeArtifactsFromResult(AgentNativeJsonCodec.stringify(it.output)) }
                 .distinctBy { it.id },
-            result.success
+            result.success,
+            executionResourceId = "skill:${result.skillId}"
         )?.let(::observeCompletedAgentRun)
     }
 
@@ -2587,7 +2589,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 AgentPhase.COMPLETED -> AgentRecordedRunStatus.COMPLETED
                 AgentPhase.CANCELLED -> AgentRecordedRunStatus.CANCELLED
                 else -> AgentRecordedRunStatus.FAILED
-            }
+            },
+            executionResourceId = routeTarget.ifBlank { "signalasi-mobile" }
         )?.let(::observeCompletedAgentRun)
     }
 
@@ -4777,6 +4780,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 showAgentPlannerSettingsPage()
             }
             "memory.manage" -> openExistingControlCenterPage { showAgentMemoryPage() }
+            "memory.inbox" -> openExistingControlCenterPage { showGlobalMemoryInboxPage() }
+            "memory.graph" -> openExistingControlCenterPage { showGlobalMemoryGraphPage() }
+            "memory.audit" -> openExistingControlCenterPage { showGlobalMemoryAuditPage() }
             "memory.toggle_capture" -> {
                 val next = !mobileNativeAgent.safetySettings().memoryCapture
                 mobileNativeAgent.updateMemoryCapture(next)
@@ -6024,6 +6030,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun renderControlCenterMemoryPage() {
         val snapshot = mobileNativeAgent.memorySnapshot()
+        val globalMemory = GlobalSuperAgentRuntime.get(this)
+        val pendingCandidates = globalMemory.memoryInboxSnapshot().pending()
+        val entityGraph = globalMemory.entityMemoryGraphSnapshot()
+        val memoryAudit = globalMemory.memoryAuditSnapshot()
         val captureEnabled = mobileNativeAgent.safetySettings().memoryCapture
         val countFor: (Set<AgentMemoryKind>) -> Int = { kinds ->
             snapshot.activeItems.count { it.kind in kinds }
@@ -6110,11 +6120,221 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                                 ControlCenterTone.BLUE
                             )
                         )
+                    ),
+                    ControlCenterSectionSpec(
+                        getString(R.string.cc_memory_section_evolution),
+                        listOf(
+                            ControlCenterRowSpec(
+                                "memory.inbox",
+                                getString(R.string.cc_memory_inbox_title),
+                                getString(R.string.cc_memory_inbox_subtitle),
+                                R.drawable.ic_agent_memory,
+                                pendingCandidates.size.toString(),
+                                if (pendingCandidates.isEmpty()) ControlCenterTone.GREEN else ControlCenterTone.AMBER
+                            ),
+                            ControlCenterRowSpec(
+                                "memory.graph",
+                                getString(R.string.cc_memory_graph_title),
+                                getString(R.string.cc_memory_graph_subtitle),
+                                R.drawable.ic_protocol_link,
+                                getString(R.string.cc_memory_graph_status, entityGraph.nodes.size, entityGraph.relations.size),
+                                ControlCenterTone.BLUE
+                            ),
+                            ControlCenterRowSpec(
+                                "memory.audit",
+                                getString(R.string.cc_memory_audit_title),
+                                getString(R.string.cc_memory_audit_subtitle),
+                                R.drawable.ic_security_shield,
+                                memoryAudit.findings.size.toString(),
+                                if (memoryAudit.findings.isEmpty()) ControlCenterTone.GREEN else ControlCenterTone.AMBER
+                            )
+                        )
                     )
                 )
             )
         )
     }
+
+    private fun showGlobalMemoryInboxPage() {
+        val runtime = GlobalSuperAgentRuntime.get(this)
+        val pending = runtime.memoryInboxSnapshot().pending()
+        showFeaturePage(getString(R.string.cc_memory_inbox_title))
+        featureContent.addView(featureHeroCard(
+            getString(R.string.cc_memory_inbox_hero_title),
+            getString(R.string.cc_memory_inbox_hero_subtitle),
+            R.drawable.ic_agent_memory,
+            "#5B6CFF",
+            pending.size.toString()
+        ))
+        addSectionTitle(getString(R.string.cc_memory_inbox_pending_section))
+        if (pending.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.cc_memory_inbox_empty),
+                getString(R.string.cc_memory_inbox_empty_subtitle),
+                R.drawable.ic_security_shield,
+                ""
+            ))
+            return
+        }
+        pending.forEach { candidate ->
+            featureContent.addView(featureRow(
+                candidate.item.value.ifBlank { candidate.item.topic }.replace(Regex("\\s+"), " ").take(90),
+                getString(
+                    R.string.cc_memory_candidate_subtitle,
+                    memoryCandidateKindLabel(candidate.kind),
+                    memoryTemporalStateLabel(candidate.temporalState)
+                ),
+                R.drawable.ic_agent_memory,
+                getString(R.string.agent_memory_review)
+            ).apply {
+                setOnClickListener { showGlobalMemoryCandidateDialog(candidate) }
+            })
+        }
+    }
+
+    private fun showGlobalMemoryCandidateDialog(candidate: GlobalMemoryCandidate) {
+        val detail = getString(
+            R.string.cc_memory_candidate_dialog_message,
+            memoryCandidateKindLabel(candidate.kind),
+            candidate.item.topic.ifBlank { getString(R.string.agent_memory_key_none) },
+            candidate.item.value.ifBlank { getString(R.string.cc_memory_candidate_private_value) }
+        )
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.cc_memory_candidate_dialog_title))
+            .setMessage(detail)
+            .setPositiveButton(R.string.cc_memory_candidate_approve) { _, _ ->
+                val approved = GlobalSuperAgentRuntime.get(this).approveMemoryCandidate(candidate.id)
+                Toast.makeText(
+                    this,
+                    getString(if (approved) R.string.cc_memory_candidate_approved else R.string.cc_memory_candidate_unchanged),
+                    Toast.LENGTH_SHORT
+                ).show()
+                showGlobalMemoryInboxPage()
+            }
+            .setNegativeButton(R.string.common_reject) { _, _ ->
+                val rejected = GlobalSuperAgentRuntime.get(this).rejectMemoryCandidate(candidate.id)
+                Toast.makeText(
+                    this,
+                    getString(if (rejected) R.string.cc_memory_candidate_rejected else R.string.cc_memory_candidate_unchanged),
+                    Toast.LENGTH_SHORT
+                ).show()
+                showGlobalMemoryInboxPage()
+            }
+            .setNeutralButton(R.string.common_cancel, null)
+            .show()
+    }
+
+    private fun showGlobalMemoryGraphPage() {
+        val graph = GlobalSuperAgentRuntime.get(this).entityMemoryGraphSnapshot()
+        val nodesById = graph.nodes.associateBy(GlobalEntityNode::id)
+        showFeaturePage(getString(R.string.cc_memory_graph_title))
+        featureContent.addView(featureHeroCard(
+            getString(R.string.cc_memory_graph_hero_title),
+            getString(R.string.cc_memory_graph_hero_subtitle),
+            R.drawable.ic_protocol_link,
+            "#2F80ED",
+            getString(R.string.cc_memory_graph_status, graph.nodes.size, graph.relations.size)
+        ))
+        addSectionTitle(getString(R.string.cc_memory_graph_current_entities))
+        if (graph.nodes.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.cc_memory_graph_empty),
+                getString(R.string.cc_memory_graph_empty_subtitle),
+                R.drawable.ic_protocol_link,
+                ""
+            ))
+        } else {
+            graph.nodes.sortedByDescending(GlobalEntityNode::lastSeenAtMillis).take(40).forEach { node ->
+                featureContent.addView(featureRow(
+                    node.label,
+                    getString(
+                        R.string.cc_memory_graph_node_subtitle,
+                        node.kind.name.lowercase(Locale.ROOT).replace('_', ' '),
+                        memoryTemporalStateLabel(node.temporalState)
+                    ),
+                    R.drawable.ic_agent_node,
+                    ""
+                ))
+            }
+        }
+        if (graph.relations.isNotEmpty()) {
+            addSectionTitle(getString(R.string.cc_memory_graph_relations))
+            graph.relations.sortedByDescending(GlobalEntityRelation::lastSeenAtMillis).take(40).forEach { relation ->
+                val from = nodesById[relation.fromNodeId]?.label ?: return@forEach
+                val to = nodesById[relation.toNodeId]?.label ?: return@forEach
+                featureContent.addView(featureRow(
+                    getString(R.string.cc_memory_graph_relation_title, from, to),
+                    relation.kind.name.lowercase(Locale.ROOT).replace('_', ' '),
+                    R.drawable.ic_protocol_link,
+                    memoryTemporalStateLabel(relation.temporalState)
+                ))
+            }
+        }
+    }
+
+    private fun showGlobalMemoryAuditPage(runNow: Boolean = false) {
+        val runtime = GlobalSuperAgentRuntime.get(this)
+        val report = if (runNow) runtime.runMemoryAudit() else runtime.memoryAuditSnapshot()
+        showFeaturePage(getString(R.string.cc_memory_audit_title))
+        featureContent.addView(featureHeroCard(
+            getString(R.string.cc_memory_audit_hero_title),
+            getString(R.string.cc_memory_audit_hero_subtitle),
+            R.drawable.ic_security_shield,
+            "#16A085",
+            report.findings.size.toString()
+        ).apply { setOnClickListener { showGlobalMemoryAuditPage(runNow = true) } })
+        addSectionTitle(getString(R.string.cc_memory_audit_findings))
+        if (report.findings.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.cc_memory_audit_clean),
+                getString(R.string.cc_memory_audit_clean_subtitle),
+                R.drawable.ic_security_shield,
+                getString(R.string.cc_status_ready)
+            ))
+        } else {
+            report.findings.forEach { finding ->
+                featureContent.addView(featureRow(
+                    memoryAuditFindingLabel(finding.kind),
+                    getString(R.string.cc_memory_audit_evidence_count, finding.evidenceCount),
+                    R.drawable.ic_security_shield,
+                    ""
+                ))
+            }
+        }
+    }
+
+    private fun memoryCandidateKindLabel(kind: GlobalMemoryCandidateKind): String = getString(
+        when (kind) {
+            GlobalMemoryCandidateKind.IDENTITY -> R.string.agent_memory_kind_identity
+            GlobalMemoryCandidateKind.PREFERENCE -> R.string.agent_memory_kind_preference
+            GlobalMemoryCandidateKind.GOAL, GlobalMemoryCandidateKind.PROJECT_STATE -> R.string.agent_memory_kind_task
+            GlobalMemoryCandidateKind.DECISION, GlobalMemoryCandidateKind.SKILL_OPPORTUNITY -> R.string.agent_memory_kind_workflow
+            GlobalMemoryCandidateKind.RELATION -> R.string.agent_memory_kind_contact
+            GlobalMemoryCandidateKind.FACT -> R.string.agent_memory_kind_knowledge
+        }
+    )
+
+    private fun memoryTemporalStateLabel(state: GlobalMemoryTemporalState): String = getString(
+        when (state) {
+            GlobalMemoryTemporalState.HISTORICAL -> R.string.cc_memory_state_historical
+            GlobalMemoryTemporalState.CURRENT -> R.string.cc_memory_state_current
+            GlobalMemoryTemporalState.PLANNED -> R.string.cc_memory_state_planned
+            GlobalMemoryTemporalState.DEPRECATED -> R.string.cc_memory_state_deprecated
+            GlobalMemoryTemporalState.PENDING -> R.string.cc_memory_state_pending
+            GlobalMemoryTemporalState.CONFLICTED -> R.string.cc_memory_state_conflicted
+        }
+    )
+
+    private fun memoryAuditFindingLabel(kind: GlobalMemoryAuditFindingKind): String = getString(
+        when (kind) {
+            GlobalMemoryAuditFindingKind.EXPIRED -> R.string.cc_memory_audit_expired
+            GlobalMemoryAuditFindingKind.DUPLICATE -> R.string.cc_memory_audit_duplicate
+            GlobalMemoryAuditFindingKind.LOW_CONFIDENCE_REUSED -> R.string.cc_memory_audit_low_confidence
+            GlobalMemoryAuditFindingKind.UNRESOLVED_CONFLICT -> R.string.cc_memory_audit_conflict
+            GlobalMemoryAuditFindingKind.SKILL_CANDIDATE -> R.string.cc_memory_audit_skill_candidate
+            GlobalMemoryAuditFindingKind.COMPLETED_GOAL -> R.string.cc_memory_audit_completed_goal
+        }
+    )
 
     private fun renderControlCenterLearningPage() {
         val pending = agentLearningEngine.proposals(AgentLearningProposalStatus.PENDING)
@@ -13635,9 +13855,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         id == "hermes" -> 0
         id == "codex" -> 1
         id == "claude" -> 2
-        id == "local-llm" -> 3
-        id.startsWith("cloud:") -> 4
-        id == "custom-agent" -> 5
+        id == "openclaw" -> 3
+        id == "local-llm" -> 4
+        id.startsWith("cloud:") -> 5
+        id == "custom-agent" -> 6
         id == CONTACT_SYSTEM.id -> 99
         else -> 20
     }
@@ -14431,11 +14652,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         fun agentName(id: String, fallback: String): String {
             return rawContact(id)?.optString("name")?.takeIf { it.isNotBlank() } ?: fallback
         }
-        val fixedAgentIds = setOf("hermes", "codex", "claude", "local-llm", "custom-agent")
+        val fixedAgentIds = setOf("hermes", "codex", "claude", "openclaw", "local-llm", "custom-agent")
         val coreAgents = listOf(
             AgentUi("hermes", "Hermes", getString(R.string.agent_private_assistant_subtitle), R.drawable.ic_avatar_hermes, if (connected("hermes")) getString(R.string.status_running) else getString(R.string.status_pending_pairing), "#14C66A", connected("hermes")),
             AgentUi("codex", agentName("codex", "Codex"), detail("codex", getString(R.string.agent_codex_subtitle)), R.drawable.logo_codex_product, badge("codex", getString(R.string.common_paired)), color("codex", "#5B6CFF"), connected("codex")),
             AgentUi("claude", agentName("claude", "Claude Code"), detail("claude", getString(R.string.agent_claude_subtitle)), R.drawable.logo_claude_code, badge("claude", getString(R.string.common_paired)), color("claude", "#FF6B5F"), connected("claude")),
+            AgentUi("openclaw", agentName("openclaw", "OpenClaw"), detail("openclaw", getString(R.string.agent_openclaw_subtitle)), R.drawable.ic_avatar_custom_agent, badge("openclaw", getString(R.string.common_paired)), color("openclaw", "#2878FF"), connected("openclaw")),
             AgentUi("local-llm", agentName("local-llm", "Local LLM"), detail("local-llm", getString(R.string.agent_local_llm_subtitle)), R.drawable.ic_avatar_custom_agent, badge("local-llm", getString(R.string.common_paired)), color("local-llm", "#00A7A7"), connected("local-llm")),
             AgentUi("custom-agent", agentName("custom-agent", "Custom Agent"), detail("custom-agent", getString(R.string.agent_custom_subtitle)), R.drawable.ic_avatar_custom_agent, badge("custom-agent", getString(R.string.common_paired)), color("custom-agent", "#6C7A89"), connected("custom-agent"))
         )
@@ -15122,6 +15344,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentId == "hermes" -> R.drawable.ic_avatar_hermes
         agentId == "codex" -> R.drawable.logo_codex_product
         agentId == "claude" -> R.drawable.logo_claude_code
+        agentId == "openclaw" -> R.drawable.ic_avatar_custom_agent
         kind == "local-model" -> R.drawable.ic_local_model
         else -> R.drawable.ic_agent_node
     }
@@ -18161,6 +18384,7 @@ private fun contactAvatarRes(contact: Contact): Int {
         "automation_center" -> R.drawable.ic_send_plane
         "codex" -> R.drawable.logo_codex_product
         "claude" -> R.drawable.logo_claude_code
+        "openclaw" -> R.drawable.ic_avatar_custom_agent
         "local-llm" -> R.drawable.ic_avatar_custom_agent
         "cloud-model" -> R.drawable.ic_avatar_cloud_model
         "custom-agent" -> R.drawable.ic_avatar_custom_agent

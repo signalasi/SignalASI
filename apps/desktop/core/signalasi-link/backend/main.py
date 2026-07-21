@@ -12,7 +12,16 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from models import init_db, get_session, Contact, Message, ContactType, MessageType, SenderType
-from agent_gateway import ask_agent_sync, connector_diagnostics, connector_self_test, list_agents, recent_agent_execution_log, reset_inactive_agent_runtime
+from agent_gateway import (
+    ask_agent_sync,
+    connector_diagnostics,
+    connector_self_test,
+    deliver_agent_sync,
+    desktop_agent_provider,
+    list_agents,
+    recent_agent_execution_log,
+    reset_inactive_agent_runtime,
+)
 from agent_config import load_config, save_config
 from api_response import api_error
 from agent_task_manager import agent_task_manager
@@ -278,6 +287,74 @@ def api_test_agent(agent_id: str, req: AgentTestReq):
             publish_connector_status(reason=f"agent_test_{agent_id}")
         except Exception:
             pass
+
+
+class AgentDeliveryReq(BaseModel):
+    prompt: str
+    task_id: str = ""
+    delivery_mode: str = "respond"
+    conversation_id: str = ""
+    source_message_id: str = ""
+    return_path: str = ""
+    protocol: str = "1.0"
+    required_features: list[str] = []
+
+
+@app.get("/api/agent-adapters")
+def api_agent_adapters(request: Request):
+    require_loopback(request)
+    provider = desktop_agent_provider()
+    return {
+        "agents": provider.enumerate(),
+        "recoverable_runs": [item.public() for item in provider.recover()],
+    }
+
+
+@app.post("/api/agent-adapters/{agent_id}/deliver")
+def api_deliver_agent(agent_id: str, req: AgentDeliveryReq, request: Request):
+    require_loopback(request)
+    try:
+        return deliver_agent_sync(
+            agent_id,
+            req.prompt,
+            task_id=req.task_id,
+            delivery_mode=req.delivery_mode,
+            conversation_id=req.conversation_id,
+            source_message_id=req.source_message_id,
+            return_path=req.return_path,
+            protocol=req.protocol,
+            required_features=tuple(req.required_features),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409 if "Idempotency key" in str(exc) else 502,
+            detail=api_error("agent_adapter_delivery_failed", str(exc)[:240], params={"agent_id": agent_id}),
+        ) from exc
+
+
+@app.get("/api/agent-adapters/{agent_id}/runs/{run_id}")
+def api_agent_adapter_run(agent_id: str, run_id: str, request: Request, after_cursor: int = Query(0)):
+    require_loopback(request)
+    provider = desktop_agent_provider()
+    result = provider.status(agent_id, run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=api_error("agent_adapter_run_not_found"))
+    return {"run": result.public(), "events": provider.events(agent_id, run_id, after_cursor)}
+
+
+@app.post("/api/agent-adapters/{agent_id}/runs/{run_id}/cancel")
+def api_cancel_agent_adapter_run(agent_id: str, run_id: str, request: Request):
+    require_loopback(request)
+    result = desktop_agent_provider().cancel(agent_id, run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=api_error("agent_adapter_run_not_found"))
+    return {"run": result.public()}
+
+
+@app.get("/api/agent-adapters/{agent_id}/observations")
+def api_agent_adapter_observations(agent_id: str, request: Request, limit: int = Query(100)):
+    require_loopback(request)
+    return {"observations": desktop_agent_provider().observations(agent_id, limit)}
 
 class MobileTestMessageReq(BaseModel):
     contact_id: str

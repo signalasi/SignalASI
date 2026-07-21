@@ -1,6 +1,6 @@
 import unittest
 
-from agent_gateway import clean_hermes_output
+from agent_gateway import clean_hermes_output, clean_openclaw_output
 
 
 class AgentOutputCleaningTests(unittest.TestCase):
@@ -26,6 +26,11 @@ Current user request:
 Ask: Reply with only the project marker."""
         raw = "Ask: Reply with only the project marker.\nORBIT-731"
         self.assertEqual(clean_hermes_output(raw, prompt), "ORBIT-731")
+
+    def test_extracts_openclaw_json_reply_without_runtime_metadata(self):
+        raw = '{"status":"ok","result":{"message":{"content":"OpenClaw ready"}},"duration_ms":42}'
+
+        self.assertEqual("OpenClaw ready", clean_openclaw_output(raw, "hello"))
 
 
 if __name__ == "__main__":
