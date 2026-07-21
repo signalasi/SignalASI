@@ -41,6 +41,46 @@ class GlobalMemoryEvolutionTest {
     }
 
     @Test
+    fun replacementDoesNotSupersedeUnrelatedFactsWithAGenericTopic() {
+        val tts = item(
+            "tts-old",
+            GlobalWorldItemKind.STATE,
+            topic = "SignalASI",
+            value = "SignalASI supports TTS",
+            eventId = "tts-event"
+        )
+        val ocr = item(
+            "ocr-current",
+            GlobalWorldItemKind.STATE,
+            topic = "SignalASI",
+            value = "SignalASI supports OCR",
+            eventId = "ocr-event"
+        )
+        val removedTts = item(
+            "tts-removed",
+            GlobalWorldItemKind.STATE,
+            topic = "SignalASI",
+            value = "SignalASI removed TTS",
+            eventId = "tts-removed-event"
+        )
+        val event = event("tts-removed-event", removedTts.value)
+        val result = GlobalMemoryEvolutionPolicy.evolve(
+            PersonalWorldModel(items = listOf(tts, ocr)),
+            GlobalWorldReduction(
+                PersonalWorldModel(items = listOf(tts, ocr, removedTts), processedEventIds = listOf(event.id)),
+                listOf(removedTts),
+                emptyList()
+            ),
+            GlobalMemoryInbox(),
+            event,
+            understanding(event, "SignalASI")
+        )
+
+        assertEquals(GlobalWorldItemStatus.SUPERSEDED, result.reduction.world.items.first { it.id == tts.id }.status)
+        assertEquals(GlobalWorldItemStatus.ACTIVE, result.reduction.world.items.first { it.id == ocr.id }.status)
+    }
+
+    @Test
     fun preferenceWaitsInInboxUntilApproved() {
         val event = event(
             id = "preference-event",
@@ -156,6 +196,160 @@ class GlobalMemoryEvolutionTest {
     }
 
     @Test
+    fun semanticallyEquivalentEvidenceStrengthensAcceptedMemory() {
+        val previous = item(
+            "linux-old",
+            GlobalWorldItemKind.FACT,
+            topic = "Linux runtime support",
+            value = "SignalASI supports the Linux runtime",
+            eventId = "event-old"
+        ).copy(lastSeenAtMillis = 1_000L)
+        val incoming = item(
+            "linux-new",
+            GlobalWorldItemKind.FACT,
+            topic = "Linux runtime support",
+            value = "SignalASI supports Linux runtime",
+            eventId = "event-new"
+        )
+        val event = event("event-new", incoming.value)
+        val result = GlobalMemoryEvolutionPolicy.evolve(
+            PersonalWorldModel(items = listOf(previous)),
+            GlobalWorldReduction(
+                PersonalWorldModel(items = listOf(previous, incoming), processedEventIds = listOf(event.id)),
+                listOf(incoming),
+                emptyList()
+            ),
+            GlobalMemoryInbox(),
+            event,
+            understanding(event, incoming.topic)
+        )
+
+        assertEquals(GlobalMemoryEvolutionAction.STRENGTHEN, result.candidates.single().action)
+        assertEquals(1, result.reduction.world.items.count { it.status == GlobalWorldItemStatus.ACTIVE })
+        assertEquals(2, result.reduction.world.items.single().evidenceCount)
+        assertTrue(result.reduction.world.items.single().confidence > previous.confidence)
+    }
+
+    @Test
+    fun plannedMemoryRemainsDistinctFromCurrentStateInCompiledContext() {
+        val event = event("planned-event", "Plan to add offline OCR")
+        val goal = item(
+            "planned-goal",
+            GlobalWorldItemKind.GOAL,
+            topic = "Offline OCR",
+            value = event.content,
+            eventId = event.id
+        )
+        val result = GlobalMemoryEvolutionPolicy.evolve(
+            PersonalWorldModel(),
+            reduction(event, goal),
+            GlobalMemoryInbox(),
+            event,
+            understanding(event, goal.topic)
+        )
+
+        assertEquals(GlobalMemoryTemporalState.PLANNED, result.reduction.world.items.single().temporalState)
+        val context = GlobalMemoryPromptCompiler.compile(
+            result.reduction.world,
+            GlobalTopicProjectGraph(),
+            GlobalEntityMemoryGraph(),
+            "What is the next goal for offline OCR?",
+            "conversation-a"
+        )
+        assertTrue(context.contains("[planned/"))
+        assertFalse(context.contains("[current/topic/goal]"))
+    }
+
+    @Test
+    fun causalDeletionRemovesSourceCandidateFromInbox() {
+        val source = event(
+            "candidate-source",
+            "Prefer concise answers",
+            metadata = mapOf("memory_kind" to AgentMemoryKind.PREFERENCE.name)
+        )
+        val preference = item(
+            "candidate-item",
+            GlobalWorldItemKind.PREFERENCE,
+            layer = GlobalWorldLayer.USER,
+            topic = "Response style",
+            value = source.content,
+            eventId = source.id
+        )
+        val first = GlobalMemoryEvolutionPolicy.evolve(
+            PersonalWorldModel(),
+            reduction(source, preference),
+            GlobalMemoryInbox(),
+            source,
+            understanding(source, preference.topic)
+        )
+        val deletion = event(
+            "candidate-delete",
+            "",
+            metadata = mapOf("deleted_event_id" to source.id)
+        ).copy(type = GlobalConversationEventType.MESSAGE_DELETED)
+        val deleted = GlobalMemoryEvolutionPolicy.evolve(
+            first.reduction.world,
+            GlobalWorldReduction(first.reduction.world, emptyList(), emptyList()),
+            first.inbox,
+            deletion,
+            understanding(deletion, preference.topic)
+        )
+
+        assertTrue(deleted.inbox.candidates.none { it.sourceEventId == source.id })
+    }
+
+    @Test
+    fun evolutionActionsTemporalStateAndThemesSurvivePersistenceRoundTrip() {
+        val persistedItem = item(
+            "persisted-item",
+            GlobalWorldItemKind.GOAL,
+            topic = "Offline OCR",
+            value = "Add offline OCR",
+            eventId = "persisted-event"
+        ).copy(temporalState = GlobalMemoryTemporalState.PLANNED)
+        val candidate = GlobalMemoryCandidate(
+            id = "persisted-candidate",
+            sourceEventId = "persisted-event",
+            conversationId = "conversation-a",
+            kind = GlobalMemoryCandidateKind.PROJECT_STATE,
+            temporalState = GlobalMemoryTemporalState.PLANNED,
+            risk = GlobalMemoryCandidateRisk.LOW,
+            status = GlobalMemoryCandidateStatus.AUTO_MERGED,
+            action = GlobalMemoryEvolutionAction.STRENGTHEN,
+            targetItemIds = listOf("existing-item"),
+            item = persistedItem,
+            reason = "test",
+            createdAtMillis = 4_000L
+        )
+        val inbox = GlobalMemoryInbox(listOf(candidate), listOf("persisted-event"), 4_000L)
+        val restoredInbox = GlobalMemoryEvolutionCodec.decodeInbox(
+            GlobalMemoryEvolutionCodec.encodeInbox(inbox).toString()
+        )
+        assertEquals(GlobalMemoryEvolutionAction.STRENGTHEN, restoredInbox.candidates.single().action)
+        assertEquals(listOf("existing-item"), restoredInbox.candidates.single().targetItemIds)
+        assertEquals(GlobalMemoryTemporalState.PLANNED, restoredInbox.candidates.single().item.temporalState)
+
+        val report = GlobalMemoryAuditReport(
+            themes = listOf(GlobalMemoryTheme(
+                id = "theme-id",
+                title = "Offline OCR",
+                itemStableKeys = listOf(persistedItem.stableKey),
+                itemCount = 3,
+                evidenceCount = 5,
+                conversationCount = 2,
+                confidence = 0.88,
+                lastUpdatedAtMillis = 5_000L
+            )),
+            auditedItemCount = 3,
+            createdAtMillis = 5_000L
+        )
+        val restoredReport = GlobalMemoryEvolutionCodec.decodeAudit(
+            GlobalMemoryEvolutionCodec.encodeAudit(report).toString()
+        )
+        assertEquals(report.themes, restoredReport.themes)
+    }
+
+    @Test
     fun pendingCandidateCannotPolluteEntityGraph() {
         val event = event("pending-graph", "Prefer the hidden experimental route")
         val graph = GlobalEntityMemoryGraphReducer.reduce(
@@ -187,6 +381,73 @@ class GlobalMemoryEvolutionTest {
         val selection = graphTwo.relevant("SignalASI device capability", hops = 3, limit = 20)
         assertTrue(selection.nodes.any { it.label.contains("QEMU", ignoreCase = true) })
         assertTrue(selection.relations.any { it.kind == GlobalEntityRelationKind.DEPENDS_ON })
+    }
+
+    @Test
+    fun graphBuildsTypedComponentStateConnectionAndPreferenceRelations() {
+        val statements = listOf(
+            "SignalASI contains Linux Runtime" to GlobalEntityRelationKind.HAS_COMPONENT,
+            "Phone connected to SignalASI" to GlobalEntityRelationKind.CONNECTED_TO,
+            "User prefers concise responses" to GlobalEntityRelationKind.PREFERS,
+            "Linux Runtime status is ready" to GlobalEntityRelationKind.HAS_STATE
+        )
+        var graph = GlobalEntityMemoryGraph()
+        statements.forEachIndexed { index, (statement, _) ->
+            val event = event("typed-relation-$index", statement)
+            val fact = item(
+                "typed-item-$index",
+                GlobalWorldItemKind.FACT,
+                topic = statement.substringBefore(' '),
+                value = statement,
+                eventId = event.id
+            )
+            graph = GlobalEntityMemoryGraphReducer.reduce(
+                graph,
+                event,
+                understanding(event, fact.topic),
+                reduction(event, fact)
+            )
+        }
+
+        val kinds = graph.relations.map(GlobalEntityRelation::kind).toSet()
+        statements.forEach { (_, expected) -> assertTrue(expected in kinds) }
+    }
+
+    @Test
+    fun removedFeatureBecomesDeprecatedInEntityGraph() {
+        val enabled = event("screen-enabled", "Screen understanding status is enabled")
+        val enabledItem = item(
+            "screen-enabled-item",
+            GlobalWorldItemKind.STATE,
+            topic = "Screen understanding",
+            value = enabled.content,
+            eventId = enabled.id
+        )
+        val first = GlobalEntityMemoryGraphReducer.reduce(
+            GlobalEntityMemoryGraph(),
+            enabled,
+            understanding(enabled, enabledItem.topic, setOf(enabledItem.topic)),
+            reduction(enabled, enabledItem)
+        )
+        val removed = event("screen-removed", "Screen understanding has been removed")
+        val removedItem = item(
+            "screen-removed-item",
+            GlobalWorldItemKind.STATE,
+            topic = "Screen understanding",
+            value = removed.content,
+            eventId = removed.id
+        )
+        val evolved = GlobalEntityMemoryGraphReducer.reduce(
+            first,
+            removed,
+            understanding(removed, removedItem.topic, setOf(removedItem.topic)),
+            reduction(removed, removedItem)
+        )
+
+        assertEquals(
+            GlobalMemoryTemporalState.DEPRECATED,
+            evolved.nodes.first { it.label.equals("Screen understanding", ignoreCase = true) }.temporalState
+        )
     }
 
     @Test
@@ -288,6 +549,97 @@ class GlobalMemoryEvolutionTest {
     }
 
     @Test
+    fun criticConsolidatesDuplicatesAndBuildsLongTermThemes() {
+        val duplicateOne = item(
+            "duplicate-one",
+            GlobalWorldItemKind.FACT,
+            topic = "SignalASI runtime",
+            value = "SignalASI supports Linux runtime",
+            eventId = "duplicate-event-one"
+        ).copy(lastSeenAtMillis = 4_000L)
+        val duplicateTwo = item(
+            "duplicate-two",
+            GlobalWorldItemKind.FACT,
+            topic = "SignalASI runtime",
+            value = "SignalASI supports the Linux runtime",
+            eventId = "duplicate-event-two"
+        ).copy(conversationIds = setOf("conversation-b"), lastSeenAtMillis = 3_000L)
+        val decision = item(
+            "runtime-decision",
+            GlobalWorldItemKind.DECISION,
+            topic = "SignalASI runtime",
+            value = "The runtime is installed on demand",
+            eventId = "decision-event"
+        ).copy(conversationIds = setOf("conversation-c"), lastSeenAtMillis = 2_000L)
+        val goal = item(
+            "runtime-goal",
+            GlobalWorldItemKind.GOAL,
+            topic = "SignalASI runtime",
+            value = "Add verified runtime packages",
+            eventId = "goal-event"
+        ).copy(conversationIds = setOf("conversation-d"), lastSeenAtMillis = 1_000L)
+
+        val (world, report) = GlobalMemoryCritic.audit(
+            PersonalWorldModel(items = listOf(duplicateOne, duplicateTwo, decision, goal)),
+            GlobalMemoryInbox(),
+            nowMillis = 5_000L
+        )
+
+        assertEquals(1, world.items.count { it.kind == GlobalWorldItemKind.FACT && it.status == GlobalWorldItemStatus.ACTIVE })
+        assertTrue(report.findings.any { it.kind == GlobalMemoryAuditFindingKind.DUPLICATE })
+        assertTrue(report.themes.any { it.title == "SignalASI runtime" && it.itemCount >= 3 })
+    }
+
+    @Test
+    fun explicitRelationshipIsClassifiedForGraphProjection() {
+        val event = event("relation-event", "SignalASI supports Linux Runtime")
+        val fact = item(
+            "relation-item",
+            GlobalWorldItemKind.FACT,
+            topic = "SignalASI",
+            value = event.content,
+            eventId = event.id
+        )
+        val result = GlobalMemoryEvolutionPolicy.evolve(
+            PersonalWorldModel(),
+            reduction(event, fact),
+            GlobalMemoryInbox(),
+            event,
+            understanding(event, "SignalASI", setOf("SignalASI", "Linux Runtime"))
+        )
+
+        assertEquals(GlobalMemoryCandidateKind.RELATION, result.candidates.single().kind)
+        assertEquals(GlobalMemoryEvolutionAction.LINK, result.candidates.single().action)
+    }
+
+    @Test
+    fun repeatedWorkflowBecomesReviewedSkillOpportunity() {
+        val event = event(
+            "workflow-event",
+            "Run verification before publishing",
+            metadata = mapOf("memory_kind" to AgentMemoryKind.WORKFLOW.name)
+        )
+        val workflow = item(
+            "workflow-memory",
+            GlobalWorldItemKind.DECISION,
+            topic = "Release workflow",
+            value = event.content,
+            eventId = event.id
+        ).copy(evidenceCount = 3)
+        val result = GlobalMemoryEvolutionPolicy.evolve(
+            PersonalWorldModel(),
+            reduction(event, workflow),
+            GlobalMemoryInbox(),
+            event,
+            understanding(event, workflow.topic)
+        )
+
+        assertTrue(result.reduction.world.items.isEmpty())
+        assertEquals(GlobalMemoryCandidateKind.SKILL_OPPORTUNITY, result.inbox.pending().single().kind)
+        assertEquals(GlobalMemoryEvolutionAction.CONSOLIDATE, result.inbox.pending().single().action)
+    }
+
+    @Test
     fun plannerChoosesSpecializedRetrievalStrategies() {
         assertEquals(
             GlobalMemoryQueryType.DEVICE_CAPABILITY,
@@ -300,6 +652,10 @@ class GlobalMemoryEvolutionTest {
         assertEquals(
             GlobalMemoryQueryType.PERSONAL_PREFERENCE,
             GlobalMemoryQueryPlanner.plan("What response style do I prefer?").type
+        )
+        assertEquals(
+            GlobalMemoryQueryType.RELATIONSHIP,
+            GlobalMemoryQueryPlanner.plan("How is the gateway connected to the phone?").type
         )
     }
 

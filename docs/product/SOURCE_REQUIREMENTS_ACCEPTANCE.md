@@ -58,7 +58,7 @@ This matrix preserves the complete scope of the two source specifications used f
 | PA-18 | Personal ASI can use native tools, Skills, MCP, specialist Agents, local/cloud models, Desktop, and smart-home resources | host registries and supervised collaboration | Partial | One end-to-end verified scenario per resource class |
 | PA-19 | Private mode, paused tracking, causal deletion, retraction, export, and erase boundaries are enforced | publication policy, evidence lifecycle, encrypted stores | Partial | Full data inventory plus deletion/export acceptance gate |
 | PA-20 | The personal Agent learns calibrated strengths, limitations, route quality, latency, and corrections from terminal Runs without retaining sensitive requests | encrypted `AgentSelfModel`, Run lifecycle projection, bounded router calibration, direct tests | Implemented | Real-device repeated-success, correction, and restore scenario |
-| PA-21 | Memory evolves through a candidate inbox, temporal state, typed graph, query planning, prompt compilation, and periodic self-audit | `GlobalMemoryEvolutionPolicy`, `GlobalEntityMemoryGraph`, `GlobalMemoryPromptCompiler`, Memory Control Center, LoCoMo-style tests | Implemented | Real-device candidate review plus process-death, export, and causal-deletion scenario |
+| PA-21 | Memory evolves through a candidate inbox, persistent temporal state, explainable evolution actions, typed graph, query planning, prompt compilation, semantic consolidation, long-term themes, and periodic self-audit | `GlobalMemoryEvolutionPolicy`, `GlobalEntityMemoryGraph`, `GlobalMemoryPromptCompiler`, Memory Control Center, LoCoMo-style tests | Implemented | Real-device candidate review plus process-death, export, and causal-deletion scenario |
 
 ## Release Rule
 

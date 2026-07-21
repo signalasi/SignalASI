@@ -993,6 +993,7 @@ class GlobalAgentRepository(context: Context) {
             item.evidenceProvenance.forEach { put(encodeEvidenceRef(it)) }
         })
         .put("status", item.status.name)
+        .put("temporal_state", item.temporalState.name)
         .put("conflict_group_id", item.conflictGroupId)
         .put("first_seen_at_millis", item.firstSeenAtMillis)
         .put("last_seen_at_millis", item.lastSeenAtMillis)
@@ -1020,6 +1021,18 @@ class GlobalAgentRepository(context: Context) {
             evidenceEventIds = json.optJSONArray("evidence_event_ids").strings().takeLast(20),
             evidenceProvenance = decodeEvidenceRefs(json.optJSONArray("evidence_provenance")),
             status = enumValue(json.optString("status"), GlobalWorldItemStatus.ACTIVE),
+            temporalState = enumValue(
+                json.optString("temporal_state"),
+                when (enumValue(json.optString("status"), GlobalWorldItemStatus.ACTIVE)) {
+                    GlobalWorldItemStatus.CONFLICTED -> GlobalMemoryTemporalState.CONFLICTED
+                    GlobalWorldItemStatus.SUPERSEDED -> GlobalMemoryTemporalState.DEPRECATED
+                    GlobalWorldItemStatus.COMPLETED -> GlobalMemoryTemporalState.HISTORICAL
+                    GlobalWorldItemStatus.ACTIVE -> when (enumValue(json.optString("kind"), GlobalWorldItemKind.FACT)) {
+                        GlobalWorldItemKind.GOAL, GlobalWorldItemKind.TASK -> GlobalMemoryTemporalState.PLANNED
+                        else -> GlobalMemoryTemporalState.CURRENT
+                    }
+                }
+            ),
             conflictGroupId = json.optString("conflict_group_id"),
             firstSeenAtMillis = json.optLong("first_seen_at_millis"),
             lastSeenAtMillis = json.optLong("last_seen_at_millis"),
@@ -1921,7 +1934,13 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
             }
         }
         val lastAudit = repository.memoryAuditReport()
-        if (GlobalMemoryCritic.due(lastAudit.createdAtMillis, handledEventIds.size)) {
+        val causalMemoryChange = events.any { event ->
+            event.id in handledEventIds && (
+                event.effectiveRetractions().isNotEmpty() ||
+                    event.excludesConversationFromGlobalModel()
+                )
+        }
+        if (causalMemoryChange || GlobalMemoryCritic.due(lastAudit.createdAtMillis, handledEventIds.size)) {
             val (auditedWorld, auditReport) = GlobalMemoryCritic.audit(world, memoryInbox)
             world = auditedWorld
             repository.saveMemoryAudit(auditReport)

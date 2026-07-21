@@ -21,6 +21,8 @@ authorized semantic event
 
 The append-only event and evidence history is never rewritten. Evolution changes the current materialized view by marking older facts as superseded, completed, conflicted, or historical.
 
+Every accepted world item now persists its temporal state directly. New evidence is assigned an explicit evolution action (`CREATE`, `STRENGTHEN`, `SUPERSEDE`, `LINK`, `CONSOLIDATE`, `REVIEW_CONFLICT`, or `BLOCK_PRIVATE`) together with bounded target item IDs. This makes the materialized transition explainable and prevents a planned goal from being compiled as current state.
+
 ## Core Invariants
 
 1. Session-private content never enters durable memory, candidate payloads, relationship graphs, exports, or model context.
@@ -57,12 +59,16 @@ Each proposed durable change is classified as a fact, preference, identity, deci
 - Private data is rejected and its raw payload is discarded.
 - Approval writes the world item and its relationship-graph projection.
 - Rejection records the decision without changing the accepted world model.
+- Semantically equivalent, same-polarity evidence strengthens the accepted item instead of creating another list entry.
+- Causal deletion removes source candidates and their payloads from the inbox before the deletion event is committed.
 
 ## Typed Relationship Graph
 
 The graph stores typed nodes for users, devices, applications, features, settings, Agents, models, tools, projects, concepts, and states. Relations include ownership, use, support, composition, state, naming, dependencies, connections, preferences, removals, and general relatedness.
 
 Every node and relation carries temporal state, confidence, bounded evidence references, and observation time. Retrieval supports bounded multi-hop traversal and excludes historical relations unless the query plan explicitly requests them.
+
+The graph projects ownership, use, support, components, state, naming, dependencies, connections, preferences, removal, and general relatedness. A removal event deprecates the affected entity and closes replaceable state or naming relations instead of leaving them current.
 
 ## Query Planner And Prompt Compiler
 
@@ -78,6 +84,8 @@ The plan controls:
 
 The prompt compiler emits only selected shareable evidence. It separates current, historical, and conflicted facts, adds an explicit unresolved-conflict warning, preserves a strict character budget, and labels all memory as untrusted evidence rather than instructions.
 
+Compiled entries carry bounded evidence counts and opaque memory references. Planned state has its own section, and historical or deprecated facts are excluded unless the query plan explicitly needs history or completed-goal context.
+
 ## Memory Critic
 
 An encrypted on-device audit runs after meaningful event batches and at least daily when the runtime wakes. It identifies:
@@ -88,8 +96,10 @@ An encrypted on-device audit runs after meaningful event batches and at least da
 - repeated decisions that may become reviewed Skills;
 - completed goals that may be archived;
 - candidates left waiting for review for too long.
+- semantically duplicate memories that can be consolidated safely;
+- cross-session topic clusters that should become durable long-term themes.
 
-The critic may retire expired state. It never auto-approves identity, preference, safety, or conflicting candidates.
+The critic may retire expired state and merge equivalent evidence while retaining the duplicate as superseded history. It never auto-approves identity, preference, safety, Skill, or conflicting candidates. Long-term themes are evidence-only rollups: they introduce no new factual claims and remain visible in Memory Health.
 
 ## Self-Model Feedback
 

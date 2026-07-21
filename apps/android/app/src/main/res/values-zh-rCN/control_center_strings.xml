@@ -558,9 +558,16 @@
     <string name="cc_memory_inbox_pending_section">等待审核</string>
     <string name="cc_memory_inbox_empty">没有需要审核的候选记忆</string>
     <string name="cc_memory_inbox_empty_subtitle">长期世界模型当前不需要你的决定</string>
-    <string name="cc_memory_candidate_subtitle">%1$s · %2$s</string>
+    <string name="cc_memory_candidate_subtitle">%1$s · %2$s · %3$s</string>
     <string name="cc_memory_candidate_dialog_title">审核候选记忆</string>
-    <string name="cc_memory_candidate_dialog_message">类型：%1$s\n主题：%2$s\n\n%3$s</string>
+    <string name="cc_memory_candidate_dialog_message">类型：%1$s\n主题：%2$s\n演化：%3$s\n\n%4$s</string>
+    <string name="cc_memory_action_create">新增</string>
+    <string name="cc_memory_action_strengthen">补强</string>
+    <string name="cc_memory_action_supersede">取代当前记忆</string>
+    <string name="cc_memory_action_link">建立关系</string>
+    <string name="cc_memory_action_consolidate">合并沉淀</string>
+    <string name="cc_memory_action_review_conflict">解决冲突</string>
+    <string name="cc_memory_action_block_private">已阻止私密内容</string>
     <string name="cc_memory_candidate_private_value">私密内容未被保留</string>
     <string name="cc_memory_candidate_approve">批准</string>
     <string name="cc_memory_candidate_approved">候选记忆已批准</string>
@@ -586,6 +593,8 @@
     <string name="cc_memory_audit_conflict">未解决的记忆冲突</string>
     <string name="cc_memory_audit_skill_candidate">工作流可固化为技能</string>
     <string name="cc_memory_audit_completed_goal">已完成目标可归档</string>
+    <string name="cc_memory_audit_themes">长期主题</string>
+    <string name="cc_memory_theme_subtitle">%1$d 条记忆 · %2$d 个会话 · %3$d 条证据引用</string>
     <string name="cc_memory_state_historical">历史</string>
     <string name="cc_memory_state_current">当前</string>
     <string name="cc_memory_state_planned">计划中</string>

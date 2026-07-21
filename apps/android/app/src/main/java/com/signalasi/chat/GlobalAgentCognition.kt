@@ -133,6 +133,7 @@ data class GlobalWorldItem(
     val evidenceEventIds: List<String> = emptyList(),
     val evidenceProvenance: List<GlobalEvidenceRef> = emptyList(),
     val status: GlobalWorldItemStatus = GlobalWorldItemStatus.ACTIVE,
+    val temporalState: GlobalMemoryTemporalState = GlobalMemoryTemporalState.CURRENT,
     val conflictGroupId: String = "",
     val firstSeenAtMillis: Long = System.currentTimeMillis(),
     val lastSeenAtMillis: Long = System.currentTimeMillis(),

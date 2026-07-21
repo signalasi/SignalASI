@@ -539,9 +539,16 @@
     <string name="cc_memory_inbox_pending_section">Waiting for Review</string>
     <string name="cc_memory_inbox_empty">No memory candidates need review</string>
     <string name="cc_memory_inbox_empty_subtitle">The durable world model is not waiting on a decision</string>
-    <string name="cc_memory_candidate_subtitle">%1$s · %2$s</string>
+    <string name="cc_memory_candidate_subtitle">%1$s · %2$s · %3$s</string>
     <string name="cc_memory_candidate_dialog_title">Review memory candidate</string>
-    <string name="cc_memory_candidate_dialog_message">Type: %1$s\nTopic: %2$s\n\n%3$s</string>
+    <string name="cc_memory_candidate_dialog_message">Type: %1$s\nTopic: %2$s\nEvolution: %3$s\n\n%4$s</string>
+    <string name="cc_memory_action_create">Add</string>
+    <string name="cc_memory_action_strengthen">Strengthen</string>
+    <string name="cc_memory_action_supersede">Replace current</string>
+    <string name="cc_memory_action_link">Create relationship</string>
+    <string name="cc_memory_action_consolidate">Consolidate</string>
+    <string name="cc_memory_action_review_conflict">Resolve conflict</string>
+    <string name="cc_memory_action_block_private">Private content blocked</string>
     <string name="cc_memory_candidate_private_value">Private content was not retained</string>
     <string name="cc_memory_candidate_approve">Approve</string>
     <string name="cc_memory_candidate_approved">Memory candidate approved</string>
@@ -567,6 +574,8 @@
     <string name="cc_memory_audit_conflict">Unresolved memory conflict</string>
     <string name="cc_memory_audit_skill_candidate">Workflow may become a Skill</string>
     <string name="cc_memory_audit_completed_goal">Completed goal can be archived</string>
+    <string name="cc_memory_audit_themes">Long-term themes</string>
+    <string name="cc_memory_theme_subtitle">%1$d memories · %2$d conversations · %3$d evidence references</string>
     <string name="cc_memory_state_historical">Historical</string>
     <string name="cc_memory_state_current">Current</string>
     <string name="cc_memory_state_planned">Planned</string>

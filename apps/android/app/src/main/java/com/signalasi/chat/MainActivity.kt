@@ -6182,7 +6182,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 getString(
                     R.string.cc_memory_candidate_subtitle,
                     memoryCandidateKindLabel(candidate.kind),
-                    memoryTemporalStateLabel(candidate.temporalState)
+                    memoryTemporalStateLabel(candidate.temporalState),
+                    memoryEvolutionActionLabel(candidate.action)
                 ),
                 R.drawable.ic_agent_memory,
                 getString(R.string.agent_memory_review)
@@ -6197,6 +6198,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             R.string.cc_memory_candidate_dialog_message,
             memoryCandidateKindLabel(candidate.kind),
             candidate.item.topic.ifBlank { getString(R.string.agent_memory_key_none) },
+            memoryEvolutionActionLabel(candidate.action),
             candidate.item.value.ifBlank { getString(R.string.cc_memory_candidate_private_value) }
         )
         AlertDialog.Builder(this)
@@ -6301,6 +6303,22 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 ))
             }
         }
+        if (report.themes.isNotEmpty()) {
+            addSectionTitle(getString(R.string.cc_memory_audit_themes))
+            report.themes.forEach { theme ->
+                featureContent.addView(featureRow(
+                    theme.title,
+                    getString(
+                        R.string.cc_memory_theme_subtitle,
+                        theme.itemCount,
+                        theme.conversationCount,
+                        theme.evidenceCount
+                    ),
+                    R.drawable.ic_agent_knowledge,
+                    ""
+                ))
+            }
+        }
     }
 
     private fun memoryCandidateKindLabel(kind: GlobalMemoryCandidateKind): String = getString(
@@ -6322,6 +6340,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             GlobalMemoryTemporalState.DEPRECATED -> R.string.cc_memory_state_deprecated
             GlobalMemoryTemporalState.PENDING -> R.string.cc_memory_state_pending
             GlobalMemoryTemporalState.CONFLICTED -> R.string.cc_memory_state_conflicted
+        }
+    )
+
+    private fun memoryEvolutionActionLabel(action: GlobalMemoryEvolutionAction): String = getString(
+        when (action) {
+            GlobalMemoryEvolutionAction.CREATE -> R.string.cc_memory_action_create
+            GlobalMemoryEvolutionAction.STRENGTHEN -> R.string.cc_memory_action_strengthen
+            GlobalMemoryEvolutionAction.SUPERSEDE -> R.string.cc_memory_action_supersede
+            GlobalMemoryEvolutionAction.LINK -> R.string.cc_memory_action_link
+            GlobalMemoryEvolutionAction.CONSOLIDATE -> R.string.cc_memory_action_consolidate
+            GlobalMemoryEvolutionAction.REVIEW_CONFLICT -> R.string.cc_memory_action_review_conflict
+            GlobalMemoryEvolutionAction.BLOCK_PRIVATE -> R.string.cc_memory_action_block_private
         }
     )
 

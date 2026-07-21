@@ -366,6 +366,7 @@ object GlobalEntityMemoryGraphReducer {
     }
 
     private fun temporalState(content: String): GlobalMemoryTemporalState = when {
+        GlobalMemoryEvolutionPolicy.removalSignal(content) -> GlobalMemoryTemporalState.DEPRECATED
         GlobalMemoryEvolutionPolicy.replacementSignal(content) -> GlobalMemoryTemporalState.CURRENT
         content.lowercase(Locale.ROOT).containsAny("planned", "plan to", "\u8ba1\u5212", "\u5c06\u8981") -> GlobalMemoryTemporalState.PLANNED
         content.lowercase(Locale.ROOT).containsAny("previously", "formerly", "\u4e4b\u524d", "\u66fe\u7ecf") -> GlobalMemoryTemporalState.HISTORICAL
@@ -419,14 +420,22 @@ object GlobalEntityMemoryGraphReducer {
         RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:owns|has)\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.OWNS),
         RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:uses|use)\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.USES),
         RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+supports\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.SUPPORTS),
+        RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:contains|includes|has component|is composed of)\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.HAS_COMPONENT),
+        RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:state is|status is|is currently)\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.HAS_STATE),
         RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:renamed to|changed to)\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.NAMED_AS),
         RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:depends on|requires)\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.DEPENDS_ON),
+        RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:connected to|paired with)\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.CONNECTED_TO),
+        RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:prefers|preference is)\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.PREFERS),
         RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:has been removed|was removed|is removed|removed)\\b"), GlobalEntityRelationKind.REMOVED),
-        RelationPattern(Regex("([^\u3002\uff01\uff1f\uff1b]{2,80}?)\\s*(?:\u62e5\u6709|\u5305\u542b)\\s*([^\u3002\uff01\uff1f\uff1b]{1,120})"), GlobalEntityRelationKind.OWNS),
+        RelationPattern(Regex("([^\u3002\uff01\uff1f\uff1b]{2,80}?)\\s*\u62e5\u6709\\s*([^\u3002\uff01\uff1f\uff1b]{1,120})"), GlobalEntityRelationKind.OWNS),
         RelationPattern(Regex("([^\u3002\uff01\uff1f\uff1b]{2,80}?)\\s*\u4f7f\u7528\\s*([^\u3002\uff01\uff1f\uff1b]{1,120})"), GlobalEntityRelationKind.USES),
         RelationPattern(Regex("([^\u3002\uff01\uff1f\uff1b]{2,80}?)\\s*\u652f\u6301\\s*([^\u3002\uff01\uff1f\uff1b]{1,120})"), GlobalEntityRelationKind.SUPPORTS),
+        RelationPattern(Regex("([^\u3002\uff01\uff1f\uff1b]{2,80}?)\\s*(?:\u5305\u542b|\u7531)\\s*([^\u3002\uff01\uff1f\uff1b]{1,120})"), GlobalEntityRelationKind.HAS_COMPONENT),
+        RelationPattern(Regex("([^\u3002\uff01\uff1f\uff1b]{2,80}?)\\s*(?:\u72b6\u6001\u4e3a|\u5f53\u524d\u4e3a)\\s*([^\u3002\uff01\uff1f\uff1b]{1,120})"), GlobalEntityRelationKind.HAS_STATE),
         RelationPattern(Regex("([^\u3002\uff01\uff1f\uff1b]{2,80}?)\\s*(?:\u6539\u6210|\u66f4\u540d\u4e3a)\\s*([^\u3002\uff01\uff1f\uff1b]{1,120})"), GlobalEntityRelationKind.NAMED_AS),
         RelationPattern(Regex("([^\u3002\uff01\uff1f\uff1b]{2,80}?)\\s*(?:\u4f9d\u8d56|\u9700\u8981)\\s*([^\u3002\uff01\uff1f\uff1b]{1,120})"), GlobalEntityRelationKind.DEPENDS_ON),
+        RelationPattern(Regex("([^\u3002\uff01\uff1f\uff1b]{2,80}?)\\s*(?:\u8fde\u63a5\u5230|\u914d\u5bf9)\\s*([^\u3002\uff01\uff1f\uff1b]{1,120})"), GlobalEntityRelationKind.CONNECTED_TO),
+        RelationPattern(Regex("([^\u3002\uff01\uff1f\uff1b]{2,80}?)\\s*(?:\u504f\u597d|\u559c\u6b22)\\s*([^\u3002\uff01\uff1f\uff1b]{1,120})"), GlobalEntityRelationKind.PREFERS),
         RelationPattern(Regex("([^\u3002\uff01\uff1f\uff1b]{2,80}?)\\s*(?:\u5df2\u79fb\u9664|\u5df2\u5220\u9664|\u53bb\u6389)"), GlobalEntityRelationKind.REMOVED)
     )
 
