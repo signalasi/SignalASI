@@ -765,10 +765,10 @@ class AgentNativeToolDefinition(
 }
 
 class AgentNativeToolRegistry(
-    private val clock: AgentNativeClock = AgentNativeClock.SYSTEM
+    private val clock: AgentNativeClock = AgentNativeClock.SYSTEM,
+    private val replayStore: AgentNativeToolReplayStore = InMemoryAgentNativeToolReplayStore()
 ) {
     private val definitions = LinkedHashMap<String, AgentNativeToolDefinition>()
-    private val replayCache = LinkedHashMap<ReplayKey, AgentNativeToolResult>()
 
     @Synchronized
     fun register(definition: AgentNativeToolDefinition): AgentNativeToolRegistry {
@@ -801,7 +801,7 @@ class AgentNativeToolRegistry(
     /** Creates an independent registry view without exposing executor implementations to callers. */
     @Synchronized
     fun subset(predicate: (AgentNativeToolDescriptor) -> Boolean): AgentNativeToolRegistry =
-        AgentNativeToolRegistry(clock).registerAll(
+        AgentNativeToolRegistry(clock, replayStore).registerAll(
             definitions.values.filter { predicate(it.descriptor) }
         )
 
@@ -993,9 +993,19 @@ class AgentNativeToolRegistry(
 
             val replayKey = idempotencyKey?.takeIf {
                 descriptor.idempotency != AgentNativeToolIdempotency.NON_IDEMPOTENT
-            }?.let { ReplayKey(descriptor.id, descriptor.version, it) }
+            }?.let { AgentNativeToolReplayKey(descriptor.id, descriptor.version, it) }
             val cached = replayKey?.let(::cachedResult)
             if (cached != null) {
+                val currentInputSha256 = digestOrEmpty(input)
+                if (cached.receipt.inputSha256 != currentInputSha256) {
+                    return finish(
+                        status = AgentNativeToolResultStatus.REJECTED,
+                        error = AgentNativeToolError(
+                            code = "idempotency_key_conflict",
+                            message = "The idempotency key was already used with different input"
+                        )
+                    )
+                }
                 return finish(
                     status = cached.status,
                     output = cached.output,
@@ -1087,11 +1097,11 @@ class AgentNativeToolRegistry(
     }
 
     @Synchronized
-    private fun cachedResult(key: ReplayKey): AgentNativeToolResult? = replayCache[key]
+    private fun cachedResult(key: AgentNativeToolReplayKey): AgentNativeToolResult? = replayStore.get(key)
 
     @Synchronized
-    private fun cacheResult(key: ReplayKey, result: AgentNativeToolResult) {
-        replayCache[key] = result
+    private fun cacheResult(key: AgentNativeToolReplayKey, result: AgentNativeToolResult) {
+        replayStore.put(key, result)
     }
 
     private fun missingToolResult(
@@ -1146,8 +1156,6 @@ class AgentNativeToolRegistry(
     private fun runHook(block: () -> Unit) {
         runCatching(block)
     }
-
-    private data class ReplayKey(val id: String, val version: String, val key: String)
 
     companion object {
         const val CONTRACT_VERSION = "signalasi.phone-native-tools/1.0"

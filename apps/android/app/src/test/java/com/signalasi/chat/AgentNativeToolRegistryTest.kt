@@ -292,6 +292,77 @@ class AgentNativeToolRegistryTest {
     }
 
     @Test
+    fun sharedReplayStoreSurvivesRegistryRecreation() {
+        val executions = AtomicInteger()
+        val replayStore = InMemoryAgentNativeToolReplayStore()
+        val descriptor = descriptor(
+            idempotency = AgentNativeToolIdempotency.IDEMPOTENCY_KEY_REQUIRED,
+            inputSchema = AgentNativeJsonSchema.objectSchema(
+                properties = mapOf("value" to AgentNativeJsonSchema.integer()),
+                required = setOf("value"),
+                additionalProperties = false
+            )
+        )
+        fun registry() = AgentNativeToolRegistry(replayStore = replayStore).register(
+            AgentNativeToolDefinition(
+                descriptor,
+                AgentNativeToolExecutor {
+                    AgentNativeToolExecutionResult.success(
+                        mapOf("execution" to executions.incrementAndGet())
+                    )
+                }
+            )
+        )
+
+        val first = registry().invoke(
+            descriptor.id,
+            mapOf("value" to 1),
+            AgentNativeToolInvocationContext(invocationId = "first", idempotencyKey = "durable-key")
+        )
+        val replay = registry().invoke(
+            descriptor.id,
+            mapOf("value" to 1),
+            AgentNativeToolInvocationContext(invocationId = "replay", idempotencyKey = "durable-key")
+        )
+
+        assertEquals(1, executions.get())
+        assertEquals(first.output, replay.output)
+        assertTrue(replay.receipt.replayed)
+    }
+
+    @Test
+    fun rejectsReusingIdempotencyKeyWithDifferentInput() {
+        val descriptor = descriptor(
+            idempotency = AgentNativeToolIdempotency.IDEMPOTENCY_KEY_REQUIRED,
+            inputSchema = AgentNativeJsonSchema.objectSchema(
+                properties = mapOf("value" to AgentNativeJsonSchema.integer()),
+                required = setOf("value"),
+                additionalProperties = false
+            )
+        )
+        val registry = AgentNativeToolRegistry().register(
+            AgentNativeToolDefinition(
+                descriptor,
+                AgentNativeToolExecutor { AgentNativeToolExecutionResult.success(mapOf("ok" to true)) }
+            )
+        )
+        registry.invoke(
+            descriptor.id,
+            mapOf("value" to 1),
+            AgentNativeToolInvocationContext(idempotencyKey = "same-key")
+        )
+
+        val conflict = registry.invoke(
+            descriptor.id,
+            mapOf("value" to 2),
+            AgentNativeToolInvocationContext(idempotencyKey = "same-key")
+        )
+
+        assertEquals(AgentNativeToolResultStatus.REJECTED, conflict.status)
+        assertEquals("idempotency_key_conflict", conflict.error?.code)
+    }
+
+    @Test
     fun adaptsExistingAgentActionExecutorWithoutMobileNativeAgentChanges() {
         var capturedAction: AgentAction? = null
         val legacyExecutor = object : AgentActionExecutor {

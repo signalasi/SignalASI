@@ -311,6 +311,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentSkillMatcher: AgentSkillMatcher
     private lateinit var agentLearningEngine: AgentLearningEngine
     private lateinit var agentRunEventStore: AgentRunEventStore
+    private lateinit var agentHandoffStore: EncryptedAgentHandoffStore
     private lateinit var encryptedAgentRegistry: EncryptedAgentRegistry
     private var lastAgentRegistrySyncAtMillis = 0L
     private lateinit var agentMcpRegistry: AgentMcpRegistry
@@ -457,6 +458,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         requestedGlobalInsightConversationId.takeIf(String::isNotBlank)?.let(agentTranscriptStore::switchConversation)
         agentRunRecorder = AgentRunRecorder(this)
         agentRunEventStore = AgentRunEventStore(this)
+        agentHandoffStore = EncryptedAgentHandoffStore(this)
         encryptedAgentRegistry = EncryptedAgentRegistry(this)
         syncAgentRegistrySnapshot(force = true)
         reconcileRecoverableAgentRuns()
@@ -925,6 +927,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentTranscriptStore.recordUsage(
             conversationId, response.inputTokens, response.outputTokens, response.costMicros
         )
+        if (turnId.isNotBlank()) finishStructuredAgentHandoff(turnId, response)
         renderAgentState(state, conversationId, turnId)
         if (turnId.isNotBlank()) recordAgentRunFromState(turnId, state)
         if (state.phase == AgentPhase.COMPLETED || state.phase == AgentPhase.FAILED ||
@@ -1421,6 +1424,26 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     }
                 }
             }
+        }
+        reconcileStructuredAgentHandoffs()
+    }
+
+    private fun reconcileStructuredAgentHandoffs() {
+        if (!::agentHandoffStore.isInitialized) return
+        agentHandoffStore.active().forEach { handoff ->
+            val run = agentRunRecorder.run(handoff.request.runId) ?: return@forEach
+            val terminalState = when (run.status) {
+                AgentRecordedRunStatus.COMPLETED -> AgentHandoffState.RETURNED
+                AgentRecordedRunStatus.CANCELLED -> AgentHandoffState.CANCELLED
+                AgentRecordedRunStatus.FAILED -> AgentHandoffState.FAILED
+                AgentRecordedRunStatus.RUNNING -> null
+            } ?: return@forEach
+            agentHandoffStore.finish(
+                runId = handoff.request.runId,
+                sourceMessageId = handoff.sourceMessageId,
+                state = terminalState,
+                resultSummary = "Recovered terminal run: ${run.status.name.lowercase(Locale.ROOT)}"
+            )
         }
     }
 
@@ -2227,6 +2250,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 val state = runtime.handleConnectorTimeout(sourceMessageId, stage) ?: return@thread
                 val remoteTaskId = before["remote_task_id"].orEmpty()
                 val contactId = before["contact_id"].orEmpty()
+                finishStructuredAgentHandoff(
+                    turnId,
+                    AgentConnectorResponse(
+                        sourceMessageId = sourceMessageId,
+                        contactId = contactId,
+                        content = "Connector timeout: ${stage.name.lowercase(Locale.ROOT)}",
+                        conversationId = conversationId,
+                        turnId = turnId,
+                        taskId = remoteTaskId,
+                        success = false
+                    )
+                )
                 if (remoteTaskId.isNotBlank() && contactId.isNotBlank()) {
                     SignalASIMqttClient.publishAgentTaskCancel(
                         taskId = remoteTaskId,
@@ -2304,7 +2339,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     PhoneExecutionAuthority.guarded(
                         NotifyingAgentActionExecutor(
                             this@MainActivity,
-                            AndroidAgentActionExecutor(this@MainActivity)
+                            AgentControlPlaneActionExecutor(
+                                this@MainActivity,
+                                AndroidAgentActionExecutor(this@MainActivity)
+                            )
                         )
                     ).execute(action, screen)
                 }
@@ -2514,7 +2552,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         val routeTarget = state.plan?.route?.targetId.orEmpty()
             .ifBlank { state.plan?.selectedAgentOrModel.orEmpty() }
-        if (routeTarget.isNotBlank() && routeTarget != "signalasi-mobile") {
+        val handoffAlreadyRecorded = agentRunEventStore.events(run.runId)
+            .any { it.type == AgentRunControlEventType.HANDOFF }
+        if (routeTarget.isNotBlank() && routeTarget != "signalasi-mobile" && !handoffAlreadyRecorded) {
             appendRunControlEvent(
                 run = run,
                 messageId = turnId,
@@ -8325,7 +8365,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun recordRunControlProgress(state: AgentUiState, turnId: String) {
         val runId = agentRunIdsByTurn[turnId] ?: return
         val run = agentRunRecorder.run(runId) ?: return
-        val action = state.pendingAction
+        val action = state.pendingAction ?: state.plan?.actions?.lastOrNull { candidate ->
+            candidate.status == AgentActionStatus.RUNNING ||
+                candidate.status == AgentActionStatus.WAITING_RESPONSE
+        }
+        if (state.phase == AgentPhase.WAITING_RESPONSE && action?.kind == AgentActionKind.CALL_CONNECTOR) {
+            recordStructuredAgentHandoff(state, turnId, run, action)
+        }
         val eventType = when (state.phase) {
             AgentPhase.OBSERVING -> AgentRunControlEventType.STEP_STARTED
             AgentPhase.PLANNING -> AgentRunControlEventType.PLANNING
@@ -8365,6 +8411,104 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ),
             stepId = stepId,
             toolCallId = toolCallId
+        )
+    }
+
+    private fun recordStructuredAgentHandoff(
+        state: AgentUiState,
+        turnId: String,
+        run: AgentRecordedRun,
+        action: AgentAction
+    ) {
+        if (!::agentHandoffStore.isInitialized) return
+        val route = state.plan?.route
+        val fromAgentId = "signalasi-mobile"
+        val toAgentId = route?.targetId.orEmpty()
+            .ifBlank { action.parameters["connector_id"].orEmpty() }
+            .ifBlank { action.target }
+        if (toAgentId.isBlank() || toAgentId == fromAgentId) return
+        val sourceMessageId = state.lastActionResult?.metadata
+            ?.get("source_message_id")?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+        val handoffId = AgentHandoffLifecycle.stableId(run.runId, action.id, fromAgentId, toAgentId)
+        val mutation = agentHandoffStore.beginActive(
+            AgentHandoffRequest(
+                handoffId = handoffId,
+                conversationId = run.conversationId,
+                taskId = turnId,
+                runId = run.runId,
+                fromAgentId = fromAgentId,
+                toAgentId = toAgentId,
+                returnToAgentId = fromAgentId,
+                reason = state.plan?.routeRationale.orEmpty().ifBlank { action.description },
+                deliveryMode = when (route?.deliveryMode.orEmpty().lowercase(Locale.ROOT)) {
+                    "observe", "inject", "context" -> AgentDeliveryMode.OBSERVE
+                    "ignore", "none", "skip" -> AgentDeliveryMode.IGNORE
+                    else -> AgentDeliveryMode.RESPOND
+                },
+                requiredCapabilities = route?.capabilities.orEmpty().toSet(),
+                artifactIds = action.outputSourceIds(),
+                checkpoint = mapOf(
+                    "source_message_id" to sourceMessageId,
+                    "last_event_sequence" to (agentRunEventStore.events(run.runId).lastOrNull()?.sequence ?: 0L)
+                ),
+                context = mapOf(
+                    "turn_id" to turnId,
+                    "step_id" to action.id,
+                    "route_kind" to route?.kind?.name.orEmpty(),
+                    "delivery_mode" to route?.deliveryMode.orEmpty()
+                )
+            ),
+            sourceMessageId = sourceMessageId
+        )
+        if (!mutation.created) return
+        appendRunControlEvent(
+            run = run,
+            messageId = turnId,
+            taskId = turnId,
+            agentId = toAgentId,
+            type = AgentRunControlEventType.HANDOFF,
+            payload = mapOf(
+                "handoff_id" to handoffId,
+                "from_agent_id" to fromAgentId,
+                "to_agent_id" to toAgentId,
+                "return_to_agent_id" to fromAgentId,
+                "reason" to mutation.record.request.reason,
+                "delivery_mode" to mutation.record.request.deliveryMode.name.lowercase(Locale.ROOT),
+                "source_message_id" to sourceMessageId,
+                "artifact_ids" to mutation.record.request.artifactIds
+            ),
+            stepId = action.id,
+            toolCallId = action.id
+        )
+    }
+
+    private fun finishStructuredAgentHandoff(turnId: String, response: AgentConnectorResponse) {
+        if (!::agentHandoffStore.isInitialized) return
+        val runId = agentRunIdsByTurn[turnId] ?: return
+        val run = agentRunRecorder.run(runId) ?: return
+        val state = if (response.success) AgentHandoffState.RETURNED else AgentHandoffState.FAILED
+        val record = agentHandoffStore.finish(
+            runId = runId,
+            sourceMessageId = response.sourceMessageId,
+            state = state,
+            resultSummary = response.content
+        ) ?: return
+        appendRunControlEvent(
+            run = run,
+            messageId = turnId,
+            taskId = turnId,
+            agentId = record.request.toAgentId,
+            type = AgentRunControlEventType.STEP_COMPLETED,
+            payload = mapOf(
+                "handoff_id" to record.request.handoffId,
+                "handoff_state" to record.state.name.lowercase(Locale.ROOT),
+                "from_agent_id" to record.request.toAgentId,
+                "to_agent_id" to record.request.returnToAgentId,
+                "source_message_id" to response.sourceMessageId,
+                "success" to response.success
+            ),
+            stepId = record.request.context["step_id"]?.toString().orEmpty(),
+            toolCallId = record.request.context["step_id"]?.toString().orEmpty()
         )
     }
 

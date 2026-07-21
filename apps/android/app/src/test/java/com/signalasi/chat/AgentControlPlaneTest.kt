@@ -93,6 +93,31 @@ class AgentControlPlaneTest {
     }
 
     @Test
+    fun structuredHandoffIdentityIsStableAcrossProcessRecovery() {
+        val first = AgentHandoffLifecycle.stableId("run", "compile", "codex", "tester")
+        val replay = AgentHandoffLifecycle.stableId("run", "compile", "codex", "tester")
+        val differentStep = AgentHandoffLifecycle.stableId("run", "verify", "codex", "tester")
+
+        assertEquals(first, replay)
+        assertTrue(first != differentStep)
+    }
+
+    @Test
+    fun terminalHandoffCannotBeReopenedByLateEvents() {
+        val returned = AgentHandoffLifecycle.transition(
+            AgentHandoffState.ACTIVE,
+            AgentHandoffState.RETURNED
+        )
+        val lateActive = AgentHandoffLifecycle.transition(returned, AgentHandoffState.ACTIVE)
+
+        assertEquals(AgentHandoffState.RETURNED, lateActive)
+        assertEquals(
+            AgentHandoffState.FAILED,
+            AgentHandoffLifecycle.transition(AgentHandoffState.ACTIVE, AgentHandoffState.FAILED)
+        )
+    }
+
+    @Test
     fun observedContextExpiresAtItsConfiguredBoundary() {
         val item = AgentObservedContext(
             targetId = "codex",

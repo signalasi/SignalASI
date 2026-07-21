@@ -126,6 +126,154 @@ data class AgentHandoffRequest(
     val createdAtMillis: Long = System.currentTimeMillis()
 )
 
+enum class AgentHandoffState {
+    REQUESTED,
+    ACTIVE,
+    RETURNED,
+    FAILED,
+    CANCELLED
+}
+
+data class AgentHandoffRecord(
+    val request: AgentHandoffRequest,
+    val state: AgentHandoffState,
+    val sourceMessageId: Long = 0L,
+    val resultSummary: String = "",
+    val updatedAtMillis: Long = System.currentTimeMillis()
+)
+
+data class AgentHandoffMutation(
+    val record: AgentHandoffRecord,
+    val created: Boolean
+)
+
+object AgentHandoffLifecycle {
+    fun stableId(runId: String, stepId: String, fromAgentId: String, toAgentId: String): String {
+        val source = listOf(runId, stepId, fromAgentId, toAgentId).joinToString("\u001f")
+        return UUID.nameUUIDFromBytes(source.toByteArray(Charsets.UTF_8)).toString()
+    }
+
+    fun transition(current: AgentHandoffState, requested: AgentHandoffState): AgentHandoffState {
+        if (current in TERMINAL_STATES) return current
+        return when (requested) {
+            AgentHandoffState.REQUESTED -> current
+            AgentHandoffState.ACTIVE -> AgentHandoffState.ACTIVE
+            AgentHandoffState.RETURNED -> AgentHandoffState.RETURNED
+            AgentHandoffState.FAILED -> AgentHandoffState.FAILED
+            AgentHandoffState.CANCELLED -> AgentHandoffState.CANCELLED
+        }
+    }
+
+    private val TERMINAL_STATES = setOf(
+        AgentHandoffState.RETURNED,
+        AgentHandoffState.FAILED,
+        AgentHandoffState.CANCELLED
+    )
+}
+
+/**
+ * Encrypted host-owned ledger for cross-Agent transfers. A deterministic
+ * handoff id makes re-rendering and process recovery safe without dispatching
+ * or recording the same transfer twice.
+ */
+class EncryptedAgentHandoffStore(context: Context) {
+    private val database = AgentEncryptedDatabase(
+        context.applicationContext,
+        DATABASE,
+        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
+    )
+
+    @Synchronized
+    fun beginActive(request: AgentHandoffRequest, sourceMessageId: Long = 0L): AgentHandoffMutation {
+        require(request.handoffId.isNotBlank()) { "Handoff id must not be blank" }
+        require(request.runId.isNotBlank() && request.taskId.isNotBlank()) {
+            "Handoff run and task ids must not be blank"
+        }
+        require(request.fromAgentId.isNotBlank() && request.toAgentId.isNotBlank()) {
+            "Handoff endpoints must not be blank"
+        }
+        val records = list().toMutableList()
+        records.firstOrNull { it.request.handoffId == request.handoffId }?.let { existing ->
+            return AgentHandoffMutation(existing, created = false)
+        }
+        val now = System.currentTimeMillis()
+        val record = AgentHandoffRecord(
+            request = request,
+            state = AgentHandoffState.ACTIVE,
+            sourceMessageId = sourceMessageId.coerceAtLeast(0L),
+            updatedAtMillis = now
+        )
+        save((records + record).takeLast(MAX_RECORDS))
+        return AgentHandoffMutation(record, created = true)
+    }
+
+    @Synchronized
+    fun finish(
+        runId: String,
+        sourceMessageId: Long,
+        state: AgentHandoffState,
+        resultSummary: String = ""
+    ): AgentHandoffRecord? {
+        require(state in TERMINAL_STATES) { "A handoff can only finish in a terminal state" }
+        val records = list().toMutableList()
+        val index = records.indexOfLast { record ->
+            record.request.runId == runId &&
+                record.state !in TERMINAL_STATES &&
+                (sourceMessageId <= 0L || record.sourceMessageId == sourceMessageId)
+        }
+        if (index < 0) return null
+        val existing = records[index]
+        val updated = existing.copy(
+            state = AgentHandoffLifecycle.transition(existing.state, state),
+            resultSummary = resultSummary.take(MAX_RESULT_CHARACTERS),
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        records[index] = updated
+        save(records)
+        return updated
+    }
+
+    @Synchronized
+    fun list(): List<AgentHandoffRecord> = decode(database.readString(KEY_RECORDS, "[]"))
+
+    @Synchronized
+    fun forRun(runId: String): List<AgentHandoffRecord> = list().filter { it.request.runId == runId }
+
+    @Synchronized
+    fun active(): List<AgentHandoffRecord> = list().filter { it.state !in TERMINAL_STATES }
+
+    @Synchronized
+    fun clear() = database.clear()
+
+    private fun save(records: List<AgentHandoffRecord>) {
+        database.writeString(KEY_RECORDS, JSONArray().apply {
+            records.forEach { put(it.toJson()) }
+        }.toString())
+    }
+
+    private fun decode(raw: String): List<AgentHandoffRecord> = runCatching {
+        val array = JSONArray(raw)
+        buildList {
+            for (index in 0 until array.length()) {
+                array.optJSONObject(index)?.toHandoffRecord()?.let(::add)
+            }
+        }
+    }.getOrDefault(emptyList())
+
+    companion object {
+        private const val DATABASE = "signalasi_agent_handoffs_v1"
+        private const val UNUSED_LEGACY_PREFERENCES = "signalasi_agent_handoffs_v1_no_legacy"
+        private const val KEY_RECORDS = "records"
+        private const val MAX_RECORDS = 1_000
+        private const val MAX_RESULT_CHARACTERS = 2_000
+        private val TERMINAL_STATES = setOf(
+            AgentHandoffState.RETURNED,
+            AgentHandoffState.FAILED,
+            AgentHandoffState.CANCELLED
+        )
+    }
+}
+
 enum class AgentTeamVisibilityMode { BACKGROUND, VISIBLE }
 
 data class AgentTeamMember(
@@ -894,6 +1042,54 @@ private fun AgentRunControlEvent.toJson(): JSONObject = JSONObject()
     .put("sequence", sequence)
     .put("timestamp_millis", timestampMillis)
     .put("payload", JSONObject(payload))
+
+private fun AgentHandoffRecord.toJson(): JSONObject = JSONObject()
+    .put("handoff_id", request.handoffId)
+    .put("conversation_id", request.conversationId)
+    .put("task_id", request.taskId)
+    .put("run_id", request.runId)
+    .put("parent_run_id", request.parentRunId)
+    .put("from_agent_id", request.fromAgentId)
+    .put("to_agent_id", request.toAgentId)
+    .put("return_to_agent_id", request.returnToAgentId)
+    .put("reason", request.reason)
+    .put("delivery_mode", request.deliveryMode.name)
+    .put("required_capabilities", JSONArray(request.requiredCapabilities.map { it.name }))
+    .put("artifact_ids", JSONArray(request.artifactIds))
+    .put("checkpoint", JSONObject(request.checkpoint))
+    .put("context", JSONObject(request.context))
+    .put("created_at_millis", request.createdAtMillis)
+    .put("state", state.name)
+    .put("source_message_id", sourceMessageId)
+    .put("result_summary", resultSummary)
+    .put("updated_at_millis", updatedAtMillis)
+
+private fun JSONObject.toHandoffRecord(): AgentHandoffRecord? = runCatching {
+    AgentHandoffRecord(
+        request = AgentHandoffRequest(
+            handoffId = getString("handoff_id"),
+            conversationId = optString("conversation_id"),
+            taskId = getString("task_id"),
+            runId = getString("run_id"),
+            parentRunId = optString("parent_run_id").ifBlank { getString("run_id") },
+            fromAgentId = getString("from_agent_id"),
+            toAgentId = getString("to_agent_id"),
+            returnToAgentId = optString("return_to_agent_id").ifBlank { getString("from_agent_id") },
+            reason = optString("reason"),
+            deliveryMode = enumValue(optString("delivery_mode"), AgentDeliveryMode.RESPOND),
+            requiredCapabilities = optJSONArray("required_capabilities")
+                .enumSet(enumValues<AgentCapability>()),
+            artifactIds = optJSONArray("artifact_ids").stringSet().toList(),
+            checkpoint = optJSONObject("checkpoint")?.toNativeMap().orEmpty(),
+            context = optJSONObject("context")?.toNativeMap().orEmpty(),
+            createdAtMillis = optLong("created_at_millis", System.currentTimeMillis())
+        ),
+        state = enumValue(optString("state"), AgentHandoffState.FAILED),
+        sourceMessageId = optLong("source_message_id").coerceAtLeast(0L),
+        resultSummary = optString("result_summary"),
+        updatedAtMillis = optLong("updated_at_millis", System.currentTimeMillis())
+    )
+}.getOrNull()
 
 private fun JSONObject.toRunEvent(): AgentRunControlEvent? = runCatching {
     AgentRunControlEvent(

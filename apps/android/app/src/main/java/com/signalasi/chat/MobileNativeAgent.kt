@@ -141,7 +141,10 @@ class MobileNativeAgent(
         confirmationConsentStore
     ),
     private val actionExecutor: AgentActionExecutor = PhoneExecutionAuthority.guarded(
-        NotifyingAgentActionExecutor(context, AndroidAgentActionExecutor(context))
+        NotifyingAgentActionExecutor(
+            context,
+            AgentControlPlaneActionExecutor(context, AndroidAgentActionExecutor(context))
+        )
     ),
     private val observationController: AgentContinuousObservationController = AgentContinuousObservationController(),
     private val recoveryController: AgentActionRecoveryController = AgentActionRecoveryController(),
