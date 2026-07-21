@@ -345,6 +345,11 @@ class AgentRuntimeGuestBridge(
         check(connection.health.ready) {
             connection.health.reason.ifBlank { "Guest runtime handshake failed" }
         }
+        if (request.secretEnvironment.isNotEmpty()) {
+            check(SECRET_ENVIRONMENT_CAPABILITY in connection.health.capabilities) {
+                "Guest runtime does not support secure environment injection; update the Linux base runtime pack"
+            }
+        }
         val pending = connection.register(request.requestId)
         var lastReceivedSequence = 0L
         if (request.cancellationToken.isCancellationRequested) {
@@ -544,6 +549,7 @@ class AgentRuntimeGuestBridge(
         private const val MAX_PENDING_REQUESTS = 64
         private const val MAX_PENDING_FRAMES = 256
         private const val MAX_STALE_HANDSHAKE_FRAMES = 32
+        private const val SECRET_ENVIRONMENT_CAPABILITY = "runtime.secret_environment"
         private val REQUIRED_GUEST_CAPABILITIES = setOf(
             "runtime.execute",
             "runtime.cancel",

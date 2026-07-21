@@ -47,6 +47,8 @@ The server must speak newline-delimited MCP JSON-RPC on stdin/stdout. SignalASI 
 ## Runtime requirements
 
 - `linux-base` and `python-uv` must be ready.
+- Credential templates require `linux-base` 1.1.0 or newer and the negotiated
+  `runtime.secret_environment` Guest capability. Older Guests fail before process launch.
 - JavaScript servers also require `node-js`.
 - TypeScript servers also require `node-js` with `tsx` support.
 - The entrypoint must be a relative file under `runtime/`.
@@ -63,3 +65,6 @@ The server must speak newline-delimited MCP JSON-RPC on stdin/stdout. SignalASI 
 6. Android parses only the final structured bridge envelope, records normal MCP/native-tool provenance, and removes the invocation control file.
 
 This transport complements, rather than replaces, Streamable HTTP, declarative HTTP, paired Desktop MCP, native Android tools, and Skills.
+
+Real-device coverage lives in `AgentMcpLocalRuntimeDeviceTest`. It separately verifies the plain
+stdio path and the credential-bearing path so a legacy Guest cannot be mistaken for a secure pass.

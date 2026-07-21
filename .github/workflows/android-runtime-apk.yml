@@ -247,17 +247,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: |
-            build/runtime/release/linux-base-1.0.0-arm64-v8a.img
-            build/runtime/release/linux-base-1.0.0-arm64-v8a.img.config.json
+            build/runtime/release/linux-base-1.1.0-arm64-v8a.img
+            build/runtime/release/linux-base-1.1.0-arm64-v8a.img.config.json
             build/runtime/release/python-uv-0.11.29-arm64-v8a.img
             build/runtime/release/python-uv-0.11.29-arm64-v8a.img.config.json
-          key: android-default-runtime-images-v1-${{ runner.os }}-${{ hashFiles('tools/runtime/build-linux-base.sh', 'tools/runtime/build-python-uv-image.sh', 'tools/runtime/runtime-download.sh', 'tools/runtime/runtime-image.mjs', 'tools/runtime/build-runtime-image.mjs', 'apps/android/runtime/buildroot-external/**') }}
+          key: android-default-runtime-images-v2-${{ runner.os }}-${{ hashFiles('tools/runtime/build-linux-base.sh', 'tools/runtime/build-python-uv-image.sh', 'tools/runtime/runtime-download.sh', 'tools/runtime/runtime-image.mjs', 'tools/runtime/build-runtime-image.mjs', 'apps/android/runtime/buildroot-external/**') }}
 
       - name: Inspect restored default runtime images
         id: default-images-state
         run: |
-          if [[ -s build/runtime/release/linux-base-1.0.0-arm64-v8a.img && \
-                -s build/runtime/release/linux-base-1.0.0-arm64-v8a.img.config.json && \
+          if [[ -s build/runtime/release/linux-base-1.1.0-arm64-v8a.img && \
+                -s build/runtime/release/linux-base-1.1.0-arm64-v8a.img.config.json && \
                 -s build/runtime/release/python-uv-0.11.29-arm64-v8a.img && \
                 -s build/runtime/release/python-uv-0.11.29-arm64-v8a.img.config.json ]]; then
             echo "ready=true" >> "$GITHUB_OUTPUT"
@@ -269,15 +269,15 @@ jobs:
         if: steps.default-images-state.outputs.ready != 'true'
         run: |
           mkdir -p build/runtime/release
-          npm run runtime:build-linux-base -- "$PWD/build/runtime/release/linux-base-1.0.0-arm64-v8a.img"
+          npm run runtime:build-linux-base -- "$PWD/build/runtime/release/linux-base-1.1.0-arm64-v8a.img"
           npm run runtime:build-python-uv -- "$PWD/build/runtime/release/python-uv-0.11.29-arm64-v8a.img"
           node --input-type=module <<'NODE'
           import { statSync, writeFileSync } from 'node:fs';
-          const image = 'linux-base-1.0.0-arm64-v8a.img';
+          const image = 'linux-base-1.1.0-arm64-v8a.img';
           const path = `build/runtime/release/${image}`;
           writeFileSync(`${path}.config.json`, `${JSON.stringify({
             id: 'linux-base',
-            version: '1.0.0',
+            version: '1.1.0',
             architecture: 'arm64-v8a',
             image,
             image_file: image,
@@ -296,8 +296,8 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: |
-            build/runtime/release/linux-base-1.0.0-arm64-v8a.img
-            build/runtime/release/linux-base-1.0.0-arm64-v8a.img.config.json
+            build/runtime/release/linux-base-1.1.0-arm64-v8a.img
+            build/runtime/release/linux-base-1.1.0-arm64-v8a.img.config.json
             build/runtime/release/python-uv-0.11.29-arm64-v8a.img
             build/runtime/release/python-uv-0.11.29-arm64-v8a.img.config.json
           key: ${{ steps.default-images-cache.outputs.cache-primary-key }}
@@ -325,7 +325,7 @@ jobs:
             --asset-root build/runtime/android-assets \
             --jni-root build/runtime/android-jni-libs \
             --certificate build/runtime/signing/runtime-cert.pem \
-            --pack build/runtime/release/linux-base-1.0.0-arm64-v8a.sarpack \
+            --pack build/runtime/release/linux-base-1.1.0-arm64-v8a.sarpack \
             --pack build/runtime/release/python-uv-0.11.29-arm64-v8a.sarpack
 
       - name: Build signed software catalog
@@ -334,7 +334,7 @@ jobs:
             --entries build/runtime/release \
             --output build/runtime/release/android-runtime-catalog-v1.json \
             --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RUNTIME_RELEASE_TAG}/" \
-            --version 1.0.0 \
+            --version 1.1.0 \
             --expires-days 365 \
             --certificate build/runtime/signing/runtime-cert.pem \
             --key build/runtime/signing/runtime-key.pem \
