@@ -760,8 +760,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             refreshGlobalAgentCognition()
             return true
         }
-        AgentConnectorResponseBus.publish(this, response)
-        return false
+        return AgentConnectorResponseBus.publish(this, response)
     }
 
     private fun consumeAgentConnectorResponse(response: AgentConnectorResponse) {
@@ -1372,7 +1371,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             delegate = AndroidAgentActionExecutor(this),
             recoverableSource = recoverableSource,
             runStartReceipts = EncryptedAgentRunStartReceiptStore(this),
-            healthLedger = EncryptedAgentProviderHealthLedger(this)
+            healthLedger = EncryptedAgentProviderHealthLedger(this),
+            managedResponses = EncryptedAgentManagedResponseLedger(this)
         )
         val directory = AgentAdapterDirectory().apply { register(provider) }
         val results = runBlocking {
@@ -6498,6 +6498,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             GlobalMemoryAuditFindingKind.EXPIRED -> R.string.cc_memory_audit_expired
             GlobalMemoryAuditFindingKind.DUPLICATE -> R.string.cc_memory_audit_duplicate
             GlobalMemoryAuditFindingKind.LOW_CONFIDENCE_REUSED -> R.string.cc_memory_audit_low_confidence
+            GlobalMemoryAuditFindingKind.STALE_CANDIDATE -> R.string.cc_memory_audit_stale_candidate
             GlobalMemoryAuditFindingKind.UNRESOLVED_CONFLICT -> R.string.cc_memory_audit_conflict
             GlobalMemoryAuditFindingKind.SKILL_CANDIDATE -> R.string.cc_memory_audit_skill_candidate
             GlobalMemoryAuditFindingKind.COMPLETED_GOAL -> R.string.cc_memory_audit_completed_goal
@@ -9992,15 +9993,82 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun showAgentRecentTasksPage() {
         val state = mobileNativeAgent.snapshot()
+        val teams = globalSuperAgentRuntime.agentTeamSnapshots().take(20)
         showFeaturePage(getString(R.string.cc_tasks_title))
-        if (state.recentTasks.isEmpty()) {
+        if (state.recentTasks.isEmpty() && teams.isEmpty()) {
             featureContent.addView(agentRecentEmptyRow())
             return
         }
-        state.recentTasks.take(20).forEachIndexed { index, task ->
-            featureContent.addView(agentRecentTaskRow(task, index))
+        if (state.recentTasks.isNotEmpty()) {
+            addSectionTitle(getString(R.string.agent_section_recent_tasks))
+            state.recentTasks.take(20).forEachIndexed { index, task ->
+                featureContent.addView(agentRecentTaskRow(task, index))
+            }
+        }
+        if (teams.isNotEmpty()) {
+            addSectionTitle(getString(R.string.agent_team_section_title))
+            teams.forEach { team ->
+                featureContent.addView(featureRow(
+                    title = team.goal.ifBlank { team.teamId },
+                    subtitle = getString(
+                        R.string.agent_team_summary,
+                        team.members.count { it.deliveryMode != AgentDeliveryMode.IGNORE },
+                        agentTeamStateText(team.state)
+                    ),
+                    iconRes = R.drawable.ic_agent_history,
+                    action = getString(R.string.agent_team_details_action)
+                ).apply { setOnClickListener { showAgentTeamDetails(team) } })
+            }
         }
     }
+
+    private fun showAgentTeamDetails(team: AgentTeamExecutionSnapshot) {
+        val projection = AgentTeamProgressPolicy.project(team, expanded = true)
+        val detail = buildString {
+            appendLine(team.goal)
+            appendLine()
+            appendLine("${getString(R.string.agent_task_detail_status)}: ${agentTeamStateText(team.state)}")
+            appendLine("${getString(R.string.agent_team_primary_label)}: ${team.primaryAgentId}")
+            appendLine()
+            appendLine(getString(R.string.agent_team_members_label))
+            projection.members.filter { it.deliveryMode != AgentDeliveryMode.IGNORE }.forEach { member ->
+                append("- ").append(member.agentId)
+                if (member.role.isNotBlank()) append(" · ").append(member.role)
+                append(" · ").append(agentTeamMemberStateText(member.status))
+                if (member.errorMessage.isNotBlank()) append(" · ").append(member.errorMessage.take(160))
+                appendLine()
+            }
+            if (projection.finalOutput.isNotBlank()) {
+                appendLine()
+                appendLine(getString(R.string.agent_team_result_label))
+                append(projection.finalOutput)
+            }
+        }.trim()
+        android.app.AlertDialog.Builder(this)
+            .setTitle(getString(R.string.agent_team_details_title))
+            .setMessage(detail)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun agentTeamStateText(state: AgentTeamExecutionState): String = getString(when (state) {
+        AgentTeamExecutionState.QUEUED -> R.string.agent_team_state_queued
+        AgentTeamExecutionState.RUNNING -> R.string.agent_team_state_running
+        AgentTeamExecutionState.SUCCEEDED -> R.string.agent_team_state_succeeded
+        AgentTeamExecutionState.COMPLETED_WITH_FAILURES -> R.string.agent_team_state_completed_with_failures
+        AgentTeamExecutionState.FAILED -> R.string.agent_team_state_failed
+        AgentTeamExecutionState.CANCELLED -> R.string.agent_team_state_cancelled
+        AgentTeamExecutionState.INTERRUPTED -> R.string.agent_team_state_interrupted
+    })
+
+    private fun agentTeamMemberStateText(state: AgentSubagentStatus): String = getString(when (state) {
+        AgentSubagentStatus.QUEUED -> R.string.agent_team_state_queued
+        AgentSubagentStatus.RUNNING -> R.string.agent_team_state_running
+        AgentSubagentStatus.SUCCEEDED -> R.string.agent_team_state_succeeded
+        AgentSubagentStatus.FAILED -> R.string.agent_team_state_failed
+        AgentSubagentStatus.CANCELLED -> R.string.agent_team_state_cancelled
+        AgentSubagentStatus.SKIPPED -> R.string.agent_team_member_state_skipped
+    })
 
     private fun showCapabilityLibraryPage(selectedKind: AgentCapabilityCatalogKind) {
         showFeaturePage(getString(R.string.agent_capability_library_title))

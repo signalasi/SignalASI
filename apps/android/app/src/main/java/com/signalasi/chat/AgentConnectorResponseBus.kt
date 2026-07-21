@@ -3,6 +3,7 @@ package com.signalasi.chat
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 
 data class AgentConnectorResponse(
@@ -35,17 +36,64 @@ object AgentConnectorResponseBus {
         listeners -= listener
     }
 
-    fun publish(context: Context, response: AgentConnectorResponse) {
-        if (response.sourceMessageId <= 0L) return
+    fun publish(context: Context, response: AgentConnectorResponse): Boolean {
+        if (response.sourceMessageId <= 0L) return false
         val richOutput = AgentRichContentCodec.normalize(response.richOutputJson)
         val normalized = response.copy(
             content = response.content.ifBlank { AgentRichContentCodec.fallbackText(richOutput) },
             richOutputJson = richOutput
         )
-        if (normalized.content.isBlank() && normalized.richOutputJson.isBlank()) return
+        if (normalized.content.isBlank() && normalized.richOutputJson.isBlank()) return false
+        if (AgentManagedConnectorResponseRegistry.consume(normalized)) return true
+        if (EncryptedAgentManagedResponseLedger(context).complete(normalized) != null) return true
         AgentConnectorResponseStore.append(context, normalized)
         listeners.forEach { listener -> listener.onConnectorResponse(normalized) }
+        return false
     }
+}
+
+/**
+ * One-shot response interception for host-managed Agent runs. Internal team
+ * replies must return to their supervisor instead of appearing as independent
+ * assistant messages in the user transcript.
+ */
+internal object AgentManagedConnectorResponseRegistry {
+    private data class Interceptor(
+        val ownerId: String,
+        val consume: (AgentConnectorResponse) -> Boolean
+    )
+
+    private val interceptors = ConcurrentHashMap<String, Interceptor>()
+
+    fun register(
+        sourceMessageId: Long,
+        contactId: String,
+        ownerId: String,
+        consume: (AgentConnectorResponse) -> Boolean
+    ) {
+        require(sourceMessageId > 0L) { "Managed response source id must be positive" }
+        require(ownerId.isNotBlank()) { "Managed response owner id must not be blank" }
+        interceptors[key(sourceMessageId, contactId)] = Interceptor(ownerId, consume)
+    }
+
+    fun consume(response: AgentConnectorResponse): Boolean {
+        val exactKey = key(response.sourceMessageId, response.contactId)
+        val wildcardKey = key(response.sourceMessageId, "")
+        val interceptor = interceptors.remove(exactKey)
+            ?: interceptors.remove(wildcardKey)
+            ?: return false
+        return runCatching { interceptor.consume(response) }.getOrDefault(false)
+    }
+
+    fun unregisterOwner(ownerId: String) {
+        if (ownerId.isBlank()) return
+        interceptors.entries.removeIf { it.value.ownerId == ownerId }
+    }
+
+    fun clear() = interceptors.clear()
+
+    private fun key(sourceMessageId: Long, contactId: String): String =
+        "$sourceMessageId:${contactId.trim()}"
 }
 
 object AgentConnectorResponseStore {

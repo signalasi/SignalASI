@@ -70,10 +70,12 @@ data class GlobalEntityMemoryGraph(
         query: String,
         hops: Int = 2,
         limit: Int = 24,
-        includeHistorical: Boolean = false
+        includeHistorical: Boolean = false,
+        historicalOnly: Boolean = false,
+        preferredRelationKinds: Set<GlobalEntityRelationKind> = emptySet()
     ): GlobalEntityGraphSelection {
         val tokens = GlobalAgentText.tokens(query)
-        val allowedStates = if (includeHistorical) {
+        val nodeStates = if (includeHistorical) {
             GlobalMemoryTemporalState.entries.toSet()
         } else setOf(
             GlobalMemoryTemporalState.CURRENT,
@@ -81,11 +83,20 @@ data class GlobalEntityMemoryGraph(
             GlobalMemoryTemporalState.CONFLICTED,
             GlobalMemoryTemporalState.PENDING
         )
+        val relationStates = if (historicalOnly) {
+            setOf(GlobalMemoryTemporalState.HISTORICAL, GlobalMemoryTemporalState.DEPRECATED)
+        } else nodeStates
+        val preferredNodeIds = if (preferredRelationKinds.isEmpty()) emptySet() else relations.asSequence()
+            .filter { it.kind in preferredRelationKinds && it.temporalState in relationStates }
+            .flatMap { sequenceOf(it.fromNodeId, it.toNodeId) }
+            .toSet()
         val rankedSeeds = nodes.asSequence()
-            .filter { it.temporalState in allowedStates }
+            .filter { it.temporalState in nodeStates }
             .map { node ->
                 val text = (listOf(node.label) + node.aliases).joinToString(" ")
-                node to (GlobalAgentText.overlap(tokens, GlobalAgentText.tokens(text)) + node.confidence * 0.15)
+                val overlap = GlobalAgentText.overlap(tokens, GlobalAgentText.tokens(text))
+                val relationBoost = if (overlap > 0.0 && node.id in preferredNodeIds) 0.14 else 0.0
+                node to (overlap + node.confidence * 0.15 + relationBoost)
             }
             .filter { (_, score) -> score >= 0.16 }
             .sortedByDescending(Pair<GlobalEntityNode, Double>::second)
@@ -96,9 +107,11 @@ data class GlobalEntityMemoryGraph(
         val selectedIds = rankedSeeds.mapTo(mutableSetOf(), GlobalEntityNode::id)
         repeat(hops.coerceIn(0, 3)) {
             val neighbors = relations.asSequence()
-                .filter { it.temporalState in allowedStates }
+                .filter { it.temporalState in relationStates }
                 .filter { it.fromNodeId in selectedIds || it.toNodeId in selectedIds }
-                .sortedByDescending(GlobalEntityRelation::confidence)
+                .sortedWith(compareByDescending<GlobalEntityRelation> { it.kind in preferredRelationKinds }
+                    .thenByDescending(GlobalEntityRelation::confidence)
+                    .thenByDescending(GlobalEntityRelation::lastSeenAtMillis))
                 .flatMap { sequenceOf(it.fromNodeId, it.toNodeId) }
                 .filterNot(selectedIds::contains)
                 .take(limit)
@@ -111,8 +124,11 @@ data class GlobalEntityMemoryGraph(
             .take(limit.coerceIn(1, 60))
         val boundedIds = selectedNodes.map(GlobalEntityNode::id).toSet()
         val selectedRelations = relations.filter {
-            it.fromNodeId in boundedIds && it.toNodeId in boundedIds && it.temporalState in allowedStates
-        }.sortedByDescending(GlobalEntityRelation::confidence).take(limit.coerceIn(1, 60) * 2)
+            it.fromNodeId in boundedIds && it.toNodeId in boundedIds && it.temporalState in relationStates
+        }.sortedWith(compareByDescending<GlobalEntityRelation> { it.kind in preferredRelationKinds }
+            .thenByDescending(GlobalEntityRelation::confidence)
+            .thenByDescending(GlobalEntityRelation::lastSeenAtMillis))
+            .take(limit.coerceIn(1, 60) * 2)
         return GlobalEntityGraphSelection(selectedNodes, selectedRelations)
     }
 }
@@ -205,6 +221,9 @@ object GlobalEntityMemoryGraphReducer {
         explicitTriples(acceptedContent).take(MAX_RELATIONS_PER_EVENT).forEach { triple ->
             val from = upsertNode(nodes, triple.from, classify(triple.from, project), evidence, acceptedEvent)
             val to = upsertNode(nodes, triple.to, classify(triple.to, project), evidence, acceptedEvent)
+            if (triple.kind == GlobalEntityRelationKind.REMOVED) {
+                retireEntityRelations(relations, from.id, event.timestampMillis)
+            }
             closeSupersededRelations(relations, from.id, triple.kind, event.timestampMillis)
             upsertRelation(
                 relations,
@@ -332,6 +351,30 @@ object GlobalEntityMemoryGraphReducer {
         }
     }
 
+    private fun retireEntityRelations(
+        relations: MutableList<GlobalEntityRelation>,
+        entityNodeId: String,
+        nowMillis: Long
+    ) {
+        relations.indices.forEach { index ->
+            val current = relations[index]
+            if ((current.fromNodeId == entityNodeId || current.toNodeId == entityNodeId) &&
+                current.temporalState in setOf(
+                    GlobalMemoryTemporalState.CURRENT,
+                    GlobalMemoryTemporalState.PLANNED,
+                    GlobalMemoryTemporalState.PENDING,
+                    GlobalMemoryTemporalState.CONFLICTED
+                )
+            ) {
+                relations[index] = current.copy(
+                    temporalState = GlobalMemoryTemporalState.DEPRECATED,
+                    validUntilMillis = nowMillis,
+                    lastSeenAtMillis = maxOf(current.lastSeenAtMillis, nowMillis)
+                )
+            }
+        }
+    }
+
     private fun explicitTriples(content: String): List<ExplicitTriple> {
         val clean = content.replace(Regex("\\s+"), " ").trim().take(2_400)
         if (clean.isBlank() || AgentLearningAnalyzer.containsSensitiveData(clean)) return emptyList()
@@ -417,7 +460,10 @@ object GlobalEntityMemoryGraphReducer {
     private data class RelationPattern(val regex: Regex, val kind: GlobalEntityRelationKind)
 
     private val RELATION_PATTERNS = listOf(
-        RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:owns|has)\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.OWNS),
+        RelationPattern(
+            Regex("(?i)([^.!?;]{2,80}?)\\s+(?:owns|has(?!\\s+(?:been\\s+)?(?:removed|deleted)\\b))\\s+([^.!?;]{1,120})"),
+            GlobalEntityRelationKind.OWNS
+        ),
         RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:uses|use)\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.USES),
         RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+supports\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.SUPPORTS),
         RelationPattern(Regex("(?i)([^.!?;]{2,80}?)\\s+(?:contains|includes|has component|is composed of)\\s+([^.!?;]{1,120})"), GlobalEntityRelationKind.HAS_COMPONENT),

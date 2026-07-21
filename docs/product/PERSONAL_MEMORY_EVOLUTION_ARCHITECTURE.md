@@ -60,6 +60,7 @@ Each proposed durable change is classified as a fact, preference, identity, deci
 - Contradictions wait in the inbox unless the event contains an explicit replacement signal.
 - Private data is rejected and its raw payload is discarded.
 - Approval writes the world item and its relationship-graph projection.
+- Approval resolves `PENDING` or `CONFLICTED` temporal state into `CURRENT`, `PLANNED`, `HISTORICAL`, or `DEPRECATED`; approved memory can therefore enter retrieval immediately without bypassing review.
 - Rejection records the decision without changing the accepted world model.
 - Semantically equivalent, same-polarity evidence strengthens the accepted item instead of creating another list entry.
 - Causal deletion removes source candidates and their payloads from the inbox before the deletion event is committed.
@@ -70,17 +71,18 @@ The graph stores typed nodes for users, devices, applications, features, setting
 
 Every node and relation carries temporal state, confidence, bounded evidence references, and observation time. Retrieval supports bounded multi-hop traversal and excludes historical relations unless the query plan explicitly requests them.
 
-The graph projects ownership, use, support, components, state, naming, dependencies, connections, preferences, removal, and general relatedness. A removal event deprecates the affected entity and closes replaceable state or naming relations instead of leaving them current.
+The graph projects ownership, use, support, components, state, naming, dependencies, connections, preferences, removal, and general relatedness. A removal event deprecates the affected entity and closes every current inbound and outbound relation, including support and dependency edges, instead of leaving stale capabilities reachable from current-state queries. Historical queries can still traverse those closed relations and their validity interval.
 
 ## Query Planner And Prompt Compiler
 
-Before retrieval, the query planner classifies the request as project state, device capability, historical decision, personal preference, long-term goal, tool evidence, or general memory.
+Before retrieval, the query planner classifies the request into one or more facets: project state, device capability, historical decision, personal identity, personal preference, security state, long-term goal, tool evidence, relationship, or general memory. A request can therefore combine device, project, relationship, security, and historical intent instead of losing all but the first match.
 
 The plan controls:
 
 - preferred world-item kinds and layers;
-- whether superseded history is eligible;
+- current-only, history-only, or current-and-history temporal scope;
 - graph traversal depth;
+- preferred typed relationships used to rerank graph traversal;
 - item and character budgets;
 - project namespace isolation.
 
@@ -90,7 +92,7 @@ Compiled entries carry bounded evidence counts and opaque memory references. Pla
 
 ## Memory Critic
 
-An encrypted on-device audit runs after meaningful event batches and at least daily when the runtime wakes. It identifies:
+An encrypted on-device audit runs after meaningful event batches. Its next daily deadline is also part of the durable AlarmManager wake schedule, so the audit does not depend on a new chat event arriving. It identifies:
 
 - expired current state;
 - unresolved conflicts;
@@ -101,7 +103,7 @@ An encrypted on-device audit runs after meaningful event batches and at least da
 - semantically duplicate memories that can be consolidated safely;
 - cross-session topic clusters that should become durable long-term themes.
 
-The critic may retire expired state and merge equivalent evidence while retaining the duplicate as superseded history. It never auto-approves identity, preference, safety, Skill, or conflicting candidates. Long-term themes are evidence-only rollups: they introduce no new factual claims and remain visible in Memory Health.
+The critic may retire expired state and merge equivalent evidence while retaining the duplicate as superseded history. Stale inbox candidates have their own finding type and are not mislabeled as low-confidence accepted memory. The critic never auto-approves identity, preference, safety, Skill, or conflicting candidates. Long-term themes are evidence-only rollups: they introduce no new factual claims and remain visible in Memory Health.
 
 ## Self-Model Feedback
 
@@ -129,8 +131,11 @@ The regression suite follows LoCoMo-style categories adapted to SignalASI:
 - reusable tool evidence;
 - long-horizon goal continuity;
 - relationship-graph multi-hop queries;
-- candidate review and rejection;
-- event replay idempotency.
+- unresolved-conflict labeling;
+- causal deletion of candidates and graph evidence;
+- candidate review, rejection, and event replay idempotency.
+
+`GlobalMemoryLoCoMoRegressionTest` is the stable cross-session corpus. Scenario names describe the user-visible memory contract rather than implementation details, which allows retrieval internals to evolve without weakening the acceptance criteria.
 
 An isolated unit test is not sufficient release evidence. Production acceptance also requires encrypted backup/restore, process-death replay, real-device review UI, causal deletion, and model-context inspection.
 

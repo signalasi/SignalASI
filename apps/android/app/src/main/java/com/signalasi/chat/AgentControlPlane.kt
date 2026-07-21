@@ -282,7 +282,10 @@ enum class AgentTeamVisibilityMode { BACKGROUND, VISIBLE }
 data class AgentTeamMember(
     val agentId: String,
     val deliveryMode: AgentDeliveryMode,
-    val requiredCapabilities: Set<AgentCapability> = emptySet()
+    val requiredCapabilities: Set<AgentCapability> = emptySet(),
+    val role: String = "",
+    val objective: String = "",
+    val dependsOnAgentIds: Set<String> = emptySet()
 )
 
 data class AgentTeamDefinition(
@@ -650,6 +653,9 @@ class AgentTeamCoordinator(private val directory: AgentAdapterDirectory) {
         require(definition.teamId.isNotBlank()) { "Team id must not be blank" }
         require(members.any { it.agentId == definition.primaryAgentId && it.deliveryMode == AgentDeliveryMode.RESPOND }) {
             "The primary Agent must be a responding team member"
+        }
+        require(members.count { it.deliveryMode == AgentDeliveryMode.RESPOND } == 1) {
+            "A team must expose exactly one responding Agent"
         }
         val primaryMember = members.first { it.agentId == definition.primaryAgentId }
         val primaryAdapter = requireNotNull(directory.resolveAdapter(primaryMember.agentId)) {

@@ -5,6 +5,10 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 
 class AgentControlPlaneActionExecutorTest {
     @Test
@@ -126,6 +130,65 @@ class AgentControlPlaneActionExecutorTest {
         assertFalse(blocked.success)
         assertEquals("true", blocked.metadata["provider_circuit_open"])
         assertEquals(3, executions.get())
+    }
+
+    @Test
+    fun managedAsyncResponseCompletesRunAndIsInterceptedOnce() = runBlocking {
+        AgentManagedConnectorResponseRegistry.clear()
+        val provider = ActionExecutorAgentProvider(
+            registrationSource = { listOf(registration()) },
+            delegate = object : AgentActionExecutor {
+                override fun execute(action: AgentAction, screen: ScreenContext) = AgentActionResult(
+                    action.id,
+                    true,
+                    "Waiting",
+                    mapOf(
+                        "awaiting_response" to "true",
+                        "source_message_id" to "73",
+                        "contact_id" to "codex"
+                    )
+                )
+            }
+        )
+        val directory = AgentAdapterDirectory().apply { register(provider) }
+        val adapter = requireNotNull(directory.resolveAdapter("codex"))
+        val request = AgentRunRequest(
+            conversationId = "conversation",
+            messageId = "message",
+            taskId = "task",
+            runId = "managed-run",
+            goal = "Inspect the project",
+            context = mapOf("managed_team" to true),
+            idempotencyKey = "managed-run"
+        )
+        provider.prepare(
+            "codex",
+            request,
+            connectorAction(),
+            ScreenContext(foregroundApp = "SignalASI", pageTitle = "Agent")
+        )
+        adapter.startRun(request)
+
+        val response = AgentConnectorResponse(
+            sourceMessageId = 73L,
+            contactId = "codex",
+            content = "Reviewed result",
+            inputTokens = 10L,
+            outputTokens = 4L
+        )
+        assertTrue(AgentManagedConnectorResponseRegistry.consume(response))
+        assertFalse(AgentManagedConnectorResponseRegistry.consume(response))
+        val terminal = async(start = CoroutineStart.UNDISPATCHED) {
+            adapter.observeEvents(request.runId).first {
+                it.type in setOf(AgentRunControlEventType.RUN_COMPLETED, AgentRunControlEventType.RUN_FAILED)
+            }
+        }.await()
+
+        assertEquals(AgentRunControlEventType.RUN_COMPLETED, terminal.type)
+        assertEquals("Reviewed result", terminal.payload["result"])
+        assertEquals("Reviewed result", provider.result("codex", request.runId)?.message)
+        assertEquals("false", provider.result("codex", request.runId)?.metadata?.get("awaiting_response"))
+        AgentManagedConnectorResponseRegistry.clear()
     }
 
     private fun connectorAction() = AgentAction(

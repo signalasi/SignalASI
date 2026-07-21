@@ -27,6 +27,11 @@ enum class AgentSubagentFailurePolicy {
     FAIL_FAST
 }
 
+enum class AgentSubagentDependencyPolicy {
+    REQUIRE_SUCCESS,
+    ALLOW_TERMINAL
+}
+
 enum class AgentSubagentStatus {
     QUEUED,
     RUNNING,
@@ -81,6 +86,7 @@ data class AgentSubagentChild(
     val childId: String,
     val parentId: String? = null,
     val dependencies: Set<String> = emptySet(),
+    val dependencyPolicy: AgentSubagentDependencyPolicy = AgentSubagentDependencyPolicy.REQUIRE_SUCCESS,
     val context: String = "",
     val provenance: AgentSubagentProvenance = AgentSubagentProvenance()
 )
@@ -97,6 +103,7 @@ data class AgentSubagentDependencyHandoff(
     val status: AgentSubagentStatus,
     val output: String,
     val outputTruncated: Boolean,
+    val errorMessage: String = "",
     val provenance: AgentSubagentProvenance
 )
 
@@ -377,7 +384,7 @@ class AgentSubagentRuntime(
             }
             currentCoroutineContext().ensureActive()
             val unsuccessful = dependencies.filter { it.status != AgentSubagentStatus.SUCCEEDED }
-            if (unsuccessful.isNotEmpty()) {
+            if (unsuccessful.isNotEmpty() && child.dependencyPolicy == AgentSubagentDependencyPolicy.REQUIRE_SUCCESS) {
                 val failedIds = unsuccessful.map { it.childId }.sorted().joinToString(",")
                 val skipped = terminalResult(
                     plan = plan,
@@ -577,6 +584,7 @@ class AgentSubagentRuntime(
                     status = result.status,
                     output = output,
                     outputTruncated = outputTruncated,
+                    errorMessage = result.errorMessage.take(MAX_ERROR_CHARS),
                     provenance = result.provenance
                 )
             }
@@ -738,6 +746,7 @@ class AgentSubagentRuntime(
                 childId = childId,
                 parentId = parentId,
                 dependencies = dependencies.toList(),
+                dependencyPolicy = child.dependencyPolicy,
                 context = child.context,
                 provenance = normalizeProvenance(child.provenance)
             )
@@ -850,6 +859,7 @@ class AgentSubagentRuntime(
         val childId: String,
         val parentId: String,
         val dependencies: List<String>,
+        val dependencyPolicy: AgentSubagentDependencyPolicy,
         val context: String,
         val provenance: AgentSubagentProvenance,
         val depth: Int = 0

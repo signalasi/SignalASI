@@ -1610,6 +1610,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     private val proactiveDiscoveryCoordinator by lazy { GlobalProactiveDiscoveryCoordinator(appContext) }
     private val realtimeContext by lazy { GlobalRealtimeContextProvider(appContext) }
     private val modelCallBudget by lazy { GlobalModelCallBudgetStore(appContext) }
+    private val agentTeamController by lazy { AgentProductionTeamController(appContext) }
 
     init {
         val settings = repository.settings()
@@ -2433,6 +2434,10 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         val modelBudget = modelCallBudget.availability(settings, nowMillis)
         val candidates = buildList {
             repository.nextPendingEventAttemptAt(nowMillis).takeIf { it > 0L }?.let(::add)
+            GlobalMemoryCritic.nextAuditAt(
+                repository.memoryAuditReport().createdAtMillis,
+                nowMillis
+            ).takeIf { it > 0L }?.let(::add)
             repository.researchTasks().forEach { task ->
                 when (task.status) {
                     GlobalResearchTaskStatus.QUEUED -> add(
@@ -2976,7 +2981,22 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         )
     }
 
-    fun clear() = repository.clear()
+    fun startAgentTeam(
+        definition: AgentTeamDefinition,
+        request: AgentRunRequest
+    ): AgentTeamExecutionHandle = agentTeamController.start(definition, request)
+
+    fun agentTeamSnapshots(): List<AgentTeamExecutionSnapshot> = agentTeamController.snapshots()
+
+    fun agentTeamProgress(
+        supervisorRunId: String,
+        expanded: Boolean = false
+    ): AgentTeamProgressProjection? = agentTeamController.progress(supervisorRunId, expanded)
+
+    fun clear() {
+        repository.clear()
+        agentTeamController.clear()
+    }
 
     companion object {
         private const val MESSAGE_DEDUPE_WINDOW_MILLIS = 6L * 60L * 60L * 1_000L

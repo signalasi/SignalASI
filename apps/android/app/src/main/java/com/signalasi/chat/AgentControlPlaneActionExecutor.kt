@@ -23,6 +23,7 @@ class AgentControlPlaneActionExecutor private constructor(
             delegate = delegate,
             runStartReceipts = EncryptedAgentRunStartReceiptStore(context),
             healthLedger = EncryptedAgentProviderHealthLedger(context),
+            managedResponses = EncryptedAgentManagedResponseLedger(context),
             recoverableSource = {
                 EncryptedAgentHandoffStore(context).active().map { handoff ->
                     AgentRecoverableRun(
@@ -152,6 +153,7 @@ internal class ActionExecutorAgentProvider(
     private val recoverableSource: () -> List<AgentRecoverableRun> = { emptyList() },
     private val runStartReceipts: AgentRunStartReceiptStore = InMemoryAgentRunStartReceiptStore(),
     private val healthLedger: AgentProviderHealthLedger = InMemoryAgentProviderHealthLedger(),
+    private val managedResponses: AgentManagedResponseLedger = InMemoryAgentManagedResponseLedger(),
     override val providerId: String = "signalasi-connectors",
     private val protocol: AgentProtocolRange = AgentProtocolRange(
         preferred = "1.0",
@@ -180,7 +182,13 @@ internal class ActionExecutorAgentProvider(
         adapters[agentId]?.let { return it }
         val registration = registration(agentId) ?: return null
         val transport = transports.computeIfAbsent(agentId) {
-            ActionExecutorAgentTransport(registrationSource, delegate, recoverableSource, agentId)
+            ActionExecutorAgentTransport(
+                registrationSource,
+                delegate,
+                recoverableSource,
+                managedResponses,
+                agentId
+            )
         }
         val adapter = AgentProductionAdapterFactory.create(
             registration = registration,
@@ -215,11 +223,21 @@ internal class ActionExecutorAgentProvider(
     ) {
         val registration = registration(agentId) ?: return
         transports.computeIfAbsent(agentId) {
-            ActionExecutorAgentTransport(registrationSource, delegate, recoverableSource, agentId)
+            ActionExecutorAgentTransport(
+                registrationSource,
+                delegate,
+                recoverableSource,
+                managedResponses,
+                agentId
+            )
         }.prepare(request.runId, action, screen, registration)
     }
 
     fun result(agentId: String, runId: String): AgentActionResult? = transports[agentId]?.result(runId)
+
+    fun consumeResponse(response: AgentConnectorResponse): Boolean = transports.values.any { transport ->
+        transport.consumeResponse(response)
+    }
 
     fun recordDispatchOutcome(agentId: String, result: AgentActionResult, latencyMillis: Long) {
         val registration = registration(agentId) ?: return
@@ -246,6 +264,7 @@ private class ActionExecutorAgentTransport(
     private val registrationSource: () -> List<AgentRegistration>,
     private val delegate: AgentActionExecutor,
     private val recoverableSource: () -> List<AgentRecoverableRun>,
+    private val managedResponses: AgentManagedResponseLedger,
     private val agentId: String
 ) : AgentAdapterTransport {
     private data class PreparedAction(
@@ -254,15 +273,30 @@ private class ActionExecutorAgentTransport(
         val registration: AgentRegistration
     )
 
+    private data class ActiveRun(
+        val request: AgentRunRequest,
+        val action: AgentAction,
+        val registration: AgentRegistration,
+        val sourceMessageId: Long,
+        val contactId: String
+    )
+
     private val prepared = ConcurrentHashMap<String, PreparedAction>()
     private val results = ConcurrentHashMap<String, AgentActionResult>()
     private val events = ConcurrentHashMap<String, MutableSharedFlow<AgentRunControlEvent>>()
+    private val activeRuns = ConcurrentHashMap<String, ActiveRun>()
+    private val sourceRuns = ConcurrentHashMap<Long, String>()
 
     fun prepare(runId: String, action: AgentAction, screen: ScreenContext, registration: AgentRegistration) {
         prepared[runId] = PreparedAction(action, screen, registration)
     }
 
     fun result(runId: String): AgentActionResult? = results[runId]
+
+    fun consumeResponse(response: AgentConnectorResponse): Boolean {
+        val runId = sourceRuns[response.sourceMessageId] ?: return false
+        return consumeResponse(runId, response)
+    }
 
     fun discardPrepared(runId: String) {
         prepared.remove(runId)
@@ -282,13 +316,44 @@ private class ActionExecutorAgentTransport(
         emit(request, item.registration, AgentRunControlEventType.AGENT_CONNECTED, 1L)
         val result = delegate.execute(item.action, item.screen)
         results[request.runId] = result
+        val awaitingResponse = result.metadata["awaiting_response"] == "true"
+        val sourceMessageId = result.metadata["source_message_id"]?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+        val contactId = result.metadata["contact_id"].orEmpty()
+        if (awaitingResponse && sourceMessageId > 0L) {
+            activeRuns[request.runId] = ActiveRun(
+                request = request,
+                action = item.action,
+                registration = item.registration,
+                sourceMessageId = sourceMessageId,
+                contactId = contactId
+            )
+            sourceRuns[sourceMessageId] = request.runId
+            if (request.context[MANAGED_TEAM_CONTEXT_KEY]?.toString()?.toBoolean() == true) {
+                AgentManagedConnectorResponseRegistry.register(
+                    sourceMessageId = sourceMessageId,
+                    contactId = contactId,
+                    ownerId = request.runId
+                ) { response -> consumeResponse(request.runId, response) }
+                managedResponses.register(AgentManagedResponseRecord(
+                    ownerRunId = request.runId,
+                    supervisorRunId = request.parentRunId,
+                    agentId = agentId,
+                    deliveryMode = request.deliveryMode,
+                    sourceMessageId = sourceMessageId,
+                    contactId = contactId
+                ))
+                if (!activeRuns.containsKey(request.runId)) {
+                    managedResponses.markApplied(request.runId)
+                }
+            }
+        }
         emit(
             request,
             item.registration,
-            if (result.metadata["awaiting_response"] == "true") {
+            if (awaitingResponse && sourceMessageId > 0L) {
                 AgentRunControlEventType.WAITING_FOR_DEVICE
             } else if (result.success) {
-                AgentRunControlEventType.STEP_COMPLETED
+                AgentRunControlEventType.RUN_COMPLETED
             } else {
                 AgentRunControlEventType.RUN_FAILED
             },
@@ -296,7 +361,9 @@ private class ActionExecutorAgentTransport(
             mapOf(
                 "action_id" to item.action.id,
                 "success" to result.success,
-                "source_message_id" to result.metadata["source_message_id"].orEmpty()
+                "source_message_id" to result.metadata["source_message_id"].orEmpty(),
+                "result" to result.message,
+                "error" to if (result.success) "" else result.message
             )
         )
         return AgentRunHandle(
@@ -316,16 +383,27 @@ private class ActionExecutorAgentTransport(
 
     override suspend fun cancelRun(runId: String) {
         prepared.remove(runId)
+        val active = removeActive(runId)
+        managedResponses.markApplied(runId)
         val current = results[runId]
         results[runId] = current?.copy(
             success = false,
             message = "Agent Run cancelled",
             metadata = current.metadata + ("cancelled" to "true")
         ) ?: AgentActionResult(runId, false, "Agent Run cancelled", mapOf("cancelled" to "true"))
+        if (active != null) {
+            emit(
+                active.request,
+                active.registration,
+                AgentRunControlEventType.RUN_CANCELLED,
+                3L,
+                mapOf("message" to "Agent Run cancelled")
+            )
+        }
     }
 
     override fun observeEvents(runId: String): Flow<AgentRunControlEvent> =
-        events.computeIfAbsent(runId) { MutableSharedFlow(extraBufferCapacity = 64) }
+        events.computeIfAbsent(runId) { newEventFlow() }
 
     override suspend fun recoverRuns(): List<AgentRecoverableRun> = recoverableSource()
         .filter { it.handle.agentId == agentId }
@@ -341,7 +419,7 @@ private class ActionExecutorAgentTransport(
         sequence: Long,
         payload: AgentNativeJsonObject = emptyMap()
     ) {
-        events.computeIfAbsent(request.runId) { MutableSharedFlow(extraBufferCapacity = 64) }.tryEmit(
+        events.computeIfAbsent(request.runId) { newEventFlow() }.tryEmit(
             AgentRunControlEvent(
                 conversationId = request.conversationId,
                 messageId = request.messageId,
@@ -356,6 +434,61 @@ private class ActionExecutorAgentTransport(
         )
     }
 
+    private fun consumeResponse(runId: String, response: AgentConnectorResponse): Boolean {
+        val active = activeRuns[runId] ?: return false
+        if (response.sourceMessageId != active.sourceMessageId) return false
+        if (active.contactId.isNotBlank() && response.contactId.isNotBlank() &&
+            active.contactId != response.contactId
+        ) return false
+        managedResponses.acknowledge(response)
+        removeActive(runId)
+        val current = results[runId]
+        results[runId] = AgentActionResult(
+            actionId = current?.actionId ?: active.action.id,
+            success = response.success,
+            message = response.content,
+            metadata = current?.metadata.orEmpty() + mapOf(
+                "awaiting_response" to "false",
+                "source_message_id" to response.sourceMessageId.toString(),
+                "contact_id" to response.contactId,
+                "input_tokens" to response.inputTokens.toString(),
+                "output_tokens" to response.outputTokens.toString(),
+                "cost_micros" to response.costMicros.toString()
+            )
+        )
+        emit(
+            active.request,
+            active.registration,
+            if (response.success) AgentRunControlEventType.RUN_COMPLETED else AgentRunControlEventType.RUN_FAILED,
+            3L,
+            mapOf(
+                "action_id" to active.action.id,
+                "success" to response.success,
+                "source_message_id" to response.sourceMessageId.toString(),
+                "result" to response.content,
+                "content" to response.content,
+                "error" to if (response.success) "" else response.content,
+                "input_tokens" to response.inputTokens,
+                "output_tokens" to response.outputTokens,
+                "cost_micros" to response.costMicros,
+                "rich_output" to response.richOutputJson
+            )
+        )
+        return true
+    }
+
+    private fun removeActive(runId: String): ActiveRun? {
+        AgentManagedConnectorResponseRegistry.unregisterOwner(runId)
+        val active = activeRuns.remove(runId) ?: return null
+        sourceRuns.remove(active.sourceMessageId, runId)
+        return active
+    }
+
+    private fun newEventFlow() = MutableSharedFlow<AgentRunControlEvent>(
+        replay = EVENT_REPLAY,
+        extraBufferCapacity = 64
+    )
+
     private fun <T> trim(map: ConcurrentHashMap<String, T>) {
         if (map.size <= MAX_TRACKED_RUNS) return
         map.keys.take(map.size - MAX_TRACKED_RUNS).forEach(map::remove)
@@ -363,5 +496,7 @@ private class ActionExecutorAgentTransport(
 
     companion object {
         private const val MAX_TRACKED_RUNS = 1_024
+        private const val EVENT_REPLAY = 4
+        private const val MANAGED_TEAM_CONTEXT_KEY = "managed_team"
     }
 }
