@@ -6143,7 +6143,8 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             AgentResourceRouter(appContext).route(
                 goal = request.goal,
                 targets = request.targets,
-                tools = request.runtimeContext.systemTools
+                tools = request.runtimeContext.systemTools,
+                nativeTools = request.runtimeContext.nativeTools
             )
         }
         val available = request.targets.filter { target ->
@@ -6204,7 +6205,8 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             } ?: return null
         val explicitResource = AgentResourceCatalog.build(
             request.targets,
-            request.runtimeContext.systemTools
+            request.runtimeContext.systemTools,
+            request.runtimeContext.nativeTools
         ).firstOrNull { it.targetId == target.id }
         if (AgentTaskRequirementAnalyzer.analyze(request.goal).localOnly &&
             explicitResource?.location == AgentResourceLocation.CLOUD
@@ -6215,7 +6217,8 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             AgentResourceRouter(appContext).route(
                 goal = request.goal,
                 targets = request.targets,
-                tools = request.runtimeContext.systemTools
+                tools = request.runtimeContext.systemTools,
+                nativeTools = request.runtimeContext.nativeTools
             )
         }?.let { decision ->
             val ordered = listOfNotNull(decision.primary) + decision.fallbacks

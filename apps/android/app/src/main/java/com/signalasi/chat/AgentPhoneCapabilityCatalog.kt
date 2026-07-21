@@ -6,10 +6,12 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.bluetooth.BluetoothManager
 import android.hardware.Sensor
 import android.hardware.SensorManager
 import android.location.LocationManager
 import android.net.ConnectivityManager
+import android.nfc.NfcAdapter
 import android.os.BatteryManager
 import android.os.Build
 import android.provider.Settings
@@ -124,6 +126,44 @@ data class AgentPhoneCapabilityStatus(
 ) {
     val advertisedAsReady: Boolean
         get() = availability == AgentPhoneCapabilityAvailability.READY && boundary.normalAppCanExecute
+}
+
+object AgentPhoneCapabilityNativeCoverage {
+    val toolIdsByCapability: Map<AgentPhoneCapabilityId, Set<String>> = mapOf(
+        AgentPhoneCapabilityId.LOCATION to setOf(
+            AgentHardwareNativeTools.LOCATION_FOREGROUND_READ
+        ),
+        AgentPhoneCapabilityId.SENSORS to setOf(
+            AgentHardwareNativeTools.SENSORS_LIST,
+            AgentHardwareNativeTools.SENSOR_SAMPLE
+        ),
+        AgentPhoneCapabilityId.BLUETOOTH to setOf(
+            AgentHardwareNativeTools.BLUETOOTH_STATUS,
+            AgentHardwareNativeTools.BLUETOOTH_DISCOVERY_FOREGROUND,
+            AgentHardwareNativeTools.BLUETOOTH_PAIRING_HANDOFF
+        ),
+        AgentPhoneCapabilityId.NFC to setOf(
+            AgentHardwareNativeTools.NFC_STATUS
+        ),
+        AgentPhoneCapabilityId.BATTERY to setOf(
+            AgentHardwareNativeTools.BATTERY_STATUS,
+            AgentHardwareNativeTools.POWER_STATUS
+        ),
+        AgentPhoneCapabilityId.NETWORK to setOf(
+            AgentHardwareNativeTools.NETWORK_STATUS,
+            AgentAndroidSystemNativeTools.WIFI_STATUS,
+            AgentAndroidSystemNativeTools.WIFI_SCAN_RESULTS
+        ),
+        AgentPhoneCapabilityId.INSTALLED_APPS to setOf(
+            AgentHardwareNativeTools.INSTALLED_APPS_LIST,
+            AgentHardwareNativeTools.PACKAGE_DETAIL
+        ),
+        AgentPhoneCapabilityId.MEDIA_PLAYBACK to setOf(
+            AgentWebMediaNativeTools.MEDIA_PLAYBACK_HANDOFF
+        )
+    )
+
+    fun isImplemented(id: AgentPhoneCapabilityId): Boolean = toolIdsByCapability[id].orEmpty().isNotEmpty()
 }
 
 object AgentPhoneCapabilityPolicy {
@@ -259,7 +299,7 @@ object AgentPhoneCapabilityCatalog {
         AgentPhoneCapabilityBoundary(
             id = AgentPhoneCapabilityId.LOCATION,
             executionLocation = AgentPhoneExecutionLocation.ANDROID_SYSTEM_SERVICE,
-            availability = AgentPhoneCapabilityAvailability.NOT_IMPLEMENTED,
+            availability = AgentPhoneCapabilityAvailability.NEEDS_RUNTIME_PERMISSION,
             androidPermissions = setOf(
                 Manifest.permission.ACCESS_COARSE_LOCATION,
                 Manifest.permission.ACCESS_FINE_LOCATION
@@ -267,22 +307,21 @@ object AgentPhoneCapabilityCatalog {
             userConsent = setOf(AgentPhoneUserConsent.RUNTIME_PERMISSION_DIALOG),
             risk = AgentRisk.HIGH,
             normalAppCanExecute = true,
-            limitation = "SignalASI has no location executor or manifest declaration; Android can also return approximate, stale, disabled, or background-restricted fixes."
+            limitation = "SignalASI supports one bounded foreground location fix; Android can return approximate, stale, disabled, or unavailable results and no background tracking is exposed."
         ),
         AgentPhoneCapabilityBoundary(
             id = AgentPhoneCapabilityId.SENSORS,
             executionLocation = AgentPhoneExecutionLocation.ANDROID_SYSTEM_SERVICE,
-            availability = AgentPhoneCapabilityAvailability.NOT_IMPLEMENTED,
-            androidPermissions = setOf(Manifest.permission.BODY_SENSORS),
-            userConsent = setOf(AgentPhoneUserConsent.RUNTIME_PERMISSION_DIALOG),
+            availability = AgentPhoneCapabilityAvailability.LIMITED,
+            userConsent = setOf(AgentPhoneUserConsent.SENSITIVE_ACTION_CONFIRMATION),
             risk = AgentRisk.MEDIUM,
             normalAppCanExecute = true,
-            limitation = "SignalASI has no sensor executor; available sensors vary by device and body or health sensors require additional permissions and policy."
+            limitation = "SignalASI lists sensor metadata and samples one bounded non-health sensor in the foreground; continuous, background, body, and health streams are excluded."
         ),
         AgentPhoneCapabilityBoundary(
             id = AgentPhoneCapabilityId.BLUETOOTH,
             executionLocation = AgentPhoneExecutionLocation.APP_PROCESS,
-            availability = AgentPhoneCapabilityAvailability.NOT_IMPLEMENTED,
+            availability = AgentPhoneCapabilityAvailability.LIMITED,
             androidPermissions = setOf(
                 Manifest.permission.BLUETOOTH_CONNECT,
                 Manifest.permission.BLUETOOTH_SCAN
@@ -293,17 +332,17 @@ object AgentPhoneCapabilityCatalog {
             ),
             risk = AgentRisk.HIGH,
             normalAppCanExecute = true,
-            limitation = "SignalASI can open Bluetooth settings but has no scan, pair, connect, or protocol executor; pairing remains system- and device-mediated."
+            limitation = "SignalASI reads adapter status, performs one bounded foreground discovery, and hands pairing to Android Settings; silent pairing, connection, and protocol traffic are excluded."
         ),
         AgentPhoneCapabilityBoundary(
             id = AgentPhoneCapabilityId.NFC,
             executionLocation = AgentPhoneExecutionLocation.APP_PROCESS,
-            availability = AgentPhoneCapabilityAvailability.NOT_IMPLEMENTED,
+            availability = AgentPhoneCapabilityAvailability.LIMITED,
             androidPermissions = setOf(Manifest.permission.NFC),
             userConsent = setOf(AgentPhoneUserConsent.PHYSICAL_PROXIMITY),
             risk = AgentRisk.HIGH,
             normalAppCanExecute = true,
-            limitation = "SignalASI has no NFC executor; tag technologies differ and secure-element or payment operations are not available to an ordinary app."
+            limitation = "SignalASI reads NFC adapter availability and enabled state only; tag capture, writes, secure-element access, and payment operations are excluded."
         ),
         AgentPhoneCapabilityBoundary(
             id = AgentPhoneCapabilityId.BATTERY,
@@ -514,15 +553,30 @@ object AgentPhoneCapabilityCatalog {
             evidence = permissionEvidence(context, Manifest.permission.RECORD_AUDIO)
         )
 
-        AgentPhoneCapabilityId.LOCATION -> AgentPhoneCapabilityObservation(
-            platformSupported = context.getSystemService(LocationManager::class.java) != null,
-            implementationPresent = false,
-            permissionsGranted = permissionsGranted(
-                context,
-                setOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION)
-            ),
-            evidence = "No SignalASI location executor"
-        )
+        AgentPhoneCapabilityId.LOCATION -> {
+            val manager = context.getSystemService(LocationManager::class.java)
+            val enabled = manager?.let { locationManager ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    locationManager.isLocationEnabled
+                } else {
+                    locationManager.allProviders.any(locationManager::isProviderEnabled)
+                }
+            } == true
+            AgentPhoneCapabilityObservation(
+                platformSupported = manager != null,
+                implementationPresent = AgentPhoneCapabilityNativeCoverage.isImplemented(id),
+                permissionsGranted = anyPermissionGranted(
+                    context,
+                    setOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION)
+                ),
+                configured = enabled,
+                evidence = when {
+                    manager == null -> "Location service is unavailable"
+                    !enabled -> "Location services are disabled"
+                    else -> "Bounded foreground location executor is registered"
+                }
+            )
+        }
 
         AgentPhoneCapabilityId.SENSORS -> {
             val sensors = context.getSystemService(SensorManager::class.java)
@@ -530,27 +584,46 @@ object AgentPhoneCapabilityCatalog {
                 .orEmpty()
             AgentPhoneCapabilityObservation(
                 platformSupported = sensors.isNotEmpty(),
-                implementationPresent = false,
-                evidence = "${sensors.size} device sensors reported; no SignalASI sensor executor"
+                implementationPresent = AgentPhoneCapabilityNativeCoverage.isImplemented(id),
+                limited = true,
+                evidence = "${sensors.size} device sensors reported; bounded non-health sampling is registered"
             )
         }
 
-        AgentPhoneCapabilityId.BLUETOOTH -> AgentPhoneCapabilityObservation(
-            platformSupported = context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH),
-            implementationPresent = false,
-            permissionsGranted = permissionsGranted(
-                context,
+        AgentPhoneCapabilityId.BLUETOOTH -> {
+            val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
+            val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 setOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN)
-            ),
-            evidence = "No SignalASI Bluetooth executor"
-        )
+            } else {
+                emptySet()
+            }
+            AgentPhoneCapabilityObservation(
+                platformSupported = adapter != null,
+                implementationPresent = AgentPhoneCapabilityNativeCoverage.isImplemented(id),
+                permissionsGranted = permissionsGranted(context, permissions),
+                limited = true,
+                evidence = if (adapter == null) {
+                    "Bluetooth adapter is unavailable"
+                } else {
+                    "Bluetooth status, bounded discovery, and system pairing handoff are registered"
+                }
+            )
+        }
 
-        AgentPhoneCapabilityId.NFC -> AgentPhoneCapabilityObservation(
-            platformSupported = context.packageManager.hasSystemFeature(PackageManager.FEATURE_NFC),
-            implementationPresent = false,
-            permissionsGranted = permissionGranted(context, Manifest.permission.NFC),
-            evidence = "No SignalASI NFC executor"
-        )
+        AgentPhoneCapabilityId.NFC -> {
+            val adapter = NfcAdapter.getDefaultAdapter(context)
+            AgentPhoneCapabilityObservation(
+                platformSupported = adapter != null,
+                implementationPresent = AgentPhoneCapabilityNativeCoverage.isImplemented(id),
+                permissionsGranted = permissionGranted(context, Manifest.permission.NFC),
+                limited = true,
+                evidence = if (adapter == null) {
+                    "NFC adapter is unavailable"
+                } else {
+                    "NFC status executor is registered; tag operations remain excluded"
+                }
+            )
+        }
 
         AgentPhoneCapabilityId.BATTERY -> AgentPhoneCapabilityObservation(
             platformSupported = context.getSystemService(BatteryManager::class.java) != null,
@@ -650,6 +723,9 @@ object AgentPhoneCapabilityCatalog {
 
     private fun permissionsGranted(context: Context, permissions: Set<String>): Boolean =
         permissions.all { permissionGranted(context, it) }
+
+    private fun anyPermissionGranted(context: Context, permissions: Set<String>): Boolean =
+        permissions.any { permissionGranted(context, it) }
 
     private fun mediaProjectionPermissionsGranted(context: Context): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&

@@ -15,6 +15,9 @@ import java.io.File
 import java.util.Base64
 import java.util.UUID
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -70,6 +73,40 @@ class AgentNativeToolsDeviceTest {
         assertEquals(descriptors.map { it.id }.toSet(), testedIds)
         writeReport(descriptors.size)
         temporaryUris.forEach { uri -> runCatching { instrumentation.targetContext.contentResolver.delete(uri, null, null) } }
+    }
+
+    @Test
+    fun runtimeCapabilityMatrixMatchesLiveDeviceAvailability() {
+        val descriptors = registry.descriptors()
+        val snapshot = AgentRuntimeCapabilityMatrix.build(
+            nativeTools = descriptors,
+            systemTools = AgentSystemToolPlanner.availableTools(),
+            targets = emptyList()
+        )
+        val expectedExecutable = descriptors.filter {
+            it.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE &&
+                it.risk != AgentNativeToolRisk.BLOCKED
+        }.mapTo(linkedSetOf()) { it.id }
+
+        assertEquals(expectedExecutable, snapshot.availableNativeToolIds)
+        descriptors.filter {
+            it.availability.status != AgentNativeToolAvailabilityStatus.AVAILABLE ||
+                it.risk == AgentNativeToolRisk.BLOCKED
+        }.forEach { descriptor ->
+            assertFalse(descriptor.id, snapshot.isNativeToolExecutable(descriptor.id))
+        }
+
+        val statuses = AgentPhoneCapabilityCatalog.probe(instrumentation.targetContext).associateBy {
+            it.boundary.id
+        }
+        AgentPhoneCapabilityNativeCoverage.toolIdsByCapability.keys.forEach { capabilityId ->
+            assertNotEquals(
+                capabilityId.name,
+                AgentPhoneCapabilityAvailability.NOT_IMPLEMENTED,
+                statuses.getValue(capabilityId).availability
+            )
+        }
+        assertTrue(snapshot.entries.any { it.source == AgentRuntimeCapabilitySource.SYSTEM_TOOL })
     }
 
     private fun testRegisteredTool(descriptor: AgentNativeToolDescriptor) {

@@ -72,11 +72,11 @@ class AgentPhoneCapabilityCatalogTest {
     }
 
     @Test
-    fun unimplementedCapabilityStaysUnimplementedOnCapableHardware() {
+    fun implementedForegroundLocationCanBecomeReady() {
         val location = AgentPhoneCapabilityCatalog.find(AgentPhoneCapabilityId.LOCATION)
 
         assertEquals(
-            AgentPhoneCapabilityAvailability.NOT_IMPLEMENTED,
+            AgentPhoneCapabilityAvailability.READY,
             AgentPhoneCapabilityPolicy.resolve(
                 location,
                 AgentPhoneCapabilityObservation(
@@ -86,5 +86,31 @@ class AgentPhoneCapabilityCatalogTest {
                 )
             )
         )
+    }
+
+    @Test
+    fun boundedHardwareCapabilitiesDeclareRegisteredNativeCoverage() {
+        val expected = setOf(
+            AgentPhoneCapabilityId.LOCATION,
+            AgentPhoneCapabilityId.SENSORS,
+            AgentPhoneCapabilityId.BLUETOOTH,
+            AgentPhoneCapabilityId.NFC,
+            AgentPhoneCapabilityId.BATTERY,
+            AgentPhoneCapabilityId.NETWORK,
+            AgentPhoneCapabilityId.INSTALLED_APPS,
+            AgentPhoneCapabilityId.MEDIA_PLAYBACK
+        )
+
+        assertEquals(expected, AgentPhoneCapabilityNativeCoverage.toolIdsByCapability.keys)
+        assertTrue(AgentPhoneCapabilityNativeCoverage.toolIdsByCapability.values.all { it.isNotEmpty() })
+        val registeredIds = AgentHardwareNativeTools.toolIds +
+            AgentAndroidSystemNativeTools.toolIds +
+            AgentWebMediaNativeTools.toolIds
+        assertTrue(
+            AgentPhoneCapabilityNativeCoverage.toolIdsByCapability.values.flatten().all { it in registeredIds }
+        )
+        assertEquals(AgentPhoneCapabilityAvailability.LIMITED, AgentPhoneCapabilityCatalog.find(AgentPhoneCapabilityId.SENSORS).availability)
+        assertEquals(AgentPhoneCapabilityAvailability.LIMITED, AgentPhoneCapabilityCatalog.find(AgentPhoneCapabilityId.BLUETOOTH).availability)
+        assertEquals(AgentPhoneCapabilityAvailability.LIMITED, AgentPhoneCapabilityCatalog.find(AgentPhoneCapabilityId.NFC).availability)
     }
 }

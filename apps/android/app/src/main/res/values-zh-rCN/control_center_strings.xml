@@ -11,6 +11,8 @@
     <string name="cc_status_secure">安全</string>
     <string name="cc_status_online">在线</string>
     <string name="cc_status_available">可用</string>
+    <string name="cc_status_available_ratio">%1$d/%2$d 可用</string>
+    <string name="cc_status_unavailable">不可用</string>
     <string name="cc_status_ready">就绪</string>
     <string name="cc_status_degraded">降级</string>
     <string name="cc_status_not_configured">未配置</string>

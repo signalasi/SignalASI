@@ -7818,8 +7818,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun renderControlCenterPhoneCapabilitiesPage() {
-        val tools = mobileNativeAgent.nativeToolCatalog()
-        val available = tools.count { it.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE }
+        val runtime = mobileNativeAgent.snapshot().runtimeContext
+        val tools = runtime.nativeTools
+        val capabilityMatrix = runtime.capabilityMatrix
+        val available = capabilityMatrix.availableNativeToolIds.size
         val attention = tools.size - available
         showControlCenterFeature(
             getString(R.string.cc_phone_title),
@@ -7834,17 +7836,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     ControlCenterSectionSpec(
                         getString(R.string.cc_section_device_control),
                         listOf(
-                            ControlCenterRowSpec("phone.catalog", getString(R.string.cc_camera_flash_title), getString(R.string.cc_camera_flash_subtitle), R.drawable.ic_scan, phoneCapabilityStatus(tools, "camera", "torch"), ControlCenterTone.AMBER),
-                            ControlCenterRowSpec("phone.catalog", getString(R.string.cc_audio_title), getString(R.string.cc_audio_subtitle), R.drawable.ic_input_voice, phoneCapabilityStatus(tools, "audio", "volume"), ControlCenterTone.BLUE),
-                            ControlCenterRowSpec("phone.catalog", getString(R.string.cc_alarm_timer_title), getString(R.string.cc_alarm_timer_subtitle), R.drawable.ic_agent_history, phoneCapabilityStatus(tools, "alarm", "timer"), ControlCenterTone.GREEN),
-                            ControlCenterRowSpec("phone.catalog", getString(R.string.cc_network_title), getString(R.string.cc_network_subtitle), R.drawable.ic_protocol_link, phoneCapabilityStatus(tools, "network", "wifi", "bluetooth", "nfc"), ControlCenterTone.VIOLET)
+                            ControlCenterRowSpec("phone.catalog", getString(R.string.cc_camera_flash_title), getString(R.string.cc_camera_flash_subtitle), R.drawable.ic_scan, phoneCapabilityStatus(capabilityMatrix, tools, "camera", "torch"), ControlCenterTone.AMBER),
+                            ControlCenterRowSpec("phone.catalog", getString(R.string.cc_audio_title), getString(R.string.cc_audio_subtitle), R.drawable.ic_input_voice, phoneCapabilityStatus(capabilityMatrix, tools, "audio", "volume"), ControlCenterTone.BLUE),
+                            ControlCenterRowSpec("phone.catalog", getString(R.string.cc_alarm_timer_title), getString(R.string.cc_alarm_timer_subtitle), R.drawable.ic_agent_history, phoneCapabilityStatus(capabilityMatrix, tools, "alarm", "timer"), ControlCenterTone.GREEN),
+                            ControlCenterRowSpec("phone.catalog", getString(R.string.cc_network_title), getString(R.string.cc_network_subtitle), R.drawable.ic_protocol_link, phoneCapabilityStatus(capabilityMatrix, tools, "network", "wifi", "bluetooth", "nfc"), ControlCenterTone.VIOLET)
                         )
                     ),
                     ControlCenterSectionSpec(
                         getString(R.string.cc_section_information_system),
                         listOf(
-                            ControlCenterRowSpec("phone.catalog", getString(R.string.cc_device_status_title), getString(R.string.cc_device_status_subtitle), R.drawable.ic_device_node, phoneCapabilityStatus(tools, "battery", "storage", "sensor"), ControlCenterTone.GREEN),
-                            ControlCenterRowSpec("phone.catalog", getString(R.string.cc_location_title), getString(R.string.cc_location_subtitle), R.drawable.ic_avatar_scan, phoneCapabilityStatus(tools, "location"), ControlCenterTone.AMBER),
+                            ControlCenterRowSpec("phone.catalog", getString(R.string.cc_device_status_title), getString(R.string.cc_device_status_subtitle), R.drawable.ic_device_node, phoneCapabilityStatus(capabilityMatrix, tools, "battery", "storage", "sensor"), ControlCenterTone.GREEN),
+                            ControlCenterRowSpec("phone.catalog", getString(R.string.cc_location_title), getString(R.string.cc_location_subtitle), R.drawable.ic_avatar_scan, phoneCapabilityStatus(capabilityMatrix, tools, "location"), ControlCenterTone.AMBER),
                             ControlCenterRowSpec("phone.catalog", getString(R.string.cc_tool_catalog_title), getString(R.string.cc_tool_catalog_subtitle), R.drawable.ic_agent_control, tools.size.toString(), ControlCenterTone.NEUTRAL)
                         )
                     )
@@ -7854,15 +7856,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun phoneCapabilityStatus(
+        capabilityMatrix: AgentRuntimeCapabilitySnapshot,
         tools: List<AgentNativeToolDescriptor>,
         vararg keywords: String
     ): String {
         val matching = tools.filter { tool -> keywords.any { keyword -> tool.id.contains(keyword, true) } }
+        val available = matching.count { capabilityMatrix.isNativeToolExecutable(it.id) }
         return when {
             matching.isEmpty() -> getString(R.string.cc_status_not_configured)
-            matching.any { it.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE } -> getString(R.string.cc_status_available)
+            available == matching.size -> getString(R.string.cc_status_available)
+            available > 0 -> getString(R.string.cc_status_available_ratio, available, matching.size)
             matching.any { it.availability.status == AgentNativeToolAvailabilityStatus.REQUIRES_SETUP } -> getString(R.string.status_needs_setup)
-            else -> getString(R.string.status_disconnected)
+            else -> getString(R.string.cc_status_unavailable)
         }
     }
 
@@ -8404,7 +8409,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun showNativeToolCatalogPage() {
-        val tools = mobileNativeAgent.nativeToolCatalog()
+        val runtime = mobileNativeAgent.snapshot().runtimeContext
+        val tools = runtime.nativeTools
         val sections = tools
             .groupBy { it.location }
             .entries
@@ -8413,21 +8419,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 ControlCenterSectionSpec(
                     nativeToolLocationLabel(location),
                     descriptors.sortedBy { it.title.lowercase(Locale.ROOT) }.map { tool ->
-                        val available = tool.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE
+                        val available = runtime.isNativeToolExecutable(tool.id)
+                        val effectiveStatus = nativeToolEffectiveAvailability(tool)
                         ControlCenterRowSpec(
                             actionId = "tool.detail:${tool.id}",
                             title = tool.title,
                             subtitle = tool.description,
                             iconRes = nativeToolIcon(tool),
-                            status = getString(
-                                when (tool.availability.status) {
-                                    AgentNativeToolAvailabilityStatus.AVAILABLE -> R.string.cc_status_available
-                                    AgentNativeToolAvailabilityStatus.REQUIRES_SETUP -> R.string.status_needs_setup
-                                    AgentNativeToolAvailabilityStatus.UNAVAILABLE -> R.string.status_disconnected
-                                }
-                            ),
+                            status = getString(nativeToolAvailabilityLabel(effectiveStatus)),
                             tone = when {
-                                !available -> ControlCenterTone.AMBER
+                                !available -> nativeToolAvailabilityTone(effectiveStatus)
                                 tool.risk == AgentNativeToolRisk.HIGH -> ControlCenterTone.RED
                                 tool.risk == AgentNativeToolRisk.MEDIUM -> ControlCenterTone.AMBER
                                 else -> ControlCenterTone.GREEN
@@ -8445,7 +8446,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     iconRes = R.drawable.ic_agent_control,
                     metrics = listOf(
                         ControlCenterMetricSpec(tools.size.toString(), getString(R.string.cc_metric_native_tools)),
-                        ControlCenterMetricSpec(tools.count { it.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE }.toString(), getString(R.string.cc_metric_available_resources)),
+                        ControlCenterMetricSpec(runtime.capabilityMatrix.availableNativeToolIds.size.toString(), getString(R.string.cc_metric_available_resources)),
                         ControlCenterMetricSpec(tools.count { it.risk == AgentNativeToolRisk.HIGH }.toString(), getString(R.string.cc_tool_risk_high))
                     )
                 ),
@@ -8456,6 +8457,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun showNativeToolDetailPage(toolId: String) {
         val tool = mobileNativeAgent.nativeToolCatalog().firstOrNull { it.id == toolId } ?: return
+        val effectiveStatus = nativeToolEffectiveAvailability(tool)
         showControlCenterFeature(
             tool.title,
             ControlCenterPageSpec(
@@ -8466,10 +8468,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     badges = listOf(
                         ControlCenterBadgeSpec(nativeToolRiskLabel(tool.risk), nativeToolRiskTone(tool.risk)),
                         ControlCenterBadgeSpec(nativeToolLocationLabel(tool.location), ControlCenterTone.BLUE),
-                        ControlCenterBadgeSpec(getString(
-                            if (tool.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE) R.string.cc_status_available
-                            else R.string.status_needs_setup
-                        ), if (tool.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE) ControlCenterTone.GREEN else ControlCenterTone.AMBER)
+                        ControlCenterBadgeSpec(
+                            getString(nativeToolAvailabilityLabel(effectiveStatus)),
+                            nativeToolAvailabilityTone(effectiveStatus)
+                        )
                     )
                 ),
                 sections = listOf(
@@ -8479,7 +8481,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             ControlCenterRowSpec("", getString(R.string.cc_tool_id), tool.id, R.drawable.ic_protocol_link, "v${tool.version}", ControlCenterTone.NEUTRAL, showChevron = false),
                             ControlCenterRowSpec("", getString(R.string.feature_run_scope), nativeToolLocationLabel(tool.location), R.drawable.ic_device_node, "", ControlCenterTone.BLUE, showChevron = false),
                             ControlCenterRowSpec("", getString(R.string.on_device_agent_section_permissions), getString(R.string.cc_tool_permissions, tool.requiredPermissions.size, nativeToolRiskLabel(tool.risk)), R.drawable.ic_security_shield, "", nativeToolRiskTone(tool.risk), showChevron = false),
-                            ControlCenterRowSpec("", getString(R.string.common_status), tool.availability.reason, R.drawable.ic_info_outline, getString(if (tool.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE) R.string.cc_status_available else R.string.status_needs_setup), if (tool.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE) ControlCenterTone.GREEN else ControlCenterTone.AMBER, showChevron = false)
+                            ControlCenterRowSpec("", getString(R.string.common_status), tool.availability.reason, R.drawable.ic_info_outline, getString(nativeToolAvailabilityLabel(effectiveStatus)), nativeToolAvailabilityTone(effectiveStatus), showChevron = false)
                         )
                     )
                 )
@@ -8497,6 +8499,25 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             AgentNativeToolLocation.UNKNOWN -> R.string.cc_tools_other
         }
     )
+
+    private fun nativeToolAvailabilityLabel(status: AgentNativeToolAvailabilityStatus): Int = when (status) {
+        AgentNativeToolAvailabilityStatus.AVAILABLE -> R.string.cc_status_available
+        AgentNativeToolAvailabilityStatus.REQUIRES_SETUP -> R.string.status_needs_setup
+        AgentNativeToolAvailabilityStatus.UNAVAILABLE -> R.string.cc_status_unavailable
+    }
+
+    private fun nativeToolEffectiveAvailability(tool: AgentNativeToolDescriptor): AgentNativeToolAvailabilityStatus =
+        if (tool.risk == AgentNativeToolRisk.BLOCKED) {
+            AgentNativeToolAvailabilityStatus.UNAVAILABLE
+        } else {
+            tool.availability.status
+        }
+
+    private fun nativeToolAvailabilityTone(status: AgentNativeToolAvailabilityStatus): ControlCenterTone = when (status) {
+        AgentNativeToolAvailabilityStatus.AVAILABLE -> ControlCenterTone.GREEN
+        AgentNativeToolAvailabilityStatus.REQUIRES_SETUP -> ControlCenterTone.AMBER
+        AgentNativeToolAvailabilityStatus.UNAVAILABLE -> ControlCenterTone.NEUTRAL
+    }
 
     private fun nativeToolRiskLabel(risk: AgentNativeToolRisk): String = getString(
         when (risk) {

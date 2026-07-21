@@ -11,6 +11,8 @@
     <string name="cc_status_secure">Secure</string>
     <string name="cc_status_online">Online</string>
     <string name="cc_status_available">Available</string>
+    <string name="cc_status_available_ratio">%1$d/%2$d available</string>
+    <string name="cc_status_unavailable">Unavailable</string>
     <string name="cc_status_ready">Ready</string>
     <string name="cc_status_degraded">Degraded</string>
     <string name="cc_status_not_configured">Not configured</string>

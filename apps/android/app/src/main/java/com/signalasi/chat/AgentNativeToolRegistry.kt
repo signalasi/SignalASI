@@ -802,22 +802,24 @@ class AgentNativeToolRegistry(
     @Synchronized
     fun subset(predicate: (AgentNativeToolDescriptor) -> Boolean): AgentNativeToolRegistry =
         AgentNativeToolRegistry(clock, replayStore).registerAll(
-            definitions.values.filter { predicate(it.descriptor) }
+            definitions.values.filter { predicate(resolvedDescriptor(it)) }
         )
 
     @Synchronized
     fun descriptors(): List<AgentNativeToolDescriptor> = definitions.values
-        .map { definition ->
-            val availability = runCatching { definition.availabilityProvider.current(null) }
-                .getOrElse {
-                    AgentNativeToolAvailability(
-                        AgentNativeToolAvailabilityStatus.UNAVAILABLE,
-                        "Availability check failed: ${it.message.orEmpty()}"
-                    )
-                }
-            definition.descriptor.copy(availability = availability)
-        }
+        .map(::resolvedDescriptor)
         .sortedBy { it.id }
+
+    private fun resolvedDescriptor(definition: AgentNativeToolDefinition): AgentNativeToolDescriptor {
+        val availability = runCatching { definition.availabilityProvider.current(null) }
+            .getOrElse {
+                AgentNativeToolAvailability(
+                    AgentNativeToolAvailabilityStatus.UNAVAILABLE,
+                    "Availability check failed: ${it.message.orEmpty()}"
+                )
+            }
+        return definition.descriptor.copy(availability = availability)
+    }
 
     fun catalogJson(): String = AgentNativeJsonCodec.stringify(
         linkedMapOf(
@@ -918,6 +920,19 @@ class AgentNativeToolRegistry(
 
         try {
             invocation.checkpoint()
+
+            if (descriptor.risk == AgentNativeToolRisk.BLOCKED) {
+                return finish(
+                    status = AgentNativeToolResultStatus.UNAVAILABLE,
+                    error = AgentNativeToolError(
+                        code = "tool_blocked",
+                        message = descriptor.availability.reason.ifBlank {
+                            "Native tool execution is blocked by host policy"
+                        },
+                        retryable = false
+                    )
+                )
+            }
 
             val availability = runCatching { definition.availabilityProvider.current(context) }
                 .getOrElse {
