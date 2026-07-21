@@ -3,10 +3,12 @@ package com.signalasi.chat
 import android.content.Context
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.InputStream
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.Locale
+import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import org.json.JSONArray
@@ -25,6 +27,15 @@ data class AgentMcpDeclarativeTool(
     val mutating: Boolean = false
 )
 
+data class AgentMcpLocalRuntimeSpec(
+    val language: AgentRuntimeLanguage,
+    val entrypoint: String,
+    val arguments: List<String> = emptyList(),
+    val environment: Map<String, String> = emptyMap(),
+    val allowedNetworkDomains: List<String> = emptyList(),
+    val timeoutMillis: Long = 60_000L
+)
+
 data class AgentMcpPackageManifest(
     val id: String,
     val version: String,
@@ -35,6 +46,7 @@ data class AgentMcpPackageManifest(
     val transport: AgentMcpTransportKind,
     val authProfiles: List<AgentMcpAuthProfile>,
     val tools: List<AgentMcpDeclarativeTool>,
+    val localRuntime: AgentMcpLocalRuntimeSpec? = null,
     val formatVersion: Int = SUPPORTED_FORMAT_VERSION,
     val author: String = "",
     val website: String = ""
@@ -50,7 +62,8 @@ data class AgentMcpPackageInspection(
     val packageSha256: String,
     val manifestSha256: String,
     val integrityVerified: Boolean,
-    val archiveEntries: List<String>
+    val archiveEntries: List<String>,
+    val runtimeFiles: Map<String, ByteArray> = emptyMap()
 )
 
 class AgentMcpPackageInstaller {
@@ -64,13 +77,20 @@ class AgentMcpPackageInstaller {
         val manifestSha = sha256(rawManifest.toByteArray())
         val integrity = files[INTEGRITY_PATH]?.toString(Charsets.UTF_8)
         val verified = integrity?.let { verifyIntegrity(it, manifestSha) } ?: false
+        val manifest = AgentMcpPackageManifestCodec.decode(rawManifest)
+        val runtimeFiles = files.filterKeys { it.startsWith(RUNTIME_DIRECTORY) }
+        if (manifest.transport == AgentMcpTransportKind.LOCAL_STDIO) {
+            val entrypoint = requireNotNull(manifest.localRuntime).entrypoint
+            require(entrypoint in runtimeFiles) { "Local MCP package is missing its runtime entrypoint: $entrypoint" }
+        }
         return AgentMcpPackageInspection(
-            manifest = AgentMcpPackageManifestCodec.decode(rawManifest),
+            manifest = manifest,
             rawManifest = rawManifest,
             packageSha256 = packageSha,
             manifestSha256 = manifestSha,
             integrityVerified = verified,
-            archiveEntries = files.keys.sorted()
+            archiveEntries = files.keys.sorted(),
+            runtimeFiles = runtimeFiles
         )
     }
 
@@ -109,6 +129,10 @@ class AgentMcpPackageInstaller {
 
     private fun isAllowedEntry(name: String): Boolean {
         if (name == MANIFEST_PATH || name == INTEGRITY_PATH || name == "README.md" || name == "LICENSE") return true
+        if (name.startsWith(RUNTIME_DIRECTORY)) {
+            val extension = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+            return extension in ALLOWED_RUNTIME_EXTENSIONS || name.substringAfterLast('/') in ALLOWED_RUNTIME_FILENAMES
+        }
         if (!name.startsWith("assets/")) return false
         return name.substringAfterLast('.', "").lowercase(Locale.ROOT) in ALLOWED_ASSET_EXTENSIONS
     }
@@ -143,7 +167,12 @@ class AgentMcpPackageInstaller {
         const val MAX_ENTRIES = 64
         const val MANIFEST_PATH = "mcp.json"
         const val INTEGRITY_PATH = "integrity.json"
+        const val RUNTIME_DIRECTORY = "runtime/"
         private val ALLOWED_ASSET_EXTENSIONS = setOf("png", "jpg", "jpeg", "webp", "svg", "txt", "md")
+        private val ALLOWED_RUNTIME_EXTENSIONS = setOf(
+            "py", "js", "mjs", "cjs", "json", "toml", "yaml", "yml", "txt", "md", "sh", "lock"
+        )
+        private val ALLOWED_RUNTIME_FILENAMES = setOf("package-lock.json", "uv.lock")
 
         fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
             .digest(bytes)
@@ -167,11 +196,26 @@ object AgentMcpPackageManifestCodec {
         val transport = transportObject.optString("type", AgentMcpTransportKind.STREAMABLE_HTTP.wireValue)
             .let { value -> AgentMcpTransportKind.entries.firstOrNull { it.wireValue == value } }
             ?: throw IllegalArgumentException("Unsupported MCP package transport")
-        val endpoint = AgentMcpEndpointPolicy.normalize(transportObject.requiredString("endpoint"))
+        val localRuntime = if (transport == AgentMcpTransportKind.LOCAL_STDIO) {
+            decodeLocalRuntime(transportObject)
+        } else {
+            null
+        }
+        val endpoint = if (transport == AgentMcpTransportKind.LOCAL_STDIO) {
+            "local-mcp:$id"
+        } else {
+            AgentMcpEndpointPolicy.normalize(transportObject.requiredString("endpoint"))
+        }
         val authProfiles = decodeAuthProfiles(root.optJSONArray("authentication"))
         val tools = decodeTools(root.optJSONArray("tools"), transport)
         if (transport == AgentMcpTransportKind.DECLARATIVE_HTTP) {
             require(tools.isNotEmpty()) { "Declarative MCP package must declare at least one tool" }
+        }
+        if (transport == AgentMcpTransportKind.LOCAL_STDIO) {
+            require(authProfiles.flatMap { it.steps }.none { it.exchange != null } &&
+                authProfiles.none { it.refreshExchange != null }) {
+                "Local stdio MCP authentication must be handled inside the sandboxed server"
+            }
         }
         require(tools.map { it.name }.distinct().size == tools.size) { "MCP package tool names must be unique" }
         return AgentMcpPackageManifest(
@@ -184,6 +228,7 @@ object AgentMcpPackageManifestCodec {
             transport = transport,
             authProfiles = authProfiles.ifEmpty { listOf(AgentMcpAuthProfile(AgentMcpAuthMethod.NONE)) },
             tools = tools,
+            localRuntime = localRuntime,
             formatVersion = formatVersion,
             author = root.optString("author").take(MAX_TEXT_CHARS),
             website = root.optString("website").take(MAX_URL_CHARS)
@@ -199,7 +244,21 @@ object AgentMcpPackageManifestCodec {
         put("catalog_id", manifest.catalogId)
         put("author", manifest.author)
         put("website", manifest.website)
-        put("transport", JSONObject().put("type", manifest.transport.wireValue).put("endpoint", manifest.endpoint))
+        put("transport", JSONObject().apply {
+            put("type", manifest.transport.wireValue)
+            if (manifest.transport == AgentMcpTransportKind.LOCAL_STDIO) {
+                requireNotNull(manifest.localRuntime).also { runtime ->
+                    put("runtime", runtime.language.wireValue)
+                    put("entrypoint", runtime.entrypoint)
+                    put("arguments", JSONArray(runtime.arguments))
+                    put("environment", JSONObject(runtime.environment))
+                    put("allowed_network_domains", JSONArray(runtime.allowedNetworkDomains))
+                    put("timeout_ms", runtime.timeoutMillis)
+                }
+            } else {
+                put("endpoint", manifest.endpoint)
+            }
+        })
         put("authentication", JSONArray().apply { manifest.authProfiles.forEach { put(encodeAuthProfile(it)) } })
         put("tools", JSONArray().apply { manifest.tools.forEach { put(encodeTool(it)) } })
     }.toString()
@@ -223,6 +282,52 @@ object AgentMcpPackageManifestCodec {
                 scopes = raw.optJSONArray("scopes").stringList(MAX_SCOPES)
             )
         }.distinctBy { it.method }
+    }
+
+    private fun decodeLocalRuntime(raw: JSONObject): AgentMcpLocalRuntimeSpec {
+        val language = AgentRuntimeLanguage.entries.firstOrNull {
+            it.wireValue == raw.requiredString("runtime").trim().lowercase(Locale.ROOT)
+        } ?: throw IllegalArgumentException("Unsupported local MCP runtime")
+        require(language in LOCAL_MCP_RUNTIME_LANGUAGES) { "Unsupported local MCP runtime: ${language.wireValue}" }
+        val entrypoint = normalizeRuntimePath(raw.requiredString("entrypoint"))
+        require(entrypoint.startsWith(AgentMcpPackageInstaller.RUNTIME_DIRECTORY)) {
+            "Local MCP entrypoint must be stored under runtime/"
+        }
+        val arguments = raw.optJSONArray("arguments").stringList(MAX_LOCAL_ARGUMENTS).also { values ->
+            require(values.all { it.length <= MAX_LOCAL_ARGUMENT_CHARS && '\u0000' !in it }) {
+                "Local MCP runtime argument is invalid"
+            }
+        }
+        val environment = raw.optJSONObject("environment")?.let { values ->
+            values.keys().asSequence().associateWith { key ->
+                require(ENVIRONMENT_KEY_PATTERN.matches(key)) { "Local MCP environment key is invalid: $key" }
+                values.optString(key).also { value ->
+                    require(value.length <= MAX_LOCAL_ENVIRONMENT_VALUE_CHARS && '\u0000' !in value) {
+                        "Local MCP environment value is invalid"
+                    }
+                }
+            }
+        }.orEmpty()
+        require(environment.size <= MAX_LOCAL_ENVIRONMENT_VALUES) { "Local MCP environment is too large" }
+        val domains = raw.optJSONArray("allowed_network_domains").stringList(MAX_LOCAL_NETWORK_DOMAINS)
+            .map { it.trim().lowercase(Locale.ROOT) }
+        require(domains.all(DOMAIN_PATTERN::matches)) { "Local MCP network domain is invalid" }
+        require(domains.isEmpty()) {
+            "Local stdio MCP direct networking is unavailable; use a remote or declarative HTTP transport"
+        }
+        val timeout = raw.optLong("timeout_ms", 60_000L)
+        require(timeout in MIN_LOCAL_TIMEOUT_MILLIS..MAX_LOCAL_TIMEOUT_MILLIS) {
+            "Local MCP timeout is outside the allowed range"
+        }
+        return AgentMcpLocalRuntimeSpec(language, entrypoint, arguments, environment, domains.distinct(), timeout)
+    }
+
+    private fun normalizeRuntimePath(raw: String): String {
+        val value = raw.replace('\\', '/').trimStart('/')
+        require(value.isNotBlank() && value.length <= MAX_LOCAL_ENTRYPOINT_CHARS) { "Local MCP entrypoint is invalid" }
+        require(value.split('/').none { it.isBlank() || it == "." || it == ".." }) { "Local MCP entrypoint is unsafe" }
+        require(!Regex("^[A-Za-z]:").containsMatchIn(value)) { "Local MCP entrypoint must be relative" }
+        return value
     }
 
     private fun decodeAuthSteps(array: JSONArray?): List<AgentMcpAuthStepSpec> {
@@ -414,18 +519,39 @@ object AgentMcpPackageManifestCodec {
     private const val MAX_OPTIONS = 64
     private const val MAX_SCOPES = 64
     private const val MAX_TOOLS = 128
+    private const val MAX_LOCAL_ARGUMENTS = 32
+    private const val MAX_LOCAL_ARGUMENT_CHARS = 2_048
+    private const val MAX_LOCAL_ENVIRONMENT_VALUES = 32
+    private const val MAX_LOCAL_ENVIRONMENT_VALUE_CHARS = 4_096
+    private const val MAX_LOCAL_NETWORK_DOMAINS = 32
+    private const val MAX_LOCAL_ENTRYPOINT_CHARS = 512
+    private const val MIN_LOCAL_TIMEOUT_MILLIS = 5_000L
+    private const val MAX_LOCAL_TIMEOUT_MILLIS = 180_000L
     private val ID_PATTERN = Regex("[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+")
     private val VERSION_PATTERN = Regex("[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?")
     private val ALLOWED_METHODS = setOf("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE")
+    private val LOCAL_MCP_RUNTIME_LANGUAGES = setOf(
+        AgentRuntimeLanguage.SHELL,
+        AgentRuntimeLanguage.PYTHON,
+        AgentRuntimeLanguage.JAVASCRIPT,
+        AgentRuntimeLanguage.TYPESCRIPT
+    )
+    private val ENVIRONMENT_KEY_PATTERN = Regex("[A-Z_][A-Z0-9_]{0,63}")
+    private val DOMAIN_PATTERN = Regex("(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 }
 
 class AgentMcpPackageRepository(
     context: Context,
     preferencesName: String = PREFERENCES_NAME
 ) {
-    private val preferences = AgentEncryptedPreferences(context.applicationContext, preferencesName)
+    private val appContext = context.applicationContext
+    private val preferences = AgentEncryptedPreferences(appContext, preferencesName)
+    private val packagesRoot = File(appContext.filesDir, PACKAGES_DIRECTORY)
+    private val runtimeProjectsRoot = File(appContext.filesDir, RUNTIME_PROJECTS_DIRECTORY)
 
+    @Synchronized
     fun save(inspection: AgentMcpPackageInspection) {
+        persistPackageFiles(inspection)
         preferences.writeString(key(inspection.manifest.id), inspection.rawManifest)
     }
 
@@ -433,13 +559,133 @@ class AgentMcpPackageRepository(
         .takeIf(String::isNotBlank)
         ?.let { runCatching { AgentMcpPackageManifestCodec.decode(it) }.getOrNull() }
 
-    fun delete(id: String) = preferences.remove(key(id))
+    @Synchronized
+    fun prepareLocalInvocation(id: String, payload: String): AgentMcpLocalInvocation {
+        require(payload.toByteArray(Charsets.UTF_8).size <= MAX_INVOCATION_BYTES) { "Local MCP invocation is too large" }
+        val sourceRuntime = File(packageDirectory(id), AgentMcpPackageInstaller.RUNTIME_DIRECTORY)
+        check(sourceRuntime.isDirectory) { "Local MCP runtime files are not installed" }
+        val workspaceId = localWorkspaceId(id)
+        val workspace = safeChild(runtimeProjectsRoot, workspaceId) ?: error("Local MCP workspace path is invalid")
+        check(workspace.mkdirs() || workspace.isDirectory) { "Local MCP workspace is unavailable" }
+        replaceDirectory(sourceRuntime, File(workspace, "runtime"))
+        val control = File(workspace, CONTROL_DIRECTORY)
+        check(control.mkdirs() || control.isDirectory) { "Local MCP control directory is unavailable" }
+        control.listFiles().orEmpty().filter { it.name.startsWith("request-") }.forEach(File::delete)
+        val request = File(control, "request-${UUID.randomUUID()}.json")
+        request.writeText(payload, Charsets.UTF_8)
+        return AgentMcpLocalInvocation(workspaceId, "$CONTROL_DIRECTORY/${request.name}")
+    }
 
-    fun clear() = preferences.clear()
+    @Synchronized
+    fun completeLocalInvocation(invocation: AgentMcpLocalInvocation) {
+        safeChild(File(runtimeProjectsRoot, invocation.workspaceId), invocation.requestPath)?.delete()
+    }
 
-    private fun key(id: String): String = "package_${Base64.getUrlEncoder().withoutPadding().encodeToString(id.toByteArray())}"
+    @Synchronized
+    fun delete(id: String) {
+        preferences.remove(key(id))
+        packageDirectory(id).deleteRecursively()
+        safeChild(runtimeProjectsRoot, localWorkspaceId(id))?.deleteRecursively()
+    }
+
+    @Synchronized
+    fun clear() {
+        preferences.clear()
+        packagesRoot.deleteRecursively()
+        runtimeProjectsRoot.listFiles().orEmpty()
+            .filter { it.isDirectory && it.name.startsWith(WORKSPACE_PREFIX) }
+            .forEach(File::deleteRecursively)
+    }
+
+    private fun persistPackageFiles(inspection: AgentMcpPackageInspection) {
+        val target = packageDirectory(inspection.manifest.id)
+        val parent = target.parentFile ?: error("MCP package storage is invalid")
+        check(parent.mkdirs() || parent.isDirectory) { "MCP package storage is unavailable" }
+        val staging = File(parent, ".${target.name}.${UUID.randomUUID()}.staging")
+        val backup = File(parent, ".${target.name}.${UUID.randomUUID()}.backup")
+        staging.deleteRecursively()
+        backup.deleteRecursively()
+        check(staging.mkdirs()) { "MCP package staging directory could not be created" }
+        try {
+            File(staging, AgentMcpPackageInstaller.MANIFEST_PATH).writeText(inspection.rawManifest, Charsets.UTF_8)
+            var totalBytes = 0L
+            inspection.runtimeFiles.forEach { (relative, bytes) ->
+                require(relative.startsWith(AgentMcpPackageInstaller.RUNTIME_DIRECTORY)) { "MCP runtime path is invalid" }
+                totalBytes += bytes.size
+                require(totalBytes <= AgentMcpPackageInstaller.MAX_EXTRACTED_BYTES) { "MCP runtime files exceed the package limit" }
+                val output = safeChild(staging, relative) ?: error("MCP runtime path is unsafe")
+                check(output.parentFile?.mkdirs() != false || output.parentFile?.isDirectory == true) {
+                    "MCP runtime directory could not be created"
+                }
+                output.writeBytes(bytes)
+            }
+            if (target.exists()) check(target.renameTo(backup)) { "Previous MCP package could not be backed up" }
+            if (!staging.renameTo(target)) {
+                target.deleteRecursively()
+                if (backup.exists()) backup.renameTo(target)
+                error("MCP package could not be committed")
+            }
+            backup.deleteRecursively()
+        } catch (error: Throwable) {
+            staging.deleteRecursively()
+            if (!target.exists() && backup.exists()) backup.renameTo(target)
+            throw error
+        }
+    }
+
+    private fun replaceDirectory(source: File, target: File) {
+        val parent = target.parentFile ?: error("Local MCP runtime storage is invalid")
+        val staging = File(parent, ".${target.name}.${UUID.randomUUID()}.staging")
+        staging.deleteRecursively()
+        check(staging.mkdirs()) { "Local MCP runtime staging directory could not be created" }
+        source.walkTopDown().forEach { input ->
+            val relative = input.relativeTo(source).path
+            if (relative.isBlank()) return@forEach
+            val output = safeChild(staging, relative) ?: error("Local MCP runtime path is unsafe")
+            if (input.isDirectory) {
+                check(output.mkdirs() || output.isDirectory) { "Local MCP runtime directory could not be created" }
+            } else {
+                check(input.isFile && input.length() <= AgentMcpPackageInstaller.MAX_ASSET_BYTES) {
+                    "Local MCP runtime file is invalid"
+                }
+                check(output.parentFile?.mkdirs() != false || output.parentFile?.isDirectory == true) {
+                    "Local MCP runtime directory could not be created"
+                }
+                input.copyTo(output, overwrite = true)
+            }
+        }
+        target.deleteRecursively()
+        check(staging.renameTo(target)) { "Local MCP runtime files could not be activated" }
+    }
+
+    private fun packageDirectory(id: String): File = File(packagesRoot, encodedId(id))
+
+    private fun localWorkspaceId(id: String): String = WORKSPACE_PREFIX + AgentMcpPackageInstaller
+        .sha256(id.toByteArray(Charsets.UTF_8))
+        .take(32)
+
+    private fun safeChild(parent: File, relative: String): File? {
+        if (relative.isBlank() || File(relative).isAbsolute) return null
+        val canonicalParent = parent.canonicalFile
+        val candidate = File(canonicalParent, relative).canonicalFile
+        return candidate.takeIf { it.path.startsWith(canonicalParent.path + File.separator) }
+    }
+
+    private fun encodedId(id: String): String = Base64.getUrlEncoder().withoutPadding().encodeToString(id.toByteArray())
+
+    private fun key(id: String): String = "package_${encodedId(id)}"
 
     companion object {
         const val PREFERENCES_NAME = "signalasi_mcp_packages"
+        private const val PACKAGES_DIRECTORY = "agent-mcp-packages"
+        private const val RUNTIME_PROJECTS_DIRECTORY = "agent-native-workspaces"
+        private const val CONTROL_DIRECTORY = ".signalasi-mcp"
+        private const val WORKSPACE_PREFIX = "mcp-"
+        private const val MAX_INVOCATION_BYTES = 512 * 1024
     }
 }
+
+data class AgentMcpLocalInvocation(
+    val workspaceId: String,
+    val requestPath: String
+)

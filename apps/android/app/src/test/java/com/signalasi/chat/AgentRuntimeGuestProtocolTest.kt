@@ -149,6 +149,58 @@ class AgentRuntimeGuestProtocolTest {
     }
 
     @Test
+    fun guestBridgeCarriesSecretsOnlyInTheAuthenticatedExecutionEnvelope() {
+        val responses = LinkedBlockingQueue<AgentRuntimeGuestEnvelope>()
+        var executionPayload: Map<String, Any?> = emptyMap()
+        val channel = object : AgentRuntimeGuestChannel {
+            override fun send(envelope: AgentRuntimeGuestEnvelope, sessionKey: ByteArray) {
+                when (envelope.type) {
+                    AgentRuntimeGuestMessageType.HELLO -> responses.put(
+                        AgentRuntimeGuestEnvelope(
+                            requestId = envelope.requestId,
+                            type = AgentRuntimeGuestMessageType.HELLO_ACK,
+                            sequence = 1L,
+                            payload = readyGuestPayload()
+                        )
+                    )
+                    AgentRuntimeGuestMessageType.EXECUTE -> {
+                        executionPayload = envelope.payload
+                        responses.put(
+                            AgentRuntimeGuestEnvelope(
+                                requestId = envelope.requestId,
+                                type = AgentRuntimeGuestMessageType.RESULT,
+                                sequence = 1L,
+                                payload = mapOf("exit_code" to 0, "stdout" to "done", "stderr" to "")
+                            )
+                        )
+                    }
+                    else -> Unit
+                }
+            }
+
+            override fun receive(timeoutMillis: Long, sessionKey: ByteArray): AgentRuntimeGuestEnvelope =
+                responses.poll(timeoutMillis, TimeUnit.MILLISECONDS)
+                    ?: throw SocketTimeoutException("No fake Guest response")
+
+            override fun close() = Unit
+        }
+        val bridge = AgentRuntimeGuestBridge(
+            channelFactory = AgentRuntimeGuestChannelFactory { channel },
+            sessionKeyProvider = { key.copyOf() }
+        )
+
+        try {
+            bridge.execute(executionRequest("request-secret").copy(secretEnvironment = mapOf("ACCESS_TOKEN" to "secret")))
+        } finally {
+            bridge.close()
+        }
+
+        val secrets = executionPayload["secret_environment"] as? Map<*, *>
+        assertEquals("secret", secrets?.get("ACCESS_TOKEN"))
+        assertFalse(executionPayload.toString().contains("request.json"))
+    }
+
+    @Test
     fun guestBridgeRejectsReplayedExecutionFrames() {
         val requestId = "request-replay"
         val responses = LinkedBlockingQueue<AgentRuntimeGuestEnvelope>()
