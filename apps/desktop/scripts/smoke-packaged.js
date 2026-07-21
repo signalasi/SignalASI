@@ -14,6 +14,7 @@ const packagedTaskWorkspace = path.join(resources, "signalasi-link", "backend", 
 const packagedResponsePolicy = path.join(resources, "signalasi-link", "backend", "response_policy.py");
 const packagedBackendDir = path.dirname(backendMain);
 const packagedCustomAgent = path.join(packagedBackendDir, "custom_agent_stdio.py");
+const packagedDesktopAgentAdapters = path.join(packagedBackendDir, "desktop_agent_adapters.py");
 const packagedMcpWrapper = path.join(packagedBackendDir, "mcp_agent_wrapper.py");
 const packagedPhoneToolBroker = path.join(packagedBackendDir, "phone_tool_broker.py");
 const packagedRichOutput = path.join(packagedBackendDir, "rich_output.py");
@@ -131,6 +132,7 @@ async function main() {
   assertExists(packagedTaskWorkspace, "Packaged task workspace module");
   assertExists(packagedResponsePolicy, "Packaged response policy module");
   assertExists(packagedCustomAgent, "Packaged Custom Agent wrapper");
+  assertExists(packagedDesktopAgentAdapters, "Packaged Desktop Agent adapters");
   assertExists(packagedMcpWrapper, "Packaged MCP wrapper");
   assertExists(packagedPhoneToolBroker, "Packaged phone tool broker");
   assertExists(packagedRichOutput, "Packaged rich output module");
@@ -142,12 +144,24 @@ async function main() {
   console.log("[packaged-smoke] checking bundled Python dependencies");
   const pythonCheck = spawn(
     bundledPython,
-    ["-c", "import cryptography, fastapi, multipart, uvicorn, paho.mqtt.client, sqlalchemy, pydantic, websockets, qrcode, mqtt_bridge, phone_tool_broker, rich_output; print('ok')"],
+    ["-c", "import cryptography, fastapi, multipart, uvicorn, paho.mqtt.client, sqlalchemy, pydantic, websockets, qrcode, desktop_agent_adapters, mqtt_bridge, phone_tool_broker, rich_output; print('ok')"],
     { cwd: packagedBackendDir, windowsHide: true }
   );
   await new Promise((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    pythonCheck.stdout.on("data", (chunk) => { stdout = `${stdout}${chunk}`.slice(-4000); });
+    pythonCheck.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-4000); });
     pythonCheck.on("error", reject);
-    pythonCheck.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`Python dependency check exited ${code}`))));
+    pythonCheck.on("exit", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(
+        `Python dependency check exited ${code}\nstdout:\n${stdout.trim() || "<empty>"}\nstderr:\n${stderr.trim() || "<empty>"}`
+      ));
+    });
   });
 
   const tempPort = await findFreePort();
