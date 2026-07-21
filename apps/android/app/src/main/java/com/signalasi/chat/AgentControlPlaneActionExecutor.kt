@@ -23,6 +23,7 @@ class AgentControlPlaneActionExecutor private constructor(
             delegate = delegate,
             runStartReceipts = EncryptedAgentRunStartReceiptStore(context),
             healthLedger = EncryptedAgentProviderHealthLedger(context),
+            managedResponses = EncryptedAgentManagedResponseLedger(context),
             recoverableSource = {
                 EncryptedAgentHandoffStore(context).active().map { handoff ->
                     AgentRecoverableRun(
@@ -152,6 +153,7 @@ internal class ActionExecutorAgentProvider(
     private val recoverableSource: () -> List<AgentRecoverableRun> = { emptyList() },
     private val runStartReceipts: AgentRunStartReceiptStore = InMemoryAgentRunStartReceiptStore(),
     private val healthLedger: AgentProviderHealthLedger = InMemoryAgentProviderHealthLedger(),
+    private val managedResponses: AgentManagedResponseLedger = InMemoryAgentManagedResponseLedger(),
     override val providerId: String = "signalasi-connectors",
     private val protocol: AgentProtocolRange = AgentProtocolRange(
         preferred = "1.0",
@@ -180,7 +182,13 @@ internal class ActionExecutorAgentProvider(
         adapters[agentId]?.let { return it }
         val registration = registration(agentId) ?: return null
         val transport = transports.computeIfAbsent(agentId) {
-            ActionExecutorAgentTransport(registrationSource, delegate, recoverableSource, agentId)
+            ActionExecutorAgentTransport(
+                registrationSource,
+                delegate,
+                recoverableSource,
+                managedResponses,
+                agentId
+            )
         }
         val adapter = AgentProductionAdapterFactory.create(
             registration = registration,
@@ -215,7 +223,13 @@ internal class ActionExecutorAgentProvider(
     ) {
         val registration = registration(agentId) ?: return
         transports.computeIfAbsent(agentId) {
-            ActionExecutorAgentTransport(registrationSource, delegate, recoverableSource, agentId)
+            ActionExecutorAgentTransport(
+                registrationSource,
+                delegate,
+                recoverableSource,
+                managedResponses,
+                agentId
+            )
         }.prepare(request.runId, action, screen, registration)
     }
 
@@ -250,6 +264,7 @@ private class ActionExecutorAgentTransport(
     private val registrationSource: () -> List<AgentRegistration>,
     private val delegate: AgentActionExecutor,
     private val recoverableSource: () -> List<AgentRecoverableRun>,
+    private val managedResponses: AgentManagedResponseLedger,
     private val agentId: String
 ) : AgentAdapterTransport {
     private data class PreparedAction(
@@ -319,6 +334,17 @@ private class ActionExecutorAgentTransport(
                     contactId = contactId,
                     ownerId = request.runId
                 ) { response -> consumeResponse(request.runId, response) }
+                managedResponses.register(AgentManagedResponseRecord(
+                    ownerRunId = request.runId,
+                    supervisorRunId = request.parentRunId,
+                    agentId = agentId,
+                    deliveryMode = request.deliveryMode,
+                    sourceMessageId = sourceMessageId,
+                    contactId = contactId
+                ))
+                if (!activeRuns.containsKey(request.runId)) {
+                    managedResponses.markApplied(request.runId)
+                }
             }
         }
         emit(
@@ -358,6 +384,7 @@ private class ActionExecutorAgentTransport(
     override suspend fun cancelRun(runId: String) {
         prepared.remove(runId)
         val active = removeActive(runId)
+        managedResponses.markApplied(runId)
         val current = results[runId]
         results[runId] = current?.copy(
             success = false,
@@ -413,6 +440,7 @@ private class ActionExecutorAgentTransport(
         if (active.contactId.isNotBlank() && response.contactId.isNotBlank() &&
             active.contactId != response.contactId
         ) return false
+        managedResponses.acknowledge(response)
         removeActive(runId)
         val current = results[runId]
         results[runId] = AgentActionResult(

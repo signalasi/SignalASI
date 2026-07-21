@@ -104,6 +104,7 @@ interface AgentTeamExecutionStore : AgentSubagentEventHook {
     fun create(definition: AgentTeamDefinition, request: AgentRunRequest)
     fun snapshot(supervisorRunId: String): AgentTeamExecutionSnapshot?
     fun snapshots(): List<AgentTeamExecutionSnapshot>
+    fun applyLateResponse(record: AgentManagedResponseRecord): Boolean
     fun markNonTerminalInterrupted(nowMillis: Long = System.currentTimeMillis()): List<AgentTeamExecutionSnapshot>
     fun clear()
 }
@@ -149,6 +150,15 @@ class InMemoryAgentTeamExecutionStore : AgentTeamExecutionStore {
     override fun snapshots(): List<AgentTeamExecutionSnapshot> = records.values
         .map(AgentTeamExecutionRecord::toSnapshot)
         .sortedByDescending(AgentTeamExecutionSnapshot::updatedAtMillis)
+
+    @Synchronized
+    override fun applyLateResponse(record: AgentManagedResponseRecord): Boolean {
+        val current = records[record.supervisorRunId] ?: return false
+        val mutation = current.applyLateResponse(record)
+        if (!mutation.accepted) return false
+        records[record.supervisorRunId] = mutation.record
+        return true
+    }
 
     @Synchronized
     override fun markNonTerminalInterrupted(nowMillis: Long): List<AgentTeamExecutionSnapshot> {
@@ -220,6 +230,20 @@ class EncryptedAgentTeamExecutionStore(context: Context) : AgentTeamExecutionSto
     override fun snapshots(): List<AgentTeamExecutionSnapshot> = load()
         .map(AgentTeamExecutionRecord::toSnapshot)
         .sortedByDescending(AgentTeamExecutionSnapshot::updatedAtMillis)
+
+    @Synchronized
+    override fun applyLateResponse(record: AgentManagedResponseRecord): Boolean {
+        val records = load().toMutableList()
+        val index = records.indexOfFirst { it.request.runId == record.supervisorRunId }
+        if (index < 0) return false
+        val mutation = records[index].applyLateResponse(record)
+        if (!mutation.accepted) return false
+        if (mutation.record != records[index]) {
+            records[index] = mutation.record
+            save(records)
+        }
+        return true
+    }
 
     @Synchronized
     override fun markNonTerminalInterrupted(nowMillis: Long): List<AgentTeamExecutionSnapshot> {
@@ -520,7 +544,8 @@ class ActionExecutorAgentTeamMemberWorker internal constructor(
             registrationSource = { AppStoreAgentConnectorRegistry(context).registrations() },
             delegate = delegate,
             runStartReceipts = EncryptedAgentRunStartReceiptStore(context),
-            healthLedger = EncryptedAgentProviderHealthLedger(context)
+            healthLedger = EncryptedAgentProviderHealthLedger(context),
+            managedResponses = EncryptedAgentManagedResponseLedger(context)
         ),
         directory = AgentAdapterDirectory(),
         screenProvider = { AndroidScreenPerceptionProvider(context).capture() },
@@ -599,12 +624,16 @@ class AgentProductionTeamController(
     context: Context,
     private val store: AgentTeamExecutionStore = EncryptedAgentTeamExecutionStore(context),
     private val worker: AgentTeamMemberWorker = ActionExecutorAgentTeamMemberWorker(context),
+    private val managedResponses: AgentManagedResponseLedger = EncryptedAgentManagedResponseLedger(context),
     limits: AgentSubagentLimits = AgentSubagentLimits(maxChildren = 12, maxConcurrency = 4)
 ) : Closeable {
     private val runtime = AgentTeamExecutionRuntime(store, limits)
+    private val lateResponseListener = AgentLateManagedResponseListener(::applyLateResponse)
 
     init {
         runtime.recoverInterrupted()
+        AgentLateManagedResponseBus.addListener(lateResponseListener)
+        reconcileLateResponses()
     }
 
     fun start(
@@ -622,10 +651,135 @@ class AgentProductionTeamController(
     fun recoverInterrupted(nowMillis: Long = System.currentTimeMillis()): List<AgentTeamExecutionSnapshot> =
         runtime.recoverInterrupted(nowMillis)
 
-    fun clear() = store.clear()
+    fun reconcileLateResponses(): Int = managedResponses.completedUnapplied().count(::applyLateResponse)
 
-    override fun close() = runtime.close()
+    fun clear() {
+        store.clear()
+        managedResponses.clear()
+    }
+
+    override fun close() {
+        AgentLateManagedResponseBus.removeListener(lateResponseListener)
+        runtime.close()
+    }
+
+    private fun applyLateResponse(record: AgentManagedResponseRecord): Boolean {
+        val applied = store.applyLateResponse(record)
+        if (applied) managedResponses.markApplied(record.ownerRunId)
+        return applied
+    }
 }
+
+private data class AgentTeamLateResponseMutation(
+    val record: AgentTeamExecutionRecord,
+    val accepted: Boolean
+)
+
+private fun AgentTeamExecutionRecord.applyLateResponse(
+    managed: AgentManagedResponseRecord
+): AgentTeamLateResponseMutation {
+    if (request.runId != managed.supervisorRunId) return AgentTeamLateResponseMutation(this, false)
+    val member = definition.members.firstOrNull {
+        it.agentId == managed.agentId && it.deliveryMode != AgentDeliveryMode.IGNORE
+    } ?: return AgentTeamLateResponseMutation(this, false)
+    val response = managed.response ?: return AgentTeamLateResponseMutation(this, false)
+    val latestForChild = events.filter { it.childId == member.agentId }
+        .maxByOrNull(AgentSubagentEvent::sequence)
+    if (latestForChild?.childStatus?.isTerminal == true) {
+        return AgentTeamLateResponseMutation(this, true)
+    }
+
+    val status = if (response.success) AgentSubagentStatus.SUCCEEDED else AgentSubagentStatus.FAILED
+    val completedAt = response.receivedAtMillis.coerceAtLeast(managed.completedAtMillis)
+        .coerceAtLeast(managed.createdAtMillis)
+    val sourceOutput = response.content.ifBlank { response.richOutputJson }
+    val output = sourceOutput.take(MAX_LATE_RESPONSE_OUTPUT_CHARS)
+    val error = if (response.success) "" else output.take(MAX_LATE_RESPONSE_ERROR_CHARS)
+    val provenance = AgentSubagentProvenance(
+        source = "late-managed-response",
+        sourceId = response.taskId.ifBlank { response.sourceMessageId.toString() },
+        traceId = request.runId,
+        metadata = mapOf(
+            "owner_run_id" to managed.ownerRunId,
+            "delivery_mode" to managed.deliveryMode.name,
+            "conversation_id" to response.conversationId,
+            "turn_id" to response.turnId
+        )
+    )
+    val childResult = AgentSubagentChildResult(
+        supervisorId = request.runId,
+        childId = member.agentId,
+        parentId = request.runId,
+        depth = 1,
+        status = status,
+        output = if (response.success) output else "",
+        outputTruncated = sourceOutput.length > output.length,
+        errorMessage = error,
+        provenance = provenance,
+        startedAtMillis = latestForChild?.result?.startedAtMillis?.takeIf { it > 0L }
+            ?: managed.createdAtMillis,
+        completedAtMillis = completedAt
+    )
+    var nextSequence = (events.maxOfOrNull(AgentSubagentEvent::sequence) ?: 0L) + 1L
+    val nextEvents = events.toMutableList().apply {
+        add(AgentSubagentEvent(
+            sequence = nextSequence,
+            supervisorId = request.runId,
+            childId = member.agentId,
+            kind = if (response.success) {
+                AgentSubagentEventKinds.CHILD_SUCCEEDED
+            } else {
+                AgentSubagentEventKinds.CHILD_FAILED
+            },
+            childStatus = status,
+            message = error,
+            provenance = provenance,
+            result = childResult,
+            timestampMillis = completedAt
+        ))
+    }
+
+    val latestStatuses = nextEvents.filter { it.childId.isNotBlank() }
+        .groupBy(AgentSubagentEvent::childId)
+        .mapValues { (_, values) -> values.maxBy(AgentSubagentEvent::sequence).childStatus }
+    val expectedMembers = definition.members.filter { it.deliveryMode != AgentDeliveryMode.IGNORE }
+    val allTerminal = expectedMembers.all { latestStatuses[it.agentId]?.isTerminal == true }
+    val alreadyTerminal = nextEvents.any { it.runStatus != null }
+    if (allTerminal && !alreadyTerminal) {
+        val statuses = expectedMembers.mapNotNull { latestStatuses[it.agentId] }
+        val runStatus = when {
+            statuses.any { it == AgentSubagentStatus.CANCELLED } -> AgentSubagentRunStatus.CANCELLED
+            statuses.any { it == AgentSubagentStatus.FAILED || it == AgentSubagentStatus.SKIPPED } ->
+                AgentSubagentRunStatus.COMPLETED_WITH_FAILURES
+            else -> AgentSubagentRunStatus.SUCCEEDED
+        }
+        nextSequence += 1L
+        nextEvents += AgentSubagentEvent(
+            sequence = nextSequence,
+            supervisorId = request.runId,
+            kind = when (runStatus) {
+                AgentSubagentRunStatus.SUCCEEDED -> AgentSubagentEventKinds.SUPERVISOR_SUCCEEDED
+                AgentSubagentRunStatus.COMPLETED_WITH_FAILURES ->
+                    AgentSubagentEventKinds.SUPERVISOR_COMPLETED_WITH_FAILURES
+                AgentSubagentRunStatus.FAILED -> AgentSubagentEventKinds.SUPERVISOR_FAILED
+                AgentSubagentRunStatus.CANCELLED -> AgentSubagentEventKinds.SUPERVISOR_CANCELLED
+            },
+            runStatus = runStatus,
+            provenance = provenance,
+            timestampMillis = completedAt
+        )
+    }
+    return AgentTeamLateResponseMutation(
+        record = copy(
+            events = nextEvents.takeLast(InMemoryAgentTeamExecutionStore.MAX_EVENTS_PER_RUN),
+            updatedAtMillis = maxOf(updatedAtMillis, completedAt)
+        ),
+        accepted = true
+    )
+}
+
+private const val MAX_LATE_RESPONSE_OUTPUT_CHARS = 16_000
+private const val MAX_LATE_RESPONSE_ERROR_CHARS = 1_024
 
 private fun AgentTeamExecutionRecord.toSnapshot(): AgentTeamExecutionSnapshot {
     val latestByChild = events.filter { it.childId.isNotBlank() }

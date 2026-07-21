@@ -1371,7 +1371,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             delegate = AndroidAgentActionExecutor(this),
             recoverableSource = recoverableSource,
             runStartReceipts = EncryptedAgentRunStartReceiptStore(this),
-            healthLedger = EncryptedAgentProviderHealthLedger(this)
+            healthLedger = EncryptedAgentProviderHealthLedger(this),
+            managedResponses = EncryptedAgentManagedResponseLedger(this)
         )
         val directory = AgentAdapterDirectory().apply { register(provider) }
         val results = runBlocking {

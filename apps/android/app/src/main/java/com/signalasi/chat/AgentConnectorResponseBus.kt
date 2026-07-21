@@ -45,6 +45,7 @@ object AgentConnectorResponseBus {
         )
         if (normalized.content.isBlank() && normalized.richOutputJson.isBlank()) return false
         if (AgentManagedConnectorResponseRegistry.consume(normalized)) return true
+        if (EncryptedAgentManagedResponseLedger(context).complete(normalized) != null) return true
         AgentConnectorResponseStore.append(context, normalized)
         listeners.forEach { listener -> listener.onConnectorResponse(normalized) }
         return false

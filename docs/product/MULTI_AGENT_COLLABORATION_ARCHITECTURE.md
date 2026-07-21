@@ -17,7 +17,7 @@ The Android connector executor uses `RESPOND` at the transport boundary for mana
 3. Observer members execute concurrently within host limits.
 4. Observer outputs, failures, provenance, and truncation state form a structured dependency handoff.
 5. The primary member waits for terminal observer states, then produces the single final answer.
-6. `AgentManagedConnectorResponseRegistry` consumes each managed connector response once and prevents internal replies from becoming independent user messages.
+6. `AgentManagedConnectorResponseRegistry` consumes live replies, while the encrypted managed-response ledger preserves correlation through process death and suppresses duplicate delivery.
 7. `AgentTeamExecutionStore` derives a user-auditable snapshot from append-only subagent events.
 
 An observer failure is isolated. The primary receives the failure and remaining evidence and may still complete. Unknown dependencies, cycles, multiple responding members, missing capabilities, offline endpoints, and capacity exhaustion fail deterministically.
@@ -26,7 +26,7 @@ An observer failure is isolated. The primary receives the failure and remaining 
 
 Team definitions, requests, child lifecycle events, outputs, errors, provenance, and terminal state are encrypted at rest. Stable supervisor and child Run IDs prevent duplicate starts. On host restart, nonterminal team Runs are marked `INTERRUPTED`; SignalASI does not silently replay remote work with an unknown outcome.
 
-Late managed responses across process death remain a release gate. Until the durable late-response correlation scenario is verified, interrupted teams are inspectable but are not automatically resumed.
+Each dispatched managed connector Run also writes an encrypted correlation record before the response is released. A response that arrives after process recreation is attached to its original child and supervisor, advances the durable team snapshot idempotently, and never falls through into ordinary chat. Applied correlation records remain as bounded, seven-day deduplication tombstones. Interrupted work is not automatically replayed; only independently returned evidence is reconciled.
 
 ## User Experience
 
@@ -46,6 +46,9 @@ Automated coverage proves:
 - stable child Run identity and structured handoff;
 - one-shot async response interception and event replay;
 - production connector bridge execution before primary synthesis;
-- interruption marking without silent replay.
+- interruption marking without silent replay;
+- late-response reconciliation into the original interrupted team;
+- duplicate live and late response suppression;
+- Android instrumentation coverage for encrypted store recreation and ordinary-chat isolation.
 
-Release still requires a real-device paired-team scenario, forced process death, late response correlation, reconnect, cancellation, and UI inspection.
+Release still requires a real-device paired-team scenario with forced process death, a naturally late Desktop reply, reconnect, cancellation, and UI inspection.

@@ -10,6 +10,8 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -150,6 +152,106 @@ class AgentCollaborationRuntimeTest {
     }
 
     @Test
+    fun lateManagedResponsesCompleteInterruptedTeamExactlyOnce() = runBlocking {
+        val store = InMemoryAgentTeamExecutionStore()
+        val definition = AgentTeamDefinition(
+            teamId = "late-team",
+            primaryAgentId = "primary",
+            members = listOf(
+                AgentTeamMember("primary", AgentDeliveryMode.RESPOND, role = "writer"),
+                AgentTeamMember("observer", AgentDeliveryMode.OBSERVE, role = "reviewer")
+            )
+        )
+        val request = request()
+        store.create(definition, request)
+        store.append(AgentSubagentEvent(
+            sequence = 1L,
+            supervisorId = request.runId,
+            kind = AgentSubagentEventKinds.SUPERVISOR_STARTED,
+            timestampMillis = 1_000L
+        ))
+        store.append(AgentSubagentEvent(
+            sequence = 2L,
+            supervisorId = request.runId,
+            childId = "observer",
+            kind = AgentSubagentEventKinds.CHILD_RUNNING,
+            childStatus = AgentSubagentStatus.RUNNING,
+            timestampMillis = 1_100L
+        ))
+        store.append(AgentSubagentEvent(
+            sequence = 3L,
+            supervisorId = request.runId,
+            childId = "primary",
+            kind = AgentSubagentEventKinds.CHILD_RUNNING,
+            childStatus = AgentSubagentStatus.RUNNING,
+            timestampMillis = 1_200L
+        ))
+        store.markNonTerminalInterrupted(1_300L)
+
+        val observer = managedResponse(
+            ownerRunId = "observer-run",
+            agentId = "observer",
+            sourceMessageId = 71L,
+            content = "verified evidence"
+        )
+        val primary = managedResponse(
+            ownerRunId = "primary-run",
+            agentId = "primary",
+            sourceMessageId = 72L,
+            content = "final reviewed answer"
+        )
+
+        assertTrue(store.applyLateResponse(observer))
+        assertEquals(AgentTeamExecutionState.INTERRUPTED, store.snapshot(request.runId)?.state)
+        assertTrue(store.applyLateResponse(primary))
+        val completed = requireNotNull(store.snapshot(request.runId))
+        val eventCount = store.records().single().events.size
+        assertEquals(AgentTeamExecutionState.SUCCEEDED, completed.state)
+        assertEquals("final reviewed answer", completed.finalOutput)
+        assertEquals(AgentSubagentStatus.SUCCEEDED, completed.members.first {
+            it.agentId == "observer"
+        }.status)
+
+        assertTrue(store.applyLateResponse(primary))
+        assertEquals(eventCount, store.records().single().events.size)
+        assertEquals(AgentTeamExecutionState.SUCCEEDED, store.snapshot(request.runId)?.state)
+    }
+
+    @Test
+    fun managedResponseLedgerCorrelatesAndReleasesLateReply() {
+        val ledger = InMemoryAgentManagedResponseLedger()
+        val record = AgentManagedResponseRecord(
+            ownerRunId = "child-run",
+            supervisorRunId = "supervisor-run",
+            agentId = "primary",
+            deliveryMode = AgentDeliveryMode.RESPOND,
+            sourceMessageId = 91L,
+            contactId = "primary",
+            createdAtMillis = 1_000L
+        )
+        ledger.register(record)
+
+        assertNull(ledger.complete(AgentConnectorResponse(92L, "primary", "wrong source")))
+        val completed = ledger.complete(AgentConnectorResponse(
+            sourceMessageId = 91L,
+            contactId = "primary",
+            content = "late answer",
+            receivedAtMillis = 2_000L
+        ))
+
+        assertEquals("child-run", completed?.ownerRunId)
+        assertEquals("late answer", ledger.completedUnapplied().single().response?.content)
+        ledger.markApplied("child-run")
+        assertTrue(ledger.completedUnapplied().isEmpty())
+        assertEquals(
+            AgentManagedResponseState.APPLIED,
+            ledger.complete(AgentConnectorResponse(91L, "primary", "duplicate"))?.state
+        )
+        ledger.removeOwner("child-run")
+        assertTrue(ledger.completedUnapplied().isEmpty())
+    }
+
+    @Test
     fun adapterWorkerUsesStableChildRunsAndStructuredDependencyContext() = runBlocking {
         val primary = EventAgentAdapter("primary", setOf(AgentCapability.CODE))
         val observer = EventAgentAdapter("observer", setOf(AgentCapability.RESEARCH))
@@ -187,12 +289,14 @@ class AgentCollaborationRuntimeTest {
     fun productionActionBridgeExecutesObserversInternallyBeforePrimaryResponse() = runBlocking {
         AgentManagedConnectorResponseRegistry.clear()
         val actions = CopyOnWriteArrayList<AgentAction>()
+        val managedResponses = InMemoryAgentManagedResponseLedger()
         val registrations = listOf(
             registration("primary", AgentCapability.CODE),
             registration("observer", AgentCapability.RESEARCH)
         )
         val provider = ActionExecutorAgentProvider(
             registrationSource = { registrations },
+            managedResponses = managedResponses,
             delegate = object : AgentActionExecutor {
                 override fun execute(action: AgentAction, screen: ScreenContext): AgentActionResult {
                     actions += action
@@ -251,8 +355,34 @@ class AgentCollaborationRuntimeTest {
         assertFalse(AgentManagedConnectorResponseRegistry.consume(
             AgentConnectorResponse(82L, "primary", "duplicate")
         ))
+        val duplicate = managedResponses.complete(AgentConnectorResponse(82L, "primary", "duplicate"))
+        assertNotNull(duplicate)
+        assertEquals(AgentManagedResponseState.APPLIED, duplicate?.state)
         AgentManagedConnectorResponseRegistry.clear()
     }
+
+    private fun managedResponse(
+        ownerRunId: String,
+        agentId: String,
+        sourceMessageId: Long,
+        content: String
+    ) = AgentManagedResponseRecord(
+        ownerRunId = ownerRunId,
+        supervisorRunId = "supervisor-run",
+        agentId = agentId,
+        deliveryMode = if (agentId == "primary") AgentDeliveryMode.RESPOND else AgentDeliveryMode.OBSERVE,
+        sourceMessageId = sourceMessageId,
+        contactId = agentId,
+        state = AgentManagedResponseState.COMPLETED,
+        response = AgentConnectorResponse(
+            sourceMessageId = sourceMessageId,
+            contactId = agentId,
+            content = content,
+            receivedAtMillis = 2_000L + sourceMessageId
+        ),
+        createdAtMillis = 1_000L,
+        completedAtMillis = 2_000L + sourceMessageId
+    )
 
     private fun teamDefinition() = AgentTeamDefinition(
         teamId = "team",
