@@ -111,6 +111,7 @@
                         android:orientation="horizontal">
 
                         <ImageView
+                            android:id="@+id/agentBrandLogo"
                             android:layout_width="39dp"
                             android:layout_height="39dp"
                             android:contentDescription="@null"
