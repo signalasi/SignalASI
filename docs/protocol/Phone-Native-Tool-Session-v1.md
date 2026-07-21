@@ -788,7 +788,8 @@ The following protocol behavior is REQUIRED:
 - Clipboard tools report limited capability and MUST NOT promise background reads.
 - Intent and Settings tools return `handoff_started` evidence until a postcondition can be observed.
 - Package installation remains unavailable until a dedicated system-installer handoff is implemented; silent install is never represented.
-- Location, sensors, Bluetooth, NFC, and general media transcode remain unavailable until dedicated implementations are registered.
+- Location, sensors, Bluetooth, and NFC are advertised only when their registered bounded tools pass live hardware, permission, and service probes.
+- General media transcode is advertised only when the typed offline adapter, Android-local guest runtime, and signed FFmpeg pack are ready; arbitrary FFmpeg arguments, ambient shared-storage access, and network access remain prohibited.
 - Device Owner and Shizuku remain privileged-only without separately provisioned integrations.
 - Root remains `blocked_by_policy` even if `su` is detected.
 - Lock-screen bypass, secure-surface bypass, payment submission, credential approval, and unrestricted third-party sends MUST NOT be exposed as callable tools.

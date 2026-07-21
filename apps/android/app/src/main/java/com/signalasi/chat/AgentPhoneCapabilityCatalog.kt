@@ -51,6 +51,7 @@ enum class AgentPhoneExecutionLocation {
     NOTIFICATION_LISTENER_SERVICE,
     ANDROID_SYSTEM_SERVICE,
     SYSTEM_UI_HANDOFF,
+    ON_DEVICE_LINUX_RUNTIME,
     PRIVILEGED_BRIDGE,
     HOME_ASSISTANT_SERVER
 }
@@ -172,6 +173,9 @@ object AgentPhoneCapabilityNativeCoverage {
         ),
         AgentPhoneCapabilityId.MEDIA_PLAYBACK to setOf(
             AgentWebMediaNativeTools.MEDIA_PLAYBACK_HANDOFF
+        ),
+        AgentPhoneCapabilityId.MEDIA_TRANSCODE to setOf(
+            AgentWebMediaNativeTools.MEDIA_FFMPEG_TRANSCODE
         )
     )
 
@@ -474,11 +478,11 @@ object AgentPhoneCapabilityCatalog {
         ),
         AgentPhoneCapabilityBoundary(
             id = AgentPhoneCapabilityId.MEDIA_TRANSCODE,
-            executionLocation = AgentPhoneExecutionLocation.APP_PROCESS,
-            availability = AgentPhoneCapabilityAvailability.NOT_IMPLEMENTED,
+            executionLocation = AgentPhoneExecutionLocation.ON_DEVICE_LINUX_RUNTIME,
+            availability = AgentPhoneCapabilityAvailability.NEEDS_CONFIGURATION,
             risk = AgentRisk.MEDIUM,
             normalAppCanExecute = true,
-            limitation = "SignalASI decodes selected audio for ASR but has no general media transcode pipeline; codec availability alone is not an executable transcode capability."
+            limitation = "Typed preset conversion is confined to the current conversation workspace and requires the signed FFmpeg pack plus a healthy Android-local Linux runtime; arbitrary FFmpeg arguments and network access are excluded."
         )
     )
 
@@ -743,10 +747,21 @@ object AgentPhoneCapabilityCatalog {
             evidence = "Android media playback API and audio output probed"
         )
 
-        AgentPhoneCapabilityId.MEDIA_TRANSCODE -> AgentPhoneCapabilityObservation(
-            implementationPresent = false,
-            evidence = "No general SignalASI transcode pipeline"
-        )
+        AgentPhoneCapabilityId.MEDIA_TRANSCODE -> {
+            val status = AgentOnDeviceRuntimeManager(context).status()
+            val supported = status.architecture == "arm64-v8a"
+            val ready = status.languageReady(AgentRuntimeLanguage.FFMPEG)
+            AgentPhoneCapabilityObservation(
+                platformSupported = supported,
+                implementationPresent = AgentPhoneCapabilityNativeCoverage.isImplemented(id),
+                configured = ready,
+                evidence = when {
+                    !supported -> "The signed FFmpeg runtime currently supports Android ARM64 devices"
+                    ready -> "Bounded offline FFmpeg conversion is registered and the runtime pack is ready"
+                    else -> status.ffmpegSetupReason()
+                }
+            )
+        }
     }
 
     private fun permissionsGranted(context: Context, permissions: Set<String>): Boolean =
