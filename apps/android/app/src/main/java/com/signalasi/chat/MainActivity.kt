@@ -132,6 +132,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val REQUEST_IMPORT_RUNTIME_PACK = 2018
         private const val REQUEST_EXPORT_RUNTIME_ARTIFACT = 2019
         private const val MAX_VISIBLE_AGENT_PROCESS_STEPS = 20
+        private const val AGENT_PROCESS_TIMER_TICK_MS = 250L
+        private const val GLOBAL_AGENT_FOREGROUND_RETRY_MILLIS = 5_000L
         private const val EXTRA_REOPEN_CONTROL_CENTER_CHILD = "signalasi_reopen_control_center_child"
         private const val CONTROL_CENTER_CHILD_TEXT_SIZE = "text_size"
         private const val CAPABILITY_KIND_MCP = "mcp"
@@ -2006,11 +2008,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         forcedAction: AgentAction? = null
     ) {
         val routingStartedAt = SystemClock.elapsedRealtime()
-        val conversationContext = globalSuperAgentRuntime.augmentContext(
-            agentTranscriptStore.context(conversationId),
-            goal
-        )
-        AgentFastLocalResponse.reply(goal, conversationContext)?.let { response ->
+        val localConversationContext = agentTranscriptStore.context(conversationId)
+        AgentFastLocalResponse.reply(goal, localConversationContext)?.let { response ->
             agentTranscriptStore.append(
                 AgentTranscriptRole.ASSISTANT,
                 response,
@@ -2023,6 +2022,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             renderAgentTranscript(agentTranscriptStore.list(conversationId))
             return
         }
+        val conversationContext = globalSuperAgentRuntime.augmentContext(
+            localConversationContext,
+            goal
+        )
         if (handleAgentSkillCommand(goal, conversationId, turnId)) return
         val skillMatch = agentSkillMatcher.match(goal)
         val deterministicAction = forcedAction ?: deterministicSystemActionFor(goal, conversationContext)
@@ -2733,6 +2736,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun refreshGlobalAgentCognition() {
         if (!::globalSuperAgentRuntime.isInitialized || !::agentTranscriptStore.isInitialized) return
+        if (foregroundAgentTurnInProgress()) {
+            if (globalAgentRefreshRequested.compareAndSet(false, true)) {
+                handler.postDelayed({
+                    globalAgentRefreshRequested.set(false)
+                    if (!isFinishing && !isDestroyed) refreshGlobalAgentCognition()
+                }, GLOBAL_AGENT_FOREGROUND_RETRY_MILLIS)
+            }
+            return
+        }
         if (!globalAgentRefreshInProgress.compareAndSet(false, true)) {
             globalAgentRefreshRequested.set(true)
             return
@@ -2785,6 +2797,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     }
                 }
             }
+        }
+    }
+
+    private fun foregroundAgentTurnInProgress(): Boolean {
+        val entries = agentTranscriptStore.list()
+        val latestUser = entries.lastOrNull { it.role == AgentTranscriptRole.USER } ?: return false
+        return entries.none { entry ->
+            entry.role == AgentTranscriptRole.ASSISTANT &&
+                entry.timestampMillis >= latestUser.timestampMillis &&
+                (latestUser.turnId.isBlank() || entry.turnId == latestUser.turnId)
         }
     }
 
@@ -8620,13 +8642,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .distinctBy { it.text.trim() }
             .takeLast(MAX_VISIBLE_AGENT_PROCESS_STEPS)
         val startedAt = processEntries.firstOrNull()?.timestampMillis ?: entry.timestampMillis
-        val finishedAt = processEntries.lastOrNull()?.timestampMillis ?: entry.timestampMillis
-        val elapsed = (finishedAt - startedAt).coerceAtLeast(0L)
-        val completed = turnEntries.any { candidate ->
-            candidate.role == AgentTranscriptRole.ASSISTANT &&
-                candidate.turnId == entry.turnId &&
-                !isAgentApprovalEntry(candidate)
-        }
+        val completedAt = agentProcessCompletionTimestamp(entry, turnEntries)
+        val completed = completedAt != null
         val expanded = AgentTranscriptPresentationPolicy.processExpanded(
             completed = completed,
             manuallyExpanded = groupKey in expandedAgentProcessGroups,
@@ -8648,16 +8665,42 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 minimumHeight = dp(34)
                 setPadding(0, dp(5), 0, dp(5))
                 addView(TextView(this@MainActivity).apply {
-                    text = getString(
-                        if (completed) R.string.agent_trace_processed else R.string.agent_trace_processing,
-                        agentTraceDuration(elapsed),
-                        ""
-                    ).trimEnd()
                     setTextColor(getColorCompat(R.color.text_secondary))
                     textSize = 14f
                     includeFontPadding = false
                     maxLines = 1
                     ellipsize = android.text.TextUtils.TruncateAt.END
+                    val statusView = this
+                    val ticker = object : Runnable {
+                        override fun run() {
+                            val completionTimestamp = agentProcessCompletionTimestamp(entry)
+                            val elapsedMillis = (
+                                (completionTimestamp ?: System.currentTimeMillis()) - startedAt
+                            ).coerceAtLeast(0L)
+                            statusView.text = getString(
+                                if (completionTimestamp != null) {
+                                    R.string.agent_trace_processed
+                                } else {
+                                    R.string.agent_trace_processing
+                                },
+                                agentTraceDuration(elapsedMillis),
+                                ""
+                            ).trimEnd()
+                            if (completionTimestamp == null && statusView.isAttachedToWindow) {
+                                statusView.postDelayed(this, AGENT_PROCESS_TIMER_TICK_MS)
+                            }
+                        }
+                    }
+                    addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                        override fun onViewAttachedToWindow(view: View) {
+                            statusView.removeCallbacks(ticker)
+                            ticker.run()
+                        }
+
+                        override fun onViewDetachedFromWindow(view: View) {
+                            statusView.removeCallbacks(ticker)
+                        }
+                    })
                 })
                 addView(ImageView(this@MainActivity).apply {
                     setImageResource(R.drawable.ic_chevron_down)
@@ -9323,10 +9366,23 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         ?.substringAfter('=')
         .orEmpty()
 
-    private fun agentTraceDuration(durationMillis: Long): String = when {
-        durationMillis < 1_000L -> "${durationMillis.coerceAtLeast(0L)} ms"
-        else -> String.format(Locale.US, "%.1f s", durationMillis / 1_000.0)
-    }
+    private fun agentTraceDuration(durationMillis: Long): String =
+        AgentTranscriptPresentationPolicy.formatElapsedSeconds(durationMillis)
+
+    private fun agentProcessCompletionTimestamp(
+        entry: AgentTranscriptEntry,
+        entries: List<AgentTranscriptEntry> = agentTranscriptStore.list(entry.conversationId)
+    ): Long? = entries.asSequence()
+        .filter { candidate ->
+            candidate.role == AgentTranscriptRole.ASSISTANT &&
+                !isAgentApprovalEntry(candidate) &&
+                when {
+                    entry.turnId.isNotBlank() -> candidate.turnId == entry.turnId
+                    entry.taskId.isNotBlank() -> candidate.taskId == entry.taskId
+                    else -> candidate.timestampMillis >= entry.timestampMillis
+                }
+        }
+        .maxOfOrNull(AgentTranscriptEntry::timestampMillis)
 
     private fun agentTraceTargetLabel(target: String): String {
         val normalized = target.lowercase(Locale.US)

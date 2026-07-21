@@ -2027,6 +2027,10 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
 
     fun settings(): GlobalAgentSettings = repository.settings()
 
+    internal fun enqueueEvent(event: GlobalConversationEvent): Boolean = repository.enqueue(event)
+
+    internal fun enqueueEvents(events: List<GlobalConversationEvent>): Int = repository.enqueueAll(events)
+
     fun modelCallBudgetSnapshot(nowMillis: Long = System.currentTimeMillis()): GlobalModelCallBudgetSnapshot =
         modelCallBudget.snapshot(repository.settings(), nowMillis)
 
@@ -2867,34 +2871,9 @@ object GlobalConversationEventBus {
         statusSequence: Long,
         detail: String
     ): Boolean {
-        if (contactId.isBlank() || status.isBlank()) return false
-        val repository = GlobalAgentRepository(context)
-        if (!repository.settings().enabled) return false
-        val contactName = AppStore.contactById(context, contactId)
-            ?.optString("name")
-            .orEmpty()
-            .ifBlank { contactId }
-        val event = GlobalConversationEvent(
-            id = "task:$contactId:${taskId.ifBlank { sourceMessageId.toString() }}:$status:$statusSequence",
-            type = GlobalConversationEventType.TASK_UPDATED,
-            conversationId = "contact:${contactId.take(160)}",
-            messageId = sourceMessageId.toString(),
-            actor = GlobalConversationActor.TOOL,
-            content = "$contactName: ${detail.ifBlank { status }}",
-            contentRef = "encrypted://chat-history/$contactId/$sourceMessageId",
-            conversationTitle = contactName,
-            topicHints = setOf(contactName),
-            metadata = mapOf(
-                "contact_id" to contactId,
-                "task_id" to taskId,
-                "task_status" to status,
-                "status_sequence" to statusSequence.toString(),
-                "origin" to "agent_task_event"
-            )
-        )
-        val enqueued = repository.enqueue(event)
-        if (enqueued) requestProcessing(context)
-        return enqueued
+        // Delivery progress belongs in the active transcript, not in long-term cognition.
+        // Recording every accepted/queued/running update can recursively create background work.
+        return false
     }
 
     fun publishChatMessageDeleted(
@@ -2961,8 +2940,9 @@ object GlobalConversationEventBus {
         supersededEntryId: String = ""
     ): Boolean {
         if (conversation.trackingPaused || conversation.privateMode) return false
-        val repository = GlobalAgentRepository(context)
-        if (!repository.settings().enabled) return false
+        if (entry.role == AgentTranscriptRole.PROCESS) return false
+        val runtime = GlobalSuperAgentRuntime.get(context)
+        if (!runtime.settings().enabled) return false
         val privateMode = conversation.privateMode
         val actor = when {
             entry.dedupeKey.startsWith("global-agent:") -> GlobalConversationActor.GLOBAL_AGENT
@@ -3007,8 +2987,8 @@ object GlobalConversationEventBus {
                 .orEmpty()
         )
         val observations = GlobalRichObservationExtractor.extract(conversation, entry, event.id)
-        val enqueued = repository.enqueueAll(listOf(event) + observations) > 0
-        if (enqueued) requestProcessing(context)
+        val enqueued = runtime.enqueueEvents(listOf(event) + observations) > 0
+        if (enqueued && entry.role == AgentTranscriptRole.ASSISTANT) requestProcessing(context)
         return enqueued
     }
 

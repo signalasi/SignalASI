@@ -79,6 +79,19 @@ class AgentTranscriptPresentationPolicyTest {
     }
 
     @Test
+    fun formatsEveryProcessingDurationInSeconds() {
+        assertEquals("1s", AgentTranscriptPresentationPolicy.formatElapsedSeconds(0L))
+        assertEquals("1s", AgentTranscriptPresentationPolicy.formatElapsedSeconds(999L))
+        assertEquals("1s", AgentTranscriptPresentationPolicy.formatElapsedSeconds(1_999L))
+        assertEquals("2s", AgentTranscriptPresentationPolicy.formatElapsedSeconds(2_000L))
+        assertEquals("59s", AgentTranscriptPresentationPolicy.formatElapsedSeconds(59_999L))
+        assertEquals("1m", AgentTranscriptPresentationPolicy.formatElapsedSeconds(60_000L))
+        assertEquals("1m 17s", AgentTranscriptPresentationPolicy.formatElapsedSeconds(77_000L))
+        assertEquals("1h", AgentTranscriptPresentationPolicy.formatElapsedSeconds(3_600_000L))
+        assertEquals("1h 17m 26s", AgentTranscriptPresentationPolicy.formatElapsedSeconds(4_646_000L))
+    }
+
+    @Test
     fun separatesModelNarrationFromContiguousToolActivity() {
         val entries = listOf(
             entry("Analyzed the request · Codex", AgentTranscriptRole.PROCESS, "conversation", "turn", 1L,

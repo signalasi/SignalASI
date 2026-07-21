@@ -212,7 +212,6 @@ object GlobalSpecialistResultParser {
         if (raw.isBlank()) return null
         val candidates = buildList {
             add(raw)
-            JSON_FENCE.find(raw)?.groupValues?.getOrNull(1)?.let(::add)
             val start = raw.indexOf('{')
             val end = raw.lastIndexOf('}')
             if (start >= 0 && end > start) add(raw.substring(start, end + 1))
@@ -246,7 +245,6 @@ object GlobalSpecialistResultParser {
     private const val MAX_ITEM_CHARACTERS = 1_000
     private const val MAX_REFERENCE_CHARACTERS = 1_500
     private const val MAX_FAILURE_CHARACTERS = 600
-    private val JSON_FENCE = Regex("```(?:json)?\\s*(\\{[\\s\\S]*?})\\s*```", RegexOption.IGNORE_CASE)
 }
 
 object GlobalSpecialistCompletionPolicy {

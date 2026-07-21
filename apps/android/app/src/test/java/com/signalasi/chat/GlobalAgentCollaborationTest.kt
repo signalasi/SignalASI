@@ -101,6 +101,23 @@ class GlobalAgentCollaborationTest {
     }
 
     @Test
+    fun `fenced structured result parses without a platform-specific brace regex`() {
+        val assignment = assignment()
+        val raw = """
+            Result:
+            ```json
+            {"contract_id":"${assignment.contractId}","status":"completed","summary":"Done"}
+            ```
+        """.trimIndent()
+
+        val completion = GlobalSpecialistCompletionPolicy.evaluate(raw, assignment)
+
+        assertTrue(completion.successful)
+        assertEquals(GlobalSpecialistResultFormat.STRUCTURED, completion.result.format)
+        assertEquals("Done", completion.result.summary)
+    }
+
+    @Test
     fun `mismatched assignment result is rejected instead of attached to a live task`() {
         val assignment = assignment()
         val raw = JSONObject()

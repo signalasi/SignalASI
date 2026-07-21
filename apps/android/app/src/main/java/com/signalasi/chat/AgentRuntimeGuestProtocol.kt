@@ -691,14 +691,21 @@ class AgentRuntimeSessionKeyStore(context: Context) {
 
 object AgentOnDeviceRuntimeSupervisor {
     @Volatile private var registeredBridge: AgentRuntimeGuestBridge? = null
+    @Volatile private var lastHealthyAtMillis: Long = 0L
 
     @Synchronized
     fun discover(context: Context): AgentOnDeviceRuntimeBridge? {
         registeredBridge?.let { bridge ->
-            if (bridge.health().ready) return bridge
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - lastHealthyAtMillis <= HEALTH_CACHE_MILLIS) return bridge
+            if (bridge.health().ready) {
+                lastHealthyAtMillis = now
+                return bridge
+            }
             bridge.close()
             AgentOnDeviceRuntimeBridgeRegistry.unregister(bridge)
             registeredBridge = null
+            lastHealthyAtMillis = 0L
         }
         val socket = File(context.applicationContext.filesDir, "agent-runtime/guest.sock")
         if (!socket.exists()) return null
@@ -713,6 +720,7 @@ object AgentOnDeviceRuntimeSupervisor {
         }
         AgentOnDeviceRuntimeBridgeRegistry.register(candidate)
         registeredBridge = candidate
+        lastHealthyAtMillis = android.os.SystemClock.elapsedRealtime()
         return candidate
     }
 
@@ -723,5 +731,8 @@ object AgentOnDeviceRuntimeSupervisor {
             AgentOnDeviceRuntimeBridgeRegistry.unregister(bridge)
         }
         registeredBridge = null
+        lastHealthyAtMillis = 0L
     }
+
+    private const val HEALTH_CACHE_MILLIS = 15_000L
 }

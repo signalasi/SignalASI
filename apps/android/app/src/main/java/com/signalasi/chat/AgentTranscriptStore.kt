@@ -103,6 +103,18 @@ object AgentTranscriptPresentationPolicy {
         manuallyCollapsedWhileActive: Boolean
     ): Boolean = if (completed) manuallyExpanded else !manuallyCollapsedWhileActive
 
+    fun formatElapsedSeconds(durationMillis: Long): String {
+        val totalSeconds = (durationMillis.coerceAtLeast(0L) / 1_000L).coerceAtLeast(1L)
+        val hours = totalSeconds / 3_600L
+        val minutes = totalSeconds % 3_600L / 60L
+        val seconds = totalSeconds % 60L
+        return buildList {
+            if (hours > 0L) add("${hours}h")
+            if (minutes > 0L) add("${minutes}m")
+            if (seconds > 0L || isEmpty()) add("${seconds}s")
+        }.joinToString(" ")
+    }
+
     fun processContentKind(entry: AgentTranscriptEntry): ProcessContentKind {
         val text = entry.text.trim().lowercase()
         val genericAnalysis = text.startsWith("analyzed the request") ||

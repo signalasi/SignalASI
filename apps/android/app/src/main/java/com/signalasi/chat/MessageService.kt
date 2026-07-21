@@ -27,6 +27,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         private const val AGENT_SCHEDULE_NOTIFICATION_ID = 1003
         private const val GLOBAL_AGENT_NOTIFICATION_ID = 1004
         private const val GLOBAL_AGENT_INTERVAL_SECONDS = 45L
+        private const val GLOBAL_AGENT_FOREGROUND_DELAY_MILLIS = 60_000L
         const val ACTION_REFRESH_LANGUAGE = "com.signalasi.chat.action.REFRESH_NOTIFICATION_LANGUAGE"
         const val ACTION_PROCESS_GLOBAL_AGENT = "com.signalasi.chat.action.PROCESS_GLOBAL_AGENT"
     }
@@ -380,6 +381,10 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
     }
 
     private fun processGlobalAgentEvents() {
+        if (AppForegroundTracker.isForeground()) {
+            GlobalAgentWakeScheduler.schedule(this, System.currentTimeMillis() + GLOBAL_AGENT_FOREGROUND_DELAY_MILLIS)
+            return
+        }
         val runtime = GlobalSuperAgentRuntime.get(this)
         runCatching { runtime.processPending() }
         runCatching { runtime.processLongHorizonCycle() }
@@ -411,6 +416,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         deliverPendingGlobalMessages(runtime)
         runCatching { runtime.scheduleNextWake() }
     }
+
 
     private fun deliverPendingGlobalMessages(runtime: GlobalSuperAgentRuntime) {
         if (AppForegroundTracker.isForeground()) {
