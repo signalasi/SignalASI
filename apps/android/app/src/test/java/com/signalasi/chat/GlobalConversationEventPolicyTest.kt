@@ -59,6 +59,32 @@ class GlobalConversationEventPolicyTest {
     }
 
     @Test
+    fun pausedOrExcludedLifecycleIsSanitizedEvenWhenProducerMarksItPersonal() {
+        val normalized = GlobalConversationEventPolicy.normalize(event(
+            type = GlobalConversationEventType.CONVERSATION_UPDATED
+        ).copy(
+            sensitivity = GlobalConversationSensitivity.PERSONAL,
+            content = "Private renamed topic",
+            contentRef = "encrypted://private/conversation",
+            conversationTitle = "Private renamed topic",
+            topicHints = setOf("Private renamed topic"),
+            metadata = mapOf(
+                "tracking_paused" to "true",
+                "global_visibility" to "excluded",
+                "origin" to "conversation_lifecycle"
+            )
+        ))!!
+
+        assertEquals(GlobalConversationSensitivity.SESSION_PRIVATE, normalized.sensitivity)
+        assertEquals("", normalized.content)
+        assertEquals("", normalized.contentRef)
+        assertEquals("", normalized.conversationTitle)
+        assertTrue(normalized.topicHints.isEmpty())
+        assertEquals("true", normalized.metadata["tracking_paused"])
+        assertFalse(normalized.metadata.containsKey(GlobalEventPublisherContract.METADATA_PUBLISHER_ID))
+    }
+
+    @Test
     fun credentialMetadataIsRemovedWithoutHidingAuthorizationState() {
         val normalized = GlobalConversationEventPolicy.normalize(event().copy(metadata = mapOf(
             "authorization_scope" to "microphone",

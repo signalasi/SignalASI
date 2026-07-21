@@ -7,23 +7,33 @@ object GlobalConversationEventPolicy {
         val id = boundedIdentifier(event.id)
         val conversationId = boundedIdentifier(event.conversationId)
         if (id.isBlank() || conversationId.isBlank()) return null
-        val sessionPrivate = event.sensitivity == GlobalConversationSensitivity.SESSION_PRIVATE
-        if (sessionPrivate && event.type !in PRIVATE_LIFECYCLE_EVENT_TYPES) return null
+        val lifecycleOnly = event.sensitivity == GlobalConversationSensitivity.SESSION_PRIVATE ||
+            GlobalEventPublisherContract.requiresLifecycleSanitization(event)
+        if (lifecycleOnly && event.type !in PRIVATE_LIFECYCLE_EVENT_TYPES) return null
+        if (!lifecycleOnly && !GlobalEventPublisherContract.isAuthorizedForGlobalStream(event)) return null
+        val sourceMetadata = if (lifecycleOnly) {
+            event.metadata
+        } else {
+            GlobalEventPublisherContract.canonicalMetadata(event)
+        }
         return event.copy(
             id = id,
             conversationId = conversationId,
             messageId = boundedIdentifier(event.messageId),
             timestampMillis = event.timestampMillis.coerceAtLeast(0L),
-            content = if (sessionPrivate) "" else cleanText(event.content, MAX_CONTENT_CHARACTERS),
-            contentRef = if (sessionPrivate) "" else sanitizeContentRef(event.contentRef),
-            conversationTitle = if (sessionPrivate) "" else cleanText(event.conversationTitle, MAX_TITLE_CHARACTERS),
-            topicHints = if (sessionPrivate) emptySet() else event.topicHints.asSequence()
+            content = if (lifecycleOnly) "" else cleanText(event.content, MAX_CONTENT_CHARACTERS),
+            contentRef = if (lifecycleOnly) "" else sanitizeContentRef(event.contentRef),
+            conversationTitle = if (lifecycleOnly) "" else cleanText(event.conversationTitle, MAX_TITLE_CHARACTERS),
+            topicHints = if (lifecycleOnly) emptySet() else event.topicHints.asSequence()
                 .map { cleanText(it, MAX_TOPIC_HINT_CHARACTERS) }
                 .filter(String::isNotBlank)
                 .distinct()
                 .take(MAX_TOPIC_HINTS)
                 .toSet(),
-            metadata = normalizeMetadata(event.metadata, sessionPrivate),
+            sensitivity = if (lifecycleOnly) {
+                GlobalConversationSensitivity.SESSION_PRIVATE
+            } else event.sensitivity,
+            metadata = normalizeMetadata(sourceMetadata, lifecycleOnly),
             causalEventIds = normalizeIdentifiers(event.causalEventIds),
             retractedEventIds = normalizeIdentifiers(event.retractedEventIds)
         )

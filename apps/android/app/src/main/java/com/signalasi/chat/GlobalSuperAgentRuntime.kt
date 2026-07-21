@@ -890,7 +890,7 @@ class GlobalAgentRepository(context: Context) {
         val id = json.optString("id")
         val conversationId = json.optString("conversation_id")
         if (id.isBlank() || conversationId.isBlank()) return null
-        return GlobalConversationEvent(
+        return GlobalConversationEventPolicy.normalize(GlobalConversationEvent(
             id = id,
             type = enumValue(json.optString("type"), GlobalConversationEventType.MESSAGE_CREATED),
             conversationId = conversationId,
@@ -905,7 +905,7 @@ class GlobalAgentRepository(context: Context) {
             metadata = json.optJSONObject("metadata").stringMap(),
             causalEventIds = json.optJSONArray("causal_event_ids").strings().toSet(),
             retractedEventIds = json.optJSONArray("retracted_event_ids").strings().toSet()
-        )
+        ))
     }
 
     private fun encodeEventFailure(failure: GlobalEventProcessingFailure): JSONObject = JSONObject()
