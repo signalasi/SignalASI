@@ -36,6 +36,7 @@ const backendFiles = [
   "agent_task_manager.py",
   "codex_app_server.py",
   "custom_agent_stdio.py",
+  "desktop_agent_adapters.py",
   "desktop_file_tools.py",
   "file_server.py",
   "link_delivery.py",

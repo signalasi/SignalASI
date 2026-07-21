@@ -32,42 +32,62 @@ fi
 rm -rf "$source_root"
 mkdir -p "$source_root/bin" "$source_root/lib" "$source_root/share/licenses/browser-automation" "$(dirname "$output")"
 
+container_script="$work_root/build-browser-automation-root.sh"
+cat >"$container_script" <<'CONTAINER_SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+npm install --prefix /tmp/signalasi --omit=dev --ignore-scripts "playwright@${PLAYWRIGHT_VERSION}"
+mkdir -p /out/lib/node_modules /out/lib/runtime-libs /out/share
+cp -aL /tmp/signalasi/node_modules/playwright /tmp/signalasi/node_modules/playwright-core /out/lib/node_modules/
+mkdir -p /out/lib/ms-playwright
+shopt -s nullglob
+chromium_roots=(/ms-playwright/chromium-*)
+headless_roots=(/ms-playwright/chromium_headless_shell-*)
+ffmpeg_roots=(/ms-playwright/ffmpeg-*)
+if [[ ${#chromium_roots[@]} -eq 0 || ${#headless_roots[@]} -eq 0 || ${#ffmpeg_roots[@]} -eq 0 ]]; then
+  echo "The pinned Playwright image is missing Chromium runtime components." >&2
+  exit 2
+fi
+browser_roots=("${chromium_roots[@]}" "${headless_roots[@]}" "${ffmpeg_roots[@]}")
+cp -aL "${browser_roots[@]}" /out/lib/ms-playwright/
+[[ ! -d /etc/fonts ]] || cp -aL /etc/fonts /out/lib/fontconfig
+[[ ! -d /usr/share/fonts ]] || cp -aL /usr/share/fonts /out/share/fonts
+
+while IFS= read -r binary; do
+  ldd_output="$(ldd "$binary" 2>/dev/null || true)"
+  [[ -n "$ldd_output" ]] || continue
+  awk '
+    /=> \/[^ ]+/ { print $3 }
+    /^\/[[:graph:]]+/ { print $1 }
+  ' <<<"$ldd_output"
+done < <(find "${browser_roots[@]}" -type f -perm /111 -print) | sort -u | while IFS= read -r library; do
+  [[ -f "$library" ]] || continue
+  case "$(basename "$library")" in
+    ld-linux-*|libc.so.*) continue ;;
+  esac
+  destination="/out/lib/runtime-libs/$(basename "$library")"
+  if [[ -e "$destination" ]]; then
+    cmp -s "$library" "$destination" || {
+      echo "Runtime library collision: $(basename "$library")" >&2
+      exit 2
+    }
+  else
+    cp -aL "$library" "$destination"
+  fi
+done
+
+find /out -xdev -type f -perm /6000 -exec chmod a-s {} +
+chmod -R o-w /out
+CONTAINER_SCRIPT
+chmod 0755 "$container_script"
+
 docker run --rm --platform linux/arm64 \
   -e PLAYWRIGHT_VERSION="$playwright_version" \
   -v "$source_root:/out" \
+  -v "$container_script:/tmp/signalasi-build-browser.sh:ro" \
   "$playwright_image" \
-  bash -euo pipefail -c '
-    npm install --prefix /tmp/signalasi --omit=dev --ignore-scripts "playwright@${PLAYWRIGHT_VERSION}"
-    mkdir -p /out/lib/node_modules /out/lib/runtime-libs /out/share
-    cp -aL /tmp/signalasi/node_modules/playwright /tmp/signalasi/node_modules/playwright-core /out/lib/node_modules/
-    cp -aL /ms-playwright /out/lib/ms-playwright
-    [[ ! -d /etc/fonts ]] || cp -aL /etc/fonts /out/lib/fontconfig
-    [[ ! -d /usr/share/fonts ]] || cp -aL /usr/share/fonts /out/share/fonts
-
-    while IFS= read -r binary; do
-      ldd "$binary" 2>/dev/null | awk '
-        /=> \/[^ ]+/ { print $3 }
-        /^\/[[:graph:]]+/ { print $1 }
-      '
-    done < <(find /ms-playwright -type f -perm /111 -print) | sort -u | while IFS= read -r library; do
-      [[ -f "$library" ]] || continue
-      case "$(basename "$library")" in
-        ld-linux-*|libc.so.*) continue ;;
-      esac
-      destination="/out/lib/runtime-libs/$(basename "$library")"
-      if [[ -e "$destination" ]]; then
-        cmp -s "$library" "$destination" || {
-          echo "Runtime library collision: $(basename "$library")" >&2
-          exit 2
-        }
-      else
-        cp -aL "$library" "$destination"
-      fi
-    done
-
-    find /out -xdev -type f -perm /6000 -exec chmod a-s {} +
-    chmod -R o-w /out
-  '
+  bash /tmp/signalasi-build-browser.sh
 
 cat >"$source_root/bin/signalasi-browser" <<'EOF'
 #!/bin/sh
