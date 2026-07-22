@@ -546,7 +546,7 @@ class AgentRuntimeGuestBridge(
         )
 
     companion object {
-        private const val HANDSHAKE_TIMEOUT_MILLIS = 2_000L
+        private const val HANDSHAKE_TIMEOUT_MILLIS = 15_000L
         private const val HEALTH_CACHE_MILLIS = 5_000L
         private const val READER_POLL_MILLIS = 30_000L
         private const val MAX_PENDING_REQUESTS = 64

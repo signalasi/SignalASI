@@ -46,6 +46,8 @@ class AgentQemuRuntimeEngineTest {
 
         val command = plan.command.joinToString(" ")
         assertTrue(command.contains("-nic none"))
+        assertTrue(command.contains("server=on,wait=on"))
+        assertFalse(command.contains("server=on,wait=off"))
         assertTrue(command.contains("readonly=on"))
         assertTrue(command.contains("mount_tag=signalasi_workspaces"))
         assertTrue(command.contains("name=opt/com.signalasi/runtime-session,file=${sessionFile.absolutePath}"))
