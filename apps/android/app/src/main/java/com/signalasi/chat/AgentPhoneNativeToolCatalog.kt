@@ -562,43 +562,47 @@ object AgentPhoneNativeToolCatalog {
         delegate: AgentActionExecutor,
         screenProvider: (AgentNativeToolInvocation) -> ScreenContext,
         statusProvider: () -> List<AgentPhoneCapabilityStatus>
-    ): List<AgentNativeToolDefinition> = supportedActionKinds.map { kind ->
-        val capabilityIds = capabilitiesFor(kind)
-        val boundaries = capabilityIds.map(AgentPhoneCapabilityCatalog::find)
-        val descriptor = AgentNativeToolDescriptor(
-            id = AgentNativeToolAgentActionAdapter.defaultToolId(kind),
-            version = VERSION,
-            title = actionTitle(kind),
-            description = actionDescription(kind),
-            location = nativeLocation(boundaries),
-            inputSchema = actionInputSchema(kind),
-            outputSchema = actionOutputSchema(),
-            risk = boundaries.maxByOrNull { it.risk.weight }?.risk.toNativeRisk(),
-            capabilities = capabilityIds.mapTo(linkedSetOf()) { it.capabilityWireId() },
-            requiredPermissions = permissionRequirements(boundaries),
-            requiredConsents = consentRequirements(boundaries),
-            timeoutMillis = 15_000,
-            idempotency = AgentNativeToolIdempotency.NON_IDEMPOTENT,
-            availability = capabilityAvailability(capabilityIds, statusProvider())
-        )
-        val adapted = AgentActionNativeToolExecutor.forKind(delegate, kind, screenProvider)
-        AgentNativeToolDefinition(
-            descriptor = descriptor,
-            executor = AgentNativeToolExecutor { invocation ->
-                boundedActionResult(adapted.execute(invocation))
-            },
-            validator = BoundedActionValidator,
-            executorId = ACTION_EXECUTOR_ID,
-            provenanceMetadata = mapOf(
-                "adapter" to AgentActionNativeToolExecutor::class.java.name,
-                "delegate_contract" to AgentActionExecutor::class.java.name,
-                "legacy_action_kind" to kind.name,
-                "result_policy" to "bounded-v1"
-            ),
-            availabilityProvider = AgentNativeToolAvailabilityProvider {
-                capabilityAvailability(capabilityIds, statusProvider())
-            }
-        )
+    ): List<AgentNativeToolDefinition> {
+        val cachedStatuses = CachedPhoneCapabilityStatuses(statusProvider)
+        val initialStatuses = cachedStatuses.current()
+        return supportedActionKinds.map { kind ->
+            val capabilityIds = capabilitiesFor(kind)
+            val boundaries = capabilityIds.map(AgentPhoneCapabilityCatalog::find)
+            val descriptor = AgentNativeToolDescriptor(
+                id = AgentNativeToolAgentActionAdapter.defaultToolId(kind),
+                version = VERSION,
+                title = actionTitle(kind),
+                description = actionDescription(kind),
+                location = nativeLocation(boundaries),
+                inputSchema = actionInputSchema(kind),
+                outputSchema = actionOutputSchema(),
+                risk = boundaries.maxByOrNull { it.risk.weight }?.risk.toNativeRisk(),
+                capabilities = capabilityIds.mapTo(linkedSetOf()) { it.capabilityWireId() },
+                requiredPermissions = permissionRequirements(boundaries),
+                requiredConsents = consentRequirements(boundaries),
+                timeoutMillis = 15_000,
+                idempotency = AgentNativeToolIdempotency.NON_IDEMPOTENT,
+                availability = capabilityAvailability(capabilityIds, initialStatuses)
+            )
+            val adapted = AgentActionNativeToolExecutor.forKind(delegate, kind, screenProvider)
+            AgentNativeToolDefinition(
+                descriptor = descriptor,
+                executor = AgentNativeToolExecutor { invocation ->
+                    boundedActionResult(adapted.execute(invocation))
+                },
+                validator = BoundedActionValidator,
+                executorId = ACTION_EXECUTOR_ID,
+                provenanceMetadata = mapOf(
+                    "adapter" to AgentActionNativeToolExecutor::class.java.name,
+                    "delegate_contract" to AgentActionExecutor::class.java.name,
+                    "legacy_action_kind" to kind.name,
+                    "result_policy" to "bounded-v1"
+                ),
+                availabilityProvider = AgentNativeToolAvailabilityProvider {
+                    capabilityAvailability(capabilityIds, cachedStatuses.current())
+                }
+            )
+        }
     }
 
     private fun <T> workspaceDefinition(
@@ -1471,4 +1475,33 @@ object AgentPhoneNativeToolCatalog {
             AgentPhoneCapabilityAvailability.BLOCKED_BY_POLICY,
             AgentPhoneCapabilityAvailability.UNKNOWN -> AgentNativeToolAvailabilityStatus.UNAVAILABLE
         }
+}
+
+private class CachedPhoneCapabilityStatuses(
+    private val source: () -> List<AgentPhoneCapabilityStatus>,
+    private val ttlMillis: Long = 5_000L,
+    private val clock: () -> Long = System::currentTimeMillis
+) {
+    @Volatile private var snapshot: Snapshot? = null
+
+    fun current(): List<AgentPhoneCapabilityStatus> {
+        val now = clock().coerceAtLeast(0L)
+        snapshot?.takeIf { cached ->
+            now >= cached.createdAtMillis && now - cached.createdAtMillis <= ttlMillis
+        }?.let { return it.statuses }
+        return synchronized(this) {
+            val refreshedAt = clock().coerceAtLeast(0L)
+            snapshot?.takeIf { cached ->
+                refreshedAt >= cached.createdAtMillis &&
+                    refreshedAt - cached.createdAtMillis <= ttlMillis
+            }?.statuses ?: source().toList().also { statuses ->
+                snapshot = Snapshot(refreshedAt, statuses)
+            }
+        }
+    }
+
+    private data class Snapshot(
+        val createdAtMillis: Long,
+        val statuses: List<AgentPhoneCapabilityStatus>
+    )
 }
