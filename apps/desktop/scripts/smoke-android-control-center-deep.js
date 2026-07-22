@@ -153,6 +153,22 @@ function findNode(xml, candidates, preferLast = false) {
   return preferLast ? partial[partial.length - 1] : partial[0];
 }
 
+function tappableNode(xml, node) {
+  if (!node?.bounds) return node;
+  const [left, top, right, bottom] = node.bounds;
+  const containers = uiNodes(xml).filter(candidate => {
+    if (!candidate.bounds || candidate.clickable !== "true" || candidate.enabled === "false") return false;
+    const [candidateLeft, candidateTop, candidateRight, candidateBottom] = candidate.bounds;
+    return candidateLeft <= left && candidateTop <= top && candidateRight >= right && candidateBottom >= bottom;
+  });
+  containers.sort((first, second) => {
+    const firstArea = (first.bounds[2] - first.bounds[0]) * (first.bounds[3] - first.bounds[1]);
+    const secondArea = (second.bounds[2] - second.bounds[0]) * (second.bounds[3] - second.bounds[1]);
+    return firstArea - secondArea;
+  });
+  return containers[0] || node;
+}
+
 async function scrollToText(candidates, name) {
   for (let attempt = 0; attempt < 7; attempt += 1) {
     const xml = await dumpUi(`${name}-${attempt}`);
@@ -168,7 +184,13 @@ async function tapText(candidates, name, scroll = false, preferLast = false) {
     const xml = await dumpUi(`${name}-${attempt}`);
     const node = findNode(xml, candidates, preferLast);
     if (node?.bounds) {
-      const [left, top, right, bottom] = node.bounds;
+      const target = tappableNode(xml, node);
+      const [left, top, right, bottom] = target.bounds;
+      const inputShown = keyboardVisible();
+      if (process.env.SIGNALASI_CC_TRACE === "1") {
+        process.stdout.write(`[tap] ${name} text=${node.text || node["content-desc"] || ""} node=${node.bounds.join(",")} target=${target.bounds.join(",")} keyboard=${inputShown}\n`);
+      }
+      await sleep(250);
       adb(["shell", "input", "tap", String(Math.round((left + right) / 2)), String(Math.round((top + bottom) / 2))]);
       await sleep(550);
       return;
@@ -208,6 +230,7 @@ async function expectNear(labelCandidates, expectedCandidates, name) {
 }
 
 async function openPage(page) {
+  await dismissKeyboard();
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const focused = currentPackage();
     if (!focused || focused === packageName) break;
@@ -218,9 +241,11 @@ async function openPage(page) {
   adb(["shell", "am", "force-stop", packageName]);
   adb(["shell", "am", "start", "-W", "-n", activityName, "--es", "signalasi_debug_control_center_page", page]);
   await sleep(750);
+  await dismissKeyboard();
 }
 
 async function openDebugBoolean(extra) {
+  await dismissKeyboard();
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const focused = currentPackage();
     if (!focused || focused === packageName) break;
@@ -231,12 +256,35 @@ async function openDebugBoolean(extra) {
   adb(["shell", "am", "force-stop", packageName]);
   adb(["shell", "am", "start", "-W", "-n", activityName, "--ez", extra, "true"]);
   await sleep(750);
+  await dismissKeyboard();
 }
 
 function currentPackage() {
   const output = adb(["shell", "dumpsys", "window"]);
-  const match = output.match(/mCurrentFocus=.*?\s([\w.]+)\//) || output.match(/mFocusedApp=.*?\s([\w.]+)\//);
+  const match = output.match(/topResumedActivity=.*?\s([\w.]+)\//) ||
+    output.match(/mCurrentFocus=.*?\s([\w.]+)\//) ||
+    output.match(/mFocusedApp=.*?\s([\w.]+)\//) ||
+    output.match(/mTopFullscreenOpaqueWindowState=.*?\s([\w.]+)\//);
   return match?.[1] || "";
+}
+
+function keyboardVisible() {
+  try {
+    const output = adb(["shell", "dumpsys", "input_method"]);
+    return /mInputShown=true|mShowRequested=true|mWindowVisible=true|mImeWindowVis=0x[1-9a-f]/i.test(output);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function dismissKeyboard() {
+  if (!keyboardVisible()) return;
+  adb(["shell", "input", "keyevent", "KEYCODE_BACK"]);
+  await sleep(350);
+}
+
+function visiblePackages(xml) {
+  return [...new Set(uiNodes(xml).map(node => node.package).filter(Boolean))];
 }
 
 function ensureAppHealthy() {
@@ -354,11 +402,24 @@ async function debugThemeSnapshot(mode) {
 }
 
 async function expectSystemPackage(name) {
-  await sleep(500);
-  const pkg = currentPackage();
-  if (!pkg || pkg === packageName) throw new Error(`${name} did not open an Android system surface; current package=${pkg}`);
-  adb(["shell", "input", "keyevent", "KEYCODE_BACK"]);
-  await sleep(450);
+  let observed = "";
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    await sleep(300);
+    const pkg = currentPackage();
+    let packages = [];
+    try {
+      packages = visiblePackages(await dumpUi(`system-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${attempt}`));
+    } catch (_) {
+      // A system transition may temporarily make UIAutomator unavailable.
+    }
+    observed = [...new Set([pkg, ...packages].filter(Boolean))].join(",");
+    if ([pkg, ...packages].some(value => value && value !== packageName && value !== "android")) {
+      adb(["shell", "input", "keyevent", "KEYCODE_BACK"]);
+      await sleep(450);
+      return;
+    }
+  }
+  throw new Error(`${name} did not open an Android system surface; observed packages=${observed}`);
 }
 
 async function headerBack(expected, name) {
