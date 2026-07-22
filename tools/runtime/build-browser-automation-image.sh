@@ -45,10 +45,12 @@ cp -aL /ms-playwright /out/lib/ms-playwright
 [[ ! -d /usr/share/fonts ]] || cp -aL /usr/share/fonts /out/share/fonts
 
 while IFS= read -r binary; do
-  ldd "$binary" 2>/dev/null | awk '
+  ldd_output="$(ldd "$binary" 2>/dev/null || true)"
+  [[ -n "$ldd_output" ]] || continue
+  awk '
     /=> \/[^ ]+/ { print $3 }
     /^\/[[:graph:]]+/ { print $1 }
-  '
+  ' <<<"$ldd_output"
 done < <(find /ms-playwright -type f -perm /111 -print) | sort -u | while IFS= read -r library; do
   [[ -f "$library" ]] || continue
   case "$(basename "$library")" in
