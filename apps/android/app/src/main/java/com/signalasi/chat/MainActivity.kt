@@ -15504,9 +15504,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             clipToOutline = true
         }
-        val screenshotView = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            contentDescription = getString(R.string.desktop_control_screen_content_description)
+        val screenshotView = DesktopRemoteScreenView(this).apply {
+            setScreenContentDescription(getString(R.string.desktop_control_screen_content_description))
         }
         screenshotFrame.addView(screenshotView, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
@@ -15530,21 +15529,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 screenshot.jpegBytes,
                 0,
                 screenshot.jpegBytes.size
-            )?.let(screenshotView::setImageBitmap)
+            )?.let(screenshotView::setScreenshot)
             placeholder.visibility = View.GONE
             if (snapshot.authorized) {
-                screenshotView.setOnTouchListener { view, event ->
-                    if (event.action != MotionEvent.ACTION_UP) return@setOnTouchListener true
-                    mapDesktopScreenshotPoint(view as ImageView, event, screenshot)?.let { (x, y) ->
-                        if (DesktopRemoteControl.click(device.id, x, y)) {
-                            Toast.makeText(
-                                this@MainActivity,
-                                getString(R.string.desktop_control_click_sent, x, y),
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
+                screenshotView.onImageTap = { xRatio, yRatio ->
+                    val x = (xRatio * screenshot.originalWidth).roundToInt()
+                        .coerceIn(0, screenshot.originalWidth - 1)
+                    val y = (yRatio * screenshot.originalHeight).roundToInt()
+                        .coerceIn(0, screenshot.originalHeight - 1)
+                    if (DesktopRemoteControl.click(device.id, x, y)) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            getString(R.string.desktop_control_click_sent, x, y),
+                            Toast.LENGTH_SHORT
+                        ).show()
                     }
-                    true
                 }
             }
         }
@@ -15732,30 +15731,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 Toast.makeText(this@MainActivity, getString(R.string.desktop_control_request_failed), Toast.LENGTH_SHORT).show()
             }
         }
-    }
-
-    private fun mapDesktopScreenshotPoint(
-        view: ImageView,
-        event: MotionEvent,
-        screenshot: DesktopControlScreenshot
-    ): Pair<Int, Int>? {
-        if (view.width <= 0 || view.height <= 0) return null
-        val scale = minOf(
-            view.width.toFloat() / screenshot.width.toFloat(),
-            view.height.toFloat() / screenshot.height.toFloat()
-        )
-        val displayedWidth = screenshot.width * scale
-        val displayedHeight = screenshot.height * scale
-        val left = (view.width - displayedWidth) / 2f
-        val top = (view.height - displayedHeight) / 2f
-        if (event.x !in left..(left + displayedWidth) || event.y !in top..(top + displayedHeight)) return null
-        val imageX = (event.x - left) / scale
-        val imageY = (event.y - top) / scale
-        val originalX = (imageX * screenshot.originalWidth / screenshot.width).roundToInt()
-            .coerceIn(0, screenshot.originalWidth - 1)
-        val originalY = (imageY * screenshot.originalHeight / screenshot.height).roundToInt()
-            .coerceIn(0, screenshot.originalHeight - 1)
-        return originalX to originalY
     }
 
     private fun desktopControlStatusLabel(status: String): String = getString(
