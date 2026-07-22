@@ -3,6 +3,7 @@ package com.signalasi.chat
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Comparator
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -93,6 +94,26 @@ class AgentPhoneNativeToolCatalogTest {
         }
 
         assertEquals(expected, AgentPhoneNativeToolCatalog.defaultToolIds)
+    }
+
+    @Test
+    fun probesPhoneCapabilitiesOncePerCatalogSnapshot() {
+        val probes = AtomicInteger()
+        val statuses = readyCapabilityStatuses()
+        val registry = AgentPhoneNativeToolCatalog.createRegistry(
+            workspaceFileTools = fileTools,
+            actionExecutor = successfulActionExecutor(),
+            screenProvider = { ScreenContext("SignalASI", pageTitle = "Agent") },
+            capabilityStatusProvider = {
+                probes.incrementAndGet()
+                statuses
+            }
+        )
+
+        registry.descriptors()
+        registry.descriptors()
+
+        assertEquals(1, probes.get())
     }
 
     @Test
