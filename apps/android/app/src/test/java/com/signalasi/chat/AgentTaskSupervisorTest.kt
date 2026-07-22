@@ -234,6 +234,34 @@ class AgentTaskSupervisorTest {
         supervisor.close()
     }
 
+    @Test
+    fun resumingAStalledTaskPublishesRecoveredSignal() = runBlocking {
+        var now = 1_000L
+        val store = InMemoryAgentWorkspaceStore(clock = { now })
+        store.upsert(workspace("resume-stalled", status = AgentWorkspaceStatus.RUNNING))
+        val signals = Collections.synchronizedList(mutableListOf<AgentTaskLivenessSignal>())
+        val supervisor = AgentTaskSupervisor(
+            workspaceStore = store,
+            clock = { now },
+            livenessPolicy = livenessPolicy(),
+            livenessListener = AgentTaskLivenessListener { signals += it }
+        )
+
+        now = 1_011L
+        supervisor.sweepLiveness()
+        supervisor.resume(
+            workspaceId = "workspace-resume-stalled",
+            hook = AgentTaskResumeHook { _, _ -> }
+        ).join()
+
+        assertEquals(
+            listOf(AgentTaskLivenessSignalKind.STALLED, AgentTaskLivenessSignalKind.RECOVERED),
+            signals.map(AgentTaskLivenessSignal::kind)
+        )
+        assertEquals(AgentWorkspaceStatus.COMPLETED, store.find("workspace-resume-stalled")?.status)
+        supervisor.shutdown()
+    }
+
     private suspend fun awaitCondition(condition: () -> Boolean) {
         withTimeout(TEST_TIMEOUT_MILLIS) {
             while (!condition()) delay(10L)
