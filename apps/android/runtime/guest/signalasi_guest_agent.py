@@ -429,7 +429,7 @@ class GuestService:
                     "hello_ack",
                     {
                         "guest_api_version": PROTOCOL_VERSION,
-                        "guest_version": "1.0.0",
+                        "guest_version": "1.1.0",
                         "ready": ready,
                         "reason": reason,
                         "capabilities": [
@@ -437,6 +437,7 @@ class GuestService:
                             "runtime.cancel",
                             "runtime.progress",
                             "runtime.concurrent",
+                            "runtime.secret_environment",
                         ],
                     },
                 )

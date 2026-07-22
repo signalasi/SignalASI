@@ -637,12 +637,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun startMessageService() {
-        val intent = Intent(this, MessageService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
+        // MainActivity is visible here, so avoid starting the foreground-service deadline
+        // before the service's main-thread lifecycle callback can run.
+        startService(Intent(this, MessageService::class.java))
     }
 
     private fun requestAgentNotificationPermissionIfNeeded() {
@@ -16961,11 +16958,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     val refreshIntent = Intent(this@MainActivity, MessageService::class.java).apply {
                         action = MessageService.ACTION_REFRESH_LANGUAGE
                     }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        startForegroundService(refreshIntent)
-                    } else {
-                        startService(refreshIntent)
-                    }
+                    startService(refreshIntent)
                     Toast.makeText(this@MainActivity, getString(R.string.language_changed), Toast.LENGTH_SHORT).show()
                     recreate()
                 }

@@ -38,10 +38,10 @@ class AgentNativeToolsDeviceTest {
     @Before
     fun setUp() {
         val context = instrumentation.targetContext
-        context.startActivity(
+        instrumentation.startActivitySync(
             Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         )
-        SystemClock.sleep(800)
+        instrumentation.waitForIdleSync()
         registry = AgentPhoneNativeToolCatalog.defaultRegistry(
             context = context,
             screenProvider = {
@@ -62,7 +62,7 @@ class AgentNativeToolsDeviceTest {
     @Test
     fun testAllRegisteredPhoneToolsOnDevice() {
         val descriptors = registry.descriptors()
-        assertEquals("The native tool inventory changed; update the device matrix", 101, descriptors.size)
+        assertEquals("The native tool inventory changed; update the device matrix", 118, descriptors.size)
 
         runWorkspaceLifecycle()
         descriptors

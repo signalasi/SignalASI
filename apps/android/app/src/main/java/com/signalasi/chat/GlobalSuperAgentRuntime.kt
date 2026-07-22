@@ -3498,7 +3498,7 @@ object GlobalConversationEventBus {
         val intent = Intent(context.applicationContext, MessageService::class.java)
             .setAction(MessageService.ACTION_PROCESS_GLOBAL_AGENT)
         val started = runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !AppForegroundTracker.isForeground()) {
                 context.applicationContext.startForegroundService(intent)
             } else {
                 context.applicationContext.startService(intent)
