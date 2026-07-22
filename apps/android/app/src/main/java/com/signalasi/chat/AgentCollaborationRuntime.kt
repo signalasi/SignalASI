@@ -112,6 +112,7 @@ interface AgentTeamExecutionStore : AgentSubagentEventHook {
     fun snapshots(): List<AgentTeamExecutionSnapshot>
     fun applyLateResponse(record: AgentManagedResponseRecord): Boolean
     fun markNonTerminalInterrupted(nowMillis: Long = System.currentTimeMillis()): List<AgentTeamExecutionSnapshot>
+    fun remove(supervisorRunId: String)
     fun clear()
 }
 
@@ -175,6 +176,11 @@ class InMemoryAgentTeamExecutionStore : AgentTeamExecutionStore {
             )
         }
         return snapshots().filter { it.state == AgentTeamExecutionState.INTERRUPTED }
+    }
+
+    @Synchronized
+    override fun remove(supervisorRunId: String) {
+        records.remove(supervisorRunId)
     }
 
     @Synchronized
@@ -262,6 +268,11 @@ class EncryptedAgentTeamExecutionStore(context: Context) : AgentTeamExecutionSto
         save(updated)
         return updated.map(AgentTeamExecutionRecord::toSnapshot)
             .filter { it.state == AgentTeamExecutionState.INTERRUPTED }
+    }
+
+    @Synchronized
+    override fun remove(supervisorRunId: String) {
+        save(load().filterNot { it.request.runId == supervisorRunId })
     }
 
     @Synchronized

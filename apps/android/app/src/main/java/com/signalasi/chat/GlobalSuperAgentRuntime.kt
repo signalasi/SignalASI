@@ -1610,7 +1610,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     private val proactiveDiscoveryCoordinator by lazy { GlobalProactiveDiscoveryCoordinator(appContext) }
     private val realtimeContext by lazy { GlobalRealtimeContextProvider(appContext) }
     private val modelCallBudget by lazy { GlobalModelCallBudgetStore(appContext) }
-    private val agentTeamController by lazy { AgentProductionTeamController(appContext) }
+    private val agentTeamController = AgentProductionTeamController(appContext)
 
     init {
         val settings = repository.settings()
