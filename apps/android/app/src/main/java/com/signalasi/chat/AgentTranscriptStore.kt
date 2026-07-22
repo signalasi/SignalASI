@@ -162,6 +162,14 @@ object AgentTranscriptPresentationPolicy {
         manuallyCollapsedWhileActive: Boolean
     ): Boolean = if (completed) manuallyExpanded else !manuallyCollapsedWhileActive
 
+    fun shouldRenderToolCompletion(
+        actionKind: AgentActionKind?,
+        succeeded: Boolean,
+        awaitingResponse: Boolean?
+    ): Boolean = !succeeded ||
+        actionKind != AgentActionKind.CALL_CONNECTOR ||
+        awaitingResponse == false
+
     fun formatElapsedSeconds(durationMillis: Long): String {
         val totalSeconds = (durationMillis.coerceAtLeast(0L) / 1_000L).coerceAtLeast(1L)
         val hours = totalSeconds / 3_600L

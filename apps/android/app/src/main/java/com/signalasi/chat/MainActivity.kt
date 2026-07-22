@@ -10355,11 +10355,29 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
             )
             AgentAuditEvent.TOOL_COMPLETED -> {
+                val actionId = auditDetailValue(entry.detail, "action")
+                val actionKind = auditDetailValue(entry.detail, "kind")
+                    .takeIf(String::isNotBlank)
+                    ?.let { value -> runCatching { AgentActionKind.valueOf(value) }.getOrNull() }
+                    ?: state.plan?.actions?.firstOrNull { it.id == actionId }?.kind
+                val awaitingResponse = when (auditDetailValue(entry.detail, "awaiting_response")) {
+                    "true" -> true
+                    "false" -> false
+                    else -> null
+                }
                 val target = agentTraceTargetLabel(
                     auditDetailValue(entry.detail, "target").ifBlank { route }
                 )
                 val duration = auditDetailValue(entry.detail, "duration_ms").toLongOrNull() ?: 0L
                 val succeeded = auditDetailValue(entry.detail, "success") == "true"
+                if (!AgentTranscriptPresentationPolicy.shouldRenderToolCompletion(
+                        actionKind = actionKind,
+                        succeeded = succeeded,
+                        awaitingResponse = awaitingResponse
+                    )
+                ) {
+                    return null
+                }
                 getString(
                     if (succeeded) R.string.agent_trace_tool_completed else R.string.agent_trace_tool_failed,
                     target,
