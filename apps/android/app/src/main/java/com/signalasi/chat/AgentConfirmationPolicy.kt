@@ -100,6 +100,12 @@ object AgentConfirmationPolicy {
     fun tier(action: AgentAction): AgentConfirmationTier {
         val value = searchableValue(action)
         val nativeToolId = action.parameters["tool_id"].orEmpty()
+        if (
+            nativeToolId == AgentHomeAssistantNativeTools.SERVICE_CALL &&
+            AgentHomeAssistantNativeTools.requiresAlwaysConfirmation(action.parameters["input_json"].orEmpty())
+        ) {
+            return AgentConfirmationTier.CONFIRM_ALWAYS
+        }
         if (nativeToolId in ALWAYS_CONFIRM_NATIVE_TOOL_IDS) {
             return AgentConfirmationTier.CONFIRM_ALWAYS
         }
@@ -146,6 +152,12 @@ object AgentConfirmationPolicy {
                 AgentHardwareNativeTools.INSTALLED_APPS_LIST,
                 AgentHardwareNativeTools.PACKAGE_DETAIL
             ) -> "installed_apps_read"
+            nativeToolId(action) in setOf(
+                AgentHomeAssistantNativeTools.ENTITIES_LIST,
+                AgentHomeAssistantNativeTools.ENTITY_READ
+            ) -> "home_assistant_read"
+            nativeToolId(action) == AgentHomeAssistantNativeTools.SERVICE_CALL ->
+                AgentHomeAssistantNativeTools.consentScope(action.parameters["input_json"].orEmpty())
             action.kind == AgentActionKind.CONTROL_DEVICE -> "device_control:${action.target.lowercase().trim()}"
             else -> "action:${action.kind.name.lowercase()}:${action.id.lowercase().trim()}"
         }
@@ -209,7 +221,10 @@ object AgentConfirmationPolicy {
         AgentHardwareNativeTools.INSTALLED_APPS_LIST,
         AgentHardwareNativeTools.PACKAGE_DETAIL,
         AgentAndroidSystemNativeTools.WIFI_SCAN_START,
-        AgentOnDeviceRuntimeTools.INSTALL_PACK
+        AgentOnDeviceRuntimeTools.INSTALL_PACK,
+        AgentHomeAssistantNativeTools.ENTITIES_LIST,
+        AgentHomeAssistantNativeTools.ENTITY_READ,
+        AgentHomeAssistantNativeTools.SERVICE_CALL
     )
 
     private val ALWAYS_CONFIRM_NATIVE_TOOL_IDS = setOf(
