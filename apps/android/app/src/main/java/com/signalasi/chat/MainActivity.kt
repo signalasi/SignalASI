@@ -15537,7 +15537,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         .coerceIn(0, screenshot.originalWidth - 1)
                     val y = (yRatio * screenshot.originalHeight).roundToInt()
                         .coerceIn(0, screenshot.originalHeight - 1)
-                    if (DesktopRemoteControl.click(device.id, x, y)) {
+                    if (DesktopRemoteControl.click(
+                            device.id,
+                            x,
+                            y,
+                            screenshot.originalWidth,
+                            screenshot.originalHeight
+                        )
+                    ) {
                         Toast.makeText(
                             this@MainActivity,
                             getString(R.string.desktop_control_click_sent, x, y),

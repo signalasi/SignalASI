@@ -403,10 +403,37 @@ class DesktopControlManager:
                 elif tool_id == CLICK_XY:
                     x = self._bounded_int(arguments.get("x"), "x", 0, 100_000)
                     y = self._bounded_int(arguments.get("y"), "y", 0, 100_000)
+                    coordinate_width_value = arguments.get("coordinate_width")
+                    coordinate_height_value = arguments.get("coordinate_height")
+                    if (coordinate_width_value is None) != (coordinate_height_value is None):
+                        raise DesktopControlError(
+                            "invalid_input",
+                            "coordinate_width and coordinate_height must be provided together",
+                        )
+                    coordinate_width = None
+                    coordinate_height = None
+                    if coordinate_width_value is not None:
+                        coordinate_width = self._bounded_int(
+                            coordinate_width_value, "coordinate_width", 1, 100_000
+                        )
+                        coordinate_height = self._bounded_int(
+                            coordinate_height_value, "coordinate_height", 1, 100_000
+                        )
+                        if x >= coordinate_width or y >= coordinate_height:
+                            raise DesktopControlError(
+                                "invalid_input",
+                                "Click coordinates are outside the supplied coordinate space",
+                            )
                     button = str(arguments.get("button") or "left").lower()
                     if button not in {"left", "right"}:
                         raise DesktopControlError("invalid_input", "button must be left or right")
-                    self._input.click(x, y, button)
+                    self._input.click(
+                        x,
+                        y,
+                        button,
+                        source_width=coordinate_width,
+                        source_height=coordinate_height,
+                    )
                     output = {"x": x, "y": y, "button": button}
                     screenshot = self._screenshot_provider()
                 elif tool_id == TYPE_TEXT:
@@ -766,11 +793,28 @@ class WindowsInputController:
         finally:
             user32.CloseDesktop(desktop)
 
-    def click(self, x: int, y: int, button: str) -> None:
+    def click(
+        self,
+        x: int,
+        y: int,
+        button: str,
+        *,
+        source_width: int | None = None,
+        source_height: int | None = None,
+    ) -> None:
         self._require_windows()
         user32 = ctypes.windll.user32
         width = int(user32.GetSystemMetrics(0))
         height = int(user32.GetSystemMetrics(1))
+        if source_width is not None and source_height is not None:
+            x, y = self.scale_point(
+                x,
+                y,
+                source_width=source_width,
+                source_height=source_height,
+                target_width=width,
+                target_height=height,
+            )
         if not (0 <= x < width and 0 <= y < height):
             raise DesktopControlError("invalid_input", "Click coordinates are outside the primary display")
         if not user32.SetCursorPos(x, y):
@@ -778,6 +822,28 @@ class WindowsInputController:
         down, up = (0x0002, 0x0004) if button == "left" else (0x0008, 0x0010)
         user32.mouse_event(down, 0, 0, 0, 0)
         user32.mouse_event(up, 0, 0, 0, 0)
+
+    @staticmethod
+    def scale_point(
+        x: int,
+        y: int,
+        *,
+        source_width: int,
+        source_height: int,
+        target_width: int,
+        target_height: int,
+    ) -> tuple[int, int]:
+        if min(source_width, source_height, target_width, target_height) <= 0:
+            raise DesktopControlError("invalid_input", "Desktop coordinate dimensions must be positive")
+        if not (0 <= x < source_width and 0 <= y < source_height):
+            raise DesktopControlError("invalid_input", "Click coordinates are outside the supplied coordinate space")
+        target_x = 0 if target_width == 1 or source_width == 1 else round(
+            x * (target_width - 1) / (source_width - 1)
+        )
+        target_y = 0 if target_height == 1 or source_height == 1 else round(
+            y * (target_height - 1) / (source_height - 1)
+        )
+        return target_x, target_y
 
     def scroll(self, delta: int) -> None:
         self._require_windows()

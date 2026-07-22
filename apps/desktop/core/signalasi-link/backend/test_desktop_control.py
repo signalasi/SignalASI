@@ -9,6 +9,7 @@ from desktop_control import (
     TYPE_TEXT,
     DesktopControlError,
     DesktopControlManager,
+    WindowsInputController,
 )
 
 
@@ -28,8 +29,9 @@ class FakeInput:
     def is_locked(self):
         return self.locked
 
-    def click(self, x, y, button):
+    def click(self, x, y, button, *, source_width=None, source_height=None):
         self.calls.append(("click", x, y, button))
+        self.coordinate_space = (source_width, source_height)
 
     def type_text(self, text):
         self.calls.append(("type", text))
@@ -179,6 +181,36 @@ class DesktopControlTests(unittest.TestCase):
         state_text = (Path(self.temporary.name) / "control.json").read_text(encoding="utf-8")
         self.assertNotIn(secret, state_text)
         self.assertIn("typed 41 chars", state_text)
+
+    def test_click_coordinate_space_is_forwarded_and_scaled_for_windows_dpi(self):
+        authorization = self.authorize()
+        click = self.manager.execute_request(
+            self.request(
+                authorization,
+                CLICK_XY,
+                {
+                    "x": 3000,
+                    "y": 1800,
+                    "button": "left",
+                    "coordinate_width": 3840,
+                    "coordinate_height": 2160,
+                },
+            ),
+            self.client,
+        )
+        self.assertEqual("succeeded", click["status"])
+        self.assertEqual((3840, 2160), self.input.coordinate_space)
+        self.assertEqual(
+            (1200, 719),
+            WindowsInputController.scale_point(
+                3000,
+                1800,
+                source_width=3840,
+                source_height=2160,
+                target_width=1536,
+                target_height=864,
+            ),
+        )
 
     def test_identity_mismatch_expiry_disable_and_revoke_are_rejected(self):
         authorization = self.authorize()
