@@ -30,6 +30,26 @@ fun interface AgentTaskLivenessListener {
     fun onSignal(signal: AgentTaskLivenessSignal)
 }
 
+internal object AgentTaskTerminalReplyPolicy {
+    private val terminalDedupePrefixes = listOf(
+        "result:",
+        "direct-system:",
+        "fast-local:",
+        "skill-command:",
+        "skill-result:"
+    )
+
+    fun hasTerminalReply(entries: List<AgentTranscriptEntry>, turnId: String): Boolean {
+        val cleanTurnId = turnId.trim()
+        if (cleanTurnId.isBlank()) return false
+        return entries.any { entry ->
+            entry.turnId == cleanTurnId &&
+                entry.role == AgentTranscriptRole.ASSISTANT &&
+                terminalDedupePrefixes.any(entry.dedupeKey::startsWith)
+        }
+    }
+}
+
 data class AgentTaskLivenessPolicy(
     val queuedWarningMillis: Long = 15_000L,
     val queuedTimeoutMillis: Long = 90_000L,
