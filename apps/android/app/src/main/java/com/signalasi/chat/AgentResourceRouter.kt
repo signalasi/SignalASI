@@ -110,7 +110,15 @@ object AgentConnectorRouteSelector {
         decision: AgentRoutingDecision?,
         preferredTargetId: String = ""
     ): AgentConnectorRouteSelection? {
-        val eligible = targets.filter(::isReasoningTarget)
+        val reasoningTargets = targets.filter(::hasReasoningCapability)
+        val eligible = reasoningTargets
+            .filter { target -> target.status == AgentConnectorStatus.AVAILABLE }
+            .ifEmpty {
+                // A paired Desktop can briefly look disconnected while its first status
+                // heartbeat is in flight. Keep it recoverable and let delivery/watchdog
+                // supervision determine actual reachability instead of drafting a local plan.
+                reasoningTargets.filter { target -> target.status == AgentConnectorStatus.DISCONNECTED }
+            }
         if (eligible.isEmpty()) return null
 
         val eligibleById = eligible.associateBy(AgentCallableTarget::id)
@@ -134,7 +142,13 @@ object AgentConnectorRouteSelector {
             AgentResourceCandidate(
                 resource = resource,
                 score = 0,
-                reasons = listOf("eligible_reasoning_fallback")
+                reasons = listOf(
+                    if (selectedTarget.status == AgentConnectorStatus.DISCONNECTED) {
+                        "recoverable_connector_status"
+                    } else {
+                        "eligible_reasoning_fallback"
+                    }
+                )
             )
         }
         val connectorDecision = selectedCandidate?.let { primary ->
@@ -148,9 +162,8 @@ object AgentConnectorRouteSelector {
         return AgentConnectorRouteSelection(selectedTarget, connectorDecision)
     }
 
-    private fun isReasoningTarget(target: AgentCallableTarget): Boolean =
-        target.status == AgentConnectorStatus.AVAILABLE &&
-            target.kind != AgentConnectorKind.DEVICE &&
+    private fun hasReasoningCapability(target: AgentCallableTarget): Boolean =
+        target.kind != AgentConnectorKind.DEVICE &&
             target.capabilities.any { capability ->
                 capability == AgentCapability.CHAT ||
                     capability == AgentCapability.REASONING ||
@@ -158,8 +171,14 @@ object AgentConnectorRouteSelector {
             }
 
     private fun defaultTarget(targets: List<AgentCallableTarget>): AgentCallableTarget =
-        targets.firstOrNull { it.id == "local-llm" }
+        targets.firstOrNull { target ->
+            target.id == "codex" || target.id.endsWith(":codex")
+        }
+            ?: targets.firstOrNull { it.id == "local-llm" }
             ?: targets.firstOrNull { it.kind == AgentConnectorKind.MODEL }
+            ?: targets.firstOrNull { target ->
+                target.id == "hermes" || target.id.endsWith(":hermes")
+            }
             ?: targets.firstOrNull { AgentCapability.RESEARCH in it.capabilities }
             ?: targets.first()
 }

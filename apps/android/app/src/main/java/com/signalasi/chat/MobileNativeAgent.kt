@@ -1676,6 +1676,8 @@ class MobileNativeAgent(
         val specializedContinuation = updatedPlan?.plannerProfile?.startsWith("specialized-adapter:") == true &&
             hardenedAction.requiresSpecializedContinuation()
         val replanReason = when {
+            lastActionResult?.success != true &&
+                lastActionResult?.metadata?.get("non_retriable") == "true" -> ""
             lastActionResult?.success != true && hardenedAction.isPhoneDevelopmentRuntimeHandoff() ->
                 PHONE_DEVELOPMENT_REPLAN_REASON
             lastActionResult?.success != true -> "action_failed:${hardenedAction.kind.name}"
@@ -5838,6 +5840,8 @@ interface AgentPlanner {
     fun plan(request: AgentRequest): AgentPlan
 }
 
+private const val UNAVAILABLE_REASONING_CONNECTOR_ID = "reasoning-provider-unavailable"
+
 class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner {
     override fun plan(request: AgentRequest): AgentPlan {
         AgentSpecializedAppPlanner.plan(request)?.let { specialized ->
@@ -6139,7 +6143,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 lower.contains("deepseek") ||
                 lower.contains("gemini") ||
                 lower.contains("qwen") -> if (taskRequirements.localOnly) {
-                    informationQueryAction(request) ?: draftPlanAction(request)
+                    informationQueryAction(request) ?: unavailableReasoningAction(request)
                 } else {
                     connectorAction(request, "cloud-models", "Send task to cloud model")
                 }
@@ -6153,9 +6157,9 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                     it.kind == AgentConnectorKind.DEVICE && request.goal.contains(it.title, ignoreCase = true)
                 } -> deviceAction(request)
             isInformationQuery(goal) -> informationQueryAction(request)
-                ?: draftPlanAction(request)
+                ?: unavailableReasoningAction(request)
             else -> informationQueryAction(request)
-                ?: draftPlanAction(request)
+                ?: unavailableReasoningAction(request)
         }
     }
 
@@ -6434,7 +6438,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         if (AgentTaskRequirementAnalyzer.analyze(request.goal).localOnly &&
             explicitResource?.location == AgentResourceLocation.CLOUD
         ) {
-            return draftPlanAction(request)
+            return unavailableReasoningAction(request)
         }
         val routing = context?.let { appContext ->
             AgentResourceRouter(appContext).route(
@@ -6452,13 +6456,18 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         return connectorAction(request, target.id, "Send task to ${target.title}", connectorRouting)
     }
 
-    private fun draftPlanAction(request: AgentRequest): AgentAction = AgentAction(
-        id = "draft-plan",
-        kind = AgentActionKind.DRAFT_PLAN,
-        target = "local-agent-runtime",
-        risk = riskFor(request.goal.lowercase(Locale.US)),
+    private fun unavailableReasoningAction(request: AgentRequest): AgentAction = AgentAction(
+        id = "connector-unavailable-${request.goal.hashCode().toUInt()}",
+        kind = AgentActionKind.CALL_CONNECTOR,
+        target = "Agent or model",
+        risk = AgentRisk.LOW,
         status = AgentActionStatus.PENDING_CONFIRMATION,
-        description = "Create a safe local task plan"
+        description = "Report that no reasoning provider is configured",
+        parameters = mapOf(
+            "connector_id" to UNAVAILABLE_REASONING_CONNECTOR_ID,
+            "prompt" to request.goal
+        ),
+        requiresConfirmation = false
     )
 
     private fun isInformationQuery(goal: String): Boolean {
@@ -7956,6 +7965,14 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         }.map { it.trim() }.filter { it.isNotBlank() }.distinct()
         var lastFailure = AgentActionResult(action.id, false, "No callable resource is available")
         connectorIds.forEachIndexed { index, connectorId ->
+            if (connectorId == UNAVAILABLE_REASONING_CONNECTOR_ID) {
+                return AgentActionResult(
+                    action.id,
+                    false,
+                    context.getString(R.string.agent_reasoning_provider_unavailable),
+                    metadata = mapOf("non_retriable" to "true")
+                )
+            }
             val startedAt = System.currentTimeMillis()
             val routedAction = action.copy(
                 parameters = action.parameters + mapOf(

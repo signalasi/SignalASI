@@ -15,6 +15,7 @@
     <string name="agent_camera_capturing">Capturing…</string>
     <string name="agent_camera_saved">Photo saved</string>
     <string name="agent_camera_unavailable">Camera is unavailable</string>
+    <string name="agent_reasoning_provider_unavailable">No Agent or model is currently available. Pair a Desktop Agent or configure a cloud model, then try again.</string>
     <string name="agent_camera_permission_required">Camera permission is required</string>
     <string name="agent_camera_save_failed">Could not save the photo</string>
     <string name="agent_camera_capture_failed">Could not capture the photo</string>
