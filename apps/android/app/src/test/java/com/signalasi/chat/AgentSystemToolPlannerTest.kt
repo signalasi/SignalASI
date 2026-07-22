@@ -207,6 +207,43 @@ class AgentSystemToolPlannerTest {
     }
 
     @Test
+    fun modelPlannerCannotReintroducePhoneRuntimeForCrossProductWork() {
+        val runtimeAction = AgentAction(
+            id = "runtime",
+            kind = AgentActionKind.CALL_NATIVE_TOOL,
+            target = "local-agent-runtime",
+            risk = AgentRisk.MEDIUM,
+            status = AgentActionStatus.PROPOSED,
+            description = "Run in the phone runtime",
+            parameters = mapOf("tool_id" to AgentOnDeviceRuntimeTools.EXECUTE)
+        )
+        val workspaceAction = runtimeAction.copy(
+            id = "workspace",
+            parameters = mapOf("tool_id" to AgentPhoneNativeToolCatalog.WORKSPACE_WRITE_TEXT)
+        )
+        val connectorAction = AgentAction(
+            id = "connector",
+            kind = AgentActionKind.CALL_CONNECTOR,
+            target = "Codex Agent",
+            risk = AgentRisk.LOW,
+            status = AgentActionStatus.PROPOSED,
+            description = "Send to Codex",
+            parameters = mapOf("connector_id" to "codex")
+        )
+        val projectGoal = "Comprehensively test the app and desktop, including offline recovery and UI responsiveness"
+
+        assertFalse(AgentPhoneDevelopmentPolicy.acceptsModelPlan(projectGoal, listOf(runtimeAction)))
+        assertFalse(AgentPhoneDevelopmentPolicy.acceptsModelPlan(projectGoal, listOf(workspaceAction)))
+        assertTrue(AgentPhoneDevelopmentPolicy.acceptsModelPlan(projectGoal, listOf(connectorAction)))
+        assertTrue(
+            AgentPhoneDevelopmentPolicy.acceptsModelPlan(
+                "Run a simple Python script locally on the phone and verify it",
+                listOf(runtimeAction)
+            )
+        )
+    }
+
+    @Test
     fun routesCrossProductTestingToAnAvailableConnectorInsteadOfPhoneLinux() {
         val screen = ScreenContext(foregroundApp = "com.signalasi.chat", pageTitle = "SignalASI")
         val runtime = nativeDescriptor(
