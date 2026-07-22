@@ -263,7 +263,7 @@ class GlobalProactiveDeliveryTest {
         sourceEventId = "event",
         sourceConversationId = "source",
         target = target,
-        title = "Signal insight",
+        title = "SignalASI insight",
         content = "A material result is ready.",
         topic = TOPIC,
         urgent = false,

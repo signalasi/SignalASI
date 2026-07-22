@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { createAdb } = require("./android-adb");
+const { establishFreshSecurePairing } = require("./android-live-pairing");
 
 const root = path.resolve(__dirname, "..");
 const workspaceRoot = path.resolve(root, "..");
@@ -186,34 +187,32 @@ async function main() {
   }
   adb(["shell", "am", "force-stop", packageName]);
 
-  log("scanning slim Desktop QR and verifying default connector contacts");
-  const pairingPayload = slimPairingPayload();
-  const qrB64 = Buffer.from(JSON.stringify(pairingPayload), "utf8").toString("base64");
-  adb([
-    "shell",
-    "am",
-    "start",
-    "-n",
+  log("scanning live Desktop QR and verifying confirmed connector contacts");
+  const { payload: pairingPayload } = await establishFreshSecurePairing({
+    adb,
+    packageName,
     activityName,
-    "--es",
-    "signalasi_debug_scan_payload_b64",
-    qrB64,
-    "--ez",
-    "signalasi_debug_auto_confirm_scan",
-    "true"
-  ]);
-  await sleep(3000);
-  const slimQrStore = readAppStore();
-  for (const text of [
+    log
+  });
+
+  const requiredContactText = [
     "Hermes Agent",
     "Codex Agent",
     "Claude Code",
     "Local LLM",
     "Custom Agent",
-    "SMOKE-PC",
+    pairingPayload.desktop_name,
     "pc_connector"
-  ]) {
-    requireStoreText(slimQrStore, text, "slim QR scan");
+  ];
+  let slimQrStore = "";
+  const contactsDeadline = Date.now() + 20_000;
+  while (Date.now() < contactsDeadline) {
+    slimQrStore = readAppStore();
+    if (requiredContactText.every((text) => slimQrStore.includes(text))) break;
+    await sleep(500);
+  }
+  for (const text of requiredContactText) {
+    requireStoreText(slimQrStore, text, "live QR scan");
   }
 
   log("opening AI Agent page with debug connector status");
@@ -395,7 +394,7 @@ async function main() {
   );
   await openDebugPageAndVerify(
     "signalasi_debug_open_destroy_data",
-    ["Clear All Data", "\u6e05\u9664\u6240\u6709\u6570\u636e"],
+    ["Reset Data", "\u91cd\u7f6e\u6570\u636e"],
     [
       ["Dangerous Operation", "\u5371\u9669\u64cd\u4f5c"],
       ["Regenerate Identity", "\u91cd\u65b0\u751f\u6210\u8eab\u4efd"],
@@ -418,10 +417,11 @@ async function main() {
     "signalasi_debug_open_signal_link_protocol",
     ["Signal Link Protocol"],
     [
-      ["Version v1.0.3", "\u7248\u672c v1.0.3"],
+      ["Protocol Layer", "\u534f\u8bae\u5c42"],
       ["Identity Layer", "\u8eab\u4efd\u5c42"],
       ["Session Layer", "\u4f1a\u8bdd\u5c42"],
-      ["Signal Protocol"]
+      ["Signal Protocol"],
+      ["Transport Layer", "\u4f20\u8f93\u5c42"]
     ]
   );
   await openDebugPageAndVerify(
@@ -429,9 +429,10 @@ async function main() {
     ["Advanced Options", "\u9ad8\u7ea7\u9009\u9879"],
     [
       ["Diagnostics", "\u8bca\u65ad"],
-      ["Protocol Logs", "\u534f\u8bae\u65e5\u5fd7"],
+      ["Protocol Diagnostics", "\u534f\u8bae\u8bca\u65ad"],
       ["Agent Permission Audit", "Agent \u6743\u9650\u5ba1\u8ba1"],
-      ["Experiments", "\u5b9e\u9a8c"]
+      ["Permissions &amp; Audit", "\u6743\u9650\u4e0e\u5ba1\u8ba1"],
+      ["App Maintenance", "\u5e94\u7528\u7ef4\u62a4"]
     ]
   );
 

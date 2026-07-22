@@ -305,11 +305,14 @@ class AgentOnDeviceRuntimeManager(
             engineReady && baseReady -> AgentOnDeviceRuntimeBackend.QEMU_TCG
             else -> AgentOnDeviceRuntimeBackend.NONE
         }
-        val activeBridge = bridge ?: AgentOnDeviceRuntimeBridgeRegistry.current()
-            ?: AgentOnDeviceRuntimeSupervisor.discover(appContext)
+        val activeBridge = bridge ?: AgentOnDeviceRuntimeSupervisor.discover(appContext)
         val bridgeHealth = activeBridge?.let { candidate ->
-            runCatching { candidate.health() }.getOrElse { error ->
-                AgentRuntimeBridgeHealth(false, reason = error.message ?: "Guest bridge health check failed")
+            if (bridge == null) {
+                AgentOnDeviceRuntimeSupervisor.cachedHealth(candidate)
+            } else {
+                runCatching { candidate.health() }.getOrElse { error ->
+                    AgentRuntimeBridgeHealth(false, reason = error.message ?: "Guest bridge health check failed")
+                }
             }
         }
         val lifecycle = if (bridgeHealth?.ready == true) {

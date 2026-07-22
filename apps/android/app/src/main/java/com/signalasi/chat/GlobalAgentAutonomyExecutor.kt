@@ -274,8 +274,8 @@ class GlobalCognitionExecutor(context: Context) {
                 sourceConversationId = task.sourceEvent.conversationId,
                 target = decision.mode.toTarget(),
                 title = if (GlobalAgentText.containsCjk(task.sourceEvent.content)) {
-                    "Signal \u5efa\u8bae"
-                } else "Signal insight",
+                    "SignalASI \u5efa\u8bae"
+                } else "SignalASI insight",
                 content = insight,
                 topic = merged.topic,
                 urgent = decision.mode == GlobalInterventionMode.IMMEDIATE,
@@ -1463,7 +1463,7 @@ class GlobalAutonomousRunExecutor(context: Context) {
             causalEventIds = run.causalEventIds.ifEmpty { setOf(run.sourceEventId) },
             sourceConversationId = run.sourceConversationId,
             target = if (run.actions.size >= 3) GlobalProactiveTarget.NEW_CONVERSATION else GlobalProactiveTarget.CURRENT_CONVERSATION,
-            title = if (GlobalAgentText.containsCjk(run.goal)) "Signal \u5df2\u51c6\u5907" else "Signal prepared",
+            title = if (GlobalAgentText.containsCjk(run.goal)) "SignalASI \u5df2\u51c6\u5907" else "SignalASI prepared",
             content = content,
             topic = run.topic,
             urgent = false,

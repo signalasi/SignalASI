@@ -11,8 +11,8 @@ const isWindows = process.platform === "win32";
 const gradle = path.join(androidDir, isWindows ? "gradlew.bat" : "gradlew");
 const command = isWindows ? "cmd.exe" : gradle;
 const args = isWindows
-  ? ["/c", gradle, "assembleDebug", "--no-daemon"]
-  : ["assembleDebug", "--no-daemon"];
+  ? ["/c", gradle, ":app:testDebugUnitTest", ":app:assembleDebug", "--no-daemon"]
+  : [":app:testDebugUnitTest", ":app:assembleDebug", "--no-daemon"];
 const env = { ...process.env };
 
 function setIfMissing(name, value) {

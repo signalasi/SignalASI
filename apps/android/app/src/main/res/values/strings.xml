@@ -1439,7 +1439,7 @@
     <string name="agent_runtime_artifact_saved">Saved to %1$s</string>
     <string name="agent_runtime_artifact_saved_picker">File saved</string>
     <string name="agent_runtime_artifact_save_failed">The file could not be saved. Try again.</string>
-    <string name="agent_session_created_by_agent">Signal &#183; %1$s</string>
+    <string name="agent_session_created_by_agent">SignalASI &#183; %1$s</string>
     <string name="cc_global_agent_title">Global Super Agent</string>
     <string name="cc_global_agent_subtitle">Persistent personal intelligence across every conversation and long-term goal</string>
     <string name="cc_global_agent_home_subtitle">%1$d topics &#183; %2$d goals &#183; %3$d pending insights</string>

@@ -215,6 +215,14 @@ data class GlobalUnderstanding(
 
 object GlobalAgentText {
     private val word = Regex("[\\p{L}\\p{N}][\\p{L}\\p{N}+#._-]{1,40}")
+    private val legacyProductTitles = mapOf(
+        "Signal insight" to "SignalASI insight",
+        "Signal prepared" to "SignalASI prepared",
+        "Signal digest" to "SignalASI digest",
+        "Signal 建议" to "SignalASI 建议",
+        "Signal 已准备" to "SignalASI 已准备",
+        "Signal 摘要" to "SignalASI 摘要"
+    )
     private val cjkStopWords = setOf(
         "\u8fd9\u4e2a", "\u90a3\u4e2a", "\u73b0\u5728", "\u7136\u540e", "\u53ef\u4ee5", "\u9700\u8981", "\u5e94\u8be5", "\u8fdb\u884c", "\u5df2\u7ecf", "\u8fd8\u662f", "\u4e00\u4e2a", "\u4e00\u4e9b", "\u4ec0\u4e48", "\u600e\u4e48"
     )
@@ -228,6 +236,11 @@ object GlobalAgentText {
         .replace(Regex("[a-zA-Z]:[\\\\/][^\\s]+"), " <path> ")
         .replace(Regex("\\s+"), " ")
         .trim()
+
+    fun productTitle(value: String): String {
+        val title = value.trim()
+        return legacyProductTitles[title] ?: title
+    }
 
     fun tokens(value: String): Set<String> {
         val normalized = normalize(value)
@@ -1619,7 +1632,7 @@ object GlobalProactiveMessageFactory {
             causalEventIds = event.evidenceRoots(),
             sourceConversationId = event.conversationId,
             target = target,
-            title = if (chinese) "Signal \u5efa\u8bae" else "Signal insight",
+            title = if (chinese) "SignalASI \u5efa\u8bae" else "SignalASI insight",
             content = content,
             topic = understanding.topic,
             urgent = decision.mode == GlobalInterventionMode.IMMEDIATE,

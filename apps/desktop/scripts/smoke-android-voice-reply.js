@@ -47,6 +47,36 @@ function restoreAppFile(file, snapshot) {
   adb(["shell", "run-as", packageName, "tee", file], { input: snapshot, stdio: ["pipe", "ignore", "pipe"] });
 }
 
+function decodeXml(value) {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+function prefString(xml, name, fallback) {
+  const match = xml.match(new RegExp(`<string name="${name}">([\\s\\S]*?)<\\/string>`));
+  return match ? decodeXml(match[1]) : fallback;
+}
+
+function resolveHermesContactId() {
+  const xml = readAppFile(appStorePrefs);
+  const contacts = JSON.parse(prefString(xml, "contacts", "[]"));
+  const target = contacts.find((contact) =>
+    contact.deleted !== true &&
+    contact.trust_state !== "deleted" &&
+    (
+      contact.agent_id === "hermes" ||
+      contact.id === "hermes" ||
+      String(contact.id || "").endsWith(":hermes") ||
+      String(contact.signalasi_id || "").endsWith(":hermes")
+    )
+  );
+  return String(target?.id || target?.signalasi_id || "hermes");
+}
+
 function dumpWindow(remoteName, targetPath) {
   adb(["shell", "uiautomator", "dump", `/sdcard/${remoteName}`]);
   adb(["pull", `/sdcard/${remoteName}`, targetPath]);
@@ -79,16 +109,6 @@ async function main() {
     "Segment delta confirms chat history stores the same text.",
     token
   ].join(" ");
-  const payloadB64 = Buffer.from(JSON.stringify({
-    sender: "hermes",
-    contact_id: "hermes",
-    content: longReply,
-    delivery_trace: [
-      { stage: "desktop_reply_publish_queued", detail: "smoke" },
-      { stage: "desktop_reply_broker_ack", detail: "smoke" }
-    ]
-  }), "utf8").toString("base64");
-
   log("installing debug APK");
   adb(["install", "-r", apkPath], { stdio: "inherit" });
   adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"]);
@@ -100,11 +120,37 @@ async function main() {
 
   try {
     log("opening voice page with debug pairing");
-    adb(["shell", "am", "start", "-n", activityName, "--ez", "signalasi_debug_pairing", "true"]);
-    await sleep(2500);
+    adb([
+      "shell", "am", "start", "-n", activityName,
+      "--ez", "signalasi_debug_pairing", "true",
+      "--ez", "signalasi_debug_open_voice", "true"
+    ]);
+    const readyXml = await waitForWindowText(
+      voiceDump,
+      "signalasi-voice-reply.xml",
+      "com.signalasi.chat:id/wakePage",
+      12
+    );
+    if (!readyXml.includes("com.signalasi.chat:id/wakePage")) {
+      fail(`Voice page did not open before reply injection. Dump saved at ${voiceDump}`);
+    }
+    const targetContactId = resolveHermesContactId();
+    const payloadB64 = Buffer.from(JSON.stringify({
+      sender: targetContactId,
+      contact_id: targetContactId,
+      content: longReply,
+      delivery_trace: [
+        { stage: "desktop_reply_publish_queued", detail: "smoke" },
+        { stage: "desktop_reply_broker_ack", detail: "smoke" }
+      ]
+    }), "utf8").toString("base64");
 
-    log("injecting a long Hermes reply and verifying the voice reply panel keeps the tail");
-    adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_incoming_b64", payloadB64]);
+    log(`injecting a long Hermes reply for ${targetContactId} and verifying the voice reply panel keeps the tail`);
+    adb([
+      "shell", "am", "start", "-n", activityName,
+      "--ez", "signalasi_debug_open_voice", "true",
+      "--es", "signalasi_debug_incoming_b64", payloadB64
+    ]);
     await sleep(1200);
     const voiceXml = await waitForWindowText(voiceDump, "signalasi-voice-reply.xml", token, 12);
     if (!voiceXml.includes(token)) {
@@ -112,7 +158,7 @@ async function main() {
     }
 
     log("opening Hermes chat and verifying the same reply is persisted");
-    adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_open_contact", "hermes"]);
+    adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_open_contact", targetContactId]);
     const chatXml = await waitForWindowText(chatDump, "signalasi-voice-reply-chat.xml", token, 12);
     const history = readAppFile(historyPrefs);
     fs.writeFileSync(historyDump, history);

@@ -65,7 +65,11 @@ class AgentTeamPairedProcessDeathDeviceTest {
         val observerToken = "$ACCEPTANCE_MARKER observer $supervisorRunId"
         val primaryToken = "$ACCEPTANCE_MARKER primary $supervisorRunId"
         val historyContactId = observerRegistration.agentId
-        val initialHistoryCount = historyMessageCount(context, historyContactId)
+        val initialHistoryCount = acceptanceHistoryCount(
+            context,
+            historyContactId,
+            supervisorRunId
+        )
         val seedPid = Process.myPid()
         val seedTime = System.currentTimeMillis()
         val preferences = acceptancePreferences(context)
@@ -135,7 +139,10 @@ class AgentTeamPairedProcessDeathDeviceTest {
             .putString(PRIMARY_OWNER_RUN_ID_KEY, pending.ownerRunId)
             .putLong(PRIMARY_SOURCE_MESSAGE_ID_KEY, pending.sourceMessageId)
             .commit())
-        assertEquals(initialHistoryCount, historyMessageCount(context, historyContactId))
+        assertEquals(
+            initialHistoryCount,
+            acceptanceHistoryCount(context, historyContactId, supervisorRunId)
+        )
 
         writeReport(context, JSONObject()
             .put("phase", PHASE_SEED)
@@ -157,6 +164,8 @@ class AgentTeamPairedProcessDeathDeviceTest {
         val initialHistoryCount = preferences.getInt(INITIAL_HISTORY_COUNT_KEY, -1)
         val seedPid = preferences.getInt(SEED_PID_KEY, 0)
         val recoveryPid = Process.myPid()
+        val syntheticSourceMessageId = AgentTeamDispatchIds.sourceMessageId(supervisorRunId)
+        val syntheticContactId = AgentTeamDispatchIds.responseContactId(teamId)
         assertTrue("The paired seed phase did not persist a Run", supervisorRunId.isNotBlank() && teamId.isNotBlank())
         assertTrue("The host did not provide a force-stop timestamp", forcedAtMillis > 0L)
         assertTrue("The paired seed phase did not persist a process identity", seedPid > 0)
@@ -168,18 +177,23 @@ class AgentTeamPairedProcessDeathDeviceTest {
             SignalASIMqttClient.isConnected() && SignalASIMqttClient.isSecureReady()
         }
         waitUntil("naturally late paired Desktop completion", AGENT_TIMEOUT_MILLIS) {
-            runtime.agentTeamSnapshot(supervisorRunId)?.state == AgentTeamExecutionState.SUCCEEDED
+            runtime.agentTeamSnapshot(supervisorRunId)?.state == AgentTeamExecutionState.SUCCEEDED &&
+                AgentConnectorResponseStore.pending(context).any {
+                    it.sourceMessageId == syntheticSourceMessageId && it.contactId == syntheticContactId
+                }
         }
 
         val snapshot = requireNotNull(runtime.agentTeamSnapshot(supervisorRunId))
         val primary = requireNotNull(snapshot.members.firstOrNull { it.agentId == primaryAgentId })
         val observer = requireNotNull(snapshot.members.firstOrNull { it.agentId == observerAgentId })
-        val syntheticSourceMessageId = AgentTeamDispatchIds.sourceMessageId(supervisorRunId)
-        val syntheticContactId = AgentTeamDispatchIds.responseContactId(teamId)
         val syntheticResponses = AgentConnectorResponseStore.pending(context).filter {
             it.sourceMessageId == syntheticSourceMessageId && it.contactId == syntheticContactId
         }
-        val chatLeakCount = historyMessageCount(context, historyContactId) - initialHistoryCount
+        val chatLeakCount = acceptanceHistoryCount(
+            context,
+            historyContactId,
+            supervisorRunId
+        ) - initialHistoryCount
         val observerOutputVerified = observer.status == AgentSubagentStatus.SUCCEEDED && observer.output.isNotBlank()
         val primaryOutputVerified = primary.status == AgentSubagentStatus.SUCCEEDED &&
             snapshot.finalOutput.isNotBlank() && snapshot.finalOutput == primary.output
@@ -264,8 +278,21 @@ class AgentTeamPairedProcessDeathDeviceTest {
     private fun childRunId(supervisorRunId: String, agentId: String): String =
         UUID.nameUUIDFromBytes("$supervisorRunId\u001f$agentId".toByteArray(Charsets.UTF_8)).toString()
 
-    private fun historyMessageCount(context: Context, contactId: String): Int =
-        if (contactId.isBlank()) -1 else chatHistoryRoot(context).optJSONArray(contactId)?.length() ?: 0
+    private fun acceptanceHistoryCount(
+        context: Context,
+        contactId: String,
+        supervisorRunId: String
+    ): Int {
+        if (contactId.isBlank() || supervisorRunId.isBlank()) return -1
+        val messages = chatHistoryRoot(context).optJSONArray(contactId) ?: return 0
+        var count = 0
+        for (index in 0 until messages.length()) {
+            val message = messages.optJSONObject(index) ?: continue
+            val content = message.optString("content")
+            if (content.contains(ACCEPTANCE_MARKER) && content.contains(supervisorRunId)) count += 1
+        }
+        return count
+    }
 
     private fun removeAcceptanceHistory(context: Context) {
         val preferences = context.getSharedPreferences(CHAT_HISTORY_PREFERENCES, Context.MODE_PRIVATE)

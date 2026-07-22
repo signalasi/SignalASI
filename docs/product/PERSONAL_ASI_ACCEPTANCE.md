@@ -38,9 +38,17 @@ Run all of the following before accepting an Android revision:
 apps/android/gradlew.bat :app:testDebugUnitTest --no-daemon
 npm run check
 npm run check:android
+npm run test:release:device
 ```
 
-The gates verify host policy and build integrity. Real network research, paired Desktop execution, provider billing telemetry, Android background timing, and third-party capabilities remain environment-dependent and must fail visibly, preserve durable state, and resume or fall back without weakening privacy or authorization.
+The local gates verify host policy and build integrity. The device bundle additionally verifies the Control Center, lifecycle UI, fresh encrypted pairing, notification reply, Home Assistant state-changing execution with readback, typed Windows/file/terminal/Office tools, and paired multi-Agent process-death recovery. Real network research, provider billing telemetry, Android background timing, and unavailable third-party capabilities remain environment-dependent and must fail visibly, preserve durable state, and resume or fall back without weakening privacy or authorization.
+
+## Direct Device Evidence
+
+- `test:android:agent-lifecycle-ui` covers seven lifecycle states at compact and large-phone dimensions, including fixed headers, bounded scrolling, and expandable details.
+- `test:android:cross-resource` establishes a fresh secure pairing, exercises Android notification reply and stale-target rejection, verifies Home Assistant service execution through state readback, and executes encrypted Windows, process, file, terminal, Office, and verification tools.
+- `test:android:team-paired-process-death` force-stops the phone during a naturally late paired Desktop Agent Run, then proves one synthesized response, no ordinary-chat leakage, and no unapplied completion after recreation.
+- Native-tool and local-MCP device reports cover 118 bounded Android operations, real camera and microphone artifacts, and plain plus credential-bound local stdio MCP execution inside the phone runtime.
 
 ## Non-Goals
 

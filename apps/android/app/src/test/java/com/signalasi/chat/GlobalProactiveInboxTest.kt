@@ -92,6 +92,16 @@ class GlobalProactiveInboxTest {
         assertEquals(0L, updated.getValue("pending").viewedAtMillis)
     }
 
+    @Test
+    fun legacyProductTitleIsUpdatedWithoutChangingProtocolNames() {
+        val legacy = message("legacy").copy(title = "Signal 建议")
+
+        val item = GlobalProactiveInboxPolicy.project(listOf(legacy), emptyList()).single()
+
+        assertEquals("SignalASI 建议", item.title)
+        assertEquals("Signal Protocol", GlobalAgentText.productTitle("Signal Protocol"))
+    }
+
     private fun message(
         id: String,
         target: GlobalProactiveTarget = GlobalProactiveTarget.CURRENT_CONVERSATION
@@ -100,7 +110,7 @@ class GlobalProactiveInboxTest {
         sourceEventId = "event-$id",
         sourceConversationId = "source",
         target = target,
-        title = "Signal insight",
+        title = "SignalASI insight",
         content = "A material result is ready.",
         topic = "SignalASI autonomy",
         urgent = false,

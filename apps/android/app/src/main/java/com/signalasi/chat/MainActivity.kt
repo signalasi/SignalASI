@@ -12636,6 +12636,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val pairing = intent?.getBooleanExtra("signalasi_debug_pairing", false) == true
         val openAgents = intent?.getBooleanExtra("signalasi_debug_open_agents", false) == true
         val openSecurity = intent?.getBooleanExtra("signalasi_debug_open_security", false) == true
+        val openVoice = intent?.getBooleanExtra("signalasi_debug_open_voice", false) == true
         val openVoiceSettings = intent?.getBooleanExtra("signalasi_debug_open_voice_settings", false) == true
         val openLanguageSettings = intent?.getBooleanExtra("signalasi_debug_open_language_settings", false) == true
         val openOnDeviceAgent = intent?.getBooleanExtra("signalasi_debug_open_on_device_agent", false) == true
@@ -12833,6 +12834,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             intent?.removeExtra("signalasi_debug_rename_name_b64")
             intent?.removeExtra("signalasi_debug_open_messages")
             intent?.removeExtra("signalasi_debug_open_contacts")
+            intent?.removeExtra("signalasi_debug_open_voice")
             intent?.removeExtra("signalasi_debug_open_language_settings")
             intent?.removeExtra("signalasi_debug_open_recent_tasks")
             val seededCloudContact = if (seedCloudProvider.isNotBlank() || openCloudSwitchProvider.isNotBlank()) {
@@ -12847,6 +12849,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             if (openContacts) {
                 reloadChatHistoryIfChanged(force = true)
                 showMainTab(PAGE_CONTACTS)
+            }
+            if (openVoice) {
+                showMainTab(PAGE_VOICE)
             }
             if (openContactId.isNotBlank()) {
                 reloadChatHistoryIfChanged(force = true)
@@ -12927,6 +12932,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         intent?.removeExtra("signalasi_debug_pairing")
         intent?.removeExtra("signalasi_debug_open_agents")
         intent?.removeExtra("signalasi_debug_open_security")
+        intent?.removeExtra("signalasi_debug_open_voice")
         intent?.removeExtra("signalasi_debug_open_voice_settings")
         intent?.removeExtra("signalasi_debug_open_language_settings")
         intent?.removeExtra("signalasi_debug_open_on_device_agent")
@@ -12958,6 +12964,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         intent?.removeExtra("signalasi_debug_incoming")
         intent?.removeExtra("signalasi_debug_incoming_b64")
         Log.i("SignalASIDebug", "Processing debug incoming payload")
+        if (openVoice) {
+            showMainTab(PAGE_VOICE)
+        }
         onMessage(payload)
         if (openContacts) {
             reloadChatHistoryIfChanged(force = true)

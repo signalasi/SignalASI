@@ -25,6 +25,14 @@ object SignalASIMqttClient {
     private const val SERVER_URI = "ssl://broker.emqx.io:8883"
     private const val MQTT_QOS = 1
     private const val MAX_INLINE_ATTACHMENT_BYTES = 320 * 1024
+    private const val PAIRING_CLAIM_MAX_AGE_MILLIS = 9 * 60_000L
+
+    private data class PendingPairingClaim(
+        val desktopId: String,
+        val topic: String,
+        val wirePayload: String,
+        val queuedAtMillis: Long
+    )
 
     private val connecting = AtomicBoolean(false)
     private val retryHandler = Handler(Looper.getMainLooper())
@@ -38,7 +46,9 @@ object SignalASIMqttClient {
     }
     private val listeners = CopyOnWriteArraySet<Listener>()
     private val deliveryMessageIds = ConcurrentHashMap<Int, String>()
+    private val pairingClaimLock = Any()
     private var client: MqttAsyncClient? = null
+    private var pendingPairingClaim: PendingPairingClaim? = null
     @Volatile private var connected = false
     @Volatile private var secureReady = false
     @Volatile private var lastConnectorStatusRequestAt = 0L
@@ -167,6 +177,7 @@ object SignalASIMqttClient {
                     Log.i(TAG, "MQTT connectComplete reconnect=$reconnect")
                     setConnected(true)
                     subscribe()
+                    flushPendingPairingClaim()
                     scheduleOutboxRetries()
                     scheduleConnectorStatusRequest()
                 }
@@ -405,7 +416,39 @@ object SignalASIMqttClient {
                 Log.e(TAG, "Pairing claim encryption failed", it)
                 return false
             }
-        return publishPublicJson(link.routes.pairing, encryptedClaim)
+        synchronized(pairingClaimLock) {
+            pendingPairingClaim = PendingPairingClaim(
+                desktopId = link.desktopId,
+                topic = link.routes.pairing,
+                wirePayload = encryptedClaim.toString(),
+                queuedAtMillis = System.currentTimeMillis()
+            )
+        }
+        if (client?.isConnected == true) flushPendingPairingClaim() else connect(context)
+        return true
+    }
+
+    private fun flushPendingPairingClaim() {
+        val pending = synchronized(pairingClaimLock) { pendingPairingClaim } ?: return
+        if (System.currentTimeMillis() - pending.queuedAtMillis > PAIRING_CLAIM_MAX_AGE_MILLIS) {
+            synchronized(pairingClaimLock) {
+                if (pendingPairingClaim == pending) pendingPairingClaim = null
+            }
+            Log.w(TAG, "Discarded expired pending pairing claim")
+            return
+        }
+        val payload = runCatching { JSONObject(pending.wirePayload) }.getOrElse {
+            synchronized(pairingClaimLock) {
+                if (pendingPairingClaim == pending) pendingPairingClaim = null
+            }
+            Log.e(TAG, "Discarded invalid pending pairing claim", it)
+            return
+        }
+        if (!publishPublicJson(pending.topic, payload)) return
+        synchronized(pairingClaimLock) {
+            if (pendingPairingClaim == pending) pendingPairingClaim = null
+        }
+        Log.i(TAG, "Published pending pairing claim desktop=${pending.desktopId.takeLast(8)}")
     }
 
     fun publishGroupTextMessage(
@@ -671,6 +714,9 @@ object SignalASIMqttClient {
         json.optJSONObject("signal_bundle")?.let { bundle ->
             val ready = SignalASICrypto.processPcBundleForDesktop(desktopId, bundle, expected, replaceExisting = true)
             if (ready) {
+                synchronized(pairingClaimLock) {
+                    if (pendingPairingClaim?.desktopId == desktopId) pendingPairingClaim = null
+                }
                 SignalASILinkProtocol.markPaired(context, desktopId)
                 setSecureReady(true)
             }

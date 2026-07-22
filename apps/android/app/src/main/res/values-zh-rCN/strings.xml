@@ -1349,7 +1349,7 @@
     <string name="agent_runtime_artifact_saved_picker">文件已保存</string>
     <string name="agent_runtime_artifact_save_failed">文件保存失败，请重试。</string>
     <string name="agent_trace_processed_details">\u67e5\u770b\u5904\u7406\u8be6\u60c5</string>
-    <string name="agent_session_created_by_agent">Signal &#183; %1$s</string>
+    <string name="agent_session_created_by_agent">SignalASI &#183; %1$s</string>
     <string name="cc_global_agent_title">全局超级智能体</string>
     <string name="cc_global_agent_subtitle">跨所有会话与长期目标持续工作的个人智能</string>
     <string name="cc_global_agent_home_subtitle">%1$d 个主题 &#183; %2$d 个目标 &#183; %3$d 条待处理发现</string>

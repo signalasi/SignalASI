@@ -85,7 +85,7 @@ object GlobalProactiveInboxPolicy {
         return GlobalProactiveInboxItem(
             key = inboxKey(primary),
             messageIds = ordered.mapTo(linkedSetOf(), GlobalProactiveMessage::id),
-            title = primary.title.trim(),
+            title = GlobalAgentText.productTitle(primary.title),
             content = content,
             topic = primary.topic.trim(),
             target = primary.target,
