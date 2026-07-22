@@ -676,22 +676,30 @@ class AgentRuntimeGuestBridge(
 }
 
 class AgentRuntimeSessionKeyStore(context: Context) {
-    private val database = AgentEncryptedDatabase(
-        context.applicationContext,
-        DATABASE,
-        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-    )
+    private val appContext = context.applicationContext
+    @Volatile private var cachedKey: ByteArray? = null
 
     @Synchronized
     fun getOrCreate(): ByteArray {
-        val existing = database.readString(KEY_SESSION, "")
-            .takeIf(String::isNotBlank)
-            ?.let { runCatching { Base64.getDecoder().decode(it) }.getOrNull() }
-            ?.takeIf { it.size >= KEY_BYTES }
-        if (existing != null) return existing
-        return ByteArray(KEY_BYTES).also(SecureRandom()::nextBytes).also { key ->
-            database.writeString(KEY_SESSION, Base64.getEncoder().encodeToString(key))
+        cachedKey?.let { return it.copyOf() }
+        val database = AgentEncryptedDatabase(
+            appContext,
+            DATABASE,
+            legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
+        )
+        val key = try {
+            database.readString(KEY_SESSION, "")
+                .takeIf(String::isNotBlank)
+                ?.let { runCatching { Base64.getDecoder().decode(it) }.getOrNull() }
+                ?.takeIf { it.size >= KEY_BYTES }
+                ?: ByteArray(KEY_BYTES).also(SecureRandom()::nextBytes).also { generated ->
+                    database.writeString(KEY_SESSION, Base64.getEncoder().encodeToString(generated))
+                }
+        } finally {
+            database.close()
         }
+        cachedKey = key.copyOf()
+        return key
     }
 
     companion object {
