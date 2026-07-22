@@ -177,7 +177,7 @@ class GuardedModelAgentPlanner(
             val selected = AppStore.selectedCloudModelContact(appContext, id) ?: contact
             if (selected.optString("cloud_model").isBlank()) continue
             if (selected.optString("cloud_endpoint").isBlank()) continue
-            if (selected.optString("cloud_api_key").isBlank()) continue
+            if (!CloudModelCredentialPolicy.isAutoRoutable(selected)) continue
             candidates += id to selected
         }
         return candidates.firstOrNull { it.first == preferredId }?.second ?: candidates.firstOrNull()?.second

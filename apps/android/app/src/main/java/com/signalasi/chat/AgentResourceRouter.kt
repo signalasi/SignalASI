@@ -151,9 +151,9 @@ object AgentConnectorTimingPolicy {
         liveStaleMs = 15_000L
     )
     private val attachment = AgentConnectorTimeoutSchedule(
-        acceptedMs = 15_000L,
-        runningMs = 30_000L,
-        liveStaleMs = 45_000L
+        acceptedMs = 60_000L,
+        runningMs = 90_000L,
+        liveStaleMs = 180_000L
     )
 
     fun deadlines(hasAttachments: Boolean): AgentConnectorTimeoutSchedule =

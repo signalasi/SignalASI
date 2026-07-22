@@ -323,7 +323,9 @@ object CloudModelClient {
         val apiKey = contact.optString("cloud_api_key")
         if (model.isBlank()) error(context.getString(R.string.cloud_model_required))
         if (endpoint.isBlank()) error(context.getString(R.string.cloud_endpoint_required))
-        if (apiKey.isBlank()) error(context.getString(R.string.cloud_api_key_required))
+        if (!CloudModelCredentialPolicy.isStoredCredential(apiKey)) {
+            error(context.getString(R.string.cloud_api_key_required))
+        }
     }
 
     private fun openAiMessages(context: Context, turns: List<ChatMessage>, systemPrompt: String): JSONArray =
