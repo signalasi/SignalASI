@@ -767,9 +767,15 @@ class AgentNativeToolDefinition(
 
 class AgentNativeToolRegistry(
     private val clock: AgentNativeClock = AgentNativeClock.SYSTEM,
-    private val replayStore: AgentNativeToolReplayStore = InMemoryAgentNativeToolReplayStore()
+    private val replayStore: AgentNativeToolReplayStore = InMemoryAgentNativeToolReplayStore(),
+    private val descriptorCacheTtlMillis: Long = DEFAULT_DESCRIPTOR_CACHE_TTL_MILLIS
 ) {
     private val definitions = LinkedHashMap<String, AgentNativeToolDefinition>()
+    private var descriptorSnapshot: DescriptorSnapshot? = null
+
+    init {
+        require(descriptorCacheTtlMillis >= 0L) { "Descriptor cache TTL must not be negative" }
+    }
 
     @Synchronized
     fun register(definition: AgentNativeToolDefinition): AgentNativeToolRegistry {
@@ -777,6 +783,7 @@ class AgentNativeToolRegistry(
             "Native tool id is already registered: ${definition.descriptor.id}"
         }
         definitions[definition.descriptor.id] = definition
+        descriptorSnapshot = null
         return this
     }
 
@@ -793,6 +800,7 @@ class AgentNativeToolRegistry(
             "Native tool ids are already registered: ${duplicateExisting.sorted().joinToString()}"
         }
         incoming.forEach { definitions[it.descriptor.id] = it }
+        descriptorSnapshot = null
         return this
     }
 
@@ -805,14 +813,22 @@ class AgentNativeToolRegistry(
     /** Creates an independent registry view without exposing executor implementations to callers. */
     @Synchronized
     fun subset(predicate: (AgentNativeToolDescriptor) -> Boolean): AgentNativeToolRegistry =
-        AgentNativeToolRegistry(clock, replayStore).registerAll(
+        AgentNativeToolRegistry(clock, replayStore, descriptorCacheTtlMillis).registerAll(
             definitions.values.filter { predicate(resolvedDescriptor(it)) }
         )
 
     @Synchronized
-    fun descriptors(): List<AgentNativeToolDescriptor> = definitions.values
-        .map(::resolvedDescriptor)
-        .sortedBy { it.id }
+    fun descriptors(): List<AgentNativeToolDescriptor> {
+        val now = clock.nowEpochMillis().coerceAtLeast(0L)
+        descriptorSnapshot?.takeIf { snapshot ->
+            now >= snapshot.createdAtMillis &&
+                now - snapshot.createdAtMillis <= descriptorCacheTtlMillis
+        }?.let { return it.descriptors }
+        return definitions.values
+            .map(::resolvedDescriptor)
+            .sortedBy { it.id }
+            .also { descriptorSnapshot = DescriptorSnapshot(now, it) }
+    }
 
     private fun resolvedDescriptor(definition: AgentNativeToolDefinition): AgentNativeToolDescriptor {
         val availability = runCatching { definition.availabilityProvider.current(null) }
@@ -824,6 +840,11 @@ class AgentNativeToolRegistry(
             }
         return definition.descriptor.copy(availability = availability)
     }
+
+    private data class DescriptorSnapshot(
+        val createdAtMillis: Long,
+        val descriptors: List<AgentNativeToolDescriptor>
+    )
 
     fun catalogJson(): String = AgentNativeJsonCodec.stringify(
         linkedMapOf(
@@ -1179,6 +1200,7 @@ class AgentNativeToolRegistry(
     companion object {
         const val CONTRACT_VERSION = "signalasi.phone-native-tools/1.0"
         const val LEGACY_ACTION_ID_ATTRIBUTE = "legacy_agent_action_id"
+        private const val DEFAULT_DESCRIPTOR_CACHE_TTL_MILLIS = 5_000L
     }
 }
 

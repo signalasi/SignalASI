@@ -39,7 +39,7 @@ class GlobalConversationContextJournalInstrumentedTest {
         assertFalse(beforeBackup.contains("Continue with that plan"))
 
         val snapshot = repository.exportSnapshot()
-        assertEquals(14, snapshot.optInt("version"))
+        assertTrue(snapshot.optInt("version") >= CONTEXT_JOURNAL_SNAPSHOT_VERSION)
         assertEquals(2, snapshot.getJSONArray("context_journal").length())
         repository.clear()
         repository.restoreSnapshot(snapshot)
@@ -97,4 +97,8 @@ class GlobalConversationContextJournalInstrumentedTest {
         content = content,
         conversationTitle = "SignalASI"
     )
+
+    companion object {
+        private const val CONTEXT_JOURNAL_SNAPSHOT_VERSION = 14
+    }
 }

@@ -4,6 +4,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
 import java.util.UUID
+import java.util.zip.ZipFile
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -68,8 +69,7 @@ class AgentOnDeviceDevelopmentLoopTest {
         writeReport(report)
         assertTrue(resultFailureMessage(second), second.isSuccess)
         assertEquals("count=5 sum=15\n", second.output["stdout"])
-        assertArtifact(second, "result.txt")
-        assertArtifact(second, "summary.txt")
+        assertProjectArchive(second, setOf("result.txt", "summary.txt"))
 
         val failed = invokeRuntime(
             registry = registry,
@@ -155,6 +155,19 @@ class AgentOnDeviceDevelopmentLoopTest {
                 row["relative_path"]?.toString()?.replace('\\', '/')?.endsWith(suffix) == true
             }
         )
+    }
+
+    private fun assertProjectArchive(result: AgentNativeToolResult, expectedPaths: Set<String>) {
+        val artifacts = result.output["artifacts"] as? Iterable<*> ?: emptyList<Any?>()
+        val archive = artifacts.mapNotNull { it as? Map<*, *> }
+            .singleOrNull { it["artifact_kind"] == "project_archive" }
+        assertTrue("Missing project archive in $artifacts", archive != null)
+        val file = File(requireNotNull(archive)["host_path"].toString())
+        assertTrue("Project archive does not exist: $file", file.isFile)
+        ZipFile(file).use { zip ->
+            val names = zip.entries().asSequence().map { it.name }.toSet()
+            assertTrue("Missing project files in $names", names.containsAll(expectedPaths))
+        }
     }
 
     private fun resultReport(result: AgentNativeToolResult): Map<String, Any?> = linkedMapOf(

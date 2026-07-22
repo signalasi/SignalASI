@@ -58,6 +58,37 @@ class AgentNativeToolRegistryTest {
     }
 
     @Test
+    fun cachesResolvedDescriptorsAndInvalidatesAfterRegistration() {
+        var now = 1_000L
+        val availabilityChecks = AtomicInteger()
+        val registry = AgentNativeToolRegistry(
+            clock = AgentNativeClock { now },
+            descriptorCacheTtlMillis = 100L
+        ).register(
+            AgentNativeToolDefinition(
+                descriptor = descriptor(id = "phone.test.cached"),
+                executor = AgentNativeToolExecutor { AgentNativeToolExecutionResult.success() },
+                availabilityProvider = AgentNativeToolAvailabilityProvider {
+                    availabilityChecks.incrementAndGet()
+                    AgentNativeToolAvailability(AgentNativeToolAvailabilityStatus.AVAILABLE)
+                }
+            )
+        )
+
+        registry.descriptors()
+        registry.descriptors()
+        assertEquals(1, availabilityChecks.get())
+
+        now += 101L
+        registry.descriptors()
+        assertEquals(2, availabilityChecks.get())
+
+        registry.register(definition(descriptor(id = "phone.test.second")))
+        registry.descriptors()
+        assertEquals(3, availabilityChecks.get())
+    }
+
+    @Test
     fun serializesCompleteDeterministicCatalog() {
         val descriptor = descriptor(
             id = "phone.contacts.lookup",

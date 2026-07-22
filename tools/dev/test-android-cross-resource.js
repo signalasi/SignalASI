@@ -81,7 +81,12 @@ async function fetchJson(url) {
 
 async function establishFreshSecurePairing() {
   const statusBefore = await fetchJson("http://127.0.0.1:8765/api/pairing/status");
-  const previousRoute = statusBefore.clients?.[0]?.client_route_id || "";
+  const previousRoutes = new Set(
+    (statusBefore.clients || [])
+      .filter((client) => client.paired && !client.revoked)
+      .map((client) => client.client_route_id)
+      .filter(Boolean),
+  );
   const payload = await fetchJson("http://127.0.0.1:8765/api/pairing/payload");
   const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
   run(["shell", "am", "force-stop", applicationId]);
@@ -102,8 +107,12 @@ async function establishFreshSecurePairing() {
   while (Date.now() < deadline) {
     await sleep(500);
     const status = await fetchJson("http://127.0.0.1:8765/api/pairing/status");
-    const current = status.clients?.find((client) => client.paired && !client.revoked);
-    if (current && current.client_route_id && current.client_route_id !== previousRoute) {
+    const current = status.clients?.find((client) =>
+      client.paired &&
+      !client.revoked &&
+      client.client_route_id &&
+      !previousRoutes.has(client.client_route_id));
+    if (current) {
       await sleep(3_000);
       process.stdout.write(`Fresh secure pairing established for route ${current.client_route_id.slice(-8)}.\n`);
       return;

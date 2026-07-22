@@ -27,24 +27,49 @@ internal object AgentPhoneDevelopmentPolicy {
         "\u624b\u673a\u672c\u673a", "\u5728\u624b\u673a", "\u672c\u673a\u6267\u884c", "\u672c\u5730\u6267\u884c", "\u672c\u4f53\u6267\u884c"
     )
     private val desktopTerms = listOf(
-        "on desktop", "on the desktop", "on pc", "on the computer", "use codex desktop", "send to codex",
-        "\u5728\u7535\u8111", "\u7535\u8111\u4e0a\u6267\u884c", "\u4ea4\u7ed9codex", "\u53d1\u7ed9codex", "\u4f7f\u7528codex desktop"
+        "desktop", "on pc", "on the pc", "on the computer", "use codex", "send to codex",
+        "claude code", "hermes agent",
+        "\u5728\u7535\u8111", "\u7535\u8111\u4e0a\u6267\u884c", "\u684c\u9762\u7aef", "\u684c\u9762\u7248",
+        "\u4ea4\u7ed9codex", "\u53d1\u7ed9codex", "\u4f7f\u7528codex"
     )
-    private val largeProjectTerms = listOf(
+    private val projectScopeTerms = listOf(
         "repository", "repo", "entire project", "whole project", "android project", "gradle", "xcode",
-        "docker", "windows app", "desktop app", "compile apk", "build apk", "release build",
-        "\u4ed3\u5e93", "\u6574\u4e2a\u9879\u76ee", "\u5927\u578b\u9879\u76ee", "\u7f16\u8bd1apk", "\u6253\u5305apk", "\u684c\u9762\u7a0b\u5e8f"
+        "codebase", "workspace", "existing app", "existing application", "android app", "backend", "frontend",
+        "docker", "windows app", "desktop app", "compile apk", "build apk", "release build", "github",
+        "pull request", "offline recovery", "all features", "every feature", "ui responsiveness",
+        "\u9879\u76ee", "\u4ee3\u7801\u5e93", "\u4ed3\u5e93", "\u73b0\u6709app", "\u73b0\u6709\u5e94\u7528",
+        "\u540e\u7aef", "\u524d\u7aef", "\u6240\u6709\u529f\u80fd", "\u5168\u90e8\u529f\u80fd", "\u5168\u9762\u6d4b\u8bd5",
+        "\u79bb\u7ebf\u6062\u590d", "\u9875\u9762\u6d41\u7545\u5ea6", "\u6027\u80fd\u95ee\u9898", "\u7f16\u8bd1apk", "\u6253\u5305apk", "\u63d0\u4ea4github"
+    )
+    private val implicitPhoneCodeTerms = listOf(
+        "python", "program", "programme", "code", "script", "function", "algorithm",
+        "\u7a0b\u5e8f", "\u4ee3\u7801", "\u811a\u672c", "\u51fd\u6570", "\u7b97\u6cd5", "\u7f16\u7a0b"
+    )
+    private val selfContainedTerms = listOf(
+        "simple", "small", "single-file", "one-file", "standalone", "snippet",
+        "\u7b80\u5355", "\u5c0f\u578b", "\u5355\u6587\u4ef6", "\u72ec\u7acb", "\u4ee3\u7801\u7247\u6bb5"
     )
 
     fun shouldUsePhoneRuntime(goal: String): Boolean {
         val normalized = goal.trim().lowercase(Locale.US)
         if (normalized.isBlank()) return false
-        if (desktopTerms.any(normalized::contains)) return false
         val development = developmentTerms.any(normalized::contains) && creationTerms.any(normalized::contains)
         if (!development) return false
         if (phoneTerms.any(normalized::contains)) return true
-        return largeProjectTerms.none(normalized::contains) && normalized.length <= MAX_INTERACTIVE_GOAL_CHARACTERS
+        if (desktopTerms.any(normalized::contains) || projectScopeTerms.any(normalized::contains)) return false
+        val selfContained = selfContainedTerms.any(normalized::contains)
+        val codeArtifact = implicitPhoneCodeTerms.any(normalized::contains)
+        return selfContained && codeArtifact && normalized.length <= MAX_INTERACTIVE_GOAL_CHARACTERS
     }
+
+    fun isPhoneDevelopmentTool(toolId: String): Boolean =
+        toolId.startsWith(PHONE_WORKSPACE_TOOL_PREFIX) || toolId in PHONE_RUNTIME_TOOL_IDS
+
+    fun acceptsModelPlan(goal: String, actions: List<AgentAction>): Boolean =
+        shouldUsePhoneRuntime(goal) || actions.none { action ->
+            action.kind == AgentActionKind.CALL_NATIVE_TOOL &&
+                isPhoneDevelopmentTool(action.parameters["tool_id"].orEmpty())
+        }
 
     fun planningPrompt(goal: String): String = buildString {
         append("Act only as a code author for SignalASI's Android-local Linux runtime. ")
@@ -105,6 +130,13 @@ internal object AgentPhoneDevelopmentPolicy {
     private const val MAX_REPAIR_MANIFEST_CHARACTERS = 24_000
     private const val MAX_REPAIR_EVIDENCE_CHARACTERS = 12_000
     private const val MAX_RUNTIME_SUMMARY_CHARACTERS = 8_000
+    private const val PHONE_WORKSPACE_TOOL_PREFIX = "signalasi.workspace."
+    private val PHONE_RUNTIME_TOOL_IDS = setOf(
+        AgentOnDeviceRuntimeTools.STATUS,
+        AgentOnDeviceRuntimeTools.LIST_PACKS,
+        AgentOnDeviceRuntimeTools.INSTALL_PACK,
+        AgentOnDeviceRuntimeTools.EXECUTE
+    )
 }
 
 internal data class AgentPhoneDevelopmentManifest(

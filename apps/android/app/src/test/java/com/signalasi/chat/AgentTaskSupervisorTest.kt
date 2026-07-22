@@ -170,6 +170,98 @@ class AgentTaskSupervisorTest {
         supervisor.shutdown()
     }
 
+    @Test
+    fun watchdogWarnsThenTerminatesAStalledTaskExactlyOnce() {
+        var now = 1_000L
+        val store = InMemoryAgentWorkspaceStore(clock = { now })
+        store.upsert(workspace("stalled", status = AgentWorkspaceStatus.RUNNING))
+        val signals = Collections.synchronizedList(mutableListOf<AgentTaskLivenessSignal>())
+        val supervisor = AgentTaskSupervisor(
+            workspaceStore = store,
+            clock = { now },
+            livenessPolicy = livenessPolicy(),
+            livenessListener = AgentTaskLivenessListener { signals += it }
+        )
+
+        now = 1_011L
+        assertEquals(
+            listOf(AgentTaskLivenessSignalKind.STALLED),
+            supervisor.sweepLiveness().map(AgentTaskLivenessSignal::kind)
+        )
+        assertEquals(AgentWorkspaceStatus.RUNNING, store.find("workspace-stalled")?.status)
+
+        now = 1_021L
+        assertEquals(
+            listOf(AgentTaskLivenessSignalKind.TIMED_OUT),
+            supervisor.sweepLiveness().map(AgentTaskLivenessSignal::kind)
+        )
+        val failed = requireNotNull(store.find("workspace-stalled"))
+        assertEquals(AgentWorkspaceStatus.FAILED, failed.status)
+        assertTrue(failed.eventJournal.any { it.kind == AgentTaskEventKinds.TIMED_OUT })
+        assertTrue(supervisor.sweepLiveness().isEmpty())
+        assertEquals(
+            listOf(AgentTaskLivenessSignalKind.STALLED, AgentTaskLivenessSignalKind.TIMED_OUT),
+            signals.map(AgentTaskLivenessSignal::kind)
+        )
+        supervisor.close()
+    }
+
+    @Test
+    fun progressAfterWarningPublishesRecoveredSignal() {
+        var now = 1_000L
+        val store = InMemoryAgentWorkspaceStore(clock = { now })
+        store.upsert(workspace("recovered", status = AgentWorkspaceStatus.RUNNING))
+        val signals = Collections.synchronizedList(mutableListOf<AgentTaskLivenessSignal>())
+        val supervisor = AgentTaskSupervisor(
+            workspaceStore = store,
+            clock = { now },
+            livenessPolicy = livenessPolicy(),
+            livenessListener = AgentTaskLivenessListener { signals += it }
+        )
+
+        now = 1_011L
+        supervisor.sweepLiveness()
+        now = 1_012L
+        supervisor.progress("workspace-recovered", "tool.running", "Running tool")
+
+        assertEquals(
+            listOf(AgentTaskLivenessSignalKind.STALLED, AgentTaskLivenessSignalKind.RECOVERED),
+            signals.map(AgentTaskLivenessSignal::kind)
+        )
+        assertFalse(
+            livenessPolicy().hasUnresolvedStall(requireNotNull(store.find("workspace-recovered")))
+        )
+        supervisor.close()
+    }
+
+    @Test
+    fun resumingAStalledTaskPublishesRecoveredSignal() = runBlocking {
+        var now = 1_000L
+        val store = InMemoryAgentWorkspaceStore(clock = { now })
+        store.upsert(workspace("resume-stalled", status = AgentWorkspaceStatus.RUNNING))
+        val signals = Collections.synchronizedList(mutableListOf<AgentTaskLivenessSignal>())
+        val supervisor = AgentTaskSupervisor(
+            workspaceStore = store,
+            clock = { now },
+            livenessPolicy = livenessPolicy(),
+            livenessListener = AgentTaskLivenessListener { signals += it }
+        )
+
+        now = 1_011L
+        supervisor.sweepLiveness()
+        supervisor.resume(
+            workspaceId = "workspace-resume-stalled",
+            hook = AgentTaskResumeHook { _, _ -> }
+        ).join()
+
+        assertEquals(
+            listOf(AgentTaskLivenessSignalKind.STALLED, AgentTaskLivenessSignalKind.RECOVERED),
+            signals.map(AgentTaskLivenessSignal::kind)
+        )
+        assertEquals(AgentWorkspaceStatus.COMPLETED, store.find("workspace-resume-stalled")?.status)
+        supervisor.shutdown()
+    }
+
     private suspend fun awaitCondition(condition: () -> Boolean) {
         withTimeout(TEST_TIMEOUT_MILLIS) {
             while (!condition()) delay(10L)
@@ -192,6 +284,18 @@ class AgentTaskSupervisorTest {
         conversationId = "conversation-$suffix",
         taskId = "task-$suffix",
         status = status
+    )
+
+    private fun livenessPolicy() = AgentTaskLivenessPolicy(
+        queuedWarningMillis = 10L,
+        queuedTimeoutMillis = 20L,
+        runningWarningMillis = 10L,
+        runningTimeoutMillis = 20L,
+        waitingResponseWarningMillis = 10L,
+        waitingResponseTimeoutMillis = 20L,
+        absoluteTimeoutMillis = 1_000L,
+        watchdogIntervalMillis = 60_000L,
+        heartbeatWriteThrottleMillis = 0L
     )
 
     private companion object {

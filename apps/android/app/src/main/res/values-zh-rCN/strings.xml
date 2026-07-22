@@ -15,6 +15,7 @@
     <string name="agent_camera_capturing">正在拍照…</string>
     <string name="agent_camera_saved">照片已保存</string>
     <string name="agent_camera_unavailable">摄像头不可用</string>
+    <string name="agent_reasoning_provider_unavailable">当前没有可用的 Agent 或模型。请先配对 Desktop Agent 或配置云端模型，然后重试。</string>
     <string name="agent_camera_permission_required">需要摄像头权限</string>
     <string name="agent_camera_save_failed">无法保存照片</string>
     <string name="agent_camera_capture_failed">无法完成拍照</string>
@@ -590,6 +591,7 @@
     <string name="agent_task_status_accepted">已接受</string>
     <string name="agent_task_status_queued">排队中</string>
     <string name="agent_task_status_starting">正在启动</string>
+    <string name="agent_stale_connector_no_result">Agent 任务已停止，但没有返回最终结果。请在连接可用后重试。</string>
     <string name="agent_task_status_running">运行中</string>
     <string name="agent_task_status_running_elapsed">运行中 · %1$d 秒</string>
     <string name="agent_task_status_waiting_input">等待输入</string>
@@ -598,6 +600,8 @@
     <string name="agent_task_status_failed">执行失败</string>
     <string name="agent_task_status_cancelled">已取消</string>
     <string name="agent_task_status_timed_out">已超时</string>
+    <string name="agent_task_watchdog_stalled">任务暂时没有上报进展，SignalASI 正在检查连接。</string>
+    <string name="agent_task_watchdog_timed_out">任务长时间没有上报进展，已停止等待。连接可用后可重新尝试。</string>
     <string name="agent_task_status_cancelling">正在取消</string>
     <string name="agent_task_cancel_title">取消 Agent 任务</string>
     <string name="agent_task_cancel_subtitle">停止配对电脑上正在运行的任务</string>

@@ -11,6 +11,65 @@ enum class AgentConversationStatus { ACTIVE, ARCHIVED }
 object AgentTranscriptLifecyclePolicy {
     fun isObsoletePlannerProcessEntry(role: AgentTranscriptRole, dedupeKey: String): Boolean =
         role == AgentTranscriptRole.PROCESS && dedupeKey.startsWith("pending:")
+
+    data class StaleConnectorRecovery(
+        val conversationId: String,
+        val turnId: String,
+        val taskId: String,
+        val result: String
+    )
+
+    fun staleConnectorRecoveries(
+        entries: List<AgentTranscriptEntry>,
+        tasks: List<AgentTaskRecord>,
+        activeTaskIds: Set<String>,
+        nowMillis: Long,
+        staleAfterMillis: Long = STALE_CONNECTOR_MILLIS
+    ): List<StaleConnectorRecovery> {
+        val tasksById = tasks.associateBy(AgentTaskRecord::taskId)
+        return entries.asSequence()
+            .filter { entry ->
+                entry.role == AgentTranscriptRole.PROCESS &&
+                    entry.turnId.isNotBlank() &&
+                    entry.taskId.isNotBlank() &&
+                    entry.dedupeKey.startsWith("connector-task:")
+            }
+            .groupBy { it.turnId }
+            .mapNotNull { (turnId, processEntries) ->
+                val taskEntry = processEntries.maxByOrNull(AgentTranscriptEntry::timestampMillis)
+                    ?: return@mapNotNull null
+                if (taskEntry.taskId in activeTaskIds) return@mapNotNull null
+                val hasUser = entries.any {
+                    it.role == AgentTranscriptRole.USER && it.turnId == turnId
+                }
+                val hasAssistant = entries.any {
+                    it.role == AgentTranscriptRole.ASSISTANT &&
+                        it.turnId == turnId &&
+                        !it.dedupeKey.startsWith("approval:")
+                }
+                if (!hasUser || hasAssistant) return@mapNotNull null
+                val task = tasksById[taskEntry.taskId] ?: return@mapNotNull null
+                val lastActivity = maxOf(taskEntry.timestampMillis, task.updatedAtMillis)
+                if (nowMillis - lastActivity < staleAfterMillis) return@mapNotNull null
+                val durableResult = task.result.trim().takeIf { result ->
+                    result.isNotBlank() && !isInternalPlannerResult(result)
+                }.orEmpty()
+                StaleConnectorRecovery(
+                    conversationId = taskEntry.conversationId,
+                    turnId = turnId,
+                    taskId = taskEntry.taskId,
+                    result = durableResult
+                )
+            }
+    }
+
+    private fun isInternalPlannerResult(value: String): Boolean {
+        val normalized = value.trim().lowercase()
+        return "local-agent-runtime" in normalized ||
+            "create a safe local task plan" in normalized
+    }
+
+    private const val STALE_CONNECTOR_MILLIS = 5L * 60L * 1_000L
 }
 
 object AgentTranscriptPresentationPolicy {
@@ -144,8 +203,10 @@ object AgentTranscriptPresentationPolicy {
         entry.role == AgentTranscriptRole.PROCESS && entry.dedupeKey.startsWith("connector-task:")
 
     fun isInternalRuntimeHandoff(entry: AgentTranscriptEntry): Boolean {
-        if (entry.role != AgentTranscriptRole.PROCESS || !entry.dedupeKey.startsWith("pending:")) return false
+        if (entry.role != AgentTranscriptRole.PROCESS) return false
         val text = entry.text.trim().lowercase()
+        if ("local-agent-runtime" in text) return true
+        if (!entry.dedupeKey.startsWith("pending:")) return false
         return text == "execute in the on-device linux sandbox" || (
             ("phone linux" in text || "on-device linux" in text) &&
                 ("run and verify" in text || "execute and verify" in text)
@@ -415,6 +476,22 @@ class AgentTranscriptStore(context: Context) {
         val cleanTurnId = turnId.trim()
         if (cleanTurnId.isBlank()) return null
         return allEntries().lastOrNull { it.turnId == cleanTurnId }?.conversationId
+    }
+
+    @Synchronized
+    fun conversationIdForTask(taskId: String): String? {
+        val cleanTaskId = taskId.trim()
+        if (cleanTaskId.isBlank()) return null
+        return allEntries().lastOrNull { it.taskId == cleanTaskId }?.conversationId
+    }
+
+    @Synchronized
+    fun turnIdForTask(taskId: String): String? {
+        val cleanTaskId = taskId.trim()
+        if (cleanTaskId.isBlank()) return null
+        return allEntries().asReversed().firstOrNull {
+            it.taskId == cleanTaskId && it.turnId.isNotBlank()
+        }?.turnId
     }
 
     @Synchronized

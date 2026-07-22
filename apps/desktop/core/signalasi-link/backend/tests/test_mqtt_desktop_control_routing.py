@@ -26,7 +26,15 @@ class FakeInput:
     def is_locked(self) -> bool:
         return False
 
-    def click(self, x: int, y: int, button: str) -> None:
+    def click(
+        self,
+        x: int,
+        y: int,
+        button: str,
+        *,
+        source_width: int | None = None,
+        source_height: int | None = None,
+    ) -> None:
         self.calls.append(("click", x, y, button))
 
     def type_text(self, value: str) -> None:

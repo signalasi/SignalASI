@@ -15,6 +15,7 @@
     <string name="agent_camera_capturing">Capturing…</string>
     <string name="agent_camera_saved">Photo saved</string>
     <string name="agent_camera_unavailable">Camera is unavailable</string>
+    <string name="agent_reasoning_provider_unavailable">No Agent or model is currently available. Pair a Desktop Agent or configure a cloud model, then try again.</string>
     <string name="agent_camera_permission_required">Camera permission is required</string>
     <string name="agent_camera_save_failed">Could not save the photo</string>
     <string name="agent_camera_capture_failed">Could not capture the photo</string>
@@ -825,6 +826,7 @@
     <string name="agent_task_status_accepted">Accepted</string>
     <string name="agent_task_status_queued">Queued</string>
     <string name="agent_task_status_starting">Starting</string>
+    <string name="agent_stale_connector_no_result">The Agent task stopped without returning a final response. Retry when the connection is available.</string>
     <string name="agent_task_status_running">Running</string>
     <string name="agent_task_status_running_elapsed">Running · %1$d s</string>
     <string name="agent_task_status_waiting_input">Waiting for input</string>
@@ -833,6 +835,8 @@
     <string name="agent_task_status_failed">Failed</string>
     <string name="agent_task_status_cancelled">Cancelled</string>
     <string name="agent_task_status_timed_out">Timed out</string>
+    <string name="agent_task_watchdog_stalled">No progress reported. SignalASI is checking the task connection.</string>
+    <string name="agent_task_watchdog_timed_out">The task stopped after no progress was reported for an extended period. Retry when the connection is available.</string>
     <string name="agent_task_status_cancelling">Cancelling</string>
     <string name="agent_task_cancel_title">Cancel Agent task</string>
     <string name="agent_task_cancel_subtitle">Stop the task running on the paired computer</string>

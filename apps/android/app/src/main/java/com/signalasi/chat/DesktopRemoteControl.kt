@@ -191,10 +191,25 @@ object DesktopRemoteControl {
 
     fun requestScreenshot(desktopId: String): Boolean = requestAction(desktopId, SCREENSHOT, JSONObject())
 
-    fun click(desktopId: String, x: Int, y: Int): Boolean = requestAction(
+    fun click(
+        desktopId: String,
+        x: Int,
+        y: Int,
+        coordinateWidth: Int = 0,
+        coordinateHeight: Int = 0
+    ): Boolean = requestAction(
         desktopId,
         CLICK_XY,
-        JSONObject().put("x", x).put("y", y).put("button", "left")
+        JSONObject()
+            .put("x", x)
+            .put("y", y)
+            .put("button", "left")
+            .apply {
+                if (coordinateWidth > 0 && coordinateHeight > 0) {
+                    put("coordinate_width", coordinateWidth)
+                    put("coordinate_height", coordinateHeight)
+                }
+            }
     )
 
     fun typeText(desktopId: String, text: String): Boolean {

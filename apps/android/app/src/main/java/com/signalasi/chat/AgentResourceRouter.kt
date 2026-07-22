@@ -99,6 +99,90 @@ data class AgentRoutingDecision(
             fallbacks.mapNotNull { it.resource.targetId.takeIf(String::isNotBlank) }
 }
 
+data class AgentConnectorRouteSelection(
+    val target: AgentCallableTarget,
+    val decision: AgentRoutingDecision?
+)
+
+object AgentConnectorRouteSelector {
+    fun select(
+        targets: List<AgentCallableTarget>,
+        decision: AgentRoutingDecision?,
+        preferredTargetId: String = ""
+    ): AgentConnectorRouteSelection? {
+        val reasoningTargets = targets.filter(::hasReasoningCapability)
+        val eligible = reasoningTargets
+            .filter { target -> target.status == AgentConnectorStatus.AVAILABLE }
+            .ifEmpty {
+                // A paired Desktop can briefly look disconnected while its first status
+                // heartbeat is in flight. Keep it recoverable and let delivery/watchdog
+                // supervision determine actual reachability instead of drafting a local plan.
+                reasoningTargets.filter { target -> target.status == AgentConnectorStatus.DISCONNECTED }
+            }
+        if (eligible.isEmpty()) return null
+
+        val eligibleById = eligible.associateBy(AgentCallableTarget::id)
+        val routedCandidates = decision?.let { listOfNotNull(it.primary) + it.fallbacks }.orEmpty()
+            .filter { candidate -> candidate.resource.targetId in eligibleById }
+            .distinctBy { candidate -> candidate.resource.targetId }
+        val selectedTarget = preferredTargetId
+            .takeIf(String::isNotBlank)
+            ?.let(eligibleById::get)
+            ?: routedCandidates.firstNotNullOfOrNull { candidate ->
+                eligibleById[candidate.resource.targetId]
+            }
+            ?: defaultTarget(eligible)
+
+        if (decision == null) return AgentConnectorRouteSelection(selectedTarget, null)
+        val selectedCandidate = routedCandidates.firstOrNull { candidate ->
+            candidate.resource.targetId == selectedTarget.id
+        } ?: decision.catalog.firstOrNull { resource ->
+            resource.targetId == selectedTarget.id
+        }?.let { resource ->
+            AgentResourceCandidate(
+                resource = resource,
+                score = 0,
+                reasons = listOf(
+                    if (selectedTarget.status == AgentConnectorStatus.DISCONNECTED) {
+                        "recoverable_connector_status"
+                    } else {
+                        "eligible_reasoning_fallback"
+                    }
+                )
+            )
+        }
+        val connectorDecision = selectedCandidate?.let { primary ->
+            decision.copy(
+                primary = primary,
+                fallbacks = routedCandidates.filterNot { candidate ->
+                    candidate.resource.targetId == selectedTarget.id
+                }
+            )
+        }
+        return AgentConnectorRouteSelection(selectedTarget, connectorDecision)
+    }
+
+    private fun hasReasoningCapability(target: AgentCallableTarget): Boolean =
+        target.kind != AgentConnectorKind.DEVICE &&
+            target.capabilities.any { capability ->
+                capability == AgentCapability.CHAT ||
+                    capability == AgentCapability.REASONING ||
+                    capability == AgentCapability.RESEARCH
+            }
+
+    private fun defaultTarget(targets: List<AgentCallableTarget>): AgentCallableTarget =
+        targets.firstOrNull { target ->
+            target.id == "codex" || target.id.endsWith(":codex")
+        }
+            ?: targets.firstOrNull { it.id == "local-llm" }
+            ?: targets.firstOrNull { it.kind == AgentConnectorKind.MODEL }
+            ?: targets.firstOrNull { target ->
+                target.id == "hermes" || target.id.endsWith(":hermes")
+            }
+            ?: targets.firstOrNull { AgentCapability.RESEARCH in it.capabilities }
+            ?: targets.first()
+}
+
 object AgentFailoverPolicy {
     fun fallbackTier(primary: AgentResourceDescriptor?, candidate: AgentResourceDescriptor): Int {
         if (primary?.location != AgentResourceLocation.TRUSTED_DESKTOP) return 0

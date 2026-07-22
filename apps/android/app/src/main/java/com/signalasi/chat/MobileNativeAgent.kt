@@ -1589,7 +1589,28 @@ class MobileNativeAgent(
     }
 
     private fun executeFirstPendingAction(): AgentUiState {
-        val plan = currentPlan ?: return snapshot()
+        val originalPlan = currentPlan ?: return snapshot()
+        val normalization = AgentPlanLifecyclePolicy.normalize(originalPlan)
+        val plan = normalization.plan
+        if (normalization.changed) {
+            currentPlan = plan
+            lastActionResult = normalization.recoverResult(lastActionResult)
+            recordAudit(
+                AgentAuditEvent.INVOCATION_AUDIT,
+                "removed_trailing_draft_actions=${normalization.removedActions.joinToString(",", transform = AgentAction::id)}"
+            )
+            if (plan.actions.none {
+                    it.status == AgentActionStatus.PENDING_CONFIRMATION ||
+                        it.status == AgentActionStatus.PROPOSED ||
+                        it.status == AgentActionStatus.RUNNING ||
+                        it.status == AgentActionStatus.WAITING_RESPONSE
+                }
+            ) {
+                phase = AgentPhase.COMPLETED
+                saveTaskRecord(result = lastActionResult?.message.orEmpty())
+                return snapshot()
+            }
+        }
         val hardenedPlan = AgentActionRiskHardener.enforce(appContext, plan)
         val preparedPlan = hardenedPlan
             .blockActionsWithFailedDependencies()
@@ -1719,6 +1740,8 @@ class MobileNativeAgent(
         val specializedContinuation = updatedPlan?.plannerProfile?.startsWith("specialized-adapter:") == true &&
             hardenedAction.requiresSpecializedContinuation()
         val replanReason = when {
+            lastActionResult?.success != true &&
+                lastActionResult?.metadata?.get("non_retriable") == "true" -> ""
             lastActionResult?.success != true && hardenedAction.isPhoneDevelopmentRuntimeHandoff() ->
                 PHONE_DEVELOPMENT_REPLAN_REASON
             lastActionResult?.success != true -> "action_failed:${hardenedAction.kind.name}"
@@ -1831,6 +1854,7 @@ class MobileNativeAgent(
                 installedPackIds = installedPackIds
             )
         }
+        responsePlan = AgentPlanLifecyclePolicy.normalize(responsePlan).plan
         currentPlan = responsePlan
         lastActionResult = completedResult
         val hasPendingActions = responsePlan.actions.any {
@@ -5650,19 +5674,27 @@ class MobileNativeAgent(
 
     private fun restoreSession(session: AgentSessionSnapshot?) {
         if (session == null) return
-        val executionWasInterrupted = session.phase == AgentPhase.EXECUTING ||
-            session.phase == AgentPhase.VERIFYING
-        sessionId = session.sessionId.ifBlank { UUID.randomUUID().toString() }
-        phase = if (executionWasInterrupted) AgentPhase.PAUSED else session.phase
-        currentGoal = session.currentGoal
-        currentScreen = session.currentScreen
+        val persistedTask = session.currentPlan?.planId?.let(taskStore::find)
+        val lifecycleNormalization = AgentPlanLifecyclePolicy.normalize(session)
+        val restoredSession = AgentPlanLifecyclePolicy.recoverCompletedConnector(
+            lifecycleNormalization.session,
+            persistedTask,
+            appContext.getString(R.string.agent_stale_connector_no_result)
+        )
+        logRestoredLifecycle(session, restoredSession, persistedTask)
+        val executionWasInterrupted = restoredSession.phase == AgentPhase.EXECUTING ||
+            restoredSession.phase == AgentPhase.VERIFYING
+        sessionId = restoredSession.sessionId.ifBlank { UUID.randomUUID().toString() }
+        phase = if (executionWasInterrupted) AgentPhase.PAUSED else restoredSession.phase
+        currentGoal = restoredSession.currentGoal
+        currentScreen = restoredSession.currentScreen
         if (!safetySettingsStore.load().screenObservationAllowed) {
             currentScreen = captureScreen()
         }
         currentPlan = if (executionWasInterrupted) {
-            session.currentPlan?.recoverInterruptedExecution()
+            restoredSession.currentPlan?.recoverInterruptedExecution()
         } else {
-            session.currentPlan
+            restoredSession.currentPlan
         }
         lastActionResult = if (executionWasInterrupted) {
             AgentActionResult(
@@ -5671,14 +5703,39 @@ class MobileNativeAgent(
                 message = "Execution was interrupted and restored at the last checkpoint"
             )
         } else {
-            session.lastActionResult
+            restoredSession.lastActionResult
         }
-        activeWorkflowExecutionId = session.activeWorkflowExecutionId.takeIf { it.isNotBlank() }
+        activeWorkflowExecutionId = restoredSession.activeWorkflowExecutionId.takeIf { it.isNotBlank() }
         auditTrail.clear()
-        auditTrail.addAll(session.auditTrail.takeLast(MAX_AUDIT_ITEMS))
+        auditTrail.addAll(restoredSession.auditTrail.takeLast(MAX_AUDIT_ITEMS))
+        if (lifecycleNormalization.changed) {
+            recordAudit(
+                AgentAuditEvent.INVOCATION_AUDIT,
+                "restored_plan_removed_trailing_drafts=${lifecycleNormalization.removedActions.joinToString(",", transform = AgentAction::id)}"
+            )
+        }
         if (executionWasInterrupted) {
             recordAudit(AgentAuditEvent.TASK_INTERRUPTED, "restored_to_safe_pause")
         }
+    }
+
+    private fun logRestoredLifecycle(
+        original: AgentSessionSnapshot,
+        restored: AgentSessionSnapshot,
+        persistedTask: AgentTaskRecord?
+    ) {
+        fun actionSummary(plan: AgentPlan?): String = plan?.actions.orEmpty().joinToString(",") { action ->
+            "${action.kind.name}:${action.target}:${action.status.name}:${action.result.length}"
+        }.ifBlank { "none" }
+        Log.i(
+            "SignalASIAgentLifecycle",
+            "restore phase=${original.phase.name}->${restored.phase.name} " +
+                "actions=${actionSummary(original.currentPlan)}->${actionSummary(restored.currentPlan)} " +
+                "last=${original.lastActionResult?.actionId.orEmpty()}:${original.lastActionResult?.message?.length ?: 0}" +
+                "->${restored.lastActionResult?.actionId.orEmpty()}:${restored.lastActionResult?.message?.length ?: 0} " +
+                "task=${persistedTask?.phase?.name.orEmpty()}:${persistedTask?.routeKind?.name.orEmpty()}:" +
+                "${persistedTask?.targetTitle.orEmpty()}:${persistedTask?.result?.length ?: 0}"
+        )
     }
 
     private fun persistSession() {
@@ -5846,6 +5903,8 @@ class AndroidScreenPerceptionProvider(private val context: Context) : ScreenPerc
 interface AgentPlanner {
     fun plan(request: AgentRequest): AgentPlan
 }
+
+private const val UNAVAILABLE_REASONING_CONNECTOR_ID = "reasoning-provider-unavailable"
 
 class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner {
     override fun plan(request: AgentRequest): AgentPlan {
@@ -6148,7 +6207,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 lower.contains("deepseek") ||
                 lower.contains("gemini") ||
                 lower.contains("qwen") -> if (taskRequirements.localOnly) {
-                    informationQueryAction(request) ?: draftPlanAction(request)
+                    informationQueryAction(request) ?: unavailableReasoningAction(request)
                 } else {
                     connectorAction(request, "cloud-models", "Send task to cloud model")
                 }
@@ -6162,9 +6221,9 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                     it.kind == AgentConnectorKind.DEVICE && request.goal.contains(it.title, ignoreCase = true)
                 } -> deviceAction(request)
             isInformationQuery(goal) -> informationQueryAction(request)
-                ?: draftPlanAction(request)
+                ?: unavailableReasoningAction(request)
             else -> informationQueryAction(request)
-                ?: draftPlanAction(request)
+                ?: unavailableReasoningAction(request)
         }
     }
 
@@ -6389,27 +6448,17 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 nativeTools = request.runtimeContext.nativeTools
             )
         }
-        val available = request.targets.filter { target ->
-            target.status == AgentConnectorStatus.AVAILABLE &&
-                (AgentCapability.CHAT in target.capabilities ||
-                    AgentCapability.REASONING in target.capabilities ||
-                    AgentCapability.RESEARCH in target.capabilities)
-        }
-        val target = if (routing != null) {
-            val selectedId = routing.primary?.resource?.targetId ?: return null
-            available.firstOrNull { it.id == selectedId } ?: return null
-        } else {
-            available.firstOrNull { it.id == "local-llm" }
-                ?: available.firstOrNull { it.kind == AgentConnectorKind.MODEL }
-                ?: available.firstOrNull { AgentCapability.RESEARCH in it.capabilities }
-                ?: return null
-        }
-        val currentInformation = routing?.requirements?.liveDataRequired == true
+        val selection = AgentConnectorRouteSelector.select(request.targets, routing) ?: return null
+        val currentInformation = selection.decision?.requirements?.liveDataRequired == true
         return connectorAction(
             request,
-            target.id,
-            if (currentInformation) "Get current information from ${target.title}" else "Ask ${target.title}",
-            routing
+            selection.target.id,
+            if (currentInformation) {
+                "Get current information from ${selection.target.title}"
+            } else {
+                "Ask ${selection.target.title}"
+            },
+            selection.decision
         )
     }
 
@@ -6453,7 +6502,7 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
         if (AgentTaskRequirementAnalyzer.analyze(request.goal).localOnly &&
             explicitResource?.location == AgentResourceLocation.CLOUD
         ) {
-            return draftPlanAction(request)
+            return unavailableReasoningAction(request)
         }
         val routing = context?.let { appContext ->
             AgentResourceRouter(appContext).route(
@@ -6462,24 +6511,27 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 tools = request.runtimeContext.systemTools,
                 nativeTools = request.runtimeContext.nativeTools
             )
-        }?.let { decision ->
-            val ordered = listOfNotNull(decision.primary) + decision.fallbacks
-            val explicit = ordered.firstOrNull { it.resource.targetId == target.id }
-            if (explicit == null) null else decision.copy(
-                primary = explicit,
-                fallbacks = ordered.filterNot { it.resource.targetId == target.id }.take(4)
-            )
         }
-        return connectorAction(request, target.id, "Send task to ${target.title}", routing)
+        val connectorRouting = AgentConnectorRouteSelector.select(
+            targets = request.targets,
+            decision = routing,
+            preferredTargetId = target.id
+        )?.decision
+        return connectorAction(request, target.id, "Send task to ${target.title}", connectorRouting)
     }
 
-    private fun draftPlanAction(request: AgentRequest): AgentAction = AgentAction(
-        id = "draft-plan",
-        kind = AgentActionKind.DRAFT_PLAN,
-        target = "local-agent-runtime",
-        risk = riskFor(request.goal.lowercase(Locale.US)),
+    private fun unavailableReasoningAction(request: AgentRequest): AgentAction = AgentAction(
+        id = "connector-unavailable-${request.goal.hashCode().toUInt()}",
+        kind = AgentActionKind.CALL_CONNECTOR,
+        target = "Agent or model",
+        risk = AgentRisk.LOW,
         status = AgentActionStatus.PENDING_CONFIRMATION,
-        description = "Create a safe local task plan"
+        description = "Report that no reasoning provider is configured",
+        parameters = mapOf(
+            "connector_id" to UNAVAILABLE_REASONING_CONNECTOR_ID,
+            "prompt" to request.goal
+        ),
+        requiresConfirmation = false
     )
 
     private fun isInformationQuery(goal: String): Boolean {
@@ -6932,16 +6984,7 @@ object AgentPlanFactory {
 
     fun actions(request: AgentRequest, actions: List<AgentAction>): AgentPlan {
         val plannedActions = collapseDuplicateConnectorCalls(actions).ifEmpty {
-            listOf(
-                AgentAction(
-                    id = "draft-plan",
-                    kind = AgentActionKind.DRAFT_PLAN,
-                    target = "local-agent-runtime",
-                    risk = AgentRisk.LOW,
-                    status = AgentActionStatus.PENDING_CONFIRMATION,
-                    description = "Create a safe local task plan"
-                )
-            )
+            listOf(emptyPlanFallbackAction(request))
         }
         val routeAction = plannedActions.firstOrNull {
             it.kind == AgentActionKind.CALL_CONNECTOR || it.kind == AgentActionKind.CONTROL_DEVICE
@@ -6970,6 +7013,41 @@ object AgentPlanFactory {
             routeRationale = routeRationaleFor(routeAction, request)
         )
         return plan.copy(validation = AgentPlanValidator.validate(plan))
+    }
+
+    private fun emptyPlanFallbackAction(request: AgentRequest): AgentAction {
+        val target = AgentConnectorRouteSelector.select(request.targets, decision = null)?.target
+        return if (target != null) {
+            AgentAction(
+                id = "fallback-connector-${request.goal.hashCode().toUInt()}",
+                kind = AgentActionKind.CALL_CONNECTOR,
+                target = target.title,
+                risk = AgentRisk.LOW,
+                status = AgentActionStatus.PENDING_CONFIRMATION,
+                description = "Ask ${target.title}",
+                parameters = mapOf(
+                    "connector_id" to target.id,
+                    "prompt" to request.goal,
+                    "planner_fallback" to "empty_action_plan"
+                ),
+                requiresConfirmation = false
+            )
+        } else {
+            AgentAction(
+                id = "connector-unavailable-${request.goal.hashCode().toUInt()}",
+                kind = AgentActionKind.CALL_CONNECTOR,
+                target = "Agent or model",
+                risk = AgentRisk.LOW,
+                status = AgentActionStatus.PENDING_CONFIRMATION,
+                description = "Report that no reasoning provider is configured",
+                parameters = mapOf(
+                    "connector_id" to UNAVAILABLE_REASONING_CONNECTOR_ID,
+                    "prompt" to request.goal,
+                    "planner_fallback" to "empty_action_plan"
+                ),
+                requiresConfirmation = false
+            )
+        }
     }
 
     private fun collapseDuplicateConnectorCalls(actions: List<AgentAction>): List<AgentAction> {
@@ -7236,12 +7314,15 @@ object AgentRouteResolver {
             candidate.id == connectorId || candidate.title == action.target
         }
         val kind = when (action.kind) {
-            AgentActionKind.CALL_CONNECTOR -> when (target?.kind) {
-                AgentConnectorKind.MODEL -> if (target.id == "local-llm") AgentRouteKind.LOCAL_MODEL else AgentRouteKind.CLOUD_MODEL
-                AgentConnectorKind.AGENT -> AgentRouteKind.DESKTOP_AGENT
-                AgentConnectorKind.DEVICE -> AgentRouteKind.DEVICE_CONNECTOR
-                AgentConnectorKind.KNOWLEDGE -> AgentRouteKind.KNOWLEDGE
-                null -> AgentRouteKind.UNKNOWN
+            AgentActionKind.CALL_CONNECTOR -> when {
+                connectorId == UNAVAILABLE_REASONING_CONNECTOR_ID -> AgentRouteKind.LOCAL_SYSTEM
+                else -> when (target?.kind) {
+                    AgentConnectorKind.MODEL -> if (target.id == "local-llm") AgentRouteKind.LOCAL_MODEL else AgentRouteKind.CLOUD_MODEL
+                    AgentConnectorKind.AGENT -> AgentRouteKind.DESKTOP_AGENT
+                    AgentConnectorKind.DEVICE -> AgentRouteKind.DEVICE_CONNECTOR
+                    AgentConnectorKind.KNOWLEDGE -> AgentRouteKind.KNOWLEDGE
+                    null -> AgentRouteKind.UNKNOWN
+                }
             }
             AgentActionKind.CONTROL_DEVICE -> AgentRouteKind.DEVICE_CONNECTOR
             AgentActionKind.CALL_NATIVE_TOOL -> AgentRouteKind.LOCAL_SYSTEM
@@ -8004,6 +8085,14 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         }.map { it.trim() }.filter { it.isNotBlank() }.distinct()
         var lastFailure = AgentActionResult(action.id, false, "No callable resource is available")
         connectorIds.forEachIndexed { index, connectorId ->
+            if (connectorId == UNAVAILABLE_REASONING_CONNECTOR_ID) {
+                return AgentActionResult(
+                    action.id,
+                    false,
+                    context.getString(R.string.agent_reasoning_provider_unavailable),
+                    metadata = mapOf("non_retriable" to "true")
+                )
+            }
             val startedAt = System.currentTimeMillis()
             val routedAction = action.copy(
                 parameters = action.parameters + mapOf(
