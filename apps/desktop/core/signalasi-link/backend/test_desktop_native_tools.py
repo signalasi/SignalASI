@@ -7,16 +7,21 @@ from pathlib import Path
 from unittest.mock import patch
 
 from desktop_native_tools import (
+    APP_LAUNCH,
+    APP_LIST,
     ARCHIVE_CREATE,
+    BROWSER_OPEN,
     FILE_LIST,
     FILE_READ_TEXT,
     FILE_SHA256,
     FILE_WRITE_TEXT,
+    HOST_FILE_SEARCH,
     OFFICE_CONVERT,
     OFFICE_INSPECT,
     PROCESS_LIST,
     SYSTEM_STATUS,
     TERMINAL_RUN,
+    WEB_FETCH,
     DesktopNativeToolRegistry,
     _digest,
 )
@@ -26,9 +31,16 @@ class DesktopNativeToolRegistryTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        self.launched = []
+        self.opened_urls = []
+        workspace_root = self.root / "workspaces"
         self.registry = DesktopNativeToolRegistry(
             state_root=self.root / "state",
-            workspace_root=self.root / "workspaces",
+            workspace_root=workspace_root,
+            known_roots={"workspace": workspace_root},
+            app_catalog=lambda: [{"id": "notepad", "name": "Notepad", "kind": "executable", "launch": "notepad.exe"}],
+            app_launcher=lambda item: self.launched.append(item),
+            browser_opener=lambda url: self.opened_urls.append(url) or True,
         )
 
     def tearDown(self):
@@ -63,10 +75,31 @@ class DesktopNativeToolRegistryTests(unittest.TestCase):
         for tool_id in (
             SYSTEM_STATUS, PROCESS_LIST, FILE_LIST, FILE_READ_TEXT, FILE_WRITE_TEXT,
             FILE_SHA256, ARCHIVE_CREATE, TERMINAL_RUN, OFFICE_INSPECT, OFFICE_CONVERT,
+            APP_LIST, APP_LAUNCH, HOST_FILE_SEARCH, BROWSER_OPEN, WEB_FETCH,
         ):
             self.assertIn(tool_id, tools)
             self.assertEqual("desktop", tools[tool_id]["location"])
             self.assertFalse(tools[tool_id]["input_schema"]["additionalProperties"])
+
+    def test_search_launch_and_browser_tools_are_bounded(self):
+        source = self.workspace() / "release-notes.md"
+        source.write_text("ready", encoding="utf-8")
+
+        searched = self.invoke(HOST_FILE_SEARCH, {
+            "root": "workspace", "query": "release", "extensions": ["md"], "max_depth": 4, "max_entries": 10,
+        })
+        applications = self.invoke(APP_LIST, {"query": "note", "max_entries": 10})
+        launched = self.invoke(APP_LAUNCH, {"name": "Notepad"})
+        opened = self.invoke(BROWSER_OPEN, {"url": "https://example.com/docs"})
+        blocked = self.invoke(WEB_FETCH, {"url": "http://127.0.0.1:8765", "max_bytes": 4096})
+
+        self.assertEqual(searched["output"]["files"][0]["name"], "release-notes.md")
+        self.assertEqual(applications["output"]["applications"][0]["name"], "Notepad")
+        self.assertEqual(launched["status"], "succeeded")
+        self.assertEqual(self.launched[0]["id"], "notepad")
+        self.assertEqual(opened["status"], "succeeded")
+        self.assertEqual(self.opened_urls, ["https://example.com/docs"])
+        self.assertEqual(blocked["error"]["code"], "private_network_blocked")
 
     def test_workspace_path_escape_is_rejected(self):
         result = self.invoke(FILE_READ_TEXT, {"workspace_id": "task-a", "path": "../secret.txt"})

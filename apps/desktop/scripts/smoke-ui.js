@@ -12,7 +12,8 @@ const screenshots = [
   path.join(screenshotDir, "desktop-language-zh.png"),
   path.join(screenshotDir, "desktop-setup-guide.png"),
   path.join(screenshotDir, "desktop-status-matrix.png"),
-  path.join(screenshotDir, "desktop-agents.png")
+  path.join(screenshotDir, "desktop-agents.png"),
+  path.join(screenshotDir, "desktop-capabilities.png")
 ];
 
 if (!fs.existsSync(electronCli)) {
@@ -31,7 +32,8 @@ const child = spawn(process.execPath, [electronCli, "."], {
   env: {
     ...process.env,
     SIGNALASI_UI_SMOKE: "1",
-    SIGNALASI_UI_SMOKE_DIR: screenshotDir
+    SIGNALASI_UI_SMOKE_DIR: screenshotDir,
+    SIGNALASI_STATE_DIR: path.join(screenshotDir, "state")
   }
 });
 

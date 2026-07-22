@@ -20,7 +20,7 @@ import os
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, Callable
 
 
 DEFAULT_TIMEOUT = 20.0
@@ -130,14 +130,13 @@ def server_command(args: argparse.Namespace) -> tuple[Any, bool]:
     return command, True
 
 
-def call_mcp(args: argparse.Namespace, prompt: str) -> str:
+def _open_mcp(
+    args: argparse.Namespace,
+    on_process: Callable[[subprocess.Popen], None] | None = None,
+) -> tuple[subprocess.Popen, list[dict[str, Any]], float]:
     command, use_shell = server_command(args)
     if not command:
-        return (
-            "[MCP Agent] No MCP server configured. Set --server, --server-python, "
-            "or SIGNALASI_MCP_SERVER_CMD. Prompt received: "
-            f"{prompt}"
-        )
+        raise McpError("No MCP server configured")
 
     deadline = time.monotonic() + float(args.timeout)
     process = subprocess.Popen(
@@ -149,6 +148,8 @@ def call_mcp(args: argparse.Namespace, prompt: str) -> str:
         text=False,
     )
     try:
+        if on_process is not None:
+            on_process(process)
         request(
             process,
             "initialize",
@@ -165,6 +166,48 @@ def call_mcp(args: argparse.Namespace, prompt: str) -> str:
         tools = listed.get("tools") or []
         if not tools:
             raise McpError("MCP server returned no tools")
+        return process, tools, deadline
+    except Exception:
+        _close_mcp(process)
+        raise
+
+
+def _close_mcp(process: subprocess.Popen) -> None:
+    try:
+        process.terminate()
+        process.wait(timeout=2)
+    except Exception:
+        process.kill()
+        process.wait(timeout=2)
+    finally:
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+
+
+def list_mcp_tools(args: argparse.Namespace) -> list[dict[str, Any]]:
+    process, tools, _deadline = _open_mcp(args)
+    try:
+        return tools
+    finally:
+        _close_mcp(process)
+
+
+def call_mcp(
+    args: argparse.Namespace,
+    prompt: str,
+    on_process: Callable[[subprocess.Popen], None] | None = None,
+) -> str:
+    command, _use_shell = server_command(args)
+    if not command:
+        return (
+            "[MCP Agent] No MCP server configured. Set --server, --server-python, "
+            "or SIGNALASI_MCP_SERVER_CMD. Prompt received: "
+            f"{prompt}"
+        )
+
+    process, tools, deadline = _open_mcp(args, on_process=on_process)
+    try:
         tool = next((item for item in tools if item.get("name") == args.tool), None) if args.tool else tools[0]
         if not tool:
             names = ", ".join(str(item.get("name")) for item in tools)
@@ -178,11 +221,7 @@ def call_mcp(args: argparse.Namespace, prompt: str) -> str:
         )
         return result_text(called)
     finally:
-        try:
-            process.terminate()
-            process.wait(timeout=2)
-        except Exception:
-            process.kill()
+        _close_mcp(process)
 
 
 def parse_args() -> argparse.Namespace:

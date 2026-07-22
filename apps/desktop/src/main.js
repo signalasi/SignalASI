@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, shell } = require("electron");
 const { spawn, spawnSync, execFile } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -30,9 +30,9 @@ if (!hasSingleInstanceLock) {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1120,
-    height: 760,
-    minWidth: 940,
+    width: 1280,
+    height: 820,
+    minWidth: 960,
     minHeight: 640,
     title: "SignalASI Desktop",
     icon: path.join(APP_ROOT, "assets", "signalasi-mark.png"),
@@ -48,6 +48,9 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
   if (UI_SMOKE) {
+    mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+      console.log(`[renderer:${level}] ${message} (${sourceId}:${line})`);
+    });
     mainWindow.webContents.once("did-finish-load", runUiSmoke);
   }
 }
@@ -60,41 +63,32 @@ async function runUiSmoke() {
   const setupPath = path.join(outDir, "desktop-setup-guide.png");
   const matrixPath = path.join(outDir, "desktop-status-matrix.png");
   const agentsPath = path.join(outDir, "desktop-agents.png");
+  const capabilitiesPath = path.join(outDir, "desktop-capabilities.png");
   try {
     fs.mkdirSync(outDir, { recursive: true });
     let state;
     for (let attempt = 0; attempt < 60; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 500));
-      state = await mainWindow.webContents.executeJavaScript(`
-        (() => {
-          const state = {
-            title: document.querySelector(".topbar h2")?.textContent || "",
-            setupTitle: document.querySelector(".setup-guide h3")?.textContent || "",
-            setupItems: document.querySelectorAll("#setupChecklist .setup-item").length,
-            matrixTitle: document.querySelector(".status-matrix h3")?.textContent || "",
-            rows: document.querySelectorAll("#connectorMatrixRows .matrix-row").length,
-            summary: document.querySelector("#statusSummary")?.textContent || "",
-            backend: document.querySelector("#backendBadge")?.textContent || ""
-          };
-          if ((state.setupItems < 6 || state.rows < 5) && ${attempt % 6 === 0 ? "true" : "false"}) {
-            document.querySelector("#refreshDiagnostics")?.click();
-          }
-          return state;
-        })()
-      `);
-      if (state.setupTitle.trim() && state.setupItems >= 6 && state.matrixTitle.trim() && state.rows >= 5) break;
+      state = await mainWindow.webContents.executeJavaScript(`(() => ({
+        app: Boolean(document.querySelector("#agentApp")),
+        title: document.querySelector("#conversationTitle")?.textContent || "",
+        composer: Boolean(document.querySelector("#promptInput")),
+        backend: document.querySelector("#backendBadge")?.textContent || "",
+        agents: document.querySelectorAll("#agentContactList .agent-contact").length
+      }))()`);
+      if (state.app && state.title.trim() && state.composer && state.backend.trim()) break;
     }
-    if (!state || !state.setupTitle.trim() || state.setupItems < 6 || !state.matrixTitle.trim() || state.rows < 5) {
-      throw new Error(`Setup guide or status matrix did not render: ${JSON.stringify(state)}`);
+    if (!state?.app || !state.title.trim() || !state.composer || !state.backend.trim()) {
+      throw new Error(`Desktop Agent workspace did not render: ${JSON.stringify(state)}`);
     }
     const defaultLanguage = await mainWindow.webContents.executeJavaScript(`
       (() => ({
         lang: document.documentElement.lang,
         selected: document.querySelector("#languageSelect")?.value || "",
-        title: document.querySelector(".topbar h2")?.textContent || ""
+        title: document.querySelector("#conversationTitle")?.textContent || ""
       }))()
     `);
-    if (defaultLanguage.lang !== "en" || defaultLanguage.selected !== "en" || defaultLanguage.title !== "Local Agent Connector") {
+    if (defaultLanguage.lang !== "en" || defaultLanguage.selected !== "en" || defaultLanguage.title !== "New task") {
       throw new Error(`Desktop did not default to English: ${JSON.stringify(defaultLanguage)}`);
     }
     await captureSmokeScreenshot(languageEnPath);
@@ -107,12 +101,11 @@ async function runUiSmoke() {
         return {
           lang: document.documentElement.lang,
           selected: select.value,
-          title: document.querySelector(".topbar h2")?.textContent || "",
-          overview: document.querySelector('[data-target="overview"]')?.textContent || ""
+          title: document.querySelector("#conversationTitle")?.textContent || ""
         };
       })()
     `);
-    if (zhLanguage.lang !== "zh-Hans" || zhLanguage.selected !== "zh-CN" || zhLanguage.title !== "\u672c\u5730 Agent \u8fde\u63a5\u5668") {
+    if (zhLanguage.lang !== "zh-Hans" || zhLanguage.selected !== "zh-CN" || zhLanguage.title !== "\u65b0\u5efa\u4efb\u52a1") {
       throw new Error(`Desktop Simplified Chinese language switch failed: ${JSON.stringify(zhLanguage)}`);
     }
     await captureSmokeScreenshot(languageZhPath);
@@ -125,51 +118,94 @@ async function runUiSmoke() {
         return {
           lang: document.documentElement.lang,
           selected: select.value,
-          title: document.querySelector(".topbar h2")?.textContent || ""
+          title: document.querySelector("#conversationTitle")?.textContent || ""
         };
       })()
     `);
-    if (restoredLanguage.lang !== "en" || restoredLanguage.selected !== "en" || restoredLanguage.title !== "Local Agent Connector") {
+    if (restoredLanguage.lang !== "en" || restoredLanguage.selected !== "en" || restoredLanguage.title !== "New task") {
       throw new Error(`Desktop English language restore failed: ${JSON.stringify(restoredLanguage)}`);
     }
     await captureSmokeScreenshot(overviewPath);
-    await mainWindow.webContents.executeJavaScript(`
-      document.querySelector(".setup-guide")?.scrollIntoView({ block: "start" });
-    `);
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    await captureSmokeScreenshot(setupPath);
-    await mainWindow.webContents.executeJavaScript(`
-      document.querySelector(".status-matrix")?.scrollIntoView({ block: "start" });
-    `);
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    await captureSmokeScreenshot(matrixPath);
     const agentsState = await mainWindow.webContents.executeJavaScript(`
-      (() => {
-        document.querySelector('[data-target="agents"]')?.click();
-        document.querySelector("#addCustomAgent")?.click();
+      (async () => {
+        document.querySelector('[data-open-panel="agents"]')?.click();
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          if (document.querySelectorAll("#agentContactList .agent-contact").length > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
         return {
-          active: document.querySelector("#agents")?.classList.contains("active-section") || false,
-          customAgentEditor: Boolean(document.querySelector(".custom-agent-editor")),
-          addButton: Boolean(document.querySelector("#addCustomAgent")),
-          list: Boolean(document.querySelector("#customAgentsList")),
-          rows: document.querySelectorAll("#customAgentsList .custom-agent-row").length,
-          auditTitle: document.querySelector(".audit h3")?.textContent || "",
-          permissions: document.querySelectorAll(".permission-grid div").length,
-          executionLog: Boolean(document.querySelector("#executionLog"))
+          open: document.querySelector("#utilityDrawer")?.classList.contains("open") || false,
+          active: document.querySelector("#agentsPanel")?.classList.contains("active") || false,
+          contacts: document.querySelectorAll("#agentContactList .agent-contact").length,
+          customFields: document.querySelectorAll("#agentsPanel .form-stack input").length,
+          contactText: document.querySelector("#agentContactList")?.textContent || ""
         };
       })()
     `);
-    if (!agentsState.active || !agentsState.customAgentEditor || !agentsState.addButton || !agentsState.list || agentsState.rows < 1 || !agentsState.auditTitle.trim() || agentsState.permissions < 3 || !agentsState.executionLog) {
-      throw new Error(`Agents page did not expose custom agent row editor: ${JSON.stringify(agentsState)}`);
+    if (!agentsState.open || !agentsState.active || agentsState.contacts < 1 || agentsState.customFields < 3) {
+      throw new Error(`Agent drawer did not expose contacts and custom Agent setup: ${JSON.stringify(agentsState)}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
     await captureSmokeScreenshot(agentsPath);
+    const capabilitiesState = await mainWindow.webContents.executeJavaScript(`
+      (async () => {
+        document.querySelector('[data-open-panel="capabilities"]')?.click();
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+          if (document.querySelectorAll("#skillList .capability-item").length >= 4) break;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        return {
+          active: document.querySelector("#capabilitiesPanel")?.classList.contains("active") || false,
+          tabs: document.querySelectorAll("[data-capability-tab]").length,
+          skills: document.querySelectorAll("#skillList .capability-item").length,
+          memory: document.querySelector("#memorySummary")?.textContent || "",
+          mcpForm: Boolean(document.querySelector("#mcpCommand"))
+        };
+      })()
+    `);
+    if (!capabilitiesState.active || capabilitiesState.tabs !== 3 || capabilitiesState.skills < 4 || !capabilitiesState.memory.trim() || !capabilitiesState.mcpForm) {
+      throw new Error(`Capabilities drawer did not expose memory, Skills, and MCP: ${JSON.stringify(capabilitiesState)}`);
+    }
+    await captureSmokeScreenshot(capabilitiesPath);
+    const computerState = await mainWindow.webContents.executeJavaScript(`
+      (async () => {
+        document.querySelector('[data-open-panel="computer"]')?.click();
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          if (document.querySelectorAll("#desktopToolList .desktop-tool").length > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        return { tools: document.querySelectorAll("#desktopToolList .desktop-tool").length };
+      })()
+    `);
+    if (computerState.tools < 5) throw new Error(`Computer drawer did not render native tools: ${JSON.stringify(computerState)}`);
+    await captureSmokeScreenshot(setupPath);
+    const gatewayState = await mainWindow.webContents.executeJavaScript(`
+      (async () => {
+        document.querySelector('[data-open-panel="gateway"]')?.click();
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          const hasFrame = Boolean(document.querySelector("#pairingFrame")?.src);
+          const hasClient = document.querySelectorAll("#pairedClientList .paired-client").length > 0;
+          if (hasFrame || hasClient) break;
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        return {
+          active: document.querySelector("#gatewayPanel")?.classList.contains("active") || false,
+          frame: Boolean(document.querySelector("#pairingFrame")?.src),
+          clients: document.querySelectorAll("#pairedClientList .paired-client").length,
+          summary: document.querySelector("#gatewaySummary")?.textContent || ""
+        };
+      })()
+    `);
+    if (!gatewayState.active || (!gatewayState.frame && gatewayState.clients < 1) || !gatewayState.summary.trim()) {
+      throw new Error(`Gateway drawer did not render: ${JSON.stringify(gatewayState)}`);
+    }
+    await captureSmokeScreenshot(matrixPath);
     console.log(`[ui-smoke] screenshot: ${overviewPath}`);
     console.log(`[ui-smoke] screenshot: ${languageEnPath}`);
     console.log(`[ui-smoke] screenshot: ${languageZhPath}`);
     console.log(`[ui-smoke] screenshot: ${setupPath}`);
     console.log(`[ui-smoke] screenshot: ${matrixPath}`);
     console.log(`[ui-smoke] screenshot: ${agentsPath}`);
+    console.log(`[ui-smoke] screenshot: ${capabilitiesPath}`);
     app.exit(0);
   } catch (error) {
     console.error(`[ui-smoke] failed: ${error.stack || error.message || error}`);
@@ -514,6 +550,17 @@ async function getPairingStatus() {
   return fetchJson("/api/pairing/status");
 }
 
+async function getPairingQr() {
+  await startBackend();
+  const pairing = await fetchJson("/api/pairing/qr");
+  const imageDataUrl = pairing.image_data_url || "";
+  if (!imageDataUrl) throw new Error("Pairing QR image was missing from the Desktop response");
+  return {
+    imageDataUrl,
+    fingerprint: pairing.fingerprint || ""
+  };
+}
+
 async function clearPairing(clientRouteId = "") {
   await startBackend();
   const query = clientRouteId ? `?client_route_id=${encodeURIComponent(clientRouteId)}` : "";
@@ -560,10 +607,181 @@ async function syncMobileStatus() {
   return fetchJson("/api/agents/sync-mobile-status", { method: "POST" });
 }
 
+async function listDesktopTasks(limit = 100) {
+  await startBackend();
+  return fetchJson(`/api/desktop/tasks?limit=${encodeURIComponent(limit)}`);
+}
+
+async function getDesktopTask(taskId) {
+  await startBackend();
+  return fetchJson(`/api/desktop/tasks/${encodeURIComponent(taskId)}`);
+}
+
+async function startDesktopTask(payload = {}) {
+  await startBackend();
+  return fetchJson("/api/desktop/tasks", {
+    method: "POST",
+    body: JSON.stringify({
+      prompt: String(payload.prompt || ""),
+      agent_id: String(payload.agentId || "auto"),
+      conversation_id: String(payload.conversationId || ""),
+      attachments: Array.isArray(payload.attachments) ? payload.attachments : []
+    })
+  });
+}
+
+async function cancelDesktopTask(taskId) {
+  await startBackend();
+  return fetchJson(`/api/desktop/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" });
+}
+
+async function retryDesktopTask(taskId) {
+  await startBackend();
+  return fetchJson(`/api/desktop/tasks/${encodeURIComponent(taskId)}/retry`, { method: "POST" });
+}
+
+async function deleteDesktopConversation(conversationId) {
+  await startBackend();
+  return fetchJson(`/api/desktop/conversations/${encodeURIComponent(conversationId)}`, { method: "DELETE" });
+}
+
+async function getDesktopTools() {
+  await startBackend();
+  return fetchJson("/api/desktop-tools");
+}
+
+async function invokeDesktopTool(payload = {}) {
+  await startBackend();
+  return fetchJson("/api/desktop-tools/invoke", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+async function getDesktopControl() {
+  await startBackend();
+  return fetchJson("/api/desktop-control");
+}
+
+async function updateDesktopControl(settings = {}) {
+  await startBackend();
+  return fetchJson("/api/desktop-control/settings", {
+    method: "POST",
+    body: JSON.stringify(settings)
+  });
+}
+
+async function desktopControlAuthorizationAction(authorizationId, action) {
+  await startBackend();
+  const allowed = new Set(["approve", "reject", "revoke"]);
+  if (!allowed.has(action)) throw new Error("Unsupported Desktop control authorization action");
+  return fetchJson(
+    `/api/desktop-control/authorizations/${encodeURIComponent(authorizationId)}/${action}`,
+    { method: "POST" }
+  );
+}
+
+async function getDesktopMemory(query = "", limit = 100) {
+  await startBackend();
+  return fetchJson(`/api/desktop-memory?query=${encodeURIComponent(query || "")}&limit=${encodeURIComponent(limit || 100)}`);
+}
+
+async function rememberDesktopMemory(payload = {}) {
+  await startBackend();
+  return fetchJson("/api/desktop-memory", { method: "POST", body: JSON.stringify(payload) });
+}
+
+async function forgetDesktopMemory(memoryId) {
+  await startBackend();
+  return fetchJson(`/api/desktop-memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" });
+}
+
+async function getDesktopSkills() {
+  await startBackend();
+  return fetchJson("/api/desktop-skills");
+}
+
+async function saveDesktopSkill(payload = {}) {
+  await startBackend();
+  return fetchJson("/api/desktop-skills", { method: "POST", body: JSON.stringify(payload) });
+}
+
+async function setDesktopSkillEnabled(skillId, enabled) {
+  await startBackend();
+  return fetchJson(`/api/desktop-skills/${encodeURIComponent(skillId)}/enabled`, {
+    method: "POST",
+    body: JSON.stringify({ enabled: Boolean(enabled) })
+  });
+}
+
+async function deleteDesktopSkill(skillId) {
+  await startBackend();
+  return fetchJson(`/api/desktop-skills/${encodeURIComponent(skillId)}`, { method: "DELETE" });
+}
+
+async function getDesktopMcp() {
+  await startBackend();
+  return fetchJson("/api/desktop-mcp");
+}
+
+async function saveDesktopMcp(payload = {}) {
+  await startBackend();
+  return fetchJson("/api/desktop-mcp", { method: "POST", body: JSON.stringify(payload) });
+}
+
+async function probeDesktopMcp(connectionId) {
+  await startBackend();
+  return fetchJson(`/api/desktop-mcp/${encodeURIComponent(connectionId)}/probe`, { method: "POST" });
+}
+
+async function deleteDesktopMcp(connectionId) {
+  await startBackend();
+  return fetchJson(`/api/desktop-mcp/${encodeURIComponent(connectionId)}`, { method: "DELETE" });
+}
+
+async function chooseAttachments() {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Add files to SignalASI",
+    buttonLabel: "Add",
+    properties: ["openFile", "multiSelections"]
+  });
+  return result.canceled ? [] : result.filePaths;
+}
+
+function resolveTaskPath(taskId, relativePath = "") {
+  const safeTaskId = String(taskId || "");
+  if (!/^[A-Za-z0-9._-]{1,96}$/.test(safeTaskId)) {
+    throw new Error("Invalid task id");
+  }
+  const tasksRoot = path.resolve(os.homedir(), "SignalASIWorkspace", "tasks");
+  const taskRoot = path.resolve(tasksRoot, safeTaskId);
+  const target = path.resolve(taskRoot, String(relativePath || "."));
+  if (target !== taskRoot && !target.startsWith(`${taskRoot}${path.sep}`)) {
+    throw new Error("Task artifact escaped its workspace");
+  }
+  return target;
+}
+
+async function openTaskArtifact(taskId, relativePath = "") {
+  const target = resolveTaskPath(taskId, relativePath);
+  if (!fs.existsSync(target)) throw new Error("Task artifact not found");
+  const error = await shell.openPath(target);
+  if (error) throw new Error(error);
+  return { ok: true, path: target };
+}
+
+async function revealTaskWorkspace(taskId) {
+  const target = resolveTaskPath(taskId);
+  if (!fs.existsSync(target)) throw new Error("Task workspace not found");
+  shell.showItemInFolder(target);
+  return { ok: true, path: target };
+}
+
 ipcMain.handle("backend:start", startBackend);
 ipcMain.handle("backend:status", backendStatus);
 ipcMain.handle("runtime:diagnostics", runtimeDiagnostics);
 ipcMain.handle("pairing:status", getPairingStatus);
+ipcMain.handle("pairing:qr", getPairingQr);
 ipcMain.handle("pairing:clear", (_event, clientRouteId = "") => clearPairing(clientRouteId));
 ipcMain.handle("agents:detect", detectAgents);
 ipcMain.handle("agents:diagnostics", getAgentDiagnostics);
@@ -575,6 +793,32 @@ ipcMain.handle("agents:config:save", (_event, config) => saveAgentConfig(config)
 ipcMain.handle("agents:test", (_event, agentId, prompt) => testAgent(agentId, prompt));
 ipcMain.handle("mobile:test-message", (_event, contactId, content) => sendMobileTestMessage(contactId, content));
 ipcMain.handle("mobile:sync-status", syncMobileStatus);
+ipcMain.handle("desktop-tasks:list", (_event, limit) => listDesktopTasks(limit));
+ipcMain.handle("desktop-tasks:get", (_event, taskId) => getDesktopTask(taskId));
+ipcMain.handle("desktop-tasks:start", (_event, payload) => startDesktopTask(payload));
+ipcMain.handle("desktop-tasks:cancel", (_event, taskId) => cancelDesktopTask(taskId));
+ipcMain.handle("desktop-tasks:retry", (_event, taskId) => retryDesktopTask(taskId));
+ipcMain.handle("desktop-conversations:delete", (_event, conversationId) => deleteDesktopConversation(conversationId));
+ipcMain.handle("desktop-tools:list", getDesktopTools);
+ipcMain.handle("desktop-tools:invoke", (_event, payload) => invokeDesktopTool(payload));
+ipcMain.handle("desktop-control:get", getDesktopControl);
+ipcMain.handle("desktop-control:update", (_event, settings) => updateDesktopControl(settings));
+ipcMain.handle("desktop-control:authorization", (_event, authorizationId, action) =>
+  desktopControlAuthorizationAction(authorizationId, action));
+ipcMain.handle("desktop-memory:list", (_event, query, limit) => getDesktopMemory(query, limit));
+ipcMain.handle("desktop-memory:remember", (_event, payload) => rememberDesktopMemory(payload));
+ipcMain.handle("desktop-memory:forget", (_event, memoryId) => forgetDesktopMemory(memoryId));
+ipcMain.handle("desktop-skills:list", getDesktopSkills);
+ipcMain.handle("desktop-skills:save", (_event, payload) => saveDesktopSkill(payload));
+ipcMain.handle("desktop-skills:enabled", (_event, skillId, enabled) => setDesktopSkillEnabled(skillId, enabled));
+ipcMain.handle("desktop-skills:delete", (_event, skillId) => deleteDesktopSkill(skillId));
+ipcMain.handle("desktop-mcp:list", getDesktopMcp);
+ipcMain.handle("desktop-mcp:save", (_event, payload) => saveDesktopMcp(payload));
+ipcMain.handle("desktop-mcp:probe", (_event, connectionId) => probeDesktopMcp(connectionId));
+ipcMain.handle("desktop-mcp:delete", (_event, connectionId) => deleteDesktopMcp(connectionId));
+ipcMain.handle("files:choose", chooseAttachments);
+ipcMain.handle("task-artifact:open", (_event, taskId, relativePath) => openTaskArtifact(taskId, relativePath));
+ipcMain.handle("task-workspace:reveal", (_event, taskId) => revealTaskWorkspace(taskId));
 ipcMain.handle("i18n:load", (_event, language) => loadLocale(language));
 ipcMain.handle("pairing:url", () => PAIRING_URL);
 ipcMain.handle("open:external", (_event, url) => shell.openExternal(url));

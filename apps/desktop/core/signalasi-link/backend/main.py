@@ -3,13 +3,15 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+import uuid
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from models import init_db, get_session, Contact, Message, ContactType, MessageType, SenderType
 from agent_gateway import (
@@ -24,7 +26,7 @@ from agent_gateway import (
 )
 from agent_config import load_config, save_config
 from api_response import api_error
-from agent_task_manager import agent_task_manager
+from agent_task_manager import TERMINAL_STATES, agent_task_manager
 from backend_instance_lock import BackendInstanceLock
 
 logging.basicConfig(level=logging.INFO)
@@ -78,10 +80,37 @@ def signalasi_pairing_payload(include_agents: bool = False) -> dict:
     pairing = new_pairing_session()
     payload["pairing_token"] = pairing["token"]
     payload["pairing_secret"] = pairing["secret"]
+    from desktop_control import desktop_control_manager
+
+    control_offer = desktop_control_manager().create_offer(pairing["token"])
+    if control_offer is not None:
+        payload["desktop_control_authorization"] = control_offer
     if include_agents:
         from mqtt_bridge import mobile_connector_agents
         payload["connector_agents"] = mobile_connector_agents()
     return payload
+
+
+def signalasi_pairing_qr() -> dict:
+    import base64
+    import io
+    import qrcode
+    from mqtt_bridge import mobile_connector_agents
+
+    payload = signalasi_pairing_payload()
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L, border=2, box_size=10)
+    qr.add_data(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    qr.make(fit=True)
+    image = qr.make_image(fill_color="black", back_color="white")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return {
+        "image_data_url": f"data:image/png;base64,{encoded}",
+        "fingerprint": payload["identity_key_sha256"][:16],
+        "pairing_type": payload["type"],
+        "agent_count": len(mobile_connector_agents()),
+    }
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -174,7 +203,9 @@ def list_contacts(db: Session = Depends(get_session)):
 
 @app.get("/api/agents")
 def api_list_agents():
-    return list_agents()
+    # The primary UI needs an immediate availability snapshot. Full version
+    # probes remain available through the diagnostics endpoint.
+    return list_agents(quick=True)
 
 @app.get("/api/agents/diagnostics")
 def api_agent_diagnostics():
@@ -209,16 +240,26 @@ def api_pairing_payload(request: Request):
     require_loopback(request)
     return signalasi_pairing_payload()
 
+
+@app.get("/api/pairing/qr")
+def api_pairing_qr(request: Request):
+    require_loopback(request)
+    return signalasi_pairing_qr()
+
 @app.post("/api/pairing/clear")
 def api_pairing_clear(client_route_id: str = Query("")):
     from pairing_state import clear_pairing_state, get_client, list_clients, pairing_status
     from mqtt_bridge import publish_pairing_revoked
     from signalasi_client import remove_peer_signal_session
+    from desktop_control import desktop_control_manager
     targets = [get_client(client_route_id)] if client_route_id else list_clients()
     targets = [target for target in targets if target]
     revoke = publish_pairing_revoked(reason="forgotten_by_desktop", client_route_id=client_route_id)
     removed_sessions = []
     for target in targets:
+        desktop_control_manager().revoke_for_client(
+            target["client_route_id"], "pairing_revoked"
+        )
         try:
             remove_peer_signal_session(target["signal_name"], int(target.get("signal_device_id") or 1))
             removed_sessions.append(target["client_route_id"])
@@ -318,6 +359,41 @@ class DesktopNativeToolInvokeReq(BaseModel):
     confirmation: dict | None = None
 
 
+class DesktopMemoryReq(BaseModel):
+    content: str
+    kind: str = "fact"
+    importance: float = 0.6
+
+
+class DesktopSkillReq(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    triggers: list[str] = Field(default_factory=list)
+    instructions: str
+    enabled: bool = True
+
+
+class DesktopSkillEnabledReq(BaseModel):
+    enabled: bool = True
+
+
+class DesktopMcpReq(BaseModel):
+    id: str
+    name: str
+    command: str
+    default_tool: str = ""
+    triggers: list[str] = Field(default_factory=list)
+    enabled: bool = True
+    auto_invoke: bool = False
+    timeout_seconds: int = 20
+
+
+class DesktopControlSettingsReq(BaseModel):
+    enabled: bool | None = None
+    require_unlocked: bool | None = None
+
+
 @app.get("/api/agent-adapters")
 def api_agent_adapters(request: Request):
     require_loopback(request)
@@ -365,6 +441,184 @@ def api_cancel_desktop_native_tool(invocation_id: str, request: Request):
     from desktop_native_tools import desktop_native_tool_registry
 
     return {"cancelled": desktop_native_tool_registry().cancel(invocation_id)}
+
+
+@app.get("/api/desktop-control")
+def api_desktop_control_status(request: Request):
+    require_loopback(request)
+    from desktop_control import desktop_control_manager
+
+    return desktop_control_manager().status(include_revoked=True)
+
+
+@app.post("/api/desktop-control/settings")
+def api_desktop_control_settings(req: DesktopControlSettingsReq, request: Request):
+    require_loopback(request)
+    from desktop_control import desktop_control_manager
+    from mqtt_bridge import publish_desktop_control_status_all
+
+    result = desktop_control_manager().update_settings(
+        enabled=req.enabled,
+        require_unlocked=req.require_unlocked,
+    )
+    publish_desktop_control_status_all(reason="settings_changed")
+    return result
+
+
+def _desktop_control_authorization_action(
+    authorization_id: str,
+    action: str,
+) -> dict:
+    from desktop_control import DesktopControlError, desktop_control_manager
+    from mqtt_bridge import publish_desktop_control_authorization_changed
+
+    manager = desktop_control_manager()
+    try:
+        if action == "approve":
+            authorization = manager.approve(authorization_id)
+        elif action == "reject":
+            authorization = manager.reject(authorization_id)
+        elif action == "revoke":
+            authorization = manager.revoke(authorization_id)
+        else:
+            raise HTTPException(status_code=400, detail=api_error("desktop_control_action_invalid"))
+    except DesktopControlError as exc:
+        status_code = 404 if exc.code == "authorization_not_found" else 409
+        raise HTTPException(
+            status_code=status_code,
+            detail=api_error(exc.code, message=str(exc)),
+        ) from exc
+    publish_desktop_control_authorization_changed(authorization, reason=action)
+    return manager.status(include_revoked=True)
+
+
+@app.post("/api/desktop-control/authorizations/{authorization_id}/approve")
+def api_desktop_control_approve(authorization_id: str, request: Request):
+    require_loopback(request)
+    return _desktop_control_authorization_action(authorization_id, "approve")
+
+
+@app.post("/api/desktop-control/authorizations/{authorization_id}/reject")
+def api_desktop_control_reject(authorization_id: str, request: Request):
+    require_loopback(request)
+    return _desktop_control_authorization_action(authorization_id, "reject")
+
+
+@app.post("/api/desktop-control/authorizations/{authorization_id}/revoke")
+def api_desktop_control_revoke(authorization_id: str, request: Request):
+    require_loopback(request)
+    return _desktop_control_authorization_action(authorization_id, "revoke")
+
+
+@app.get("/api/desktop-memory")
+def api_desktop_memory(request: Request, query: str = Query(""), limit: int = Query(100)):
+    require_loopback(request)
+    from desktop_memory import desktop_memory_store
+
+    store = desktop_memory_store()
+    rows = store.search(query, limit=limit) if query.strip() else store.list(limit=limit)
+    return {"memories": rows, "stats": store.stats()}
+
+
+@app.post("/api/desktop-memory")
+def api_remember_desktop_memory(req: DesktopMemoryReq, request: Request):
+    require_loopback(request)
+    from desktop_memory import desktop_memory_store
+
+    memory = desktop_memory_store().remember(
+        req.content,
+        kind=req.kind,
+        importance=req.importance,
+        confidence=1.0,
+        tags=["manual"],
+    )
+    if memory is None:
+        raise HTTPException(status_code=400, detail=api_error("desktop_memory_rejected"))
+    return memory
+
+
+@app.delete("/api/desktop-memory/{memory_id}")
+def api_forget_desktop_memory(memory_id: str, request: Request):
+    require_loopback(request)
+    from desktop_memory import desktop_memory_store
+
+    return {"id": memory_id, "forgotten": desktop_memory_store().forget(memory_id)}
+
+
+@app.get("/api/desktop-skills")
+def api_desktop_skills(request: Request):
+    require_loopback(request)
+    from desktop_skills import desktop_skill_registry
+
+    return {"skills": desktop_skill_registry().list(include_instructions=True)}
+
+
+@app.post("/api/desktop-skills")
+def api_save_desktop_skill(req: DesktopSkillReq, request: Request):
+    require_loopback(request)
+    from desktop_skills import desktop_skill_registry
+
+    try:
+        return desktop_skill_registry().upsert(req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=api_error("desktop_skill_invalid", str(exc))) from exc
+
+
+@app.post("/api/desktop-skills/{skill_id}/enabled")
+def api_enable_desktop_skill(skill_id: str, req: DesktopSkillEnabledReq, request: Request):
+    require_loopback(request)
+    from desktop_skills import desktop_skill_registry
+
+    try:
+        return desktop_skill_registry().set_enabled(skill_id, req.enabled)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=api_error("desktop_skill_not_found")) from exc
+
+
+@app.delete("/api/desktop-skills/{skill_id}")
+def api_delete_desktop_skill(skill_id: str, request: Request):
+    require_loopback(request)
+    from desktop_skills import desktop_skill_registry
+
+    return {"id": skill_id, "deleted": desktop_skill_registry().delete(skill_id)}
+
+
+@app.get("/api/desktop-mcp")
+def api_desktop_mcp(request: Request):
+    require_loopback(request)
+    from desktop_mcp import desktop_mcp_registry
+
+    return {"connections": desktop_mcp_registry().list(include_command=True)}
+
+
+@app.post("/api/desktop-mcp")
+def api_save_desktop_mcp(req: DesktopMcpReq, request: Request):
+    require_loopback(request)
+    from desktop_mcp import desktop_mcp_registry
+
+    try:
+        return desktop_mcp_registry().upsert(req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=api_error("desktop_mcp_invalid", str(exc))) from exc
+
+
+@app.post("/api/desktop-mcp/{connection_id}/probe")
+def api_probe_desktop_mcp(connection_id: str, request: Request):
+    require_loopback(request)
+    from desktop_mcp import desktop_mcp_registry
+
+    try:
+        return desktop_mcp_registry().probe(connection_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=api_error("desktop_mcp_not_found")) from exc
+
+
+@app.delete("/api/desktop-mcp/{connection_id}")
+def api_delete_desktop_mcp(connection_id: str, request: Request):
+    require_loopback(request)
+    from desktop_mcp import desktop_mcp_registry
+
+    return {"id": connection_id, "deleted": desktop_mcp_registry().delete(connection_id)}
 
 
 @app.post("/api/agent-adapters/{agent_id}/deliver")
@@ -482,6 +736,254 @@ def api_cancel_agent_task(task_id: str, x_signalasi_token: str = Header(default=
         raise HTTPException(status_code=404, detail=api_error("agent_task_not_found"))
     return {"task": task.public()}
 
+
+class DesktopTaskStartReq(BaseModel):
+    prompt: str
+    agent_id: str = "auto"
+    conversation_id: str = ""
+    attachments: list[str] = Field(default_factory=list)
+    retry_of: str = ""
+    attempt: int = 1
+
+
+def _desktop_agent_for(prompt: str, requested: str = "auto") -> str:
+    requested_id = str(requested or "auto").strip().lower()
+    if requested_id in {"", "auto", "desktop", "this-desktop"}:
+        return "desktop"
+    if requested_id.startswith("mcp:"):
+        from desktop_mcp import desktop_mcp_registry
+
+        connection_id = requested_id.split(":", 1)[1]
+        if desktop_mcp_registry().get(connection_id) is None:
+            raise HTTPException(status_code=404, detail=api_error("desktop_mcp_not_found"))
+        return requested_id
+    diagnostics = connector_diagnostics(quick=True)
+    known = {str(item.get("id") or "") for item in diagnostics.get("agents", [])}
+    if requested_id not in known:
+        raise HTTPException(status_code=404, detail=api_error("desktop_agent_not_found"))
+    return requested_id
+
+
+def _desktop_task_prompt(prompt: str, conversation_id: str, attachment_paths: list[str]) -> str:
+    history = agent_task_manager.conversation_messages(conversation_id, limit=8)
+    parts = [
+        "You are executing a task from SignalASI Desktop. Work directly, use the available local tools, "
+        "verify the result, and return a concise final response with artifact paths when files are created."
+    ]
+    if history:
+        parts.append("Conversation context from this same SignalASI Desktop session:")
+        for item in history:
+            if item.get("status") != "completed" and str(item.get("prompt") or "").strip() == str(prompt or "").strip():
+                continue
+            parts.append(f"User: {item['prompt'][:4_000]}")
+            if item.get("result"):
+                parts.append(f"Assistant: {str(item['result'])[:8_000]}")
+    if attachment_paths:
+        parts.append("Files attached to this task workspace:")
+        parts.extend(f"- {value}" for value in attachment_paths)
+    parts.append(f"Current user request:\n{str(prompt or '').strip()}")
+    return "\n\n".join(parts)
+
+
+def _copy_desktop_attachments(task_id: str, values: list[str]) -> list[str]:
+    from task_workspace import task_workspace
+
+    destination = task_workspace(task_id, "desktop") / "downloads" / "input"
+    destination.mkdir(parents=True, exist_ok=True)
+    copied: list[str] = []
+    used: set[str] = set()
+    for raw in list(values or [])[:12]:
+        source = Path(str(raw or "")).expanduser().resolve()
+        if not source.is_file() or source.stat().st_size > 512 * 1024 * 1024:
+            continue
+        name = source.name[:220] or f"attachment-{len(copied) + 1}"
+        stem, suffix = Path(name).stem, Path(name).suffix
+        candidate = name
+        serial = 2
+        while candidate.casefold() in used or (destination / candidate).exists():
+            candidate = f"{stem}-{serial}{suffix}"
+            serial += 1
+        used.add(candidate.casefold())
+        shutil.copy2(source, destination / candidate)
+        copied.append(f"downloads/input/{candidate}")
+    return copied
+
+
+@app.post("/api/desktop/tasks")
+def api_start_desktop_task(req: DesktopTaskStartReq, request: Request):
+    require_loopback(request)
+    prompt = str(req.prompt or "").strip()
+    if not prompt and not req.attachments:
+        raise HTTPException(status_code=400, detail=api_error("desktop_task_empty"))
+    task_id = str(uuid.uuid4())
+    conversation_id = str(req.conversation_id or "").strip() or str(uuid.uuid4())
+    agent_id = _desktop_agent_for(prompt, req.agent_id)
+    attachments = _copy_desktop_attachments(task_id, req.attachments)
+    compiled_prompt = _desktop_task_prompt(prompt, conversation_id, attachments)
+
+    def runner(task):
+        agent_task_manager.update(
+            task.task_id,
+            "running",
+            current_step="Planning the task" if agent_id == "desktop" else f"Running {agent_id}",
+        )
+        if agent_id == "desktop":
+            from desktop_super_agent import DesktopSuperAgent
+
+            outcome = DesktopSuperAgent(
+                task_manager=agent_task_manager,
+                diagnostics=connector_diagnostics,
+                deliver=deliver_agent_sync,
+            ).run(
+                task_id=task.task_id,
+                conversation_id=conversation_id,
+                prompt=prompt,
+                compiled_prompt=compiled_prompt,
+                attachments=attachments,
+            )
+            return outcome.reply
+        if agent_id.startswith("mcp:"):
+            from desktop_mcp import desktop_mcp_registry
+
+            connection_id = agent_id.split(":", 1)[1]
+            connection = desktop_mcp_registry().get(connection_id)
+            agent_task_manager.add_event(
+                task.task_id,
+                "mcp",
+                f"Using {connection.name if connection else connection_id}",
+            )
+            result = desktop_mcp_registry().invoke_prompt(
+                connection_id,
+                prompt,
+                process_callback=lambda process: agent_task_manager.register_process(task.task_id, process),
+            )
+            agent_task_manager.add_event(
+                task.task_id,
+                "result",
+                f"Received result from {connection.name if connection else connection_id}",
+                metadata={"duration_ms": int(result.get("duration_ms") or 0)},
+            )
+            return str(result.get("result") or "")
+        result = deliver_agent_sync(
+            agent_id,
+            compiled_prompt,
+            task_id=task.task_id,
+            conversation_id=conversation_id,
+            source_message_id=task.source_message_id,
+            return_path="desktop-ui",
+        )
+        return str(result.get("reply") or "")
+
+    task = agent_task_manager.create(
+        agent_id=agent_id,
+        contact_id=agent_id,
+        source_message_id=f"desktop:{task_id}",
+        prompt=prompt or "Attached files",
+        runner=runner,
+        on_event=lambda _event: None,
+        task_id=task_id,
+        conversation_id=conversation_id,
+        attachments=attachments,
+        retry_of=str(req.retry_of or ""),
+        attempt=max(1, int(req.attempt or 1)),
+    )
+    payload = task.public(include_prompt=True)
+    payload["attachments"] = attachments
+    return payload
+
+
+@app.get("/api/desktop/tasks")
+def api_list_desktop_tasks(request: Request, limit: int = Query(100)):
+    require_loopback(request)
+    tasks = [
+        item for item in agent_task_manager.list(limit=max(100, limit), include_prompt=True)
+        if str(item.get("source_message_id") or "").startswith("desktop:")
+    ]
+    return {"tasks": tasks[:max(1, min(limit, 500))]}
+
+
+@app.get("/api/desktop/tasks/{task_id}")
+def api_get_desktop_task(task_id: str, request: Request):
+    require_loopback(request)
+    task = agent_task_manager.get(task_id)
+    if task is None or not task.source_message_id.startswith("desktop:"):
+        raise HTTPException(status_code=404, detail=api_error("desktop_task_not_found"))
+    return task.public(include_prompt=True)
+
+
+@app.post("/api/desktop/tasks/{task_id}/cancel")
+def api_cancel_desktop_task(task_id: str, request: Request):
+    require_loopback(request)
+    task = agent_task_manager.get(task_id)
+    if task is None or not task.source_message_id.startswith("desktop:"):
+        raise HTTPException(status_code=404, detail=api_error("desktop_task_not_found"))
+    try:
+        from desktop_native_tools import desktop_native_tool_registry
+
+        desktop_native_tool_registry().cancel_task(task_id)
+    except Exception:
+        pass
+    runtime_agent = str(task.delegate_agent_id or task.agent_id or "")
+    if runtime_agent == "codex":
+        try:
+            from mqtt_bridge import codex_app_server
+
+            if codex_app_server is not None:
+                codex_app_server.interrupt(task_id)
+        except Exception:
+            pass
+    cancelled = agent_task_manager.cancel(task_id)
+    return {"task": cancelled.public(include_prompt=True) if cancelled else None}
+
+
+@app.post("/api/desktop/tasks/{task_id}/retry")
+def api_retry_desktop_task(task_id: str, request: Request):
+    require_loopback(request)
+    task = agent_task_manager.get(task_id)
+    if task is None or not task.source_message_id.startswith("desktop:"):
+        raise HTTPException(status_code=404, detail=api_error("desktop_task_not_found"))
+    if task.status not in TERMINAL_STATES or task.status == "completed":
+        raise HTTPException(status_code=409, detail=api_error("desktop_task_not_retryable"))
+
+    from task_workspace import task_workspace
+
+    root = task_workspace(task.task_id).resolve()
+    relative_paths = list(task.attachments or [])
+    if not relative_paths:
+        relative_paths = [
+            path.relative_to(root).as_posix()
+            for path in sorted((root / "downloads" / "input").glob("*"))
+            if path.is_file()
+        ][:12]
+    sources: list[str] = []
+    for relative in relative_paths:
+        candidate = (root / Path(relative)).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            sources.append(str(candidate))
+
+    return api_start_desktop_task(
+        DesktopTaskStartReq(
+            prompt=task.prompt,
+            agent_id=task.agent_id,
+            conversation_id=task.conversation_id,
+            attachments=sources,
+            retry_of=task.retry_of or task.task_id,
+            attempt=max(2, task.attempt + 1),
+        ),
+        request,
+    )
+
+
+@app.delete("/api/desktop/conversations/{conversation_id}")
+def api_delete_desktop_conversation(conversation_id: str, request: Request):
+    require_loopback(request)
+    deleted = agent_task_manager.delete_conversation(conversation_id)
+    return {"conversation_id": conversation_id, "deleted_task_ids": deleted}
+
 @app.get("/api/messages/{contact_id}")
 def get_messages(contact_id: str, limit: int = Query(50), offset: int = Query(0),
                  db: Session = Depends(get_session)):
@@ -546,8 +1048,6 @@ def mark_read(contact_id: str, db: Session = Depends(get_session)):
 from fastapi.responses import FileResponse
 from fastapi.responses import HTMLResponse
 import os
-import base64
-import io
 
 frontend_path = Path(__file__).parent.parent / "frontend" / "index.html"
 
@@ -558,20 +1058,11 @@ def serve_index():
 @app.get("/signalasi/verify")
 def signalasi_verify_qr(request: Request):
     require_loopback(request)
-    import qrcode
-    from mqtt_bridge import mobile_connector_agents
-
-    payload = signalasi_pairing_payload()
-    agent_count = len(mobile_connector_agents())
-    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L, border=2, box_size=10)
-    qr.add_data(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
-    qr.make(fit=True)
-    image = qr.make_image(fill_color="black", back_color="white")
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-    short_hash = payload["identity_key_sha256"][:16]
-    pairing_type = payload["type"]
+    pairing = signalasi_pairing_qr()
+    image_data_url = pairing["image_data_url"]
+    short_hash = pairing["fingerprint"]
+    pairing_type = pairing["pairing_type"]
+    agent_count = pairing["agent_count"]
     return HTMLResponse(f"""<!doctype html>
 <html lang="en">
 <head>
@@ -593,7 +1084,7 @@ def signalasi_verify_qr(request: Request):
     <section>
       <h1>SignalASI Secure Pairing</h1>
       <p>Scan this QR code in the SignalASI mobile app to pair this desktop connector.</p>
-      <img alt="SignalASI pairing QR" data-pairing-type="{pairing_type}" data-pairing-route="/signalasi/verify" data-agent-count="{agent_count}" src="data:image/png;base64,{encoded}">
+      <img alt="SignalASI pairing QR" data-pairing-type="{pairing_type}" data-pairing-route="/signalasi/verify" data-agent-count="{agent_count}" src="{image_data_url}">
       <p>PC identity hash</p>
       <code>{short_hash}</code>
     </section>

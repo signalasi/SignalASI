@@ -10,9 +10,15 @@ const required = [
   "src/preload.js",
   "src/renderer/index.html",
   "src/renderer/renderer.js",
+  "src/renderer/workspace.js",
   "src/renderer/locales/zh-CN.json",
   "src/renderer/locales/en.json",
   "src/renderer/styles.css",
+  "core/signalasi-link/backend/desktop_control.py",
+  "core/signalasi-link/backend/desktop_super_agent.py",
+  "core/signalasi-link/backend/desktop_memory.py",
+  "core/signalasi-link/backend/desktop_mcp.py",
+  "core/signalasi-link/backend/desktop_skills.py",
   "scripts/package-win.js",
   "scripts/android-adb.js",
   "scripts/smoke.js",
@@ -64,6 +70,7 @@ const main = fs.readFileSync(path.join(root, "src/main.js"), "utf8");
 const preload = fs.readFileSync(path.join(root, "src/preload.js"), "utf8");
 const html = fs.readFileSync(path.join(root, "src/renderer/index.html"), "utf8");
 const renderer = fs.readFileSync(path.join(root, "src/renderer/renderer.js"), "utf8");
+const workspaceRenderer = fs.readFileSync(path.join(root, "src/renderer/workspace.js"), "utf8");
 const localeZh = JSON.parse(fs.readFileSync(path.join(root, "src", "renderer", "locales", "zh-CN.json"), "utf8"));
 const localeEn = JSON.parse(fs.readFileSync(path.join(root, "src", "renderer", "locales", "en.json"), "utf8"));
 const packageJson = fs.readFileSync(path.join(root, "package.json"), "utf8");
@@ -104,7 +111,12 @@ const backendTaskManager = fs.readFileSync(path.join(backendDir, "agent_task_man
 const backendAgentConfig = fs.readFileSync(path.join(backendDir, "agent_config.py"), "utf8");
 const backendCustomAgent = fs.readFileSync(path.join(backendDir, "custom_agent_stdio.py"), "utf8");
 const backendDesktopFileTools = fs.readFileSync(path.join(backendDir, "desktop_file_tools.py"), "utf8");
+const backendDesktopControl = fs.readFileSync(path.join(backendDir, "desktop_control.py"), "utf8");
 const backendDesktopNativeTools = fs.readFileSync(path.join(backendDir, "desktop_native_tools.py"), "utf8");
+const backendDesktopMemory = fs.readFileSync(path.join(backendDir, "desktop_memory.py"), "utf8");
+const backendDesktopMcp = fs.readFileSync(path.join(backendDir, "desktop_mcp.py"), "utf8");
+const backendDesktopSkills = fs.readFileSync(path.join(backendDir, "desktop_skills.py"), "utf8");
+const backendDesktopSuperAgent = fs.readFileSync(path.join(backendDir, "desktop_super_agent.py"), "utf8");
 const backendMcpWrapper = fs.readFileSync(path.join(backendDir, "mcp_agent_wrapper.py"), "utf8");
 const backendTaskWorkspace = fs.readFileSync(path.join(backendDir, "task_workspace.py"), "utf8");
 const backendPushAuth = fs.readFileSync(path.join(backendDir, "push_auth.py"), "utf8");
@@ -206,7 +218,7 @@ if (renderer.includes("const I18N_ZH")) {
   throw new Error("Desktop renderer translations must live in locale files, not an inline I18N_ZH object");
 }
 
-if (!main.includes("function loadLocale") || !main.includes('ipcMain.handle("i18n:load"') || !preload.includes("loadLocale") || !renderer.includes("await window.signalasi.loadLocale")) {
+if (!main.includes("function loadLocale") || !main.includes('ipcMain.handle("i18n:load"') || !preload.includes("loadLocale") || !workspaceRenderer.includes("await window.signalasi.loadLocale")) {
   throw new Error("Desktop i18n must load locale JSON through preload IPC");
 }
 
@@ -250,9 +262,21 @@ for (const requiredBackendCode of [
 if (!packager.includes("\"api_response.py\"")) {
   throw new Error("Packaged Desktop backend must include api_response.py");
 }
-for (const requiredFile of ["link_protocol.py", "link_delivery.py", "task_workspace.py", "desktop_file_tools.py", "desktop_native_tools.py"]) {
+for (const requiredFile of ["link_protocol.py", "link_delivery.py", "task_workspace.py", "desktop_control.py", "desktop_file_tools.py", "desktop_memory.py", "desktop_mcp.py", "desktop_native_tools.py", "desktop_skills.py", "desktop_super_agent.py"]) {
   if (!packager.includes(`"${requiredFile}"`)) {
     throw new Error(`Packaged Desktop backend must include ${requiredFile}`);
+  }
+}
+
+for (const capabilityContract of [
+  [backendDesktopControl, "class DesktopControlManager"],
+  [backendDesktopMemory, "class DesktopMemoryStore"],
+  [backendDesktopMcp, "class DesktopMcpRegistry"],
+  [backendDesktopSkills, "class DesktopSkillRegistry"],
+  [backendDesktopSuperAgent, "Using relevant long-term memory"]
+]) {
+  if (!capabilityContract[0].includes(capabilityContract[1])) {
+    throw new Error(`Desktop super-agent capability is incomplete: ${capabilityContract[1]}`);
   }
 }
 
@@ -267,6 +291,11 @@ if (!backendDesktopFileTools.includes("try_execute_explicit_file_task") || !back
 for (const contract of [
   "signalasi.desktop-native-tools/1.0",
   "signalasi.desktop.windows.system.status",
+  "signalasi.desktop.windows.app.list",
+  "signalasi.desktop.windows.app.launch",
+  "signalasi.desktop.files.search",
+  "signalasi.desktop.browser.open",
+  "signalasi.desktop.web.fetch",
   "signalasi.desktop.workspace.file.write.text",
   "signalasi.desktop.terminal.run",
   "signalasi.desktop.office.document.convert",
@@ -275,6 +304,23 @@ for (const contract of [
 ]) {
   if (!backendDesktopNativeTools.includes(contract)) {
     throw new Error(`Desktop native tool contract missing: ${contract}`);
+  }
+}
+
+for (const taskContract of [
+  "/api/desktop/tasks/{task_id}/retry",
+  "attachments=attachments",
+  "retry_of=str(req.retry_of",
+  "desktop_native_tool_registry().cancel_task"
+]) {
+  if (!backendMain.includes(taskContract)) {
+    throw new Error(`Desktop task recovery contract missing: ${taskContract}`);
+  }
+}
+
+for (const rendererContract of ["retryDesktopTask", "data-retry-task", "task.attachments"]) {
+  if (!workspaceRenderer.includes(rendererContract) && !preload.includes(rendererContract)) {
+    throw new Error(`Desktop task recovery UI missing: ${rendererContract}`);
   }
 }
 
@@ -361,18 +407,14 @@ for (const requiredText of [
   "sendMobileTest",
   "syncMobileStatus",
   "Sync phone status",
-  "Local Agent Connector",
-  "Mobile pairing",
-  "Closed-loop tests",
-  "Runtime requirements",
-  "Phone contact map",
-  "First-run setup",
-  "setupChecklist",
-  "pairingState",
+  "Desktop Agent",
+  "New task",
+  "Mobile Gateway",
+  "conversationStream",
+  "promptInput",
   "/api/pairing/status",
   "/api/pairing/clear",
-  "Revoke all clients",
-  "data-pairing-type",
+  "pairedClientList",
   "signalasi_verify",
   "signalasi_pairing_ciphertext",
   "connector_agents",
@@ -381,44 +423,29 @@ for (const requiredText of [
   "forgotten_by_desktop",
   "SIGNALASI_ALLOW_UNPAIRED_MQTT",
   "Phone is not paired",
-  "renderSetupGuide",
-  "data-setup-action",
-  "Connector status matrix",
-  "Agent permissions and execution log",
+  "agentContactList",
+  "desktopToolList",
   "agent-execution.jsonl",
   "/api/agents/execution-log",
   "prompt_sha256",
   "local_process",
-  "refreshExecutionLog",
-  "refreshStatusMatrix",
-  "connectorMatrixRows",
-  "renderStatusMatrix",
-  "Copy pairing link",
-  "Copy default commands",
-  "Custom Agent name",
-  "Local contact name",
-  "Additional custom agents",
-  "addCustomAgent",
-  "customAgentsList",
-  "custom-agent-row",
+  "startDesktopTask",
+  "listDesktopTasks",
+  "cancelDesktopTask",
+  "deleteDesktopConversation",
+  "/api/desktop/tasks",
+  "DesktopTaskStartReq",
+  "conversation_messages",
+  "customAgentId",
+  "saveCustomAgentButton",
   "multiple_custom_agents",
   "Ollama Local",
   "LM Studio",
   "custom_agent_stdio.py",
   "mcp_agent_wrapper.py",
-  "Use stdin template",
-  "Use MCP wrapper template",
   "custom_agent",
-  "independent encrypted relationship",
   "clipboard:write",
   "backend dependencies",
-  "Self-test all",
-  "Open Claude Code docs",
-  "Use Ollama defaults",
-  "Use LM Studio preset",
-  "Cloud models are added directly in the mobile app",
-  "Save and test Local LLM",
-  "Test Custom Agent",
   "custom-agent",
   "CUSTOM_AGENT_OK",
   "package:win",
@@ -596,13 +623,13 @@ for (const requiredText of [
   "taskStatusSeq",
   "smoke:agent-lifecycle"
 ]) {
-if (![main, preload, html, renderer, packageJson, packager, androidAdb, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidContactTags, smokeAndroidLanguage, smokeAndroidCloudModels, smokeAndroidBackground, smokeAndroidAgentReplies, smokeAndroidBackup, smokeAndroidVoiceReply, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeAgentLifecycle, smokeVoiceStt, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendLinkProtocol, backendGateway, backendTaskManager, backendAgentConfig, backendPushAuth, backendSignalasiNotify, backendStt, androidMainActivity, androidMqtt, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
+if (![main, preload, html, renderer, workspaceRenderer, packageJson, packager, androidAdb, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidContactTags, smokeAndroidLanguage, smokeAndroidCloudModels, smokeAndroidBackground, smokeAndroidAgentReplies, smokeAndroidBackup, smokeAndroidVoiceReply, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeAgentLifecycle, smokeVoiceStt, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendLinkProtocol, backendGateway, backendTaskManager, backendAgentConfig, backendPushAuth, backendSignalasiNotify, backendStt, androidMainActivity, androidMqtt, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
     throw new Error(`Missing desktop connector capability: ${requiredText}`);
   }
 }
 
 for (const mojibake of ["\u95ba", "\u95c1", "\u95c2", "\u5a75", "\u7f02", "\u6fde\u5b58\u7c8d\u9368", "\u95b8", "\u95b9"]) {
-  if (html.includes(mojibake) || renderer.includes(mojibake)) {
+  if (html.includes(mojibake) || renderer.includes(mojibake) || workspaceRenderer.includes(mojibake)) {
     throw new Error(`Renderer contains mojibake text: ${mojibake}`);
   }
 }
