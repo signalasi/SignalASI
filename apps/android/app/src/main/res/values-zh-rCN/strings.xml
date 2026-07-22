@@ -599,6 +599,8 @@
     <string name="agent_task_status_failed">执行失败</string>
     <string name="agent_task_status_cancelled">已取消</string>
     <string name="agent_task_status_timed_out">已超时</string>
+    <string name="agent_task_watchdog_stalled">任务暂时没有上报进展，SignalASI 正在检查连接。</string>
+    <string name="agent_task_watchdog_timed_out">任务长时间没有上报进展，已停止等待。连接可用后可重新尝试。</string>
     <string name="agent_task_status_cancelling">正在取消</string>
     <string name="agent_task_cancel_title">取消 Agent 任务</string>
     <string name="agent_task_cancel_subtitle">停止配对电脑上正在运行的任务</string>

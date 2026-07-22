@@ -12,7 +12,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -38,6 +40,10 @@ object AgentTaskEventKinds {
     const val BLOCKED = "task.blocked"
     const val SNAPSHOT = "task.execution_snapshot"
     const val PERMISSION_REVOKED = "task.permission_revoked"
+    const val HEARTBEAT = "task.heartbeat"
+    const val PROGRESS = "task.progress"
+    const val STALLED = "task.stalled"
+    const val TIMED_OUT = "task.timed_out"
 }
 
 fun interface AgentTaskResumeHook {
@@ -121,6 +127,24 @@ class AgentTaskContext internal constructor(
         stateJson = stateJson
     )
 
+    fun heartbeat(
+        stage: String = "running",
+        message: String = ""
+    ): AgentWorkspace = supervisor.heartbeat(
+        workspaceId = workspaceKey.workspaceId,
+        stage = stage,
+        message = message
+    )
+
+    fun progress(
+        stage: String,
+        message: String = ""
+    ): AgentWorkspace = supervisor.progress(
+        workspaceId = workspaceKey.workspaceId,
+        stage = stage,
+        message = message
+    )
+
     fun transition(
         status: AgentWorkspaceStatus,
         eventKind: String = "task.status.${status.name.lowercase()}",
@@ -178,7 +202,9 @@ class AgentTaskSupervisor(
     private val workspaceStore: AgentWorkspaceStore,
     maxConcurrentReadReasoningTasks: Int = DEFAULT_MAX_READ_REASONING_TASKS,
     dispatcher: CoroutineDispatcher = Dispatchers.Default,
-    private val clock: () -> Long = { System.currentTimeMillis() }
+    private val clock: () -> Long = { System.currentTimeMillis() },
+    private val livenessPolicy: AgentTaskLivenessPolicy = AgentTaskLivenessPolicy(),
+    private val livenessListener: AgentTaskLivenessListener = AgentTaskLivenessListener {}
 ) : Closeable {
     private val supervisorJob = SupervisorJob()
     private val applicationScope = CoroutineScope(
@@ -195,12 +221,53 @@ class AgentTaskSupervisor(
         require(maxConcurrentReadReasoningTasks > 0) {
             "maxConcurrentReadReasoningTasks must be positive"
         }
+        applicationScope.launch(CoroutineName("AgentTaskWatchdog")) {
+            while (currentCoroutineContext().isActive) {
+                delay(livenessPolicy.watchdogIntervalMillis)
+                runCatching { sweepLiveness() }
+            }
+        }
     }
 
     val isActive: Boolean
         get() = supervisorJob.isActive && !closed.get()
 
     fun activeTaskIds(): Set<String> = activeByTask.keys.toSet()
+
+    fun heartbeat(
+        workspaceId: String,
+        stage: String = "running",
+        message: String = ""
+    ): AgentWorkspace = recordActivity(
+        workspaceId = workspaceId,
+        eventKind = AgentTaskEventKinds.HEARTBEAT,
+        stage = stage,
+        message = message
+    )
+
+    fun progress(
+        workspaceId: String,
+        stage: String,
+        message: String = ""
+    ): AgentWorkspace = recordActivity(
+        workspaceId = workspaceId,
+        eventKind = AgentTaskEventKinds.PROGRESS,
+        stage = stage,
+        message = message
+    )
+
+    fun sweepLiveness(): List<AgentTaskLivenessSignal> {
+        val observedAt = now()
+        return workspaceStore.recoverable().mapNotNull { workspace ->
+            val volatileActivity = activeByWorkspace[workspace.workspaceId]?.lastActivityAtMillis ?: 0L
+            val decision = livenessPolicy.evaluate(workspace, observedAt, volatileActivity)
+            when (decision.state) {
+                AgentTaskLivenessState.HEALTHY -> null
+                AgentTaskLivenessState.STALLED -> markStalled(workspace, decision, observedAt)
+                AgentTaskLivenessState.TIMED_OUT -> timeOut(workspace, decision, observedAt)
+            }
+        }
+    }
 
     fun cancellationSource(taskId: String): AgentTaskCancellationSource? =
         activeByTask[taskId.trim()]?.cancellationSource
@@ -331,6 +398,120 @@ class AgentTaskSupervisor(
     ): AgentWorkspace = synchronized(storeMutationLock) {
         mutateWorkspaceLocked(workspaceId) { current ->
             appendEventCandidate(current, kind, message, payloadJson)
+        }
+    }
+
+    private fun recordActivity(
+        workspaceId: String,
+        eventKind: String,
+        stage: String,
+        message: String
+    ): AgentWorkspace {
+        val cleanStage = stage.trim().ifBlank { "running" }
+        val cleanMessage = message.trim().ifBlank { cleanStage }
+        val observedAt = now()
+        var recovered = false
+        val updated = synchronized(storeMutationLock) {
+            mutateWorkspaceLocked(workspaceId) { current ->
+                if (current.status.isTerminal || current.cancellationRequested) return@mutateWorkspaceLocked current
+                recovered = livenessPolicy.hasUnresolvedStall(current)
+                val previous = current.eventJournal.lastOrNull()
+                val sameRecentEvent = !recovered && previous?.kind == eventKind &&
+                    previous.message == cleanMessage &&
+                    observedAt - previous.timestampMillis < livenessPolicy.heartbeatWriteThrottleMillis
+                if (sameRecentEvent) current else appendEventCandidate(
+                    current = current,
+                    kind = eventKind,
+                    message = cleanMessage,
+                    payloadJson = AgentNativeJsonCodec.stringify(mapOf("stage" to cleanStage))
+                )
+            }
+        }
+        activeByWorkspace[workspaceId.trim()]?.lastActivityAtMillis = observedAt
+        if (recovered) {
+            notifyLiveness(
+                AgentTaskLivenessSignalKind.RECOVERED,
+                updated,
+                "progress_resumed",
+                observedAt
+            )
+        }
+        return updated
+    }
+
+    private fun markStalled(
+        workspace: AgentWorkspace,
+        decision: AgentTaskLivenessDecision,
+        observedAt: Long
+    ): AgentTaskLivenessSignal? {
+        if (livenessPolicy.hasUnresolvedStall(workspace)) return null
+        val updated = synchronized(storeMutationLock) {
+            mutateWorkspaceLocked(workspace.workspaceId) { current ->
+                if (current.status.isTerminal || livenessPolicy.hasUnresolvedStall(current)) current
+                else appendEventCandidate(
+                    current = current,
+                    kind = AgentTaskEventKinds.STALLED,
+                    message = decision.reason,
+                    payloadJson = AgentNativeJsonCodec.stringify(mapOf(
+                        "idle_ms" to decision.idleMillis,
+                        "lifetime_ms" to decision.lifetimeMillis
+                    ))
+                )
+            }
+        }
+        val signal = AgentTaskLivenessSignal(
+            AgentTaskLivenessSignalKind.STALLED,
+            updated,
+            decision.reason,
+            observedAt
+        )
+        runCatching { livenessListener.onSignal(signal) }
+        return signal
+    }
+
+    private fun timeOut(
+        workspace: AgentWorkspace,
+        decision: AgentTaskLivenessDecision,
+        observedAt: Long
+    ): AgentTaskLivenessSignal? {
+        var changed = false
+        val updated = synchronized(storeMutationLock) {
+            mutateWorkspaceLocked(workspace.workspaceId) { current ->
+                if (current.status.isTerminal || current.cancellationRequested) current else {
+                    changed = true
+                    transitionCandidate(
+                        current = current,
+                        status = AgentWorkspaceStatus.FAILED,
+                        eventKind = AgentTaskEventKinds.TIMED_OUT,
+                        message = decision.reason,
+                        payloadJson = AgentNativeJsonCodec.stringify(mapOf(
+                            "idle_ms" to decision.idleMillis,
+                            "lifetime_ms" to decision.lifetimeMillis
+                        ))
+                    ).copy(errorMessage = decision.reason)
+                }
+            }
+        }
+        if (!changed) return null
+        activeByWorkspace[workspace.workspaceId]?.cancellationSource?.cancelExecution(decision.reason)
+        val signal = AgentTaskLivenessSignal(
+            AgentTaskLivenessSignalKind.TIMED_OUT,
+            updated,
+            decision.reason,
+            observedAt
+        )
+        runCatching { livenessListener.onSignal(signal) }
+        return signal
+    }
+
+    private fun notifyLiveness(
+        kind: AgentTaskLivenessSignalKind,
+        workspace: AgentWorkspace,
+        reason: String,
+        observedAt: Long
+    ) {
+        runCatching {
+            livenessListener.onSignal(AgentTaskLivenessSignal(kind, workspace, reason, observedAt))
         }
     }
 
@@ -512,6 +693,7 @@ class AgentTaskSupervisor(
             taskJob.complete()
             throw failure
         }
+        control.lastActivityAtMillis = now()
         val context = AgentTaskContext(
             workspaceKey = queued.key,
             lane = lane,
@@ -551,6 +733,7 @@ class AgentTaskSupervisor(
                     status = AgentWorkspaceStatus.RUNNING,
                     eventKind = AgentTaskEventKinds.RUNNING
                 )
+                control.lastActivityAtMillis = now()
                 context.block()
             }
             finishCompleted(control)
@@ -783,7 +966,8 @@ class AgentTaskSupervisor(
         val taskId: String,
         val lane: AgentTaskLane,
         val cancellationSource: AgentTaskCancellationSource,
-        @Volatile var executionJob: Job? = null
+        @Volatile var executionJob: Job? = null,
+        @Volatile var lastActivityAtMillis: Long = 0L
     )
 
     private class AgentTaskDeferredException(

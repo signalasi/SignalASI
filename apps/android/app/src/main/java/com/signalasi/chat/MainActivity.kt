@@ -310,6 +310,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val handler = Handler(Looper.getMainLooper())
     private val globalAgentRefreshInProgress = AtomicBoolean(false)
     private val globalAgentRefreshRequested = AtomicBoolean(false)
+    private val agentTaskRecoveryInProgress = AtomicBoolean(false)
     private val globalProactiveDeliveryListener = GlobalProactiveDeliveryListener {
         handler.post(::refreshGlobalAgentCognition)
     }
@@ -337,6 +338,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var agentSessionsDialog: android.app.Dialog? = null
     private val agentConnectorResponseListener = AgentConnectorResponseListener { response ->
         runOnUiThread { consumeAgentConnectorResponse(response) }
+    }
+    private val agentTaskLivenessListener = AgentTaskLivenessListener { signal ->
+        handler.post { handleAgentTaskLivenessSignal(signal) }
     }
     private val agentVisualScreenListener = AgentVisualScreenListener { result ->
         runOnUiThread {
@@ -480,6 +484,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             nativeToolEventSink = AgentNativeToolEventSink(::recordNativeToolLifecycleEvent)
         )
         agentTranscriptStore = AgentTranscriptStore(this)
+        AgentTaskRuntime.addLivenessListener(agentTaskLivenessListener)
+        AgentTaskRuntime.supervisor(this)
         traceStartup("mobile_agent")
         globalSuperAgentRuntime = GlobalSuperAgentRuntime.get(this)
         traceStartup("global_runtime")
@@ -794,6 +800,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         stopRecording(send = false)
         saveChatHistory(sync = true)
         SignalASIMqttClient.removeListener(this)
+        AgentTaskRuntime.removeLivenessListener(agentTaskLivenessListener)
         ScreenPerceptionState.removeVisualListener(agentVisualScreenListener)
         if (::agentRuntimePackCatalogManager.isInitialized) agentRuntimePackCatalogManager.close()
         historyExecutor.shutdown()
@@ -977,6 +984,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 workspaceId = turnId,
                 lane = AgentTaskLane.READ_REASONING,
                 hook = AgentTaskResumeHook { context, _ ->
+                    context.progress("connector.response", "Connector response received")
                     val state = try {
                         runtime.acceptConnectorResponse(
                             sourceMessageId = response.sourceMessageId,
@@ -1457,6 +1465,19 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val targetName = contactById(contactId).name
         val turnId = envelopeTurnId.takeIf { it.isNotBlank() }
             ?: taskRuntime?.let(agentRuntimeTurnIds::get).orEmpty()
+        if (turnId.isNotBlank() && status in setOf(
+                "accepted", "queued", "starting", "running", "waiting_input", "waiting_approval",
+                "completed", "failed", "cancelled", "timed_out", "not_found"
+            )
+        ) {
+            runCatching {
+                AgentTaskRuntime.supervisor(this).progress(
+                    workspaceId = turnId,
+                    stage = "connector.$status",
+                    message = statusLabel
+                )
+            }
+        }
         val conversationId = connectorConversationId(
             envelopeConversationId,
             taskRuntime,
@@ -1628,6 +1649,59 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             activeRuns = activeRuns,
             timestampMillis = System.currentTimeMillis()
         )
+    }
+
+    private fun handleAgentTaskLivenessSignal(signal: AgentTaskLivenessSignal) {
+        if (!::agentTranscriptStore.isInitialized) return
+        val workspace = signal.workspace
+        val conversationId = agentTranscriptStore.resolveMergedConversationId(workspace.conversationId)
+            ?: workspace.conversationId
+        if (conversationId.isBlank()) return
+        val dedupeKey = "task-watchdog:${workspace.taskId}"
+        when (signal.kind) {
+            AgentTaskLivenessSignalKind.STALLED -> {
+                agentTranscriptStore.upsert(
+                    role = AgentTranscriptRole.PROCESS,
+                    text = getString(R.string.agent_task_watchdog_stalled),
+                    dedupeKey = dedupeKey,
+                    timestampMillis = signal.observedAtMillis,
+                    conversationId = conversationId,
+                    turnId = workspace.taskId,
+                    taskId = workspace.taskId
+                )
+                consumePendingAgentConnectorResponsesAsync()
+                if (workspace.status == AgentWorkspaceStatus.WAITING_RESPONSE &&
+                    workspace.agentId.isNotBlank() && workspace.agentId != "signalasi-mobile" &&
+                    agentTaskRecoveryInProgress.compareAndSet(false, true)
+                ) {
+                    thread(name = "signalasi-agent-stall-recovery") {
+                        try {
+                            runCatching { reconcileRecoverableAgentRuns() }
+                                .onFailure { Log.w("SignalASIAgent", "Stalled task recovery failed", it) }
+                        } finally {
+                            agentTaskRecoveryInProgress.set(false)
+                        }
+                    }
+                }
+            }
+            AgentTaskLivenessSignalKind.RECOVERED -> {
+                agentTranscriptStore.deleteByDedupeKey(conversationId, dedupeKey)
+            }
+            AgentTaskLivenessSignalKind.TIMED_OUT -> {
+                agentTranscriptStore.deleteByDedupeKey(conversationId, dedupeKey)
+                agentTranscriptStore.append(
+                    role = AgentTranscriptRole.ASSISTANT,
+                    text = getString(R.string.agent_task_watchdog_timed_out),
+                    dedupeKey = "task-watchdog-timeout:${workspace.taskId}",
+                    conversationId = conversationId,
+                    turnId = workspace.taskId,
+                    taskId = workspace.taskId
+                )
+            }
+        }
+        if (conversationId == agentTranscriptStore.activeConversation().id) {
+            renderAgentTranscript(agentTranscriptStore.list(conversationId))
+        }
     }
 
     private fun reconcileRecoverableAgentRuns() {
@@ -2436,6 +2510,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             status = AgentWorkspaceStatus.CREATED
         )
         AgentTaskRuntime.supervisor(this).submit(workspace, AgentTaskLane.READ_REASONING) {
+            progress("planning", "Planning task")
             val runtime = MobileNativeAgent(
                 this@MainActivity,
                 planner = deterministicAction?.let { selectedAction ->
@@ -2467,6 +2542,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 state
             }
             val state = outcome.getOrElse { runtime.snapshot() }
+            progress("agent.${state.phase.name.lowercase(Locale.ROOT)}", state.phase.name)
             persistAgentWorkspaceSnapshot(turnId, state)
             appendEvent(
                 kind = "agent.state",
@@ -3028,6 +3104,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun recordNativeToolLifecycleEvent(event: AgentNativeToolLifecycleEvent) {
         val runId = agentRunIdsByTurn[event.turnId] ?: return
         val run = agentRunRecorder.run(runId) ?: return
+        if (event.turnId.isNotBlank()) {
+            runCatching {
+                AgentTaskRuntime.supervisor(this).progress(
+                    workspaceId = event.turnId,
+                    stage = "tool.${event.stage.name.lowercase(Locale.ROOT)}",
+                    message = event.message.ifBlank { event.toolId }
+                )
+            }
+        }
         val type = when (event.stage) {
             AgentNativeToolLifecycleStage.STARTED -> AgentRunControlEventType.TOOL_STARTED
             AgentNativeToolLifecycleStage.PROGRESS -> AgentRunControlEventType.TOOL_PROGRESS
