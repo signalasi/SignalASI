@@ -75,6 +75,8 @@ object SignalASIMqttClient {
 
     fun isSecureReady(): Boolean = secureReady
 
+    internal fun applicationContext(): Context? = appContext
+
     fun forgetSecureChannel() {
         val context = appContext
         setSecureReady(context != null && SignalASILinkProtocol.allServerLinks(context).any { it.paired })
@@ -107,6 +109,26 @@ object SignalASIMqttClient {
 
     fun publishDesktopToolCall(desktopId: String, payload: JSONObject): Boolean =
         publishDesktopControlPayload(desktopId, payload)
+
+    fun publishDesktopExecutorRequest(desktopId: String, payload: JSONObject): Boolean =
+        publishDesktopControlPayload(desktopId, payload)
+
+    fun publishDesktopControlAuthorizationsRequest(desktopId: String): Boolean =
+        publishDesktopControlPayload(
+            desktopId,
+            JSONObject()
+                .put("type", "desktop_control_authorizations_request")
+                .put("time", System.currentTimeMillis())
+        )
+
+    fun publishDesktopControlRevoke(desktopId: String, authorizationId: String): Boolean =
+        publishDesktopControlPayload(
+            desktopId,
+            JSONObject()
+                .put("type", "desktop_control_revoke")
+                .put("authorization_id", authorizationId)
+                .put("time", System.currentTimeMillis())
+        )
 
     fun publishDesktopToolCancel(
         desktopId: String,
@@ -394,6 +416,10 @@ object SignalASIMqttClient {
         )
         subscribeLink(link)
         val profile = AppStore.profile(context)
+        DesktopRemoteControl.markPairingOffer(context, pairingQr)
+        val controlAuthorizationToken = pairingQr
+            .optJSONObject("desktop_control_authorization")
+            ?.optString("token").orEmpty()
         val payload = JSONObject()
             .put("protocol", SignalASILinkProtocol.NAME)
             .put("version", SignalASILinkProtocol.VERSION)
@@ -410,6 +436,7 @@ object SignalASIMqttClient {
             .put("identity_fingerprint", SignalASICrypto.localIdentitySha256())
             .put("identity_public_key", SignalASICrypto.localIdentityPublicKey())
             .put("signal_bundle", SignalASICrypto.localSignalBundleJson())
+            .put("desktop_control_authorization_token", controlAuthorizationToken)
             .put("time", System.currentTimeMillis())
         val encryptedClaim = runCatching { SignalASILinkProtocol.encryptPairingClaim(payload, pairingQr) }
             .getOrElse {
@@ -670,6 +697,7 @@ object SignalASIMqttClient {
         if (payload.optString("type") == "capability_manifest") {
             AgentDesktopRemoteNativeTools.updateManifest(context, payload)
         }
+        DesktopRemoteControl.handleInbound(context, payload)
         if (AgentDesktopRemoteNativeTools.handleInbound(payload)) return
         if (handleSecureControlMessage(payload)) {
             listeners.forEach { it.onMessage(payload.toString()) }
@@ -733,6 +761,7 @@ object SignalASIMqttClient {
                 val desktopId = json.optString("desktop_id")
                 if (desktopId.isNotBlank()) {
                     AgentDesktopRemoteNativeTools.removeDesktop(context, desktopId)
+                    DesktopRemoteControl.clearDesktop(context, desktopId)
                     AppStore.deleteDesktopConnector(context, desktopId, deleteMessages = false)
                     SignalASICrypto.clearDesktopTrust(context, desktopId)
                     SignalASILinkProtocol.removeServer(context, desktopId)
