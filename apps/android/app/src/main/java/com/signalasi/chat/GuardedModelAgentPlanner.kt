@@ -210,6 +210,7 @@ private object AgentModelPlanningPrompt {
         append("\"description\":\"...\",\"depends_on\":[\"earlier_ref\"],")
         append("\"use_outputs_from\":[\"earlier_ref\"],\"parameters\":{\"key\":\"value\"}}]}\n\n")
         append("Allowed kinds: ").append(AgentModelPlanParser.allowedKinds.joinToString(", ") { it.name }).append(".\n")
+        append("DRAFT_PLAN is valid only during replanning, as the sole action with target task-complete after the goal is already complete; never append it after an executable action. ")
         append("TAP/LONG_PRESS require an exact element_query from the current inventory; prefer the id when labels repeat. ")
         append("TYPE_TEXT requires an exact field_query and text. ")
         append("DELETE_TEXT/PASTE_TEXT require field_query. SWIPE requires direction up/down/left/right. ")

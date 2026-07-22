@@ -55,6 +55,7 @@ object AgentModelPlanParser {
             ) ?: return null
             actions += action
         }
+        if (!hasValidDraftPlanSemantics(request, actions)) return null
         val plan = AgentPlanFactory.actions(request, actions).copy(
             expectedResult = json.optString("expected_result").trim().take(500)
                 .ifBlank { actions.last().description },
@@ -64,6 +65,17 @@ object AgentModelPlanParser {
         return plan.takeIf {
             AgentPlanValidator.validate(it).valid && it.toolGraphDepth() <= settings.maxAgentHops
         }
+    }
+
+    private fun hasValidDraftPlanSemantics(
+        request: AgentRequest,
+        actions: List<AgentAction>
+    ): Boolean {
+        val drafts = actions.filter { it.kind == AgentActionKind.DRAFT_PLAN }
+        if (drafts.isEmpty()) return true
+        return request.replanReason.isNotBlank() &&
+            actions.size == 1 &&
+            drafts.single().target.equals(TASK_COMPLETE_TARGET, ignoreCase = true)
     }
 
     private fun parseAction(
@@ -374,4 +386,5 @@ object AgentModelPlanParser {
     private const val MAX_TEXT_INPUT_CHARACTERS = 2_000
     private const val MAX_CONNECTOR_PROMPT_CHARACTERS = 4_000
     private const val MAX_NATIVE_TOOL_ARGUMENT_CHARACTERS = 64 * 1_024
+    private const val TASK_COMPLETE_TARGET = "task-complete"
 }
