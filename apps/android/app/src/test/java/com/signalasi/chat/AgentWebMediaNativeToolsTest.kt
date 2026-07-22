@@ -12,7 +12,7 @@ import org.junit.Test
 
 class AgentWebMediaNativeToolsTest {
     @Test
-    fun exposesBoundedToolsAndExplicitFfmpegUnavailability() {
+    fun exposesBoundedToolsAndReportsMissingFfmpegRuntime() {
         val services = services(FakeTransport())
         val definitions = AgentWebMediaNativeTools.definitions(services)
 
@@ -21,7 +21,7 @@ class AgentWebMediaNativeToolsTest {
             assertTrue(it.descriptor.timeoutMillis <= AgentWebMediaNativeTools.MAX_TOOL_TIMEOUT_MILLIS)
         }
         val ffmpeg = definitions.single { it.descriptor.id == AgentWebMediaNativeTools.MEDIA_FFMPEG_TRANSCODE }
-        assertEquals(AgentNativeToolRisk.BLOCKED, ffmpeg.descriptor.risk)
+        assertEquals(AgentNativeToolRisk.MEDIUM, ffmpeg.descriptor.risk)
         assertEquals(AgentNativeToolAvailabilityStatus.UNAVAILABLE, ffmpeg.descriptor.availability.status)
 
         val result = AgentWebMediaNativeTools.createRegistry(services).invoke(
@@ -30,7 +30,7 @@ class AgentWebMediaNativeToolsTest {
         )
 
         assertEquals(AgentNativeToolResultStatus.UNAVAILABLE, result.status)
-        assertEquals("tool_blocked", result.error?.code)
+        assertEquals("tool_unavailable", result.error?.code)
         assertTrue(result.error?.message.orEmpty().contains("FFmpeg"))
         setOf(
             AgentWebMediaNativeTools.WEB_SEARCH,
@@ -40,6 +40,78 @@ class AgentWebMediaNativeToolsTest {
         ).forEach { id ->
             assertTrue(definitions.single { it.descriptor.id == id }.descriptor.requiredConsents.isEmpty())
         }
+    }
+
+    @Test
+    fun transcodeUsesTypedWorkspaceRequestAndReturnsOneArtifact() {
+        val transcoder = FakeTranscoder()
+        val registry = registry(FakeTransport(), transcoder = transcoder)
+
+        val result = registry.invoke(
+            AgentWebMediaNativeTools.MEDIA_FFMPEG_TRANSCODE,
+            mapOf(
+                "source_path" to "inputs/turn/clip.mov",
+                "destination_path" to "outputs/clip.mp4",
+                "target_format" to "mp4",
+                "preset" to "compact",
+                "start_ms" to 1_250,
+                "duration_ms" to 4_000,
+                "max_width" to 1_280,
+                "max_height" to 720,
+                "audio_bitrate_kbps" to 128,
+                "timeout_ms" to 30_000
+            ),
+            AgentNativeToolInvocationContext(
+                invocationId = "media-test-1",
+                conversationId = "conversation-1",
+                attributes = mapOf("workspace_id" to "workspace-1")
+            )
+        )
+
+        assertTrue(result.toJson(), result.isSuccess)
+        assertEquals("workspace-1", transcoder.request?.workspaceId)
+        assertEquals("inputs/turn/clip.mov", transcoder.request?.sourcePath)
+        assertEquals(AgentMediaTargetFormat.MP4, transcoder.request?.targetFormat)
+        assertEquals(AgentMediaTranscodePreset.COMPACT, transcoder.request?.preset)
+        assertEquals("outputs/clip.mp4", result.output["destination_path"])
+        assertEquals("video/mp4", result.output["mime_type"])
+        assertEquals(false, result.output["network_enabled"])
+        assertEquals(1, (result.output["artifacts"] as List<*>).size)
+    }
+
+    @Test
+    fun transcodeRequiresExactlyOneSafeSourceAndMatchingDestinationExtension() {
+        val registry = registry(FakeTransport(), transcoder = FakeTranscoder())
+
+        val missingSource = registry.validateInput(
+            AgentWebMediaNativeTools.MEDIA_FFMPEG_TRANSCODE,
+            mapOf("target_format" to "mp4")
+        )
+        val duplicateSource = registry.validateInput(
+            AgentWebMediaNativeTools.MEDIA_FFMPEG_TRANSCODE,
+            mapOf(
+                "content_uri" to "content://media/1",
+                "source_path" to "inputs/clip.mov",
+                "target_format" to "mp4"
+            )
+        )
+        val unsafePath = registry.validateInput(
+            AgentWebMediaNativeTools.MEDIA_FFMPEG_TRANSCODE,
+            mapOf("source_path" to "../clip.mov", "target_format" to "mp4")
+        )
+        val wrongExtension = registry.validateInput(
+            AgentWebMediaNativeTools.MEDIA_FFMPEG_TRANSCODE,
+            mapOf(
+                "source_path" to "inputs/clip.mov",
+                "destination_path" to "outputs/clip.gif",
+                "target_format" to "mp4"
+            )
+        )
+
+        assertFalse(missingSource.isValid)
+        assertFalse(duplicateSource.isValid)
+        assertFalse(unsafePath.isValid)
+        assertFalse(wrongExtension.isValid)
     }
 
     @Test
@@ -398,7 +470,8 @@ class AgentWebMediaNativeToolsTest {
         writer: AgentContentUriWriter = FakeWriter(),
         ocr: AgentContentOcr = FakeOcr(),
         inspector: AgentMediaInspector = FakeInspector(),
-        playback: AgentMediaPlayback = FakePlayback()
+        playback: AgentMediaPlayback = FakePlayback(),
+        transcoder: AgentMediaTranscoder = AgentUnavailableMediaTranscoder
     ): AgentNativeToolRegistry {
         val web = AgentBoundedWebService(
             transport,
@@ -410,7 +483,7 @@ class AgentWebMediaNativeToolsTest {
             )
         )
         return AgentWebMediaNativeTools.createRegistry(
-            AgentWebMediaServices(web, writer, ocr, inspector, playback),
+            AgentWebMediaServices(web, writer, ocr, inspector, playback, transcoder),
             clock
         )
     }
@@ -516,6 +589,35 @@ class AgentWebMediaNativeToolsTest {
             uri = contentUri
             this.contentType = contentType
             return AgentMediaPlaybackResult(true, "android.intent.action.VIEW", "fake.player")
+        }
+    }
+
+    private class FakeTranscoder : AgentMediaTranscoder {
+        override val availability = AgentNativeToolAvailability.AVAILABLE
+        override val implementationId = "fake.ffmpeg"
+        var request: AgentMediaTranscodeRequest? = null
+
+        override fun transcode(request: AgentMediaTranscodeRequest): AgentMediaTranscodeResult {
+            this.request = request
+            val sha256 = "a".repeat(64)
+            return AgentMediaTranscodeResult(
+                sourcePath = request.sourcePath.ifBlank { "inputs/media/import.mov" },
+                destinationPath = request.destinationPath.ifBlank { "outputs/media.mp4" },
+                targetFormat = request.targetFormat,
+                sizeBytes = 4_096,
+                sha256 = sha256,
+                executionDurationMillis = 321,
+                artifacts = listOf(
+                    mapOf(
+                        "relative_path" to request.destinationPath.ifBlank { "outputs/media.mp4" },
+                        "size_bytes" to 4_096,
+                        "sha256" to sha256,
+                        "host_path" to "/private/output.mp4",
+                        "artifact_kind" to "file"
+                    )
+                ),
+                executionReceipt = mapOf("status" to "completed")
+            )
         }
     }
 

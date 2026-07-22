@@ -256,12 +256,12 @@ All tools SHALL use the descriptor, invocation, receipt, and error contract in `
 | OCR and screen | Accessibility tree, screenshot, OCR, grounded elements, post-action observation | Accessibility special access and per-session MediaProjection consent; secure content remains unavailable |
 | Documents | Import text/PDF and selected files, extract bounded content, cite source | User-selected content only; parsing is untrusted and size-limited |
 | Camera and microphone | User-visible capture, voice input, ASR | Runtime permission and privacy indicator; no silent unattended capture |
-| Media | Image preview, audio/video playback, metadata, bounded conversion when implemented | Playback is codec-dependent; general transcoding MUST remain unavailable until implemented |
+| Media | Image preview, audio/video playback, metadata, and typed FFmpeg conversion | Conversion is offline and workspace-confined, accepts only fixed presets, and requires a healthy Android-local Linux runtime plus the signed FFmpeg pack |
 | UI action | Tap, long press, swipe, type, clear/paste, back, home, recents | Accessibility/focus/coordinates are fallible; protected screens and confirmations cannot be bypassed |
 | Notifications | Read posted fields and reply through live `RemoteInput` | Notification-listener access; reply only when the notification explicitly supports it |
 | Clipboard | Foreground-limited read and explicit write | Background restrictions and sensitive clipboard behavior apply |
 | System handoff | Open apps, URLs, settings, dialer/composer, file picker, contacts, alarms/timers | Handoff does not prove completion; protected settings and submission remain user/system controlled |
-| Hardware observation | Battery and network state; later location/sensors/Bluetooth/NFC | Only implemented and permissioned probes may be advertised |
+| Hardware observation | Battery, network, foreground location, bounded sensors, Bluetooth, and NFC state | Only registered tools whose live permission, service, and hardware probes pass may be advertised |
 | Smart devices | Read state and invoke allowlisted Home Assistant/custom services | Requires explicit configuration, entity/service scope, confirmation, and controller evidence |
 
 ### 9.1 Script execution requirements
@@ -371,8 +371,8 @@ The runtime MAY refuse a category even after a request for confirmation.
 | Installed apps | Partial package visibility only; never a complete census |
 | Settings | System screen handoff only for protected settings |
 | Package installation | Not implemented; ordinary apps can at most invoke the system installer with user approval |
-| Location, sensors, Bluetooth, NFC | Not executable until dedicated implementations and permissions exist |
-| General media transcode | Not executable until a bounded pipeline exists |
+| Location, sensors, Bluetooth, NFC | Dedicated bounded tools exist; live availability still depends on device hardware, Android version, runtime permissions, and enabled services |
+| General media transcode | Typed MP4/M4A/WAV/FLAC/GIF/PNG/JPG presets execute offline in the conversation workspace when the signed FFmpeg pack and guest runtime are ready |
 | Device Owner | Privileged provisioning only; the app cannot self-elevate |
 | Shizuku | Separate service and authorization required; no bundled integration at present |
 | Root | Product-policy blocked; never advertise as ready |
@@ -464,7 +464,7 @@ The canonical result format is `Super-Agent-Rich-Output` version 1.
 - Secure surfaces remain unreadable and are reported as unavailable, not empty success.
 - Settings, dialer, SMS, installer, and picker flows are labeled as handoffs until post-state evidence exists.
 - Root remains policy-blocked even on a rooted test device.
-- Location, sensors, Bluetooth, NFC, package installation, general transcoding, Shizuku, and Device Owner are not advertised as ready without real implementations.
+- Location, sensors, Bluetooth, NFC, and media transcoding are advertised only from registered tools and live capability probes; package installation, Shizuku, and Device Owner remain unavailable or privileged until separately implemented and provisioned.
 
 ### 18.4 Safety and verification
 
@@ -524,7 +524,7 @@ Release readiness requires automated unit, integration, Android build, real-devi
 
 ## 20. Current Repository Implementation Matrix
 
-Snapshot basis: source tree inspected on 2026-07-21. `Implemented` means source exists in the current repository; it does not by itself mean release-grade or real-device accepted. `Scaffold` means a contract or isolated implementation exists but is not wired end to end.
+Snapshot basis: source tree inspected on 2026-07-22. `Implemented` means source exists in the current repository; it does not by itself mean release-grade or real-device accepted. `Scaffold` means a contract or isolated implementation exists but is not wired end to end.
 
 | Capability | Status | Current repository evidence | Required next work |
 | --- | --- | --- | --- |
@@ -542,8 +542,8 @@ Snapshot basis: source tree inspected on 2026-07-21. `Implemented` means source 
 | Notifications | Partial | `AgentNotificationNativeTools.kt` registers bounded, redacted reads and guarded `RemoteInput` replies with stale-target rejection, explicit confirmation binding, and dispatch-only receipts | Complete real-device notification read/reply acceptance across supported apps |
 | Clipboard and system intents | Partial | `AgentSystemTools.kt` and `AndroidAgentActionExecutor` implement clipboard, app/settings/URL/dialer/composer/picker, alarms, and navigation paths | Distinguish handoff from completion in receipts and migrate to native descriptors |
 | Camera, microphone, voice ASR/TTS | Partial | `AgentVisibleCaptureNativeTools.kt` provides explicit foreground photo/audio descriptors, bounded capture activities, conversation artifacts, runtime permissions, and privacy lifecycle tests; ASR/TTS settings and runtimes remain separate | Complete real-device capture, cancellation, process-death, and artifact-retention acceptance |
-| General media transcode | Not implemented | `AgentPhoneCapabilityCatalog.kt` explicitly marks `MEDIA_TRANSCODE` not implemented | Add a bounded codec pipeline before advertising the capability |
-| Location, sensors, Bluetooth, NFC | Not implemented | Capability catalog explicitly marks each not implemented; manifest lacks their runtime permissions | Add dedicated implementations and policies separately, or continue to advertise unavailable |
+| General media transcode | Implemented, setup-dependent | `AgentMediaTranscode.kt` and `AgentWebMediaNativeTools.kt` provide typed, offline, cancellable FFmpeg presets with confined paths, bounded resources, artifacts, and execution receipts; `AgentPhoneCapabilityCatalog.kt` probes the signed pack and guest runtime | Complete real-device acceptance for every advertised format and representative input codec |
+| Location, sensors, Bluetooth, NFC | Partial | `AgentHardwareNativeTools.kt` registers foreground location, bounded sensor sampling, Bluetooth status/discovery/pairing handoff, and NFC status with runtime gates | Broaden real-device and OEM acceptance without weakening permissions or user-visible boundaries |
 | Package installation | Not implemented | Catalog marks installer handoff not implemented; system-tools planner blocks installation/removal and device wipe | Any future installer handoff must remain system/user mediated and separately accepted |
 | Device Owner and Shizuku | Privileged only | Capability catalog marks both non-normal-app capabilities and notes no controller/integration | Keep unavailable unless separately provisioned, implemented, reviewed, and policy-scoped |
 | Root | Policy blocked | Capability catalog explicitly refuses `su` execution even if a binary is detected | No implementation planned under this specification |

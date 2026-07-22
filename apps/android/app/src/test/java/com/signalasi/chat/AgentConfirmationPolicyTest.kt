@@ -15,6 +15,7 @@ class AgentConfirmationPolicyTest {
         assertEquals(AgentConfirmationTier.DIRECT, nativeTier(AgentAndroidSystemNativeTools.WIFI_HOTSPOT_PANEL_OPEN, "Open hotspot settings"))
         assertEquals(AgentConfirmationTier.DIRECT, nativeTier(AgentHardwareNativeTools.BLUETOOTH_PAIRING_HANDOFF, "Open Bluetooth pairing settings"))
         assertEquals(AgentConfirmationTier.DIRECT, nativeTier(AgentVisibleCaptureNativeTools.CAMERA_CAPTURE, "Capture a photo"))
+        assertEquals(AgentConfirmationTier.DIRECT, nativeTier(AgentWebMediaNativeTools.MEDIA_FFMPEG_TRANSCODE, "Convert media locally"))
     }
 
     @Test
