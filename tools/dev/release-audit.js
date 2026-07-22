@@ -13,9 +13,12 @@ const requiredWorkflows = ["Repository Guard", "Windows Package"];
 const requiredLocalGates = [
   "npm run check",
   "npm run check:android",
+  "npm run test:runtime-tools",
+  "npm run test:guest-runtime",
   "npm run smoke:desktop",
   "npm run smoke:desktop:pairing",
   "npm run smoke:desktop:agent-push",
+  "npm run smoke:desktop:agent-lifecycle",
   "npm run smoke:desktop:voice-stt",
   "npm run smoke:desktop:ui",
   "npm run smoke:desktop:e2e",
@@ -38,8 +41,12 @@ const deviceGates = [
   "npm run smoke:android:agent-replies",
   "npm run smoke:android:voice-reply",
   "npm run smoke:android:voice-settings",
+  "npm run smoke:android:control-center-deep",
   "npm run smoke:android:backup",
-  "npm run smoke:android:reset"
+  "npm run smoke:android:reset",
+  "npm run test:android:agent-lifecycle-ui",
+  "npm run test:android:cross-resource",
+  "npm run test:android:team-paired-process-death"
 ];
 
 const deviceGateBundle = [
@@ -47,7 +54,8 @@ const deviceGateBundle = [
 ];
 
 const networkGates = [
-  "npm run smoke:desktop:mqtt-persistence"
+  "npm run smoke:desktop:mqtt-persistence",
+  "npm run smoke:desktop:codex-style-live"
 ];
 
 const manualChecks = [
@@ -55,6 +63,8 @@ const manualChecks = [
   "Send text messages from Android to Hermes and Codex and confirm live Agent replies arrive on the phone. Automated display evidence: npm run smoke:android:agent-replies.",
   "Send a voice message to Hermes and confirm Desktop STT is used when configured. Automated STT evidence: npm run smoke:desktop:voice-stt. Automated reply-panel evidence: npm run smoke:android:voice-reply.",
   "Exercise the Voice page wake loop on a real microphone and confirm replies are preserved in the voice response panel. Automated preservation evidence: npm run smoke:android:voice-reply.",
+  "Verify the Control Center hierarchy and every wired setting destination on a real phone. Automated evidence: npm run smoke:android:control-center-deep.",
+  "Verify lifecycle rendering, encrypted Windows/file/terminal/Office execution, notification reply, smart-home execution, and paired multi-Agent process-death recovery. Automated evidence: npm run test:android:agent-lifecycle-ui, npm run test:android:cross-resource, and npm run test:android:team-paired-process-death.",
   "Clear Android app data and confirm a new identity fingerprint, empty contacts, and a new welcome notification are created. Automated evidence: npm run smoke:android:reset.",
   "Verify exported APK, Desktop EXE, local databases, logs, screenshots, pairing state, tokens, and node_modules are not staged for Git."
 ];

@@ -97,6 +97,20 @@ object AgentPhoneNativeToolCatalog {
         supportedActionKinds.mapTo(this, AgentNativeToolAgentActionAdapter::defaultToolId)
     }
 
+    val defaultToolIds: Set<String> by lazy {
+        linkedSetOf<String>().apply {
+            addAll(toolIds)
+            addAll(AgentWebMediaNativeTools.toolIds)
+            addAll(AgentHardwareNativeTools.toolIds)
+            addAll(AgentVisibleCaptureNativeTools.toolIds)
+            addAll(AgentNotificationNativeTools.toolIds)
+            addAll(AgentAndroidSystemNativeTools.toolIds)
+            addAll(AgentMcpNativeTools.toolIds)
+            addAll(AgentOnDeviceRuntimeTools.toolIds)
+            addAll(AgentDesktopRemoteNativeTools.toolIds)
+        }
+    }
+
     fun defaultRegistry(
         context: Context,
         screenProvider: (AgentNativeToolInvocation) -> ScreenContext,
@@ -133,6 +147,8 @@ object AgentPhoneNativeToolCatalog {
             AgentMcpNativeTools.definitions(context.applicationContext)
         ).registerAll(
             AgentOnDeviceRuntimeTools.definitions(context.applicationContext)
+        ).registerAll(
+            AgentDesktopRemoteNativeTools.definitions(context.applicationContext)
         )
     }
 

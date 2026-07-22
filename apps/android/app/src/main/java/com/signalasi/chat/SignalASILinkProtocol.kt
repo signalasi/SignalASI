@@ -80,11 +80,18 @@ object SignalASILinkProtocol {
     }
 
     @Synchronized
-    fun ensureServerLink(context: Context, qr: JSONObject): ServerLink {
+    fun ensureServerLink(
+        context: Context,
+        qr: JSONObject,
+        rotateClientRoute: Boolean = false
+    ): ServerLink {
         require(validatePairingQr(qr)) { "Invalid SignalASI Link v1 pairing QR" }
         val desktopId = qr.getString("desktop_id")
         val existing = serverLink(context, desktopId)
-        if (existing != null && existing.routes.serverRouteId == qr.getString("server_route_id")) return existing
+        if (!rotateClientRoute &&
+            existing != null &&
+            existing.routes.serverRouteId == qr.getString("server_route_id")
+        ) return existing
         val link = ServerLink(
             desktopId = desktopId,
             desktopName = qr.optString("desktop_name", "SignalASI Desktop"),

@@ -34,10 +34,12 @@ const backendFiles = [
   "agent_config.py",
   "agent_gateway.py",
   "agent_task_manager.py",
+  "backend_instance_lock.py",
   "codex_app_server.py",
   "custom_agent_stdio.py",
   "desktop_agent_adapters.py",
   "desktop_file_tools.py",
+  "desktop_native_tools.py",
   "file_server.py",
   "link_delivery.py",
   "link_protocol.py",
@@ -54,8 +56,7 @@ const backendFiles = [
   "signalasi_client.py",
   "signalasi_notify.py",
   "stt_bridge.py",
-  "task_workspace.py",
-  "websocket.py"
+  "task_workspace.py"
 ];
 
 function copyRecursive(src, dest, options = {}) {
@@ -73,7 +74,55 @@ function copyRecursive(src, dest, options = {}) {
 }
 
 function removeIfExists(target) {
-  fs.rmSync(target, { recursive: true, force: true });
+  const retryable = new Set(["EBUSY", "ENOTEMPTY", "EPERM"]);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      fs.rmSync(target, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (!retryable.has(error.code) || attempt === 19) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+    }
+  }
+}
+
+function stopPackagedProcesses() {
+  if (process.platform !== "win32" || !fs.existsSync(packageDir)) return;
+  const escapedPackageDir = packageDir.replace(/'/g, "''");
+  const script = `
+    $target = '${escapedPackageDir}'
+    $names = @('SignalASI Desktop.exe', 'python.exe', 'pythonw.exe', 'java.exe', 'cmd.exe')
+    $stopped = [System.Collections.Generic.HashSet[int]]::new()
+    for ($attempt = 0; $attempt -lt 20; $attempt += 1) {
+      $processes = @(Get-CimInstance Win32_Process | Where-Object {
+        ($_.ExecutablePath -and $_.ExecutablePath -like "$target*") -or
+        ($_.Name -in $names -and $_.CommandLine -and $_.CommandLine -like "*$target*")
+      })
+      if ($processes.Count -eq 0) { break }
+      foreach ($process in $processes) {
+        [void]$stopped.Add([int]$process.ProcessId)
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+      }
+      Start-Sleep -Milliseconds 500
+    }
+    $remaining = @(Get-CimInstance Win32_Process | Where-Object {
+      ($_.ExecutablePath -and $_.ExecutablePath -like "$target*") -or
+      ($_.Name -in $names -and $_.CommandLine -and $_.CommandLine -like "*$target*")
+    })
+    if ($remaining.Count -gt 0) {
+      Write-Error "Packaged SignalASI process tree did not stop: $($remaining.ProcessId -join ',')"
+      exit 1
+    }
+    if ($stopped.Count -gt 0) { Write-Output ((@($stopped) | Sort-Object) -join ',') }
+  `;
+  const stopped = execFileSync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", script],
+    { encoding: "utf8", windowsHide: true }
+  ).trim();
+  if (stopped) {
+    console.log(`Stopped packaged SignalASI Desktop process tree: ${stopped}`);
+  }
 }
 
 function writeJson(target, data) {
@@ -177,6 +226,7 @@ requirePath(backendSrc, "SignalASI backend");
 ensureSignalSidecarRuntime();
 requirePath(sidecarRuntimeDir, "SignalASI Link sidecar runtime");
 
+stopPackagedProcesses();
 removeIfExists(packageDir);
 fs.mkdirSync(packageDir, { recursive: true });
 

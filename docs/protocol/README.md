@@ -2,6 +2,12 @@
 
 This directory contains protocol specifications, schemas, and compatibility notes shared by all SignalASI clients.
 
+Additional protocol contracts:
+
+- [Desktop Native Tool Execution v1](Desktop-Native-Tool-Execution-v1.md)
+- [Phone-Native Tool Session v1](Phone-Native-Tool-Session-v1.md)
+- [Super Agent Rich Output](Super-Agent-Rich-Output.md)
+
 ## Agent Conversation Identity
 
 Agent messages use three independent identifiers:

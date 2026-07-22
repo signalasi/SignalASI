@@ -179,6 +179,26 @@ def list_clients(include_revoked: bool = False) -> list[dict]:
     return sorted(values, key=lambda item: float(item.get("paired_at") or 0))
 
 
+def clients_for_identity(
+    fingerprint: str,
+    remote_name: str,
+    *,
+    exclude_route_id: str = "",
+) -> list[dict]:
+    """Return active routes owned by the same cryptographic client identity."""
+    clean_fingerprint = str(fingerprint or "").lower()
+    clean_name = str(remote_name or "")
+    return [
+        client
+        for client in list_clients()
+        if client["client_route_id"] != exclude_route_id
+        and (
+            str(client.get("identity_fingerprint") or "").lower() == clean_fingerprint
+            or str(client.get("signal_name") or "") == clean_name
+        )
+    ]
+
+
 def touch_client(client_route_id: str) -> None:
     with _registry_lock:
         state = _read_state()

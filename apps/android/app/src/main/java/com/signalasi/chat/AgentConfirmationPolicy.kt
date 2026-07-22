@@ -203,6 +203,7 @@ object AgentConfirmationPolicy {
         AgentHardwareNativeTools.FLASHLIGHT_SET,
         AgentVisibleCaptureNativeTools.CAMERA_CAPTURE,
         AgentWebMediaNativeTools.WEB_SEARCH,
+        AgentWebMediaNativeTools.MEDIA_FFMPEG_TRANSCODE,
         AgentOnDeviceRuntimeTools.EXECUTE,
         AgentHardwareNativeTools.BLUETOOTH_PAIRING_HANDOFF,
         AgentAndroidSystemNativeTools.AUDIO_STATUS,

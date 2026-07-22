@@ -3,6 +3,7 @@ package com.signalasi.chat
 import android.content.Context
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
+import android.os.Looper
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.Closeable
@@ -18,10 +19,12 @@ import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.ReentrantLock
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -345,6 +348,11 @@ class AgentRuntimeGuestBridge(
         check(connection.health.ready) {
             connection.health.reason.ifBlank { "Guest runtime handshake failed" }
         }
+        if (request.secretEnvironment.isNotEmpty()) {
+            check(SECRET_ENVIRONMENT_CAPABILITY in connection.health.capabilities) {
+                "Guest runtime does not support secure environment injection; update the Linux base runtime pack"
+            }
+        }
         val pending = connection.register(request.requestId)
         var lastReceivedSequence = 0L
         if (request.cancellationToken.isCancellationRequested) {
@@ -497,7 +505,7 @@ class AgentRuntimeGuestBridge(
 
     private fun executePayload(request: AgentRuntimeExecutionRequest): AgentNativeJsonObject {
         val limits = request.resourceLimits.validated()
-        return mapOf(
+        return linkedMapOf<String, Any?>(
             "language" to request.language.wireValue,
             "arguments" to request.arguments,
             "workspace_id" to request.workspaceId,
@@ -516,7 +524,11 @@ class AgentRuntimeGuestBridge(
                 "max_output_bytes" to limits.maxOutputBytes,
                 "max_artifact_bytes" to limits.maxArtifactBytes
             )
-        )
+        ).apply {
+            if (request.secretEnvironment.isNotEmpty()) {
+                put("secret_environment", request.secretEnvironment)
+            }
+        }
     }
 
     private fun responseFrom(envelope: AgentRuntimeGuestEnvelope, startedAt: Long): AgentRuntimeExecutionResponse =
@@ -540,6 +552,7 @@ class AgentRuntimeGuestBridge(
         private const val MAX_PENDING_REQUESTS = 64
         private const val MAX_PENDING_FRAMES = 256
         private const val MAX_STALE_HANDSHAKE_FRAMES = 32
+        private const val SECRET_ENVIRONMENT_CAPABILITY = "runtime.secret_environment"
         private val REQUIRED_GUEST_CAPABILITIES = setOf(
             "runtime.execute",
             "runtime.cancel",
@@ -691,48 +704,117 @@ class AgentRuntimeSessionKeyStore(context: Context) {
 
 object AgentOnDeviceRuntimeSupervisor {
     @Volatile private var registeredBridge: AgentRuntimeGuestBridge? = null
+    @Volatile private var lastHealth: AgentRuntimeBridgeHealth? = null
+    @Volatile private var lastProbeAtMillis: Long = 0L
     @Volatile private var lastHealthyAtMillis: Long = 0L
-
-    @Synchronized
-    fun discover(context: Context): AgentOnDeviceRuntimeBridge? {
-        registeredBridge?.let { bridge ->
-            val now = android.os.SystemClock.elapsedRealtime()
-            if (now - lastHealthyAtMillis <= HEALTH_CACHE_MILLIS) return bridge
-            if (bridge.health().ready) {
-                lastHealthyAtMillis = now
-                return bridge
-            }
-            bridge.close()
-            AgentOnDeviceRuntimeBridgeRegistry.unregister(bridge)
-            registeredBridge = null
-            lastHealthyAtMillis = 0L
-        }
-        val socket = File(context.applicationContext.filesDir, "agent-runtime/guest.sock")
-        if (!socket.exists()) return null
-        val keyStore = AgentRuntimeSessionKeyStore(context)
-        val candidate = AgentRuntimeGuestBridge(
-            channelFactory = LocalSocketAgentRuntimeGuestChannelFactory(socket.absolutePath),
-            sessionKeyProvider = keyStore::getOrCreate
-        )
-        if (!candidate.health().ready) {
-            candidate.close()
-            return null
-        }
-        AgentOnDeviceRuntimeBridgeRegistry.register(candidate)
-        registeredBridge = candidate
-        lastHealthyAtMillis = android.os.SystemClock.elapsedRealtime()
-        return candidate
+    private val discoveryLock = ReentrantLock()
+    private val discoveryScheduled = AtomicBoolean(false)
+    private val discoveryExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "signalasi-runtime-discovery").apply { isDaemon = true }
     }
 
-    @Synchronized
-    fun reset() {
-        registeredBridge?.let { bridge ->
-            bridge.close()
-            AgentOnDeviceRuntimeBridgeRegistry.unregister(bridge)
+    fun discover(context: Context): AgentOnDeviceRuntimeBridge? {
+        val appContext = context.applicationContext
+        val now = android.os.SystemClock.elapsedRealtime()
+        cachedReadyBridge(now)?.let { return it }
+        if (lastHealth?.ready == false && now - lastProbeAtMillis <= FAILED_HEALTH_CACHE_MILLIS) {
+            return null
         }
-        registeredBridge = null
-        lastHealthyAtMillis = 0L
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            scheduleDiscovery(appContext)
+            return null
+        }
+        return discoverBlocking(appContext)
+    }
+
+    fun cachedHealth(bridge: AgentOnDeviceRuntimeBridge): AgentRuntimeBridgeHealth? {
+        if (registeredBridge !== bridge) return null
+        val now = android.os.SystemClock.elapsedRealtime()
+        return lastHealth?.takeIf { now - lastProbeAtMillis <= HEALTH_CACHE_MILLIS }
+    }
+
+    private fun scheduleDiscovery(context: Context) {
+        if (!discoveryScheduled.compareAndSet(false, true)) return
+        discoveryExecutor.execute {
+            try {
+                discoverBlocking(context.applicationContext)
+            } finally {
+                discoveryScheduled.set(false)
+            }
+        }
+    }
+
+    private fun discoverBlocking(context: Context): AgentOnDeviceRuntimeBridge? {
+        if (!discoveryLock.tryLock()) {
+            return cachedReadyBridge(android.os.SystemClock.elapsedRealtime())
+        }
+        try {
+            val now = android.os.SystemClock.elapsedRealtime()
+            cachedReadyBridge(now)?.let { return it }
+            if (lastHealth?.ready == false && now - lastProbeAtMillis <= FAILED_HEALTH_CACHE_MILLIS) {
+                return null
+            }
+            registeredBridge?.let { bridge ->
+                val health = runCatching { bridge.health() }
+                    .getOrElse { AgentRuntimeBridgeHealth(false, reason = it.message ?: "Guest runtime is unavailable") }
+                recordHealth(health)
+                if (health.ready) return bridge
+                bridge.close()
+                AgentOnDeviceRuntimeBridgeRegistry.unregister(bridge)
+                registeredBridge = null
+                lastHealthyAtMillis = 0L
+            }
+            val socket = File(context.filesDir, "agent-runtime/guest.sock")
+            if (!socket.exists()) {
+                recordHealth(AgentRuntimeBridgeHealth(false, reason = "Guest runtime socket is unavailable"))
+                return null
+            }
+            val keyStore = AgentRuntimeSessionKeyStore(context)
+            val candidate = AgentRuntimeGuestBridge(
+                channelFactory = LocalSocketAgentRuntimeGuestChannelFactory(socket.absolutePath),
+                sessionKeyProvider = keyStore::getOrCreate
+            )
+            val health = candidate.health()
+            recordHealth(health)
+            if (!health.ready) {
+                candidate.close()
+                return null
+            }
+            AgentOnDeviceRuntimeBridgeRegistry.register(candidate)
+            registeredBridge = candidate
+            return candidate
+        } finally {
+            discoveryLock.unlock()
+        }
+    }
+
+    fun reset() {
+        discoveryLock.lock()
+        try {
+            registeredBridge?.let { bridge ->
+                bridge.close()
+                AgentOnDeviceRuntimeBridgeRegistry.unregister(bridge)
+            }
+            registeredBridge = null
+            lastHealth = null
+            lastProbeAtMillis = 0L
+            lastHealthyAtMillis = 0L
+        } finally {
+            discoveryLock.unlock()
+        }
+    }
+
+    private fun cachedReadyBridge(now: Long): AgentRuntimeGuestBridge? = registeredBridge?.takeIf {
+        lastHealth?.ready == true && now - lastHealthyAtMillis <= HEALTH_CACHE_MILLIS
+    }
+
+    private fun recordHealth(health: AgentRuntimeBridgeHealth) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        lastHealth = health
+        lastProbeAtMillis = now
+        if (health.ready) lastHealthyAtMillis = now
     }
 
     private const val HEALTH_CACHE_MILLIS = 15_000L
+    private const val FAILED_HEALTH_CACHE_MILLIS = 1_000L
 }

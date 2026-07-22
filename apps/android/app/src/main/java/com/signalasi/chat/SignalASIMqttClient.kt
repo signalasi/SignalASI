@@ -25,6 +25,14 @@ object SignalASIMqttClient {
     private const val SERVER_URI = "ssl://broker.emqx.io:8883"
     private const val MQTT_QOS = 1
     private const val MAX_INLINE_ATTACHMENT_BYTES = 320 * 1024
+    private const val PAIRING_CLAIM_MAX_AGE_MILLIS = 9 * 60_000L
+
+    private data class PendingPairingClaim(
+        val desktopId: String,
+        val topic: String,
+        val wirePayload: String,
+        val queuedAtMillis: Long
+    )
 
     private val connecting = AtomicBoolean(false)
     private val retryHandler = Handler(Looper.getMainLooper())
@@ -38,7 +46,9 @@ object SignalASIMqttClient {
     }
     private val listeners = CopyOnWriteArraySet<Listener>()
     private val deliveryMessageIds = ConcurrentHashMap<Int, String>()
+    private val pairingClaimLock = Any()
     private var client: MqttAsyncClient? = null
+    private var pendingPairingClaim: PendingPairingClaim? = null
     @Volatile private var connected = false
     @Volatile private var secureReady = false
     @Volatile private var lastConnectorStatusRequestAt = 0L
@@ -95,6 +105,52 @@ object SignalASIMqttClient {
         return true
     }
 
+    fun publishDesktopToolCall(desktopId: String, payload: JSONObject): Boolean =
+        publishDesktopControlPayload(desktopId, payload)
+
+    fun publishDesktopToolCancel(
+        desktopId: String,
+        callId: String,
+        taskId: String,
+        conversationId: String
+    ): Boolean = publishDesktopControlPayload(
+        desktopId,
+        JSONObject()
+            .put("type", "desktop_tool_call_cancel")
+            .put("call_id", callId)
+            .put("invocation_id", callId)
+            .put("task_id", taskId)
+            .put("conversation_id", conversationId)
+            .put("time", System.currentTimeMillis())
+    )
+
+    private fun publishDesktopControlPayload(desktopId: String, payload: JSONObject): Boolean {
+        val context = appContext ?: return false
+        val link = SignalASILinkProtocol.serverLink(context, desktopId) ?: return false
+        val mqtt = client ?: return false
+        if (!mqtt.isConnected || !link.paired || !SignalASICrypto.hasDesktopSession(context, desktopId)) return false
+        payload.put("desktop_id", desktopId)
+        val envelope = runCatching {
+            SignalASILinkProtocol.makeEnvelope(payload, SignalASICrypto.localSignalasiId(), desktopId)
+        }.getOrNull() ?: return false
+        val encrypted = SignalASICrypto.encryptPayloadForDesktop(desktopId, envelope) ?: return false
+        val messageId = envelope.getString("message_id")
+        val wirePayload = encrypted.toString()
+        SignalASILinkDeliveryStore.enqueue(context, messageId, link.routes.control, wirePayload)
+        SignalASILinkDeliveryStore.markAttempt(context, messageId)
+        return runCatching {
+            val token = mqtt.publish(
+                link.routes.control,
+                MqttMessage(wirePayload.toByteArray(Charsets.UTF_8)).apply {
+                    qos = MQTT_QOS
+                    isRetained = false
+                }
+            )
+            deliveryMessageIds[token.messageId] = messageId
+            true
+        }.getOrDefault(false)
+    }
+
     fun verifyPcIdentityFromQr(contents: String): Boolean {
         val context = appContext ?: return false
         val qr = runCatching { JSONObject(contents) }.getOrNull() ?: return false
@@ -121,6 +177,7 @@ object SignalASIMqttClient {
                     Log.i(TAG, "MQTT connectComplete reconnect=$reconnect")
                     setConnected(true)
                     subscribe()
+                    flushPendingPairingClaim()
                     scheduleOutboxRetries()
                     scheduleConnectorStatusRequest()
                 }
@@ -330,7 +387,11 @@ object SignalASIMqttClient {
     fun publishPairingClaim(pairingQr: JSONObject): Boolean {
         val context = appContext ?: return false
         if (!SignalASILinkProtocol.validatePairingQr(pairingQr)) return false
-        val link = SignalASILinkProtocol.ensureServerLink(context, pairingQr)
+        val link = SignalASILinkProtocol.ensureServerLink(
+            context,
+            pairingQr,
+            rotateClientRoute = true
+        )
         subscribeLink(link)
         val profile = AppStore.profile(context)
         val payload = JSONObject()
@@ -355,7 +416,39 @@ object SignalASIMqttClient {
                 Log.e(TAG, "Pairing claim encryption failed", it)
                 return false
             }
-        return publishPublicJson(link.routes.pairing, encryptedClaim)
+        synchronized(pairingClaimLock) {
+            pendingPairingClaim = PendingPairingClaim(
+                desktopId = link.desktopId,
+                topic = link.routes.pairing,
+                wirePayload = encryptedClaim.toString(),
+                queuedAtMillis = System.currentTimeMillis()
+            )
+        }
+        if (client?.isConnected == true) flushPendingPairingClaim() else connect(context)
+        return true
+    }
+
+    private fun flushPendingPairingClaim() {
+        val pending = synchronized(pairingClaimLock) { pendingPairingClaim } ?: return
+        if (System.currentTimeMillis() - pending.queuedAtMillis > PAIRING_CLAIM_MAX_AGE_MILLIS) {
+            synchronized(pairingClaimLock) {
+                if (pendingPairingClaim == pending) pendingPairingClaim = null
+            }
+            Log.w(TAG, "Discarded expired pending pairing claim")
+            return
+        }
+        val payload = runCatching { JSONObject(pending.wirePayload) }.getOrElse {
+            synchronized(pairingClaimLock) {
+                if (pendingPairingClaim == pending) pendingPairingClaim = null
+            }
+            Log.e(TAG, "Discarded invalid pending pairing claim", it)
+            return
+        }
+        if (!publishPublicJson(pending.topic, payload)) return
+        synchronized(pairingClaimLock) {
+            if (pendingPairingClaim == pending) pendingPairingClaim = null
+        }
+        Log.i(TAG, "Published pending pairing claim desktop=${pending.desktopId.takeLast(8)}")
     }
 
     fun publishGroupTextMessage(
@@ -574,6 +667,10 @@ object SignalASIMqttClient {
         } else {
             publishInboundReceipt(link, payload.optString("message_id"))
         }
+        if (payload.optString("type") == "capability_manifest") {
+            AgentDesktopRemoteNativeTools.updateManifest(context, payload)
+        }
+        if (AgentDesktopRemoteNativeTools.handleInbound(payload)) return
         if (handleSecureControlMessage(payload)) {
             listeners.forEach { it.onMessage(payload.toString()) }
             return
@@ -617,6 +714,9 @@ object SignalASIMqttClient {
         json.optJSONObject("signal_bundle")?.let { bundle ->
             val ready = SignalASICrypto.processPcBundleForDesktop(desktopId, bundle, expected, replaceExisting = true)
             if (ready) {
+                synchronized(pairingClaimLock) {
+                    if (pendingPairingClaim?.desktopId == desktopId) pendingPairingClaim = null
+                }
                 SignalASILinkProtocol.markPaired(context, desktopId)
                 setSecureReady(true)
             }
@@ -632,6 +732,7 @@ object SignalASIMqttClient {
                 Log.w(TAG, "Pairing revoked by desktop connector")
                 val desktopId = json.optString("desktop_id")
                 if (desktopId.isNotBlank()) {
+                    AgentDesktopRemoteNativeTools.removeDesktop(context, desktopId)
                     AppStore.deleteDesktopConnector(context, desktopId, deleteMessages = false)
                     SignalASICrypto.clearDesktopTrust(context, desktopId)
                     SignalASILinkProtocol.removeServer(context, desktopId)

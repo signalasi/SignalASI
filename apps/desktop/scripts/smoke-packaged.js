@@ -10,11 +10,13 @@ const exe = path.join(packageDir, "SignalASI Desktop.exe");
 const resources = path.join(packageDir, "resources");
 const bundledPython = path.join(resources, "python", "venv", "Scripts", "python.exe");
 const backendMain = path.join(resources, "signalasi-link", "backend", "main.py");
+const packagedBackendInstanceLock = path.join(resources, "signalasi-link", "backend", "backend_instance_lock.py");
 const packagedTaskWorkspace = path.join(resources, "signalasi-link", "backend", "task_workspace.py");
 const packagedResponsePolicy = path.join(resources, "signalasi-link", "backend", "response_policy.py");
 const packagedBackendDir = path.dirname(backendMain);
 const packagedCustomAgent = path.join(packagedBackendDir, "custom_agent_stdio.py");
 const packagedDesktopAgentAdapters = path.join(packagedBackendDir, "desktop_agent_adapters.py");
+const packagedDesktopNativeTools = path.join(packagedBackendDir, "desktop_native_tools.py");
 const packagedMcpWrapper = path.join(packagedBackendDir, "mcp_agent_wrapper.py");
 const packagedPhoneToolBroker = path.join(packagedBackendDir, "phone_tool_broker.py");
 const packagedRichOutput = path.join(packagedBackendDir, "rich_output.py");
@@ -49,8 +51,11 @@ async function fetchOk(url) {
   return response.text();
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url);
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, {
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    ...options
+  });
   if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`);
   return response.json();
 }
@@ -129,10 +134,12 @@ async function main() {
   console.log("[packaged-smoke] checking portable package layout");
   assertExists(exe, "SignalASI Desktop exe");
   assertExists(backendMain, "Packaged backend");
+  assertExists(packagedBackendInstanceLock, "Packaged backend instance lock");
   assertExists(packagedTaskWorkspace, "Packaged task workspace module");
   assertExists(packagedResponsePolicy, "Packaged response policy module");
   assertExists(packagedCustomAgent, "Packaged Custom Agent wrapper");
   assertExists(packagedDesktopAgentAdapters, "Packaged Desktop Agent adapters");
+  assertExists(packagedDesktopNativeTools, "Packaged Desktop native tools");
   assertExists(packagedMcpWrapper, "Packaged MCP wrapper");
   assertExists(packagedPhoneToolBroker, "Packaged phone tool broker");
   assertExists(packagedRichOutput, "Packaged rich output module");
@@ -144,7 +151,7 @@ async function main() {
   console.log("[packaged-smoke] checking bundled Python dependencies");
   const pythonCheck = spawn(
     bundledPython,
-    ["-c", "import cryptography, fastapi, multipart, uvicorn, paho.mqtt.client, sqlalchemy, pydantic, websockets, qrcode, desktop_agent_adapters, mqtt_bridge, phone_tool_broker, rich_output; print('ok')"],
+    ["-c", "import cryptography, fastapi, multipart, uvicorn, paho.mqtt.client, sqlalchemy, pydantic, websockets, qrcode, backend_instance_lock, desktop_agent_adapters, desktop_native_tools, mqtt_bridge, phone_tool_broker, rich_output; print('ok')"],
     { cwd: packagedBackendDir, windowsHide: true }
   );
   await new Promise((resolve, reject) => {
@@ -188,6 +195,24 @@ async function main() {
           if (!agent.detail_code || !agent.detail_params || !agent.setup_code || !agent.setup_params || !agent.pairing_code || !agent.pairing_params) {
             throw new Error(`Packaged backend missing structured agent diagnostics: ${JSON.stringify(agent)}`);
           }
+        }
+        const nativeManifest = await fetchJson(`http://127.0.0.1:${tempPort}/api/desktop-tools`);
+        const nativeIds = new Set((nativeManifest.tools || []).map((item) => item.id));
+        if (!nativeIds.has("signalasi.desktop.windows.system.status") || !nativeIds.has("signalasi.desktop.office.document.convert")) {
+          throw new Error("Packaged Desktop native tool manifest is incomplete");
+        }
+        const nativeStatus = await fetchJson(`http://127.0.0.1:${tempPort}/api/desktop-tools/invoke`, {
+          method: "POST",
+          body: JSON.stringify({
+            tool_id: "signalasi.desktop.windows.system.status",
+            invocation_id: "packaged-native-status",
+            task_id: "packaged-smoke-task",
+            conversation_id: "packaged-smoke-conversation",
+            arguments: {}
+          })
+        });
+        if (nativeStatus.status !== "succeeded" || nativeStatus.verification?.status !== "passed") {
+          throw new Error(`Packaged Desktop native status failed: ${JSON.stringify(nativeStatus)}`);
         }
         backendOk = true;
         break;

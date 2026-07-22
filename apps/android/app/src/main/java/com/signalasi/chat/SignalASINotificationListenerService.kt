@@ -4,22 +4,32 @@ import android.app.Notification
 import android.app.RemoteInput
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import android.util.Log
 import java.util.Locale
 
 class SignalASINotificationListenerService : NotificationListenerService() {
+    private val reconnectHandler = Handler(Looper.getMainLooper())
+    private val retryActiveNotificationSync = Runnable {
+        if (activeService === this) refreshActiveNotifications(scheduleRetry = false)
+    }
+
     override fun onCreate() {
         super.onCreate()
         activeService = this
     }
 
     override fun onListenerConnected() {
-        connected = true
-        updateActiveNotifications(activeNotifications?.toList().orEmpty())
+        super.onListenerConnected()
+        activeService = this
+        refreshActiveNotifications(scheduleRetry = true)
     }
 
     override fun onListenerDisconnected() {
+        reconnectHandler.removeCallbacks(retryActiveNotificationSync)
         connected = false
         synchronized(lock) {
             latestItems = emptyList()
@@ -28,6 +38,7 @@ class SignalASINotificationListenerService : NotificationListenerService() {
     }
 
     override fun onDestroy() {
+        reconnectHandler.removeCallbacks(retryActiveNotificationSync)
         if (activeService === this) activeService = null
         connected = false
         synchronized(lock) {
@@ -39,6 +50,7 @@ class SignalASINotificationListenerService : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         sbn ?: return
+        connected = true
         val item = notificationItem(sbn)
         synchronized(lock) {
             val next = listOf(item)
@@ -58,10 +70,27 @@ class SignalASINotificationListenerService : NotificationListenerService() {
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
         sbn ?: return
+        connected = true
         synchronized(lock) {
             latestItems = latestItems.filterNot { it.key == sbn.key }
             latestNotifications = latestNotifications.filterKeys { it != sbn.key }
         }
+    }
+
+    private fun refreshActiveNotifications(scheduleRetry: Boolean) {
+        val snapshot = try {
+            activeNotifications?.toList().orEmpty()
+        } catch (error: Exception) {
+            connected = false
+            Log.w(TAG, "Notification listener snapshot is not ready", error)
+            if (scheduleRetry && activeService === this) {
+                reconnectHandler.removeCallbacks(retryActiveNotificationSync)
+                reconnectHandler.postDelayed(retryActiveNotificationSync, ACTIVE_SYNC_RETRY_MILLIS)
+            }
+            return
+        }
+        connected = true
+        updateActiveNotifications(snapshot)
     }
 
     private fun updateActiveNotifications(items: List<StatusBarNotification>) {
@@ -172,8 +201,10 @@ class SignalASINotificationListenerService : NotificationListenerService() {
         }
 
     companion object {
+        private const val TAG = "SignalASINotification"
         private const val MAX_ITEMS = 12
         private const val MAX_REPLY_CHARACTERS = 2_000
+        private const val ACTIVE_SYNC_RETRY_MILLIS = 500L
         private val lock = Any()
 
         @Volatile

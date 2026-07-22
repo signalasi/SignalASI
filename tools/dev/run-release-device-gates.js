@@ -18,8 +18,12 @@ const gates = [
   "smoke:android:agent-replies",
   "smoke:android:voice-reply",
   "smoke:android:voice-settings",
+  "smoke:android:control-center-deep",
   "smoke:android:backup",
-  "smoke:android:reset"
+  "smoke:android:reset",
+  "test:android:agent-lifecycle-ui",
+  "test:android:cross-resource",
+  "test:android:team-paired-process-death"
 ];
 
 function runGate(scriptName) {
@@ -51,9 +55,19 @@ if (process.argv.includes("--list")) {
   process.exit(0);
 }
 
+const fromArgument = process.argv.find((argument) => argument.startsWith("--from="));
+const fromGate = fromArgument?.slice("--from=".length).trim();
+const fromIndex = fromGate ? gates.indexOf(fromGate) : 0;
+if (fromGate && fromIndex < 0) {
+  console.error(`[release-device] Unknown --from gate: ${fromGate}`);
+  process.exit(2);
+}
+const selectedGates = gates.slice(fromIndex);
+
 console.log("[release-device] Running Android device release gates sequentially.");
-console.log("[release-device] A connected unlocked phone or emulator with adb access is required.");
-for (const gate of gates) {
+console.log("[release-device] A connected unlocked phone, installed debug and test APKs, and a healthy Desktop backend on 127.0.0.1:8765 are required.");
+if (fromGate) console.log(`[release-device] Resuming from npm run ${fromGate}.`);
+for (const gate of selectedGates) {
   runGate(gate);
 }
 console.log("\n[release-device] Android device release gates passed.");

@@ -28,6 +28,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         private const val GLOBAL_AGENT_NOTIFICATION_ID = 1004
         private const val GLOBAL_AGENT_INTERVAL_SECONDS = 45L
         private const val GLOBAL_AGENT_FOREGROUND_DELAY_MILLIS = 60_000L
+        private const val RUNTIME_AUTOSTART_DELAY_MILLIS = 5_000L
         const val ACTION_REFRESH_LANGUAGE = "com.signalasi.chat.action.REFRESH_NOTIFICATION_LANGUAGE"
         const val ACTION_PROCESS_GLOBAL_AGENT = "com.signalasi.chat.action.PROCESS_GLOBAL_AGENT"
     }
@@ -53,6 +54,12 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         SignalASIMqttClient.connect(this)
         registerNetworkRecoveryCallback()
         thread(name = "signalasi-runtime-service-autostart") {
+            try {
+                Thread.sleep(RUNTIME_AUTOSTART_DELAY_MILLIS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return@thread
+            }
             runCatching { AgentEmbeddedRuntimeBootstrap.ensureInstalled(this@MessageService) }
             runCatching { AgentOnDeviceRuntimeLifecycle.ensureRunning(this@MessageService) }
         }
@@ -131,7 +138,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
                     globalAgentExecutor.execute(::processGlobalAgentEvents)
                     return
                 }
-                AgentConnectorResponseBus.publish(this, response)
+                if (AgentConnectorResponseBus.publish(this, response)) return
             }
         }
         val stored = ChatHistoryStore.appendIncoming(this, payload) ?: return
@@ -467,10 +474,7 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
             intent?.getStringExtra("signalasi_debug_service_payload")?.trim().orEmpty()
         }
         if (payload.isBlank()) return
-        ChatHistoryStore.appendIncoming(this, payload)?.let {
-            showIncomingNotification(it)
-            ChatHistoryStore.markNotified(this, it.contactId, it.messageId)
-        }
+        onMessage(payload)
     }
 
 }

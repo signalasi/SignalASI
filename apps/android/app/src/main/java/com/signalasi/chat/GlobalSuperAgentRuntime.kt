@@ -1388,7 +1388,7 @@ class GlobalAgentRepository(context: Context) {
                 .ifEmpty { setOf(json.optString("source_event_id")) },
             sourceConversationId = json.optString("source_conversation_id"),
             target = enumValue(json.optString("target"), GlobalProactiveTarget.CURRENT_CONVERSATION),
-            title = json.optString("title"),
+            title = GlobalAgentText.productTitle(json.optString("title")),
             content = json.optString("content"),
             topic = json.optString("topic"),
             urgent = json.optBoolean("urgent"),
@@ -1610,7 +1610,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     private val proactiveDiscoveryCoordinator by lazy { GlobalProactiveDiscoveryCoordinator(appContext) }
     private val realtimeContext by lazy { GlobalRealtimeContextProvider(appContext) }
     private val modelCallBudget by lazy { GlobalModelCallBudgetStore(appContext) }
-    private val agentTeamController by lazy { AgentProductionTeamController(appContext) }
+    private val agentTeamController = AgentProductionTeamController(appContext)
 
     init {
         val settings = repository.settings()
@@ -2638,7 +2638,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         val primary = messages.lastOrNull(GlobalProactiveMessage::urgent) ?: messages.last()
         if (messages.size == 1) {
             return GlobalAgentNotificationCandidate(
-                title = primary.title.ifBlank { "SignalASI" },
+                title = GlobalAgentText.productTitle(primary.title).ifBlank { "SignalASI" },
                 content = primary.content.take(240),
                 conversationId = primary.deliveredConversationId,
                 messageIds = setOf(primary.id)
@@ -2646,9 +2646,9 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         }
         val chinese = messages.any { GlobalAgentText.containsCjk(it.content) }
         val title = if (chinese) {
-            "Signal \u6709 ${messages.size} \u6761\u65b0\u53d1\u73b0"
+            "SignalASI \u6709 ${messages.size} \u6761\u65b0\u53d1\u73b0"
         } else {
-            "Signal has ${messages.size} new insights"
+            "SignalASI has ${messages.size} new insights"
         }
         val content = messages.asReversed()
             .distinctBy { GlobalAgentText.normalize(it.topic) }
@@ -2865,7 +2865,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         nowMillis: Long
     ): List<GlobalProactiveMessage> {
         val chinese = messages.any { GlobalAgentText.containsCjk(it.content) }
-        val title = if (chinese) "Signal \u6458\u8981" else "Signal digest"
+        val title = if (chinese) "SignalASI \u6458\u8981" else "SignalASI digest"
         val topicKey = GlobalProactiveConversationRouter.topicKey("global-digest")
         val target = transcriptStore.agentConversationForTopic(title, globalTopicKey = topicKey)
             ?: if (settings.autoCreateConversationsEnabled) {
@@ -2917,7 +2917,7 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     }
 
     private fun proactiveTranscriptText(message: GlobalProactiveMessage): String = buildString {
-        message.title.trim().takeIf(String::isNotBlank)?.let {
+        GlobalAgentText.productTitle(message.title).takeIf(String::isNotBlank)?.let {
             append(it)
             append("\n\n")
         }
@@ -2987,6 +2987,9 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     ): AgentTeamExecutionHandle = agentTeamController.start(definition, request)
 
     fun agentTeamSnapshots(): List<AgentTeamExecutionSnapshot> = agentTeamController.snapshots()
+
+    fun agentTeamSnapshot(supervisorRunId: String): AgentTeamExecutionSnapshot? =
+        agentTeamController.snapshot(supervisorRunId)
 
     fun agentTeamProgress(
         supervisorRunId: String,
@@ -3495,7 +3498,7 @@ object GlobalConversationEventBus {
         val intent = Intent(context.applicationContext, MessageService::class.java)
             .setAction(MessageService.ACTION_PROCESS_GLOBAL_AGENT)
         val started = runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !AppForegroundTracker.isForeground()) {
                 context.applicationContext.startForegroundService(intent)
             } else {
                 context.applicationContext.startService(intent)

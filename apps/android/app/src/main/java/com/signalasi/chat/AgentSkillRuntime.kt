@@ -213,6 +213,7 @@ interface AgentSkillStore {
         list().firstOrNull { it.id == id && it.version == version }
 
     fun upsert(installation: AgentSkillInstallation)
+    fun replaceAll(installations: List<AgentSkillInstallation>)
     fun delete(id: String, version: String): Boolean
     fun clear()
 }
@@ -229,6 +230,11 @@ class InMemoryAgentSkillStore(
     override fun upsert(installation: AgentSkillInstallation) {
         val current = list().filterNot { it.id == installation.id && it.version == installation.version }
         document = AgentSkillStoreCodec.encode(current + installation)
+    }
+
+    @Synchronized
+    override fun replaceAll(installations: List<AgentSkillInstallation>) {
+        document = AgentSkillStoreCodec.encode(installations)
     }
 
     @Synchronized
@@ -264,6 +270,11 @@ class EncryptedAgentSkillStore(
     override fun upsert(installation: AgentSkillInstallation) {
         val current = list().filterNot { it.id == installation.id && it.version == installation.version }
         preferences.writeString(KEY_SKILLS, AgentSkillStoreCodec.encode(current + installation))
+    }
+
+    @Synchronized
+    override fun replaceAll(installations: List<AgentSkillInstallation>) {
+        preferences.writeString(KEY_SKILLS, AgentSkillStoreCodec.encode(installations))
     }
 
     @Synchronized
@@ -324,6 +335,39 @@ class AgentSkillRuntime(
         }
         val now = now()
         return AgentSkillInstallation(manifest, enabled, now, now).also(store::upsert)
+    }
+
+    @Synchronized
+    fun installAvailable(
+        manifests: Iterable<AgentSkillManifest>,
+        enabled: Boolean = true
+    ): List<AgentSkillInstallation> {
+        val current = store.list().toMutableList()
+        val byCoordinate = current.associateByTo(mutableMapOf()) { it.id to it.version }
+        val accepted = mutableListOf<AgentSkillInstallation>()
+        var changed = false
+
+        manifests.forEach { manifest ->
+            if (!validate(manifest).isValid) return@forEach
+            val coordinate = manifest.id to manifest.version
+            val existing = byCoordinate[coordinate]
+            if (existing != null) {
+                if (AgentSkillManifestCodec.encode(existing.manifest) == AgentSkillManifestCodec.encode(manifest)) {
+                    accepted += existing
+                }
+                return@forEach
+            }
+            if (current.size >= AgentSkillLimits.MAX_INSTALLED_SKILLS) return@forEach
+            val installedAt = now()
+            val installation = AgentSkillInstallation(manifest, enabled, installedAt, installedAt)
+            current += installation
+            byCoordinate[coordinate] = installation
+            accepted += installation
+            changed = true
+        }
+
+        if (changed) store.replaceAll(current)
+        return accepted
     }
 
     fun install(rawManifest: String, enabled: Boolean = true): AgentSkillInstallation {

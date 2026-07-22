@@ -102,7 +102,8 @@ class AgentPhoneCapabilityCatalogTest {
             AgentPhoneCapabilityId.BATTERY,
             AgentPhoneCapabilityId.NETWORK,
             AgentPhoneCapabilityId.INSTALLED_APPS,
-            AgentPhoneCapabilityId.MEDIA_PLAYBACK
+            AgentPhoneCapabilityId.MEDIA_PLAYBACK,
+            AgentPhoneCapabilityId.MEDIA_TRANSCODE
         )
 
         assertEquals(expected, AgentPhoneCapabilityNativeCoverage.toolIdsByCapability.keys)
@@ -118,5 +119,9 @@ class AgentPhoneCapabilityCatalogTest {
         assertEquals(AgentPhoneCapabilityAvailability.LIMITED, AgentPhoneCapabilityCatalog.find(AgentPhoneCapabilityId.SENSORS).availability)
         assertEquals(AgentPhoneCapabilityAvailability.LIMITED, AgentPhoneCapabilityCatalog.find(AgentPhoneCapabilityId.BLUETOOTH).availability)
         assertEquals(AgentPhoneCapabilityAvailability.LIMITED, AgentPhoneCapabilityCatalog.find(AgentPhoneCapabilityId.NFC).availability)
+        assertEquals(
+            AgentPhoneCapabilityAvailability.NEEDS_CONFIGURATION,
+            AgentPhoneCapabilityCatalog.find(AgentPhoneCapabilityId.MEDIA_TRANSCODE).availability
+        )
     }
 }

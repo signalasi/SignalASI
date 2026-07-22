@@ -779,10 +779,37 @@ object AgentSkillCommandParser {
 const val AGENT_ORCHESTRATION_TOOL_ID = "signalasi.agent.orchestrate"
 
 object AgentBuiltInSkills {
-    fun installAvailable(runtime: AgentSkillRuntime): List<AgentSkillInstallation> = manifests()
-        .mapNotNull { manifest ->
-            if (!runtime.validate(manifest).isValid) null else runCatching { runtime.install(manifest) }.getOrNull()
+    private const val BOOTSTRAP_PREFERENCES = "signalasi_builtin_skill_bootstrap"
+    private const val KEY_CATALOG_REVISION = "catalog_revision"
+
+    fun installAvailable(runtime: AgentSkillRuntime): List<AgentSkillInstallation> =
+        runtime.installAvailable(manifests())
+
+    @Synchronized
+    fun synchronizeIfNeeded(context: Context, runtime: AgentSkillRuntime): Boolean {
+        val catalog = manifests()
+        val revision = catalogRevision(catalog)
+        val preferences = context.applicationContext
+            .getSharedPreferences(BOOTSTRAP_PREFERENCES, Context.MODE_PRIVATE)
+        if (preferences.getString(KEY_CATALOG_REVISION, "") == revision) return false
+
+        val available = runtime.installAvailable(catalog)
+        if (available.size == catalog.size) {
+            check(preferences.edit().putString(KEY_CATALOG_REVISION, revision).commit()) {
+                "Built-in Skill bootstrap state could not be saved"
+            }
         }
+        return true
+    }
+
+    private fun catalogRevision(catalog: List<AgentSkillManifest>): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        catalog.forEach { manifest ->
+            digest.update(AgentSkillManifestCodec.encode(manifest).toByteArray(Charsets.UTF_8))
+            digest.update(byteArrayOf(0))
+        }
+        return digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
 
     fun manifests(): List<AgentSkillManifest> = listOf(
         statusSkill(

@@ -228,6 +228,7 @@ private object AgentModelPlanningPrompt {
         if (settings.multiAgentCoordination) {
             append("You may create a directed task graph using ref and depends_on. Dependencies must refer only to earlier refs. ")
             append("CALL_CONNECTOR may use_outputs_from dependencies to pass their confirmed outputs to another Agent. ")
+            append("When using multiple Agent connectors, use distinct Agent IDs and create exactly one final CALL_CONNECTOR node that depends on every specialist branch and produces the user-facing synthesis. ")
             append("Keep graph depth at most ").append(settings.maxAgentHops.coerceIn(1, 8)).append(".\n")
         } else {
             append("Do not use depends_on or use_outputs_from.\n")

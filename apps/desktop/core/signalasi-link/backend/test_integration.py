@@ -1,158 +1,140 @@
-"""SignalASI Integration Test — imports, API health, DB, agent gateway."""
-import sys, os, json, time, threading, traceback
+"""Isolated integration contracts for the packaged SignalASI backend."""
+from __future__ import annotations
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import textwrap
+import unittest
 
-PASS = 0
-FAIL = 0
 
-def ok(msg):
-    global PASS
-    PASS += 1
-    print(f"  PASS  {msg}")
+BACKEND_DIR = Path(__file__).resolve().parent
 
-def fail(msg, err=None):
-    global FAIL
-    FAIL += 1
-    print(f"  FAIL  {msg}")
-    if err:
-        print(f"        {err}")
-        traceback.print_exc()
 
-def section(title):
-    print(f"\n{'='*60}")
-    print(f"  {title}")
-    print(f"{'='*60}")
+class BackendIntegrationContractTest(unittest.TestCase):
+    def run_isolated(self, source: str) -> None:
+        with tempfile.TemporaryDirectory(prefix="signalasi-backend-test-") as temporary:
+            state_dir = Path(temporary)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "SIGNALASI_STATE_DIR": str(state_dir),
+                    "SIGNALASI_DATA_DIR": str(state_dir / "pairing"),
+                    "SIGNALASI_DATABASE_PATH": str(state_dir / "signalasi.db"),
+                    "SIGNALASI_CONFIG_PATH": str(state_dir / "signalasi_agents.json"),
+                }
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", textwrap.dedent(source)],
+                cwd=BACKEND_DIR,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(
+                0,
+                result.returncode,
+                msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+            )
 
-# ── 1. Module imports ──
-section("Module imports")
-modules = [
-    "models", "agent_config", "api_response", "agent_gateway",
-    "mqtt_bridge", "signalasi_client", "signalasi_notify",
-    "pairing_state", "push_auth", "websocket", "file_server",
-    "custom_agent_stdio", "stt_bridge", "main",
-]
-for m in modules:
-    try:
-        __import__(m)
-        ok(f"import {m}")
-    except Exception as e:
-        fail(f"import {m}", e)
+    def test_packaged_runtime_modules_import(self) -> None:
+        self.run_isolated(
+            """
+            modules = (
+                "models", "agent_config", "api_response", "agent_gateway",
+                "mqtt_bridge", "signalasi_client", "signalasi_notify",
+                "pairing_state", "push_auth", "file_server",
+                "custom_agent_stdio", "stt_bridge", "main",
+            )
+            for module in modules:
+                __import__(module)
+            """
+        )
 
-# ── 2. Database init ──
-section("Database")
-try:
-    from models import init_db, get_session, Contact, Message, ContactType, MessageType, SenderType
-    init_db()
-    db = get_session()
-    # verify tables exist
-    tables = db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-    table_names = {r[0] for r in tables}
-    for t in ["contacts", "messages"]:
-        if t in table_names:
-            ok(f"table '{t}' exists")
-        else:
-            fail(f"table '{t}' missing")
-    db.close()
-except Exception as e:
-    fail("database init", e)
+    def test_database_schema_initializes_in_isolated_state(self) -> None:
+        self.run_isolated(
+            """
+            from sqlalchemy import inspect
+            from models import engine, init_db
 
-# ── 3. API response helpers ──
-section("API response helpers")
-try:
-    from api_response import api_error, api_success
-    err = api_error("test_code", "test detail")
-    assert "error" in err, "api_error missing 'error' key"
-    assert err["error"]["code"] == "test_code"
-    ok("api_error format")
-except Exception as e:
-    fail("api_error", e)
+            init_db()
+            tables = set(inspect(engine).get_table_names())
+            assert {"contacts", "messages"}.issubset(tables), tables
+            """
+        )
 
-# ── 4. Agent config load/save ──
-section("Agent config")
-try:
-    from agent_config import load_config, save_config
-    cfg = load_config()
-    assert isinstance(cfg, dict), "load_config should return dict"
-    ok("load_config")
-    from agent_gateway import list_agents, connector_diagnostics
-    agents = list_agents()
-    assert isinstance(agents, list), "list_agents should return list"
-    ok("list_agents")
-    diag = connector_diagnostics()
-    assert isinstance(diag, dict), "connector_diagnostics should return dict"
-    ok("connector_diagnostics")
-except Exception as e:
-    fail("agent config/gateway", e)
+    def test_stable_api_response_contract(self) -> None:
+        self.run_isolated(
+            """
+            from api_response import api_error, api_ok
 
-# ── 5. HTTP API health check (start server) ──
-section("HTTP API (live server)")
-try:
-    import uvicorn, httpx
-except ImportError:
-    try:
-        os.system(f"{sys.executable} -m pip install httpx -q")
-        import httpx
-    except:
-        httpx = None
+            success = api_ok("ready", params={"agent": "codex"})
+            assert success == {"ok": True, "code": "ready", "params": {"agent": "codex"}}
+            failure = api_error("content_required")
+            assert failure["ok"] is False
+            assert failure["code"] == "content_required"
+            assert failure["error"] == "content is required."
+            """
+        )
 
-if httpx:
-    from main import app
-    import uvicorn
-    port = 19876
-    server_thread = threading.Thread(
-        target=uvicorn.run,
-        args=(app,),
-        kwargs={"host": "127.0.0.1", "port": port, "log_level": "error"},
-        daemon=True,
-    )
-    server_thread.start()
-    time.sleep(2)
+    def test_agent_registry_and_diagnostics_load_in_isolation(self) -> None:
+        self.run_isolated(
+            """
+            from agent_config import load_config
+            from agent_gateway import connector_diagnostics, list_agents
 
-    try:
-        r = httpx.get(f"http://127.0.0.1:{port}/api/agents/diagnostics", timeout=5)
-        if r.status_code == 200:
-            ok("GET /api/agents/diagnostics")
-        else:
-            fail(f"GET /api/agents/diagnostics ({r.status_code})")
-    except Exception as e:
-        fail("GET /api/agents/diagnostics", e)
+            assert isinstance(load_config(), dict)
+            assert isinstance(list_agents(), list)
+            assert isinstance(connector_diagnostics(), dict)
+            """
+        )
 
-    try:
-        r = httpx.get(f"http://127.0.0.1:{port}/api/agents", timeout=5)
-        if r.status_code == 200:
-            ok("GET /api/agents")
-        else:
-            fail(f"GET /api/agents ({r.status_code})")
-    except Exception as e:
-        fail("GET /api/agents", e)
+    def test_fastapi_surface_contains_current_contract_routes(self) -> None:
+        self.run_isolated(
+            """
+            from main import app
 
-    try:
-        r = httpx.get(f"http://127.0.0.1:{port}/api/contacts", timeout=5)
-        if r.status_code == 200:
-            ok("GET /api/contacts")
-        else:
-            fail(f"GET /api/contacts ({r.status_code})")
-    except Exception as e:
-        fail("GET /api/contacts", e)
-else:
-    print("  SKIP  HTTP tests (httpx not available)")
+            routes = {route.path for route in app.routes}
+            required = {
+                "/health",
+                "/api/contacts",
+                "/api/agents",
+                "/api/agents/diagnostics",
+                "/api/pairing/status",
+                "/api/desktop-tools",
+                "/api/agent-adapters",
+                "/signalasi/verify",
+                "/ws/{contact_id}",
+            }
+            assert required.issubset(routes), required - routes
+            """
+        )
 
-# ── 6. Pairing state ──
-section("Pairing state")
-try:
-    from pairing_state import pairing_status, new_pairing_token, clear_pairing_state
-    s = pairing_status()
-    assert "paired" in s, "pairing_status missing 'paired'"
-    token = new_pairing_token()
-    assert isinstance(token, str) and len(token) > 8
-    ok("pairing_state lifecycle")
-except Exception as e:
-    fail("pairing_state", e)
+    def test_pairing_state_isolated_lifecycle(self) -> None:
+        self.run_isolated(
+            """
+            from pairing_state import (
+                clear_pairing_state,
+                new_pairing_token,
+                pairing_status,
+                validate_pairing_token,
+            )
 
-# ── Summary ──
-print(f"\n{'='*60}")
-print(f"  RESULTS: {PASS} passed, {FAIL} failed")
-print(f"{'='*60}")
-sys.exit(0 if FAIL == 0 else 1)
+            clear_pairing_state()
+            assert pairing_status()["paired"] is False
+            token = new_pairing_token()
+            assert isinstance(token, str) and len(token) > 8
+            status = pairing_status()
+            assert status["token"]["active"] is True
+            assert status["token"]["active_count"] == 1
+            assert validate_pairing_token(token) is True
+            """
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

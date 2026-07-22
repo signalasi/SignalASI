@@ -104,6 +104,7 @@ const backendTaskManager = fs.readFileSync(path.join(backendDir, "agent_task_man
 const backendAgentConfig = fs.readFileSync(path.join(backendDir, "agent_config.py"), "utf8");
 const backendCustomAgent = fs.readFileSync(path.join(backendDir, "custom_agent_stdio.py"), "utf8");
 const backendDesktopFileTools = fs.readFileSync(path.join(backendDir, "desktop_file_tools.py"), "utf8");
+const backendDesktopNativeTools = fs.readFileSync(path.join(backendDir, "desktop_native_tools.py"), "utf8");
 const backendMcpWrapper = fs.readFileSync(path.join(backendDir, "mcp_agent_wrapper.py"), "utf8");
 const backendTaskWorkspace = fs.readFileSync(path.join(backendDir, "task_workspace.py"), "utf8");
 const backendPushAuth = fs.readFileSync(path.join(backendDir, "push_auth.py"), "utf8");
@@ -249,7 +250,7 @@ for (const requiredBackendCode of [
 if (!packager.includes("\"api_response.py\"")) {
   throw new Error("Packaged Desktop backend must include api_response.py");
 }
-for (const requiredFile of ["link_protocol.py", "link_delivery.py", "task_workspace.py", "desktop_file_tools.py"]) {
+for (const requiredFile of ["link_protocol.py", "link_delivery.py", "task_workspace.py", "desktop_file_tools.py", "desktop_native_tools.py"]) {
   if (!packager.includes(`"${requiredFile}"`)) {
     throw new Error(`Packaged Desktop backend must include ${requiredFile}`);
   }
@@ -261,6 +262,31 @@ if (!backendMqtt.includes("warm_codex_app_server") || !backendMqtt.includes("_tr
 
 if (!backendDesktopFileTools.includes("try_execute_explicit_file_task") || !backendDesktopFileTools.includes("Excel.Application")) {
   throw new Error("Desktop explicit file conversion tool is incomplete");
+}
+
+for (const contract of [
+  "signalasi.desktop-native-tools/1.0",
+  "signalasi.desktop.windows.system.status",
+  "signalasi.desktop.workspace.file.write.text",
+  "signalasi.desktop.terminal.run",
+  "signalasi.desktop.office.document.convert",
+  "canonical_input_sha256",
+  "idempotency_key_required"
+]) {
+  if (!backendDesktopNativeTools.includes(contract)) {
+    throw new Error(`Desktop native tool contract missing: ${contract}`);
+  }
+}
+
+for (const routeContract of [
+  "desktop_tool_call_request",
+  "desktop_tool_call_result",
+  "DESKTOP_TOOL_REQUEST_SLOTS",
+  "scoped_workspace_id"
+]) {
+  if (!backendMqtt.includes(routeContract)) {
+    throw new Error(`Encrypted Desktop tool routing missing: ${routeContract}`);
+  }
 }
 
 if (!backendMain.includes("custom_agent: dict[str, str]") || !backendAgentConfig.includes("def custom_agent_config") || !backendAgentConfig.includes("def custom_agent_configs")) {

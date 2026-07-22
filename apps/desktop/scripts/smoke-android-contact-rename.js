@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { createAdb } = require("./android-adb");
+const { establishFreshSecurePairing } = require("./android-live-pairing");
 
 const root = path.resolve(__dirname, "..");
 const workspaceRoot = path.resolve(root, "..");
@@ -9,7 +10,6 @@ const apkPath = path.join(androidDir, "app", "build", "outputs", "apk", "debug",
 const packageName = "com.signalasi.chat";
 const activityName = `${packageName}/.MainActivity`;
 const appStorePrefs = "shared_prefs/signalasi_app_store.xml";
-const oldAppStorePrefs = "shared_prefs/hermes_app_store.xml";
 const outDir = path.join(root, "ui-smoke");
 const storeDump = path.join(outDir, "android-contact-rename-app-store.xml");
 const detailDump = path.join(outDir, "android-contact-rename-detail.xml");
@@ -84,9 +84,20 @@ function startWithExtras(extras) {
 }
 
 function dumpWindowTo(fileName, remoteName) {
-  adb(["shell", "uiautomator", "dump", `/sdcard/${remoteName}`]);
-  adb(["pull", `/sdcard/${remoteName}`, fileName]);
-  return fs.readFileSync(fileName, "utf8");
+  const remotePath = `/sdcard/${remoteName}`;
+  let lastError;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      adb(["shell", "rm", "-f", remotePath]);
+      adb(["shell", "uiautomator", "dump", remotePath]);
+      adb(["pull", remotePath, fileName]);
+      return fs.readFileSync(fileName, "utf8");
+    } catch (error) {
+      lastError = error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+    }
+  }
+  throw lastError || new Error(`Unable to capture ${remoteName}`);
 }
 
 async function main() {
@@ -102,45 +113,48 @@ async function main() {
   adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"]);
   adb(["shell", "am", "force-stop", packageName]);
 
-  const originalAppStore = readAppFile(appStorePrefs);
-  const originalOldAppStore = readAppFile(oldAppStorePrefs);
+  let pairedAppStore = "";
 
   try {
-    log("resetting app store snapshot for isolated contact rename flow");
-    restoreAppFile(appStorePrefs, "");
-    restoreAppFile(oldAppStorePrefs, "");
-    adb(["shell", "am", "force-stop", packageName]);
-
-    log("seeding verified Desktop connector contacts");
-    startWithExtras([
-      ["--ez", "signalasi_debug_pairing", "true"],
-      ["--ez", "signalasi_debug_status", "true"]
-    ]);
-    await sleep(3500);
-
-    let store = readStore();
-    let contact = findCodexContact(store);
+    log("pairing with the live Desktop and waiting for its verified Codex contact");
+    await establishFreshSecurePairing({ adb, packageName, activityName, log });
+    let store = { xml: "", contacts: [] };
+    let contact;
+    const contactDeadline = Date.now() + 20_000;
+    while (Date.now() < contactDeadline) {
+      store = readStore();
+      contact = findCodexContact(store);
+      if (contact) break;
+      await sleep(500);
+    }
     if (!contact) {
       fs.writeFileSync(storeDump, store.xml || "");
-      fail(`Codex connector contact was not seeded. Store dump: ${storeDump}`);
+      fail(`Live Desktop did not publish a Codex connector contact. Store dump: ${storeDump}`);
     }
-    const contactId = contact.signalasi_id || contact.id;
-    if (!contactId) {
+    pairedAppStore = store.xml;
+    const resolvedContactId = contact.signalasi_id || contact.id;
+    if (!resolvedContactId) {
       fs.writeFileSync(storeDump, store.xml || "");
       fail(`Codex connector contact did not include an id. Store dump: ${storeDump}`);
     }
+    const originalIdentity = {
+      agentId: contact.agent_id,
+      desktopId: contact.desktop_id,
+      deliveryMode: contact.delivery_mode,
+      defaultDisplayName: contact.default_display_name
+    };
 
     log("renaming Codex contact and opening contact detail page");
     startWithExtras([
-      ["--es", "signalasi_debug_rename_contact", contactId],
+      ["--es", "signalasi_debug_rename_contact", resolvedContactId],
       ["--es", "signalasi_debug_rename_name_b64", renamedB64],
-      ["--es", "signalasi_debug_open_contact_detail", contactId]
+      ["--es", "signalasi_debug_open_contact_detail", resolvedContactId]
     ]);
     await sleep(2500);
 
     store = readStore();
     fs.writeFileSync(storeDump, store.xml || "");
-    contact = store.contacts.find((item) => item.id === contactId || item.signalasi_id === contactId);
+    contact = store.contacts.find((item) => item.id === resolvedContactId || item.signalasi_id === resolvedContactId);
     if (!contact) {
       fail(`Renamed contact disappeared. Store dump: ${storeDump}`);
     }
@@ -150,20 +164,29 @@ async function main() {
     if (contact.user_renamed !== true) {
       fail(`Renamed contact did not persist user_renamed evidence. Store dump: ${storeDump}`);
     }
+    if (contact.agent_id !== originalIdentity.agentId ||
+        contact.desktop_id !== originalIdentity.desktopId ||
+        contact.delivery_mode !== originalIdentity.deliveryMode) {
+      fail(`Rename changed immutable connector routing identity. Store dump: ${storeDump}`);
+    }
+    if (contact.default_display_name !== originalIdentity.defaultDisplayName) {
+      fail(`Rename overwrote the connector's default display name. Store dump: ${storeDump}`);
+    }
 
     const detailXml = dumpWindowTo(detailDump, "signalasi-contact-rename-detail.xml");
     if (!detailXml.includes(renamed)) {
       fail(`Contact detail did not show renamed display name. Dump saved at ${detailDump}`);
     }
-    if (!detailXml.includes("SignalASI ID") && !detailXml.includes(contactId.replace(/&/g, "&amp;"))) {
+    if (!detailXml.includes("SignalASI ID") && !detailXml.includes(resolvedContactId.replace(/&/g, "&amp;"))) {
       fail(`Contact detail did not show identity metadata. Dump saved at ${detailDump}`);
     }
     log("OK: contact display name rename persisted and rendered on device");
   } finally {
     adb(["shell", "am", "force-stop", packageName]);
-    log("restoring original app store");
-    restoreAppFile(appStorePrefs, originalAppStore);
-    restoreAppFile(oldAppStorePrefs, originalOldAppStore);
+    if (pairedAppStore) {
+      log("restoring the paired app store snapshot");
+      restoreAppFile(appStorePrefs, pairedAppStore);
+    }
     adb(["shell", "am", "force-stop", packageName]);
   }
 }

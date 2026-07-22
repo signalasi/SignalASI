@@ -25,6 +25,7 @@ from agent_gateway import (
 from agent_config import load_config, save_config
 from api_response import api_error
 from agent_task_manager import agent_task_manager
+from backend_instance_lock import BackendInstanceLock
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("signalasi")
@@ -85,8 +86,11 @@ def signalasi_pairing_payload(include_agents: bool = False) -> dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     file_server_process = None
-    init_db()
     external_services_enabled = os.environ.get("SIGNALASI_DISABLE_EXTERNAL_SERVICES") != "1"
+    instance_lock = BackendInstanceLock() if external_services_enabled else None
+    if instance_lock is not None:
+        instance_lock.acquire()
+    init_db()
     if external_services_enabled:
         # Start the local Signal Protocol sidecar.
         try:
@@ -146,6 +150,8 @@ async def lifespan(app: FastAPI):
                 stop_signal_sidecar()
             except Exception as exc:
                 log.warning("Signal sidecar shutdown failed: %s", exc)
+        if instance_lock is not None:
+            instance_lock.release()
 
 app = FastAPI(title="SignalASI Link", lifespan=lifespan)
 app.add_middleware(
@@ -300,6 +306,18 @@ class AgentDeliveryReq(BaseModel):
     required_features: list[str] = []
 
 
+class DesktopNativeToolInvokeReq(BaseModel):
+    tool_id: str
+    tool_version: str = "1.0.0"
+    arguments: dict = {}
+    invocation_id: str = ""
+    task_id: str = ""
+    conversation_id: str = ""
+    workspace_id: str = ""
+    idempotency_key: str = ""
+    confirmation: dict | None = None
+
+
 @app.get("/api/agent-adapters")
 def api_agent_adapters(request: Request):
     require_loopback(request)
@@ -308,6 +326,45 @@ def api_agent_adapters(request: Request):
         "agents": provider.enumerate(),
         "recoverable_runs": [item.public() for item in provider.recover()],
     }
+
+
+@app.get("/api/desktop-tools")
+def api_desktop_native_tools(request: Request):
+    require_loopback(request)
+    from desktop_native_tools import desktop_native_tool_registry
+
+    return desktop_native_tool_registry().manifest()
+
+
+@app.post("/api/desktop-tools/invoke")
+def api_invoke_desktop_native_tool(req: DesktopNativeToolInvokeReq, request: Request):
+    require_loopback(request)
+    from desktop_native_tools import desktop_native_tool_registry
+
+    arguments = dict(req.arguments)
+    if req.workspace_id and "workspace_id" not in arguments:
+        arguments["workspace_id"] = req.workspace_id
+    return desktop_native_tool_registry().invoke(
+        req.tool_id,
+        arguments,
+        {
+            "tool_version": req.tool_version,
+            "invocation_id": req.invocation_id,
+            "task_id": req.task_id,
+            "conversation_id": req.conversation_id,
+            "idempotency_key": req.idempotency_key,
+            "confirmation": req.confirmation,
+            "caller_id": "signalasi.desktop.loopback",
+        },
+    )
+
+
+@app.post("/api/desktop-tools/{invocation_id}/cancel")
+def api_cancel_desktop_native_tool(invocation_id: str, request: Request):
+    require_loopback(request)
+    from desktop_native_tools import desktop_native_tool_registry
+
+    return {"cancelled": desktop_native_tool_registry().cancel(invocation_id)}
 
 
 @app.post("/api/agent-adapters/{agent_id}/deliver")

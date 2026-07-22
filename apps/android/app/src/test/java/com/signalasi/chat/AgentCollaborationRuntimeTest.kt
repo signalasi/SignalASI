@@ -88,6 +88,42 @@ class AgentCollaborationRuntimeTest {
     }
 
     @Test
+    fun memberScopedKnowledgeOverridesTheSupervisorDefault() = runBlocking {
+        val runtime = AgentTeamExecutionRuntime(InMemoryAgentTeamExecutionStore())
+        val definition = AgentTeamDefinition(
+            teamId = "scoped-team",
+            primaryAgentId = "primary",
+            members = listOf(
+                AgentTeamMember(
+                    "primary",
+                    AgentDeliveryMode.RESPOND,
+                    context = mapOf("_signalasi_agent_knowledge_context" to "lead-only")
+                ),
+                AgentTeamMember(
+                    "researcher",
+                    AgentDeliveryMode.OBSERVE,
+                    context = mapOf("_signalasi_agent_knowledge_context" to "research-only")
+                )
+            )
+        )
+        val observed = linkedMapOf<String, String>()
+
+        runtime.start(
+            definition,
+            request().copy(context = mapOf("_signalasi_agent_knowledge_context" to "shared-default"))
+        ) { context ->
+            observed[context.member.agentId] = context.request.context[
+                "_signalasi_agent_knowledge_context"
+            ].toString()
+            AgentSubagentOutput(if (context.member.agentId == "primary") "final" else "evidence")
+        }.await()
+        runtime.close()
+
+        assertEquals("lead-only", observed["primary"])
+        assertEquals("research-only", observed["researcher"])
+    }
+
+    @Test
     fun teamRejectsMultipleRespondersAndUnknownDependencies() {
         val store = InMemoryAgentTeamExecutionStore()
         val runtime = AgentTeamExecutionRuntime(store)
@@ -149,6 +185,30 @@ class AgentCollaborationRuntimeTest {
         assertEquals(AgentTeamExecutionState.INTERRUPTED, interrupted.single().state)
         assertEquals(2, store.records().single().events.size)
         assertEquals(2_000L, store.snapshot(request.runId)?.interruptedAtMillis)
+    }
+
+    @Test
+    fun oneTeamCanBeMarkedInterruptedWithoutMutatingAnotherActiveTeam() = runBlocking {
+        val store = InMemoryAgentTeamExecutionStore()
+        val first = request().copy(runId = "first-run")
+        val second = request().copy(runId = "second-run")
+        store.create(teamDefinition(), first)
+        store.create(teamDefinition().copy(teamId = "second-team"), second)
+        listOf(first, second).forEach { request ->
+            store.append(AgentSubagentEvent(
+                sequence = 1L,
+                supervisorId = request.runId,
+                kind = AgentSubagentEventKinds.SUPERVISOR_STARTED,
+                timestampMillis = 1_000L
+            ))
+        }
+
+        val interrupted = store.markInterrupted(first.runId, 2_000L)
+
+        assertEquals(AgentTeamExecutionState.INTERRUPTED, interrupted?.state)
+        assertEquals(AgentTeamExecutionState.RUNNING, store.snapshot(second.runId)?.state)
+        assertEquals(0L, store.snapshot(second.runId)?.interruptedAtMillis)
+        assertNull(store.markInterrupted("missing-run", 2_000L))
     }
 
     @Test

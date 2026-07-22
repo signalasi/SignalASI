@@ -36,6 +36,7 @@ from link_delivery import (
 )
 from link_protocol import LinkTopics, PROTOCOL_NAME, PROTOCOL_VERSION, decrypt_pairing_claim, make_envelope, parse_topic, validate_envelope, valid_route_id
 from pairing_state import (
+    clients_for_identity,
     get_client,
     is_paired,
     list_clients,
@@ -94,6 +95,11 @@ TOOL_SESSION_START_TYPE = "tool_session_start"
 TOOL_CALL_REQUEST_TYPE = "tool_call_request"
 TOOL_CALL_RESULT_TYPE = "tool_call_result"
 TOOL_CALL_CANCEL_TYPE = "tool_call_cancel"
+DESKTOP_TOOL_CALL_REQUEST_TYPE = "desktop_tool_call_request"
+DESKTOP_TOOL_CALL_RESULT_TYPE = "desktop_tool_call_result"
+DESKTOP_TOOL_CALL_CANCEL_TYPE = "desktop_tool_call_cancel"
+DESKTOP_TOOL_CANCEL_ACK_TYPE = "desktop_tool_cancel_ack"
+DESKTOP_TOOL_REQUEST_SLOTS = threading.BoundedSemaphore(8)
 
 
 class PhoneToolSessionRoutingError(RuntimeError):
@@ -415,6 +421,213 @@ def _route_phone_tool_payload(
     return True
 
 
+def _desktop_tool_failure(
+    call_id: str,
+    invocation_id: str,
+    code: str,
+    message: str,
+    *,
+    retryable: bool = False,
+) -> dict:
+    now_ms = int(time.time() * 1000)
+    return {
+        "status": "failed",
+        "output": {},
+        "message": str(message or "Desktop tool request failed")[:2_000],
+        "metadata": {},
+        "error": {
+            "code": str(code or "desktop_tool_request_invalid"),
+            "message": str(message or "Desktop tool request failed")[:2_000],
+            "retryable": retryable,
+            "details": {},
+        },
+        "verification": None,
+        "receipt": {
+            "invocation_id": invocation_id or call_id,
+            "idempotency_key": None,
+            "started_at": now_ms,
+            "finished_at": now_ms,
+            "duration_ms": 0,
+            "status": "failed",
+            "input_sha256": "",
+            "output_sha256": "",
+            "replayed": False,
+            "original_invocation_id": None,
+        },
+        "provenance": {
+            "tool_id": "unknown",
+            "tool_version": "1.0.0",
+            "location": "desktop",
+            "executor_id": "signalasi.desktop_native",
+            "contract_version": "signalasi.desktop-native-tools/1.0",
+        },
+        "artifacts": [],
+    }
+
+
+def _execute_desktop_tool_request(
+    mqttc,
+    wire_payload: dict,
+    application_envelope: dict,
+    payload: dict,
+    paired_client: dict,
+) -> dict:
+    from desktop_native_tools import canonical_input_sha256, desktop_native_tool_registry
+
+    call_id = _phone_tool_identifier("call_id", payload.get("call_id"))
+    invocation_id = _phone_tool_identifier(
+        "invocation_id", payload.get("invocation_id") or call_id
+    )
+    task_id = _phone_tool_identifier("task_id", payload.get("task_id"))
+    conversation_id = _phone_tool_identifier(
+        "conversation_id",
+        payload.get("conversation_id") or application_envelope.get("conversation_id"),
+    )
+    if conversation_id != str(application_envelope.get("conversation_id") or ""):
+        raise PhoneToolSessionRoutingError("Desktop tool conversation does not match Link envelope")
+    arguments = payload.get("arguments")
+    if not isinstance(arguments, dict):
+        raise PhoneToolSessionRoutingError("Desktop tool arguments must be an object")
+    confirmation = payload.get("confirmation")
+    if isinstance(confirmation, dict):
+        received_digest = str(confirmation.get("arguments_sha256") or "")
+        if received_digest != canonical_input_sha256(arguments):
+            raise PhoneToolSessionRoutingError("Desktop tool confirmation does not match transmitted arguments")
+        confirmation = dict(confirmation)
+    payload_workspace_id = str(payload.get("workspace_id") or "").strip()
+    argument_workspace_id = str(arguments.get("workspace_id") or "").strip()
+    if payload_workspace_id and argument_workspace_id and payload_workspace_id != argument_workspace_id:
+        raise PhoneToolSessionRoutingError("Desktop tool workspace identities do not match")
+    requested_workspace_id = argument_workspace_id or payload_workspace_id
+    if requested_workspace_id:
+        caller_id = str(paired_client.get("signal_name") or "signalasi.phone")
+        scoped_workspace_id = "link-" + hashlib.sha256(
+            f"{caller_id}\0{requested_workspace_id}".encode("utf-8")
+        ).hexdigest()
+        arguments = {**arguments, "workspace_id": scoped_workspace_id}
+    if isinstance(confirmation, dict):
+        confirmation["arguments_sha256"] = canonical_input_sha256(arguments)
+    result = desktop_native_tool_registry().invoke(
+        str(payload.get("tool_id") or ""),
+        arguments,
+        {
+            "tool_version": str(payload.get("tool_version") or "1.0.0"),
+            "invocation_id": invocation_id,
+            "task_id": task_id,
+            "conversation_id": conversation_id,
+            "idempotency_key": str(payload.get("idempotency_key") or ""),
+            "confirmation": confirmation,
+            "caller_id": str(paired_client.get("signal_name") or "signalasi.phone"),
+        },
+    )
+    response = {
+        "type": DESKTOP_TOOL_CALL_RESULT_TYPE,
+        "call_id": call_id,
+        "invocation_id": invocation_id,
+        "task_id": task_id,
+        "conversation_id": conversation_id,
+        "source_message_id": str(payload.get("message_id") or application_envelope.get("message_id") or ""),
+        "desktop_id": desktop_id(),
+        "desktop_name": desktop_name(),
+        "result": result,
+        "sender": "system",
+        "time": time.time(),
+    }
+    _publish_phone_payload(mqttc, wire_payload, response)
+    return response
+
+
+def _route_desktop_tool_payload(
+    mqttc,
+    paired_client: dict,
+    application_envelope: dict,
+    payload: dict,
+    channel: str,
+) -> bool:
+    message_type = str(payload.get("type") or "")
+    if message_type not in {DESKTOP_TOOL_CALL_REQUEST_TYPE, DESKTOP_TOOL_CALL_CANCEL_TYPE}:
+        return False
+    if application_envelope.get("target_id") != desktop_id():
+        log.warning("Desktop tool request rejected: target does not match this Desktop")
+        return True
+    if channel != "control":
+        log.warning("Desktop tool request rejected on non-control channel=%s", channel)
+        return True
+    call_id = str(payload.get("call_id") or "")[:160]
+    invocation_id = str(payload.get("invocation_id") or call_id)[:160]
+    if message_type == DESKTOP_TOOL_CALL_CANCEL_TYPE:
+        from desktop_native_tools import desktop_native_tool_registry
+
+        cancelled = desktop_native_tool_registry().cancel(invocation_id)
+        _publish_phone_payload(mqttc, {**payload, **{"_client_route_id": paired_client["client_route_id"]}}, {
+            "type": DESKTOP_TOOL_CANCEL_ACK_TYPE,
+            "call_id": call_id,
+            "invocation_id": invocation_id,
+            "cancelled": cancelled,
+            "desktop_id": desktop_id(),
+            "sender": "system",
+            "time": time.time(),
+        })
+        return True
+
+    wire_payload = {
+        "_client_route_id": paired_client["client_route_id"],
+        "scheme": "signal",
+    }
+
+    if not DESKTOP_TOOL_REQUEST_SLOTS.acquire(blocking=False):
+        result = _desktop_tool_failure(
+            call_id,
+            invocation_id,
+            "desktop_tool_busy",
+            "Desktop native tool capacity is busy",
+            retryable=True,
+        )
+        _publish_phone_payload(mqttc, wire_payload, {
+            "type": DESKTOP_TOOL_CALL_RESULT_TYPE,
+            "call_id": call_id,
+            "invocation_id": invocation_id,
+            "task_id": str(payload.get("task_id") or ""),
+            "conversation_id": str(application_envelope.get("conversation_id") or ""),
+            "source_message_id": str(payload.get("message_id") or application_envelope.get("message_id") or ""),
+            "desktop_id": desktop_id(),
+            "desktop_name": desktop_name(),
+            "result": result,
+            "sender": "system",
+            "time": time.time(),
+        })
+        return True
+
+    def execute() -> None:
+        try:
+            _execute_desktop_tool_request(
+                mqttc, wire_payload, application_envelope, dict(payload), paired_client
+            )
+        except Exception as exc:
+            log.warning("Desktop tool request rejected call=%s: %s", call_id, exc)
+            result = _desktop_tool_failure(
+                call_id, invocation_id, "desktop_tool_request_invalid", str(exc)
+            )
+            _publish_phone_payload(mqttc, wire_payload, {
+                "type": DESKTOP_TOOL_CALL_RESULT_TYPE,
+                "call_id": call_id,
+                "invocation_id": invocation_id,
+                "task_id": str(payload.get("task_id") or ""),
+                "conversation_id": str(application_envelope.get("conversation_id") or ""),
+                "source_message_id": str(payload.get("message_id") or application_envelope.get("message_id") or ""),
+                "desktop_id": desktop_id(),
+                "desktop_name": desktop_name(),
+                "result": result,
+                "sender": "system",
+                "time": time.time(),
+            })
+        finally:
+            DESKTOP_TOOL_REQUEST_SLOTS.release()
+
+    threading.Thread(target=execute, name=f"desktop-tool-{call_id[:24]}", daemon=True).start()
+    return True
+
+
 def request_phone_tool_call(
     session_id: str,
     *,
@@ -507,6 +720,17 @@ def _subscribe_client(mqttc, client: dict) -> None:
         topic = str(topics.get(key) or "")
         if topic:
             mqttc.subscribe(topic, qos=MQTT_QOS)
+
+
+def _unsubscribe_client(mqttc, client: dict) -> None:
+    topics = client.get("topics") or {}
+    active_topics = [
+        str(topics.get(key) or "")
+        for key in ("up", "control")
+        if str(topics.get(key) or "")
+    ]
+    if active_topics:
+        mqttc.unsubscribe(active_topics)
 
 
 def _subscribe_all_routes(mqttc) -> None:
@@ -876,7 +1100,8 @@ def _publish_phone_payload(mqttc, wire_payload: dict, reply_payload: dict) -> bo
         log.warning("Phone publish skipped: no active client route")
         return False
     channel = "control" if reply_payload.get("type") in {
-        "delivery_ack", "agent_task_event", "pairing_revoked", "connector_status", "capability_manifest"
+        "delivery_ack", "agent_task_event", "pairing_revoked", "connector_status", "capability_manifest",
+        DESKTOP_TOOL_CALL_RESULT_TYPE, DESKTOP_TOOL_CANCEL_ACK_TYPE,
     } else "down"
     target_topic = paired_client["topics"][channel]
     with phone_publish_lock:
@@ -1327,6 +1552,15 @@ def _process_message(mqttc, userdata, msg):
                 accepted_delivery_ack_payload(payload, message_id, trace),
             )
 
+        if _route_desktop_tool_payload(
+            mqttc,
+            paired_client,
+            application_envelope,
+            payload,
+            channel,
+        ):
+            return
+
         if _route_phone_tool_payload(
             mqttc,
             paired_client,
@@ -1362,6 +1596,7 @@ def _process_message(mqttc, userdata, msg):
                 reason="client_connected",
                 client_route_id=client_route_id,
             )
+            publish_capability_manifest(mqttc, client_route_id)
             if not status.get("ok"):
                 log.warning("Requested connector status publish failed: %s", status)
             return
@@ -1557,11 +1792,33 @@ def handle_pairing_claim(mqttc, payload: dict):
     if not validate_pairing_token(token, consume=True):
         log.warning("MQTT pairing claim rejected: invalid token")
         return
+    replaced_clients = clients_for_identity(
+        fingerprint,
+        signal_name,
+        exclude_route_id=client_route_id,
+    )
+    for previous_client in replaced_clients:
+        result = publish_pairing_revoked(
+            mqttc,
+            reason="replaced_by_new_pairing",
+            client_route_id=previous_client["client_route_id"],
+        )
+        if not result.get("ok"):
+            log.warning(
+                "Previous pairing notification failed route=%s code=%s",
+                previous_client["client_route_id"],
+                result.get("code"),
+            )
     result = replace_peer_signal_bundle(
         bundle,
         remote_name=signal_name,
         remote_device_id=int(payload.get("signal_device_id") or 1),
     )
+    for previous_client in replaced_clients:
+        previous_route_id = previous_client["client_route_id"]
+        revoke_client(previous_route_id, "replaced_by_new_pairing")
+        _unsubscribe_client(mqttc, previous_client)
+        _close_phone_tool_sessions(previous_route_id, "pairing replaced")
     paired_client = record_pairing_success(
         fingerprint=fingerprint,
         remote_name=signal_name,
@@ -1634,6 +1891,8 @@ def mobile_connector_agents(client_route_id: str = "") -> list[dict]:
 
 
 def capability_manifest(client_route_id: str = "") -> dict:
+    from desktop_native_tools import desktop_native_tool_registry
+
     diagnostics = connector_diagnostics()
     return {
         "type": "capability_manifest",
@@ -1646,7 +1905,8 @@ def capability_manifest(client_route_id: str = "") -> dict:
         },
         "agents": mobile_connector_agents(client_route_id),
         "models": [],
-        "tools": ["agent_tasks", "agent_adapters", "voice_stt", "file_transfer"],
+        "tools": ["agent_tasks", "agent_adapters", "voice_stt", "file_transfer", "desktop_native_tools"],
+        "desktop_native_tools": desktop_native_tool_registry().manifest(),
         "features": [
             "tasks",
             "task_events",
@@ -1658,6 +1918,8 @@ def capability_manifest(client_route_id: str = "") -> dict:
             "respond_observe_ignore",
             "durable_agent_run_receipts",
             "agent_protocol_negotiation",
+            "desktop_native_tool_registry_v1",
+            "desktop_native_tool_receipts",
         ],
         "limits": {
             "max_parallel_tasks": int(os.environ.get("SIGNALASI_MAX_PARALLEL_TASKS", "4")),
@@ -2032,4 +2294,3 @@ def stop():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     start()
-

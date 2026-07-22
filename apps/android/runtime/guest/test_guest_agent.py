@@ -154,6 +154,16 @@ class GuestProtocolTest(unittest.TestCase):
         )
         self.assertEqual(str(guest.PACK_ROOT / "java"), environment["JAVA_HOME"])
 
+    def test_secret_environment_is_memory_only_and_strictly_bounded(self):
+        environment = {"PATH": "/usr/bin"}
+        guest.inject_secret_environment(environment, {"ACCESS_TOKEN": "secret-value"})
+
+        self.assertEqual("secret-value", environment["ACCESS_TOKEN"])
+        with self.assertRaises(ValueError):
+            guest.inject_secret_environment(environment, {"invalid-name": "value"})
+        with self.assertRaises(ValueError):
+            guest.inject_secret_environment(environment, {"TOKEN": "x" * 4097})
+
     def test_guest_clock_bootstraps_from_trusted_host_epoch(self):
         host_epoch_millis = 1_784_385_257_000
         with (

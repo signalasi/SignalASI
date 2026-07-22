@@ -435,6 +435,7 @@
     <string name="cc_chat_history_subtitle">Encrypted local storage managed per conversation</string>
     <string name="cc_cache_cleared">Rebuildable cache cleared</string>
     <string name="cc_tools_phone">Phone</string>
+    <string name="cc_tools_desktop">Desktop</string>
     <string name="cc_tools_application">Application</string>
     <string name="cc_tools_android_system">Android System</string>
     <string name="cc_tools_accessibility">Accessibility Service</string>

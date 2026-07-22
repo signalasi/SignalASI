@@ -409,6 +409,8 @@
     <string name="agent_team_state_cancelled">Cancelled</string>
     <string name="agent_team_state_interrupted">Interrupted</string>
     <string name="agent_team_member_state_skipped">Skipped</string>
+    <string name="agent_team_failed_response">The Agent team could not complete the task.</string>
+    <string name="agent_team_failed_response_with_reason">The Agent team could not complete the task: %1$s</string>
     <string name="agent_recent_empty">No recent Agent tasks yet</string>
     <string name="agent_recent_meta">%1$s / %2$s / %3$s risk</string>
     <string name="agent_recent_status_blocked">Blocked</string>
@@ -1362,6 +1364,8 @@
     <string name="agent_mcp_open_authorization">Open authorization page</string>
     <string name="agent_mcp_auth_failed">Authentication could not be completed</string>
     <string name="agent_mcp_endpoint">Endpoint</string>
+    <string name="agent_mcp_runtime">Runtime</string>
+    <string name="agent_mcp_runtime_value">%1$s · On-device Linux</string>
     <string name="agent_mcp_tools">Tools</string>
     <string name="agent_mcp_tools_not_discovered">Run a connection test to discover tools</string>
     <string name="agent_mcp_test_connection">Test connection</string>
@@ -1435,7 +1439,7 @@
     <string name="agent_runtime_artifact_saved">Saved to %1$s</string>
     <string name="agent_runtime_artifact_saved_picker">File saved</string>
     <string name="agent_runtime_artifact_save_failed">The file could not be saved. Try again.</string>
-    <string name="agent_session_created_by_agent">Signal &#183; %1$s</string>
+    <string name="agent_session_created_by_agent">SignalASI &#183; %1$s</string>
     <string name="cc_global_agent_title">Global Super Agent</string>
     <string name="cc_global_agent_subtitle">Persistent personal intelligence across every conversation and long-term goal</string>
     <string name="cc_global_agent_home_subtitle">%1$d topics &#183; %2$d goals &#183; %3$d pending insights</string>
@@ -1562,21 +1566,21 @@
     <string name="agent_global_feedback_helpful">Helpful</string>
     <string name="agent_global_feedback_not_relevant">Not relevant</string>
     <string name="agent_global_feedback_too_frequent">Too frequent</string>
-    <string name="agent_global_feedback_saved">Feedback saved. Signal will adapt future insights.</string>
+    <string name="agent_global_feedback_saved">Feedback saved. SignalASI will adapt future insights.</string>
     <string name="agent_global_feedback_unavailable">This insight can no longer be linked to its source.</string>
     <plurals name="agent_global_new_insights">
-        <item quantity="one">Signal has %1$d new finding</item>
-        <item quantity="other">Signal has %1$d new findings</item>
+        <item quantity="one">SignalASI has %1$d new finding</item>
+        <item quantity="other">SignalASI has %1$d new findings</item>
     </plurals>
-    <string name="agent_global_insights_title">Signal insights</string>
-    <string name="agent_global_insights_empty">No recent Signal insights.</string>
+    <string name="agent_global_insights_title">SignalASI insights</string>
+    <string name="agent_global_insights_empty">No recent SignalASI insights.</string>
     <string name="agent_global_insight_current_topic">Current topic</string>
     <string name="agent_global_insight_new_topic">New topic</string>
     <string name="agent_global_insight_digest">Digest</string>
     <string name="agent_global_insight_urgent">Important</string>
     <string name="agent_global_insight_open_topic">Open topic</string>
     <string name="agent_global_insight_source">From %1$s</string>
-    <string name="agent_global_insight_feedback_hint">Your feedback changes when and where Signal intervenes.</string>
+    <string name="agent_global_insight_feedback_hint">Your feedback changes when and where SignalASI intervenes.</string>
     <string name="cc_global_learning_toggle_title">Adaptive autonomy</string>
     <string name="cc_global_learning_toggle_subtitle">Learn when, where, and how often proactive help is useful</string>
     <string name="cc_global_learning_title">Learned behavior</string>

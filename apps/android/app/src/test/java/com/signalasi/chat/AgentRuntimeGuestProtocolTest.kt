@@ -2,6 +2,7 @@ package com.signalasi.chat
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
@@ -146,6 +147,112 @@ class AgentRuntimeGuestProtocolTest {
 
         assertFalse(AgentRuntimeGuestProtocol.verify(blankRequest, key, timestamp))
         assertFalse(AgentRuntimeGuestProtocol.verify(invalidSequence, key, timestamp))
+    }
+
+    @Test
+    fun guestBridgeCarriesSecretsOnlyInTheAuthenticatedExecutionEnvelope() {
+        val responses = LinkedBlockingQueue<AgentRuntimeGuestEnvelope>()
+        var executionPayload: Map<String, Any?> = emptyMap()
+        val channel = object : AgentRuntimeGuestChannel {
+            override fun send(envelope: AgentRuntimeGuestEnvelope, sessionKey: ByteArray) {
+                when (envelope.type) {
+                    AgentRuntimeGuestMessageType.HELLO -> responses.put(
+                        AgentRuntimeGuestEnvelope(
+                            requestId = envelope.requestId,
+                            type = AgentRuntimeGuestMessageType.HELLO_ACK,
+                            sequence = 1L,
+                            payload = readyGuestPayload()
+                        )
+                    )
+                    AgentRuntimeGuestMessageType.EXECUTE -> {
+                        executionPayload = envelope.payload
+                        responses.put(
+                            AgentRuntimeGuestEnvelope(
+                                requestId = envelope.requestId,
+                                type = AgentRuntimeGuestMessageType.RESULT,
+                                sequence = 1L,
+                                payload = mapOf("exit_code" to 0, "stdout" to "done", "stderr" to "")
+                            )
+                        )
+                    }
+                    else -> Unit
+                }
+            }
+
+            override fun receive(timeoutMillis: Long, sessionKey: ByteArray): AgentRuntimeGuestEnvelope =
+                responses.poll(timeoutMillis, TimeUnit.MILLISECONDS)
+                    ?: throw SocketTimeoutException("No fake Guest response")
+
+            override fun close() = Unit
+        }
+        val bridge = AgentRuntimeGuestBridge(
+            channelFactory = AgentRuntimeGuestChannelFactory { channel },
+            sessionKeyProvider = { key.copyOf() }
+        )
+
+        try {
+            bridge.execute(executionRequest("request-secret").copy(secretEnvironment = mapOf("ACCESS_TOKEN" to "secret")))
+        } finally {
+            bridge.close()
+        }
+
+        val secrets = executionPayload["secret_environment"] as? Map<*, *>
+        assertEquals("secret", secrets?.get("ACCESS_TOKEN"))
+        assertFalse(executionPayload.toString().contains("request.json"))
+    }
+
+    @Test
+    fun guestBridgeRejectsSecretInjectionWhenTheGuestDoesNotAdvertiseSupport() {
+        val responses = LinkedBlockingQueue<AgentRuntimeGuestEnvelope>()
+        var executeSent = false
+        val channel = object : AgentRuntimeGuestChannel {
+            override fun send(envelope: AgentRuntimeGuestEnvelope, sessionKey: ByteArray) {
+                when (envelope.type) {
+                    AgentRuntimeGuestMessageType.HELLO -> responses.put(
+                        AgentRuntimeGuestEnvelope(
+                            requestId = envelope.requestId,
+                            type = AgentRuntimeGuestMessageType.HELLO_ACK,
+                            sequence = 1L,
+                            payload = readyGuestPayload() - "capabilities" + mapOf(
+                                "capabilities" to listOf(
+                                    "runtime.execute",
+                                    "runtime.cancel",
+                                    "runtime.progress",
+                                    "runtime.concurrent"
+                                )
+                            )
+                        )
+                    )
+                    AgentRuntimeGuestMessageType.EXECUTE -> executeSent = true
+                    else -> Unit
+                }
+            }
+
+            override fun receive(timeoutMillis: Long, sessionKey: ByteArray): AgentRuntimeGuestEnvelope =
+                responses.poll(timeoutMillis, TimeUnit.MILLISECONDS)
+                    ?: throw SocketTimeoutException("No fake Guest response")
+
+            override fun close() = Unit
+        }
+        val bridge = AgentRuntimeGuestBridge(
+            channelFactory = AgentRuntimeGuestChannelFactory { channel },
+            sessionKeyProvider = { key.copyOf() }
+        )
+
+        val error = try {
+            assertThrows(IllegalStateException::class.java) {
+                bridge.execute(
+                    executionRequest("request-legacy-secret").copy(
+                        secretEnvironment = mapOf("ACCESS_TOKEN" to "secret")
+                    )
+                )
+            }
+        } finally {
+            bridge.close()
+        }
+
+        assertTrue(error.message.orEmpty().contains("secure environment injection"))
+        assertFalse(executeSent)
     }
 
     @Test
@@ -403,7 +510,8 @@ class AgentRuntimeGuestProtocolTest {
             "runtime.execute",
             "runtime.cancel",
             "runtime.progress",
-            "runtime.concurrent"
+            "runtime.concurrent",
+            "runtime.secret_environment"
         )
     )
 }

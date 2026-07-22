@@ -38,10 +38,10 @@ class AgentNativeToolsDeviceTest {
     @Before
     fun setUp() {
         val context = instrumentation.targetContext
-        context.startActivity(
+        instrumentation.startActivitySync(
             Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         )
-        SystemClock.sleep(800)
+        instrumentation.waitForIdleSync()
         registry = AgentPhoneNativeToolCatalog.defaultRegistry(
             context = context,
             screenProvider = {
@@ -62,7 +62,7 @@ class AgentNativeToolsDeviceTest {
     @Test
     fun testAllRegisteredPhoneToolsOnDevice() {
         val descriptors = registry.descriptors()
-        assertEquals("The native tool inventory changed; update the device matrix", 101, descriptors.size)
+        assertEquals("The native tool inventory changed; update the device matrix", 118, descriptors.size)
 
         runWorkspaceLifecycle()
         descriptors
@@ -177,8 +177,13 @@ class AgentNativeToolsDeviceTest {
 
             AgentWebMediaNativeTools.MEDIA_FFMPEG_TRANSCODE -> execute(
                 descriptor,
-                inputFor(descriptor.id),
-                "expected_unavailable"
+                mapOf(
+                    "content_uri" to testImageUri.toString(),
+                    "target_format" to "jpg",
+                    "preset" to "compact",
+                    "timeout_ms" to 60_000
+                ),
+                "real_content_transcode"
             )
 
             else -> verifyProtectedOrHandoffContract(descriptor)
@@ -389,7 +394,7 @@ class AgentNativeToolsDeviceTest {
             AgentWebMediaNativeTools.OCR_RECOGNIZE_CONTENT -> mapOf("content_uri" to "content://invalid/device-test", "source_kind" to "captured")
             AgentWebMediaNativeTools.MEDIA_METADATA -> mapOf("content_uri" to "content://invalid/device-test")
             AgentWebMediaNativeTools.MEDIA_PLAYBACK_HANDOFF -> mapOf("content_uri" to "content://invalid/device-test")
-            AgentWebMediaNativeTools.MEDIA_FFMPEG_TRANSCODE -> mapOf("content_uri" to "content://invalid/device-test", "target_format" to "mp3")
+            AgentWebMediaNativeTools.MEDIA_FFMPEG_TRANSCODE -> mapOf("content_uri" to "content://invalid/device-test", "target_format" to "jpg")
             AgentVisibleCaptureNativeTools.CAMERA_CAPTURE -> mapOf("facing" to "back")
             AgentVisibleCaptureNativeTools.MICROPHONE_RECORD -> mapOf("max_duration_seconds" to 1)
             AgentNotificationNativeTools.NOTIFICATIONS_LIST -> mapOf("limit" to 6, "reply_capable_only" to false)

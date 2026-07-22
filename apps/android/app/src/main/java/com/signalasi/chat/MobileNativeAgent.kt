@@ -267,6 +267,8 @@ class MobileNativeAgent(
 
     fun nativeToolCatalog(): List<AgentNativeToolDescriptor> = nativeToolRegistry.descriptors()
 
+    fun nativeToolIds(): Set<String> = AgentPhoneNativeToolCatalog.defaultToolIds
+
     fun executeDirectAction(
         action: AgentAction,
         conversationId: String = "",
@@ -488,6 +490,7 @@ class MobileNativeAgent(
         if (toolId == AgentOnDeviceRuntimeTools.LIST_PACKS) return renderRuntimePackList(output, zh)
         if (toolId == AgentOnDeviceRuntimeTools.EXECUTE) return renderRuntimeExecution(output, message, zh)
         if (toolId == AgentOnDeviceRuntimeTools.INSTALL_PACK) return renderRuntimePackInstallation(output, zh)
+        if (toolId in AgentDesktopRemoteNativeTools.toolIds) return renderDesktopNativeToolResult(toolId, message, output, zh)
         renderAndroidSystemSummary(toolId, output, zh)?.let { return it }
         if (zh) return renderNativeToolResultChinese(toolId, message, output)
         fun bool(name: String) = output[name] as? Boolean ?: false
@@ -631,6 +634,85 @@ class MobileNativeAgent(
             } else {
                 message
             }
+        }
+    }
+
+    private fun renderDesktopNativeToolResult(
+        toolId: String,
+        message: String,
+        output: AgentNativeJsonObject,
+        zh: Boolean
+    ): String {
+        fun long(name: String) = (output[name] as? Number)?.toLong()
+        fun text(name: String) = output[name]?.toString().orEmpty()
+        fun maps(name: String) = (output[name] as? Iterable<*>)?.mapNotNull { it as? Map<*, *> }.orEmpty()
+        fun heading(chinese: String, english: String) = if (zh) chinese else english
+        return when (toolId) {
+            AgentDesktopRemoteNativeTools.SYSTEM_STATUS -> {
+                val available = formatBytes(long("memory_available_bytes") ?: 0L)
+                val total = formatBytes(long("memory_total_bytes") ?: 0L)
+                if (zh) {
+                    "Windows ${text("release")}\uff0c${text("architecture")}\uff0c${long("logical_cpu_count") ?: 0} \u4e2a\u903b\u8f91\u5904\u7406\u5668\u3002\u53ef\u7528\u5185\u5b58 $available / $total\u3002"
+                } else {
+                    "Windows ${text("release")} on ${text("architecture")} with ${long("logical_cpu_count") ?: 0} logical processors. Available memory: $available of $total."
+                }
+            }
+            AgentDesktopRemoteNativeTools.PROCESS_LIST -> {
+                val processes = maps("processes")
+                val lines = processes.take(20).map { row ->
+                    val name = row["name"]?.toString().orEmpty()
+                    val pid = row["pid"]?.toString().orEmpty()
+                    val memoryMb = ((row["memory_kb"] as? Number)?.toLong() ?: 0L) / 1_024L
+                    "- $name (PID $pid, ${memoryMb} MB)"
+                }
+                heading("\u627e\u5230 ${processes.size} \u4e2a Windows \u8fdb\u7a0b\uff1a", "Found ${processes.size} Windows processes:") +
+                    if (lines.isEmpty()) "" else "\n" + lines.joinToString("\n")
+            }
+            AgentDesktopRemoteNativeTools.FILE_LIST -> {
+                val entries = maps("entries")
+                val lines = entries.take(40).map { row ->
+                    val suffix = if (row["type"] == "directory") "/" else ""
+                    "- ${row["path"]}$suffix"
+                }
+                heading("Desktop \u5de5\u4f5c\u533a\u5305\u542b ${entries.size} \u9879\uff1a", "Desktop workspace contains ${entries.size} entries:") +
+                    if (lines.isEmpty()) "" else "\n" + lines.joinToString("\n")
+            }
+            AgentDesktopRemoteNativeTools.FILE_READ_TEXT -> {
+                val path = text("path")
+                val body = text("text").take(12_000)
+                heading("\u5df2\u8bfb\u53d6 $path\uff1a", "Read $path:") + "\n\n```text\n$body\n```"
+            }
+            AgentDesktopRemoteNativeTools.FILE_WRITE_TEXT ->
+                heading("\u5df2\u5199\u5165 ${text("path")}\uff08${formatBytes(long("size_bytes") ?: 0L)}\uff09\u3002", "Wrote ${text("path")} (${formatBytes(long("size_bytes") ?: 0L)}).")
+            AgentDesktopRemoteNativeTools.FILE_SHA256 ->
+                heading("${text("path")} \u7684 SHA-256\uff1a${text("sha256")}", "SHA-256 for ${text("path")}: ${text("sha256")}")
+            AgentDesktopRemoteNativeTools.ARCHIVE_CREATE ->
+                heading("\u5df2\u521b\u5efa ${text("path")}\uff0c\u5305\u542b ${long("entry_count") ?: 0} \u4e2a\u6587\u4ef6\u3002", "Created ${text("path")} with ${long("entry_count") ?: 0} files.")
+            AgentDesktopRemoteNativeTools.TERMINAL_RUN -> {
+                val exitCode = long("exit_code") ?: 0L
+                val stdout = text("stdout").trim().take(12_000)
+                val stderr = text("stderr").trim().take(6_000)
+                buildList {
+                    add(heading("Desktop \u547d\u4ee4\u5df2\u5b8c\u6210\uff0c\u9000\u51fa\u7801 $exitCode\u3002", "Desktop command completed with exit code $exitCode."))
+                    if (stdout.isNotBlank()) add("```text\n$stdout\n```")
+                    if (stderr.isNotBlank()) add(heading("\u9519\u8bef\u8f93\u51fa\uff1a", "Error output:") + "\n```text\n$stderr\n```")
+                }.joinToString("\n\n")
+            }
+            AgentDesktopRemoteNativeTools.OFFICE_INSPECT -> {
+                val documentType = text("document_type")
+                val details = if (documentType == "excel") {
+                    (output["rows"] as? Iterable<*>)?.take(30)?.joinToString("\n") { row ->
+                        (row as? Iterable<*>)?.joinToString("\t") { it?.toString().orEmpty() }.orEmpty()
+                    }.orEmpty()
+                } else {
+                    (output["text_items"] as? Iterable<*>)?.take(40)?.joinToString("\n") { "- ${it?.toString().orEmpty()}" }.orEmpty()
+                }
+                heading("\u5df2\u68c0\u67e5 ${text("path")}\uff08$documentType\uff09\u3002", "Inspected ${text("path")} ($documentType).") +
+                    details.takeIf(String::isNotBlank)?.let { "\n\n$it" }.orEmpty()
+            }
+            AgentDesktopRemoteNativeTools.OFFICE_CONVERT ->
+                heading("\u5df2\u751f\u6210 ${text("path")}\uff08${formatBytes(long("size_bytes") ?: 0L)}\uff09\u3002", "Created ${text("path")} (${formatBytes(long("size_bytes") ?: 0L)}).")
+            else -> message.trim()
         }
     }
 
@@ -1395,7 +1477,7 @@ class MobileNativeAgent(
                 append(currentScreen.visibleTexts.take(20).joinToString("\n") { "- ${it.take(300)}" })
             }.take(6_000)
         } else ""
-        val draftPlan = planned.copy(
+        val contextualPlan = planned.copy(
             actions = planned.actions.map { action ->
                 val targetIds = setOf(
                     action.parameters["connector_id"].orEmpty(),
@@ -1423,6 +1505,11 @@ class MobileNativeAgent(
                     INTERNAL_LONG_TERM_WRITE_ALLOWED to (!activeConversationContext.privateMode).toString()
                 ))
             }
+        )
+        val draftPlan = AgentTeamPlanCompiler.compile(
+            plan = contextualPlan,
+            targets = targets,
+            enabled = modelPlannerSettings().multiAgentCoordination
         )
         val safetyReview = safetyPolicy.review(draftPlan)
         currentPlan = draftPlan.withSafetyReview(safetyReview)
@@ -7893,6 +7980,12 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
     }
 
     private fun dispatchConnectorTask(action: AgentAction): AgentActionResult {
+        val encodedTeam = action.parameters[AGENT_TEAM_SPEC_PARAMETER].orEmpty()
+        if (encodedTeam.isNotBlank()) {
+            val spec = AgentTeamDispatchSpecCodec.decode(encodedTeam)
+                ?: return AgentActionResult(action.id, false, "Agent team plan is invalid")
+            return dispatchAgentTeam(action, spec)
+        }
         val prompt = if (action.parameters["connector_task_mode"] == PHONE_DEVELOPMENT_CONNECTOR_MODE) {
             action.parameters["prompt"].orEmpty()
         } else if (action.id == "knowledge-answer") {
@@ -7939,6 +8032,91 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             lastFailure = result
         }
         return lastFailure
+    }
+
+    private fun dispatchAgentTeam(
+        action: AgentAction,
+        spec: AgentTeamDispatchSpec
+    ): AgentActionResult {
+        if (action.parameters[AGENT_TEAM_RUN_PARAMETER] != spec.supervisorRunId ||
+            action.parameters[AGENT_TEAM_SOURCE_PARAMETER]?.toLongOrNull() != spec.sourceMessageId ||
+            action.parameters["connector_id"] != spec.definition.primaryAgentId
+        ) {
+            return AgentActionResult(action.id, false, "Agent team identity validation failed")
+        }
+        val registrations = AppStoreAgentConnectorRegistry(context).registrations()
+            .associateBy(AgentRegistration::agentId)
+        val missing = spec.definition.members.map(AgentTeamMember::agentId)
+            .filterNot(registrations::containsKey)
+        if (missing.isNotEmpty()) {
+            return AgentActionResult(
+                action.id,
+                false,
+                "Agent team member is unavailable: ${missing.joinToString(", ").take(240)}"
+            )
+        }
+        val conversationId = action.parameters[INTERNAL_CONVERSATION_ID].orEmpty()
+        val turnId = action.parameters[INTERNAL_TURN_ID].orEmpty().ifBlank { action.id }
+        val runtime = GlobalSuperAgentRuntime.get(context)
+        val existing = runtime.agentTeamSnapshot(spec.supervisorRunId)
+        if (existing == null) {
+            val requestContext = linkedMapOf<String, Any?>(
+                INTERNAL_CONVERSATION_CONTEXT to action.parameters[INTERNAL_CONVERSATION_CONTEXT].orEmpty(),
+                INTERNAL_MEMORY_CONTEXT to action.parameters[INTERNAL_MEMORY_CONTEXT].orEmpty(),
+                INTERNAL_CLOUD_KNOWLEDGE_CONTEXT to action.parameters[INTERNAL_CLOUD_KNOWLEDGE_CONTEXT].orEmpty(),
+                INTERNAL_AGENT_KNOWLEDGE_CONTEXT to action.parameters[INTERNAL_AGENT_KNOWLEDGE_CONTEXT].orEmpty(),
+                INTERNAL_SCREEN_CONTEXT to action.parameters[INTERNAL_SCREEN_CONTEXT].orEmpty(),
+                INTERNAL_LONG_TERM_WRITE_ALLOWED to action.parameters[INTERNAL_LONG_TERM_WRITE_ALLOWED].orEmpty(),
+                "team_action_id" to action.id,
+                "team_source_message_id" to spec.sourceMessageId
+            )
+            val primaryCapabilities = spec.definition.members
+                .first { it.agentId == spec.definition.primaryAgentId }
+                .requiredCapabilities
+            val request = AgentRunRequest(
+                conversationId = conversationId,
+                messageId = turnId,
+                taskId = turnId,
+                runId = spec.supervisorRunId,
+                goal = action.parameters["original_goal"].orEmpty()
+                    .ifBlank { action.parameters["prompt"].orEmpty() }
+                    .ifBlank { action.description },
+                deliveryMode = AgentDeliveryMode.RESPOND,
+                requiredCapabilities = primaryCapabilities,
+                context = requestContext,
+                idempotencyKey = spec.supervisorRunId
+            )
+            val started = runCatching { runtime.startAgentTeam(spec.definition, request) }
+            if (started.isFailure) {
+                return AgentActionResult(
+                    action.id,
+                    false,
+                    started.exceptionOrNull()?.message ?: "Agent team could not start"
+                )
+            }
+        }
+        val state = runtime.agentTeamSnapshot(spec.supervisorRunId)?.state
+            ?: AgentTeamExecutionState.RUNNING
+        return AgentActionResult(
+            actionId = action.id,
+            success = true,
+            message = "Coordinating ${spec.definition.members.size} specialist Agents",
+            metadata = mapOf(
+                "delivery_mode" to AgentDeliveryMode.RESPOND.name.lowercase(Locale.ROOT),
+                "awaiting_response" to "true",
+                "source_message_id" to spec.sourceMessageId.toString(),
+                "contact_id" to spec.responseContactId,
+                "target" to action.target,
+                "resource_id" to "agent-team:${spec.definition.teamId}",
+                "failure_domain" to "agent-team:${spec.definition.teamId}",
+                "resource_location" to "distributed",
+                "resource_started_at" to System.currentTimeMillis().toString(),
+                "team_run_id" to spec.supervisorRunId,
+                "team_id" to spec.definition.teamId,
+                "team_member_count" to spec.definition.members.size.toString(),
+                "team_state" to state.name.lowercase(Locale.ROOT)
+            )
+        )
     }
 
     private fun buildKnowledgeAnswerPrompt(action: AgentAction): String? {
@@ -8031,6 +8209,9 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
 
     private fun dispatchContactTask(action: AgentAction, contactId: String, prompt: String): AgentActionResult {
         val deliveryMode = deliveryMode(action)
+        val managedTeamAction = action.parameters[MANAGED_AGENT_TEAM_ACTION_PARAMETER]
+            .orEmpty()
+            .toBoolean()
         val observationTargetId = action.parameters["connector_id"].orEmpty().ifBlank { contactId }
         val conversationId = action.parameters[INTERNAL_CONVERSATION_ID].orEmpty()
         if (deliveryMode == AgentDeliveryMode.IGNORE) {
@@ -8067,13 +8248,18 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 .put("stage", "agent_confirmed")
                 .put("at", System.currentTimeMillis())
                 .put("detail", action.target))
-        val messageId = ChatHistoryStore.appendOutgoing(
-            context = context,
-            contactId = contactId,
-            content = historyPrompt,
-            deliveryStatus = context.getString(R.string.delivery_status_sending),
-            deliveryTrace = trace
-        )
+        val messageId = if (managedTeamAction) {
+            val stableIdentity = action.parameters["idempotency_key"].orEmpty().ifBlank { action.id }
+            AgentTeamDispatchIds.sourceMessageId("member:$stableIdentity")
+        } else {
+            ChatHistoryStore.appendOutgoing(
+                context = context,
+                contactId = contactId,
+                content = historyPrompt,
+                deliveryStatus = context.getString(R.string.delivery_status_sending),
+                deliveryTrace = trace
+            )
+        }
         val observed = observationContextStore.peek(observationTargetId, conversationId)
         val published = SignalASIMqttClient.publishUserMessage(
             content = promptWithConversationContext(action, promptWithObservedContext(prompt, observed)),
@@ -8085,14 +8271,16 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             turnId = action.parameters[INTERNAL_TURN_ID].orEmpty()
         )
         if (published) observationContextStore.acknowledge(observed.mapTo(linkedSetOf()) { it.id })
-        ChatHistoryStore.markOutgoingDelivery(
-            context = context,
-            contactId = contactId,
-            messageId = messageId,
-            stage = if (published) "mqtt_published" else "publish_failed",
-            detail = topic,
-            status = context.getString(if (published) R.string.delivery_status_sent else R.string.delivery_status_failed)
-        )
+        if (!managedTeamAction) {
+            ChatHistoryStore.markOutgoingDelivery(
+                context = context,
+                contactId = contactId,
+                messageId = messageId,
+                stage = if (published) "mqtt_published" else "publish_failed",
+                detail = topic,
+                status = context.getString(if (published) R.string.delivery_status_sent else R.string.delivery_status_failed)
+            )
+        }
         return AgentActionResult(
             actionId = action.id,
             success = published,
@@ -10643,7 +10831,7 @@ data class AgentPlan(
     fun resetActionForRetry(actionId: String): AgentPlan = copy(
         actions = actions.map { action ->
             if (action.id == actionId) {
-                action.copy(
+                action.rekeyAgentTeamForRetry().copy(
                     status = AgentActionStatus.PENDING_CONFIRMATION,
                     result = "",
                     evidence = ""

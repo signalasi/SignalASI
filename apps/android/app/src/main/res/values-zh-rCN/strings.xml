@@ -429,6 +429,8 @@
     <string name="agent_team_state_cancelled">已取消</string>
     <string name="agent_team_state_interrupted">已中断</string>
     <string name="agent_team_member_state_skipped">已跳过</string>
+    <string name="agent_team_failed_response">Agent 团队未能完成任务。</string>
+    <string name="agent_team_failed_response_with_reason">Agent 团队未能完成任务：%1$s</string>
     <string name="about_product_subtitle">连接用户、Agent、模型与设备的安全超级智能体</string>
     <string name="about_section_product">产品信息</string>
     <string name="about_version">版本</string>
@@ -1271,6 +1273,8 @@
     <string name="agent_mcp_open_authorization">打开授权页面</string>
     <string name="agent_mcp_auth_failed">无法完成认证</string>
     <string name="agent_mcp_endpoint">服务地址</string>
+    <string name="agent_mcp_runtime">运行环境</string>
+    <string name="agent_mcp_runtime_value">%1$s · 手机本机 Linux</string>
     <string name="agent_mcp_tools">工具</string>
     <string name="agent_mcp_tools_not_discovered">测试连接后发现工具</string>
     <string name="agent_mcp_test_connection">测试连接</string>
@@ -1345,7 +1349,7 @@
     <string name="agent_runtime_artifact_saved_picker">文件已保存</string>
     <string name="agent_runtime_artifact_save_failed">文件保存失败，请重试。</string>
     <string name="agent_trace_processed_details">\u67e5\u770b\u5904\u7406\u8be6\u60c5</string>
-    <string name="agent_session_created_by_agent">Signal &#183; %1$s</string>
+    <string name="agent_session_created_by_agent">SignalASI &#183; %1$s</string>
     <string name="cc_global_agent_title">全局超级智能体</string>
     <string name="cc_global_agent_subtitle">跨所有会话与长期目标持续工作的个人智能</string>
     <string name="cc_global_agent_home_subtitle">%1$d 个主题 &#183; %2$d 个目标 &#183; %3$d 条待处理发现</string>
@@ -1443,20 +1447,20 @@
     <string name="agent_global_feedback_helpful">有帮助</string>
     <string name="agent_global_feedback_not_relevant">不相关</string>
     <string name="agent_global_feedback_too_frequent">太频繁</string>
-    <string name="agent_global_feedback_saved">已记住，Signal 会调整后续的主动帮助。</string>
+    <string name="agent_global_feedback_saved">已记住，SignalASI 会调整后续的主动帮助。</string>
     <string name="agent_global_feedback_unavailable">这条发现已无法关联原始记录。</string>
     <plurals name="agent_global_new_insights">
-        <item quantity="other">Signal 有 %1$d 条新发现</item>
+        <item quantity="other">SignalASI 有 %1$d 条新发现</item>
     </plurals>
-    <string name="agent_global_insights_title">Signal 新发现</string>
-    <string name="agent_global_insights_empty">暂时没有新的 Signal 发现。</string>
+    <string name="agent_global_insights_title">SignalASI 新发现</string>
+    <string name="agent_global_insights_empty">暂时没有新的 SignalASI 发现。</string>
     <string name="agent_global_insight_current_topic">当前话题</string>
     <string name="agent_global_insight_new_topic">新话题</string>
     <string name="agent_global_insight_digest">摘要</string>
     <string name="agent_global_insight_urgent">重要</string>
     <string name="agent_global_insight_open_topic">打开话题</string>
     <string name="agent_global_insight_source">来自 %1$s</string>
-    <string name="agent_global_insight_feedback_hint">你的反馈会直接调整 Signal 介入的时机和频率。</string>
+    <string name="agent_global_insight_feedback_hint">你的反馈会直接调整 SignalASI 介入的时机和频率。</string>
     <string name="cc_global_learning_toggle_title">自适应自主性</string>
     <string name="cc_global_learning_toggle_subtitle">学习何时、在哪里以及多久主动帮助一次</string>
     <string name="cc_global_learning_title">已学习行为</string>

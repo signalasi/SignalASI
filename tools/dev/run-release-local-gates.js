@@ -10,9 +10,12 @@ const npmCommand = isWindows ? (process.env.ComSpec || "cmd.exe") : "npm";
 const gates = [
   "check",
   "check:android",
+  "test:runtime-tools",
+  "test:guest-runtime",
   "smoke:desktop",
   "smoke:desktop:pairing",
   "smoke:desktop:agent-push",
+  "smoke:desktop:agent-lifecycle",
   "smoke:desktop:mqtt-persistence",
   "smoke:desktop:voice-stt",
   "smoke:desktop:ui",

@@ -31,7 +31,7 @@ class GlobalProactiveInboxInstrumentedTest {
             sourceEventId = "event",
             sourceConversationId = "source",
             target = GlobalProactiveTarget.NEW_CONVERSATION,
-            title = "Signal insight",
+            title = "SignalASI insight",
             content = "A durable result is ready.",
             topic = "Long-running project",
             urgent = false,

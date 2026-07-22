@@ -24,6 +24,7 @@ interface AgentManagedResponseLedger {
     fun register(record: AgentManagedResponseRecord)
     fun complete(response: AgentConnectorResponse): AgentManagedResponseRecord?
     fun acknowledge(response: AgentConnectorResponse): AgentManagedResponseRecord?
+    fun pendingForSupervisor(supervisorRunId: String): List<AgentManagedResponseRecord>
     fun completedUnapplied(): List<AgentManagedResponseRecord>
     fun markApplied(ownerRunId: String)
     fun removeOwner(ownerRunId: String)
@@ -64,6 +65,11 @@ class InMemoryAgentManagedResponseLedger : AgentManagedResponseLedger {
         records[entry.key] = acknowledged
         return acknowledged
     }
+
+    @Synchronized
+    override fun pendingForSupervisor(supervisorRunId: String): List<AgentManagedResponseRecord> = records.values
+        .filter { it.supervisorRunId == supervisorRunId && it.state == AgentManagedResponseState.PENDING }
+        .sortedBy(AgentManagedResponseRecord::createdAtMillis)
 
     @Synchronized
     override fun completedUnapplied(): List<AgentManagedResponseRecord> = records.values
@@ -129,6 +135,13 @@ class EncryptedAgentManagedResponseLedger(context: Context) : AgentManagedRespon
             records[index] = acknowledged
             save(records)
             acknowledged
+        }
+
+    override fun pendingForSupervisor(supervisorRunId: String): List<AgentManagedResponseRecord> =
+        synchronized(PROCESS_LOCK) {
+            load().filter {
+                it.supervisorRunId == supervisorRunId && it.state == AgentManagedResponseState.PENDING
+            }.sortedBy(AgentManagedResponseRecord::createdAtMillis)
         }
 
     override fun completedUnapplied(): List<AgentManagedResponseRecord> = synchronized(PROCESS_LOCK) {

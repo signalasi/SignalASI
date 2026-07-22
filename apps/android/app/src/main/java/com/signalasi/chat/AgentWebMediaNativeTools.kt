@@ -935,7 +935,8 @@ data class AgentWebMediaServices(
     val contentWriter: AgentContentUriWriter,
     val ocr: AgentContentOcr,
     val mediaInspector: AgentMediaInspector,
-    val mediaPlayback: AgentMediaPlayback
+    val mediaPlayback: AgentMediaPlayback,
+    val mediaTranscoder: AgentMediaTranscoder = AgentUnavailableMediaTranscoder
 )
 
 object AgentWebMediaNativeTools {
@@ -968,15 +969,13 @@ object AgentWebMediaNativeTools {
     const val MAX_OCR_LINES = 500
     const val MAX_OCR_BLOCKS = 200
     const val MAX_TOOL_TIMEOUT_MILLIS = 15_000L
+    const val MAX_TRANSCODE_TIMEOUT_MILLIS = 15L * 60_000L
 
     private const val VERSION = "1.0.0"
     private const val WEB_EXECUTOR_ID = "signalasi.bounded_https"
     private const val CONTENT_EXECUTOR_ID = "signalasi.android_content_uri"
     private const val MEDIA_EXECUTOR_ID = "signalasi.android_media_handoff"
-    private val FFMPEG_UNAVAILABLE = AgentNativeToolAvailability(
-        AgentNativeToolAvailabilityStatus.UNAVAILABLE,
-        "FFmpeg transcoding is not installed or supported in the phone runtime"
-    )
+    private const val MEDIA_TRANSCODE_EXECUTOR_ID = "signalasi.android_runtime.ffmpeg"
 
     val toolIds: Set<String> = linkedSetOf(
         WEB_SEARCH,
@@ -1009,7 +1008,8 @@ object AgentWebMediaNativeTools {
         contentWriter = AgentAndroidContentUriWriter(context),
         ocr = AgentAndroidMlKitContentOcr(context),
         mediaInspector = AgentAndroidMediaInspector(context.applicationContext),
-        mediaPlayback = AgentAndroidMediaPlayback(context.applicationContext)
+        mediaPlayback = AgentAndroidMediaPlayback(context.applicationContext),
+        mediaTranscoder = AgentAndroidFfmpegMediaTranscoder(context.applicationContext)
     )
 
     fun createRegistry(
@@ -1030,7 +1030,7 @@ object AgentWebMediaNativeTools {
         ocrDefinition(services.ocr),
         mediaMetadataDefinition(services.mediaInspector),
         mediaPlaybackDefinition(services.mediaPlayback),
-        ffmpegUnavailableDefinition()
+        ffmpegTranscodeDefinition(services.mediaTranscoder)
     )
 
     private fun webSearchDefinition(web: AgentBoundedWebService) = AgentNativeToolDefinition(
@@ -1569,36 +1569,96 @@ object AgentWebMediaNativeTools {
         availabilityProvider = AgentNativeToolAvailabilityProvider { playback.availability }
     )
 
-    private fun ffmpegUnavailableDefinition() = AgentNativeToolDefinition(
+    private fun ffmpegTranscodeDefinition(transcoder: AgentMediaTranscoder) = AgentNativeToolDefinition(
         descriptor = AgentNativeToolDescriptor(
             id = MEDIA_FFMPEG_TRANSCODE,
             version = VERSION,
             title = "Transcode media with FFmpeg",
-            description = "Represents general FFmpeg conversion, which is explicitly unavailable in the phone runtime.",
+            description = "Converts one user-authorized or conversation-workspace media file in the bounded, offline Android-local FFmpeg runtime.",
             location = AgentNativeToolLocation.APPLICATION,
-            inputSchema = objectSchema(
-                properties = mapOf(
-                    "content_uri" to contentUriSchema(),
-                    "target_format" to AgentNativeJsonSchema.string(minLength = 1, maxLength = 64)
-                ),
-                required = setOf("content_uri", "target_format")
+            inputSchema = mediaTranscodeInputSchema(),
+            outputSchema = mediaTranscodeOutputSchema(),
+            risk = AgentNativeToolRisk.MEDIUM,
+            capabilities = setOf(
+                "media.transcode.ffmpeg",
+                "runtime.android_local",
+                "runtime.linux",
+                "runtime.sandboxed",
+                "workspace.conversation_scoped"
             ),
-            outputSchema = objectSchema(),
-            risk = AgentNativeToolRisk.BLOCKED,
-            capabilities = setOf("media.transcode.ffmpeg"),
-            timeoutMillis = 1_000,
-            availability = FFMPEG_UNAVAILABLE
+            timeoutMillis = MAX_TRANSCODE_TIMEOUT_MILLIS,
+            idempotency = AgentNativeToolIdempotency.NON_IDEMPOTENT,
+            availability = transcoder.availability
         ),
-        executor = AgentNativeToolExecutor {
-            AgentNativeToolExecutionResult.failure("ffmpeg_unavailable", FFMPEG_UNAVAILABLE.reason)
+        executor = AgentNativeToolExecutor { invocation ->
+            executeBounded {
+                val targetFormat = AgentMediaTargetFormat.fromWireValue(invocation.input.string("target_format"))
+                    ?: throw AgentWebMediaException("invalid_target_format", "Media target format is invalid")
+                val preset = AgentMediaTranscodePreset.fromWireValue(
+                    invocation.input.string("preset", AgentMediaTranscodePreset.BALANCED.wireValue)
+                ) ?: throw AgentWebMediaException("invalid_transcode_preset", "Media conversion preset is invalid")
+                val workspaceId = invocation.context.attributes["workspace_id"].orEmpty().ifBlank {
+                    AgentWorkspaceScope.id(invocation.context.conversationId, invocation.context.sessionId)
+                }
+                val requestedTimeout = invocation.input.long("timeout_ms", 5L * 60_000L)
+                val timeout = minOf(requestedTimeout, invocation.remainingTimeMillis).coerceAtLeast(100L)
+                val result = transcoder.transcode(
+                    AgentMediaTranscodeRequest(
+                        contentUri = invocation.input.string("content_uri", ""),
+                        sourcePath = invocation.input.string("source_path", ""),
+                        destinationPath = invocation.input.string("destination_path", ""),
+                        targetFormat = targetFormat,
+                        preset = preset,
+                        startMillis = invocation.input.long("start_ms", 0L),
+                        durationMillis = invocation.input.long("duration_ms", 0L),
+                        maxWidth = invocation.input.long("max_width", 0L).toInt(),
+                        maxHeight = invocation.input.long("max_height", 0L).toInt(),
+                        audioBitrateKbps = invocation.input.long("audio_bitrate_kbps", 0L).toInt(),
+                        timeoutMillis = timeout,
+                        workspaceId = workspaceId,
+                        invocationId = invocation.context.invocationId,
+                        cancellationToken = invocation.cancellationToken,
+                        checkpoint = invocation::checkpoint,
+                        progressListener = { progress ->
+                            invocation.reportProgress(
+                                stage = progress.stage,
+                                message = progress.message,
+                                percent = progress.percent,
+                                sequence = progress.sequence,
+                                timestampEpochMillis = progress.timestampMillis
+                            )
+                        }
+                    )
+                )
+                AgentNativeToolExecutionResult.success(
+                    output = linkedMapOf(
+                        "source_path" to result.sourcePath,
+                        "destination_path" to result.destinationPath,
+                        "target_format" to result.targetFormat.wireValue,
+                        "mime_type" to result.targetFormat.mimeType,
+                        "size_bytes" to result.sizeBytes,
+                        "sha256" to result.sha256,
+                        "execution_duration_ms" to result.executionDurationMillis,
+                        "artifacts" to result.artifacts,
+                        "execution_receipt" to result.executionReceipt,
+                        "network_enabled" to false,
+                        "completed_at_epoch_ms" to System.currentTimeMillis()
+                    ),
+                    message = "Media converted in the on-device FFmpeg runtime",
+                    metadata = mapOf("media_implementation" to transcoder.implementationId)
+                )
+            }
         },
-        executorId = "signalasi.unavailable_phone_runtime",
+        validator = AgentNativeToolValidator(::validateMediaTranscodeInput),
+        executorId = MEDIA_TRANSCODE_EXECUTOR_ID,
         provenanceMetadata = mapOf(
-            "implementation" to "none",
+            "implementation" to transcoder.implementationId,
             "platform" to "android_phone",
-            "status" to "unavailable"
+            "sandbox" to "linux_guest",
+            "network" to "disabled",
+            "argument_policy" to "typed_presets_only"
         ),
-        availabilityProvider = AgentNativeToolAvailabilityProvider { FFMPEG_UNAVAILABLE }
+        availabilityProvider = AgentNativeToolAvailabilityProvider { transcoder.availability }
     )
 
     private fun webDescriptor(
@@ -1872,6 +1932,115 @@ object AgentWebMediaNativeTools {
         ),
         required = setOf("launched", "action", "handler_package", "completed", "handed_off_at_epoch_ms", "source")
     )
+
+    private fun mediaTranscodeInputSchema() = objectSchema(
+        properties = mapOf(
+            "content_uri" to contentUriSchema(),
+            "source_path" to AgentNativeJsonSchema.string(minLength = 1, maxLength = 1_024),
+            "destination_path" to AgentNativeJsonSchema.string(minLength = 1, maxLength = 1_024),
+            "target_format" to AgentNativeJsonSchema.string(
+                enumValues = AgentMediaTargetFormat.entries.map { it.wireValue }
+            ),
+            "preset" to AgentNativeJsonSchema.string(
+                enumValues = AgentMediaTranscodePreset.entries.map { it.wireValue }
+            ),
+            "start_ms" to AgentNativeJsonSchema.integer(0, 6L * 60L * 60L * 1_000L),
+            "duration_ms" to AgentNativeJsonSchema.integer(0, 6L * 60L * 60L * 1_000L),
+            "max_width" to AgentNativeJsonSchema.integer(16, 8_192),
+            "max_height" to AgentNativeJsonSchema.integer(16, 8_192),
+            "audio_bitrate_kbps" to AgentNativeJsonSchema.integer(32, 512),
+            "timeout_ms" to AgentNativeJsonSchema.integer(100, MAX_TRANSCODE_TIMEOUT_MILLIS)
+        ),
+        required = setOf("target_format")
+    )
+
+    private fun mediaTranscodeOutputSchema() = objectSchema(
+        properties = mapOf(
+            "source_path" to AgentNativeJsonSchema.string(minLength = 1, maxLength = 1_024),
+            "destination_path" to AgentNativeJsonSchema.string(minLength = 1, maxLength = 1_024),
+            "target_format" to AgentNativeJsonSchema.string(
+                enumValues = AgentMediaTargetFormat.entries.map { it.wireValue }
+            ),
+            "mime_type" to AgentNativeJsonSchema.string(minLength = 1, maxLength = 255),
+            "size_bytes" to AgentNativeJsonSchema.integer(0, 256L * 1024L * 1024L),
+            "sha256" to sha256Schema(),
+            "execution_duration_ms" to AgentNativeJsonSchema.integer(0, MAX_TRANSCODE_TIMEOUT_MILLIS),
+            "artifacts" to AgentNativeJsonSchema.array(
+                objectSchema(
+                    properties = mapOf(
+                        "relative_path" to AgentNativeJsonSchema.string(minLength = 1, maxLength = 1_024),
+                        "size_bytes" to AgentNativeJsonSchema.integer(0, 256L * 1024L * 1024L),
+                        "sha256" to sha256Schema(),
+                        "host_path" to AgentNativeJsonSchema.string(maxLength = 4_096),
+                        "artifact_kind" to AgentNativeJsonSchema.string(maxLength = 64)
+                    ),
+                    required = setOf("relative_path", "size_bytes", "sha256")
+                ),
+                maxItems = 1
+            ),
+            "execution_receipt" to AgentNativeJsonSchema.objectSchema(additionalProperties = true),
+            "network_enabled" to AgentNativeJsonSchema.boolean(),
+            "completed_at_epoch_ms" to AgentNativeJsonSchema.integer(0)
+        ),
+        required = setOf(
+            "source_path",
+            "destination_path",
+            "target_format",
+            "mime_type",
+            "size_bytes",
+            "sha256",
+            "execution_duration_ms",
+            "artifacts",
+            "execution_receipt",
+            "network_enabled",
+            "completed_at_epoch_ms"
+        )
+    )
+
+    private fun validateMediaTranscodeInput(
+        schema: AgentNativeJsonSchema,
+        value: Any?
+    ): AgentNativeValidationResult {
+        val base = AgentNativeJsonSchemaValidator.validate(schema, value)
+        if (!base.isValid) return base
+        val input = value as? Map<*, *> ?: return AgentNativeValidationResult.invalid(
+            "$", "type_mismatch", "Media conversion input must be an object"
+        )
+        val issues = mutableListOf<AgentNativeValidationIssue>()
+        val contentUri = input["content_uri"] as? String
+        val sourcePath = input["source_path"] as? String
+        if (contentUri.isNullOrBlank() == sourcePath.isNullOrBlank()) {
+            issues += AgentNativeValidationIssue(
+                "$",
+                "exclusive_source_required",
+                "Provide exactly one of content_uri or source_path"
+            )
+        }
+        sourcePath?.takeIf(String::isNotBlank)?.let { path ->
+            runCatching { AgentMediaWorkspacePaths.normalizeRelative(path, "source_path") }
+                .exceptionOrNull()
+                ?.let { error ->
+                    issues += AgentNativeValidationIssue("$.source_path", "unsafe_path", error.message.orEmpty())
+                }
+        }
+        val destination = input["destination_path"] as? String
+        destination?.takeIf(String::isNotBlank)?.let { path ->
+            runCatching { AgentMediaWorkspacePaths.normalizeRelative(path, "destination_path") }
+                .exceptionOrNull()
+                ?.let { error ->
+                    issues += AgentNativeValidationIssue("$.destination_path", "unsafe_path", error.message.orEmpty())
+                }
+            val target = AgentMediaTargetFormat.fromWireValue(input["target_format"]?.toString().orEmpty())
+            if (target != null && !path.lowercase(Locale.ROOT).endsWith(".${target.extension}")) {
+                issues += AgentNativeValidationIssue(
+                    "$.destination_path",
+                    "extension_mismatch",
+                    "Destination extension must match ${target.wireValue}"
+                )
+            }
+        }
+        return AgentNativeValidationResult(issues)
+    }
 
     private fun contentSourceSchema(includeKind: Boolean = false): AgentNativeJsonSchema {
         val properties = linkedMapOf("content_uri" to contentUriSchema())

@@ -22,8 +22,8 @@ fun AgentAction.outputSourceIds(): List<String> = parameters[INTERNAL_OUTPUT_SOU
 fun AgentAction.remapToolGraphIds(newId: String, idMap: Map<String, String>): AgentAction = copy(
     id = newId,
     parameters = parameters + mapOf(
-        INTERNAL_DEPENDS_ON to dependencyIds().mapNotNull(idMap::get).joinToString(","),
-        INTERNAL_OUTPUT_SOURCES to outputSourceIds().mapNotNull(idMap::get).joinToString(",")
+        INTERNAL_DEPENDS_ON to dependencyIds().mapNotNull(idMap::get).distinct().joinToString(","),
+        INTERNAL_OUTPUT_SOURCES to outputSourceIds().mapNotNull(idMap::get).distinct().joinToString(",")
     )
 )
 

@@ -11,6 +11,21 @@ import org.junit.Test
 
 class AgentNativeToolRegistryTest {
     @Test
+    fun canonicalDigestMatchesDesktopConfirmationContract() {
+        val value = mapOf(
+            "workspace_id" to "abc",
+            "path" to "a b.txt",
+            "recursive" to false,
+            "max_entries" to 10
+        )
+
+        assertEquals(
+            "e68f4ceb5babcb632bb3dfa6422c5382a62b406df06c5bc060be8f49be395171",
+            AgentNativeJsonCodec.sha256(value)
+        )
+    }
+
+    @Test
     fun protectsStableIdsAndSupportsLookup() {
         val first = definition(descriptor(id = "phone.test.echo"))
         val registry = AgentNativeToolRegistry().register(first)
@@ -19,6 +34,27 @@ class AgentNativeToolRegistryTest {
         assertThrows(IllegalArgumentException::class.java) {
             registry.register(definition(descriptor(id = "phone.test.echo", version = "2.0.0")))
         }
+    }
+
+    @Test
+    fun listsStableIdsWithoutRunningAvailabilityChecks() {
+        val availabilityChecks = AtomicInteger()
+        val descriptor = descriptor(id = "phone.test.fast-id")
+        val registry = AgentNativeToolRegistry().register(
+            AgentNativeToolDefinition(
+                descriptor = descriptor,
+                executor = AgentNativeToolExecutor { AgentNativeToolExecutionResult.success() },
+                availabilityProvider = AgentNativeToolAvailabilityProvider {
+                    availabilityChecks.incrementAndGet()
+                    AgentNativeToolAvailability(AgentNativeToolAvailabilityStatus.AVAILABLE)
+                }
+            )
+        )
+
+        assertEquals(setOf("phone.test.fast-id"), registry.ids())
+        assertEquals(0, availabilityChecks.get())
+        assertEquals(1, registry.descriptors().size)
+        assertEquals(1, availabilityChecks.get())
     }
 
     @Test
