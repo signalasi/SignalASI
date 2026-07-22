@@ -88,6 +88,28 @@ class AgentTaskLivenessPolicyTest {
         assertEquals("absolute_deadline_exceeded", decision.reason)
     }
 
+    @Test
+    fun completedReplySuppressesLateWatchdogPresentation() {
+        val entries = listOf(
+            transcript(AgentTranscriptRole.USER, "", "turn"),
+            transcript(AgentTranscriptRole.PROCESS, "task-watchdog:turn", "turn"),
+            transcript(AgentTranscriptRole.ASSISTANT, "result:plan:action:hash", "turn")
+        )
+
+        assertTrue(AgentTaskTerminalReplyPolicy.hasTerminalReply(entries, "turn"))
+        assertFalse(AgentTaskTerminalReplyPolicy.hasTerminalReply(entries, "other-turn"))
+    }
+
+    @Test
+    fun approvalAndTimeoutMessagesAreNotTerminalReplies() {
+        val entries = listOf(
+            transcript(AgentTranscriptRole.ASSISTANT, "approval:plan:action", "turn"),
+            transcript(AgentTranscriptRole.ASSISTANT, "task-watchdog-timeout:turn", "turn")
+        )
+
+        assertFalse(AgentTaskTerminalReplyPolicy.hasTerminalReply(entries, "turn"))
+    }
+
     private fun workspace(
         status: AgentWorkspaceStatus,
         events: List<AgentWorkspaceEvent> = emptyList()
@@ -108,4 +130,16 @@ class AgentTaskLivenessPolicyTest {
         kind = kind,
         timestampMillis = timestamp
     )
+
+    private fun transcript(role: AgentTranscriptRole, dedupeKey: String, turnId: String) =
+        AgentTranscriptEntry(
+            id = "$role-$dedupeKey",
+            role = role,
+            text = "message",
+            timestampMillis = 1_000L,
+            dedupeKey = dedupeKey,
+            conversationId = "conversation",
+            turnId = turnId,
+            taskId = turnId
+        )
 }

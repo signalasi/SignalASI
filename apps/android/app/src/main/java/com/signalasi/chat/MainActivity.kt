@@ -1006,6 +1006,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             .put("success", response.success)
                             .toString()
                     )
+                    persistAgentWorkspaceSnapshot(turnId, state)
                     AgentConnectorResponseStore.remove(this@MainActivity, response)
                     activeAgentTasks.remove(response.sourceMessageId)
                     runOnUiThread {
@@ -1063,6 +1064,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 success = response.success,
                 richOutputJson = response.richOutputJson
             ) ?: runtime.snapshot()
+            val turnId = agentRuntimeTurnIds[runtime].orEmpty().ifBlank { response.turnId }
+            if (turnId.isNotBlank()) persistAgentWorkspaceSnapshot(turnId, state)
             AgentConnectorResponseStore.remove(this, response)
             activeAgentTasks.remove(response.sourceMessageId)
             runOnUiThread {
@@ -1071,7 +1074,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     runtime,
                     state,
                     conversationId,
-                    agentRuntimeTurnIds[runtime].orEmpty(),
+                    turnId,
                     responseKey
                 )
             }
@@ -1091,6 +1094,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             conversationId, response.inputTokens, response.outputTokens, response.costMicros
         )
         if (turnId.isNotBlank()) finishStructuredAgentHandoff(turnId, response)
+        if (turnId.isNotBlank() && state.phase.isTerminalAgentPhase()) {
+            clearAgentTaskWatchdogTranscript(conversationId, turnId)
+        }
         renderAgentState(state, conversationId, turnId)
         if (turnId.isNotBlank()) recordAgentRunFromState(turnId, state)
         if (state.phase == AgentPhase.COMPLETED || state.phase == AgentPhase.FAILED ||
@@ -1105,6 +1111,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         ) {
             presentVoiceAgentState(state)
         }
+    }
+
+    private fun AgentPhase.isTerminalAgentPhase(): Boolean = this in setOf(
+        AgentPhase.COMPLETED,
+        AgentPhase.FAILED,
+        AgentPhase.CANCELLED,
+        AgentPhase.BLOCKED
+    )
+
+    private fun clearAgentTaskWatchdogTranscript(conversationId: String, turnId: String) {
+        agentTranscriptStore.deleteByDedupeKey(conversationId, "task-watchdog:$turnId")
+        agentTranscriptStore.deleteByDedupeKey(conversationId, "task-watchdog-timeout:$turnId")
     }
 
     private fun consumePendingAgentConnectorResponses() {
@@ -1658,6 +1676,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ?: workspace.conversationId
         if (conversationId.isBlank()) return
         val dedupeKey = "task-watchdog:${workspace.taskId}"
+        if (AgentTaskTerminalReplyPolicy.hasTerminalReply(
+                agentTranscriptStore.list(conversationId),
+                workspace.taskId
+            )
+        ) {
+            clearAgentTaskWatchdogTranscript(conversationId, workspace.taskId)
+            if (conversationId == agentTranscriptStore.activeConversation().id) {
+                renderAgentTranscript(agentTranscriptStore.list(conversationId))
+            }
+            return
+        }
         when (signal.kind) {
             AgentTaskLivenessSignalKind.STALLED -> {
                 agentTranscriptStore.upsert(
