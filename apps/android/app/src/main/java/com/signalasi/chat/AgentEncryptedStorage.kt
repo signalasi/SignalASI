@@ -124,9 +124,11 @@ object AgentStorageCipher {
     private const val IV_BYTES = 12
     private const val TAG_BITS = 128
 
+    @Volatile
+    private var cachedKey: SecretKey? = null
+
     fun isEncrypted(value: String): Boolean = value.startsWith(PREFIX)
 
-    @Synchronized
     fun encrypt(plaintext: String, associatedData: ByteArray): String {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
@@ -142,7 +144,6 @@ object AgentStorageCipher {
         }
     }
 
-    @Synchronized
     fun decrypt(value: String, associatedData: ByteArray): String? {
         if (!isEncrypted(value)) return value
         return runCatching {
@@ -160,15 +161,18 @@ object AgentStorageCipher {
 
     @Synchronized
     fun deleteMasterKey() {
+        cachedKey = null
         val keyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
         if (keyStore.containsAlias(KEY_ALIAS)) keyStore.deleteEntry(KEY_ALIAS)
     }
 
+    @Synchronized
     private fun getOrCreateKey(): SecretKey {
+        cachedKey?.let { return it }
         val keyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
         runCatching { keyStore.getKey(KEY_ALIAS, null) as? SecretKey }
             .getOrNull()
-            ?.let { return it }
+            ?.let { return it.also { key -> cachedKey = key } }
         if (keyStore.containsAlias(KEY_ALIAS)) keyStore.deleteEntry(KEY_ALIAS)
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE)
         generator.init(
@@ -182,7 +186,7 @@ object AgentStorageCipher {
                 .setRandomizedEncryptionRequired(true)
                 .build()
         )
-        return generator.generateKey()
+        return generator.generateKey().also { cachedKey = it }
     }
 
     private fun ByteArray.toBase64(): String = Base64.encodeToString(this, Base64.NO_WRAP)

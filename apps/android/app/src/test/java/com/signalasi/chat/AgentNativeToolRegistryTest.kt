@@ -37,6 +37,27 @@ class AgentNativeToolRegistryTest {
     }
 
     @Test
+    fun listsStableIdsWithoutRunningAvailabilityChecks() {
+        val availabilityChecks = AtomicInteger()
+        val descriptor = descriptor(id = "phone.test.fast-id")
+        val registry = AgentNativeToolRegistry().register(
+            AgentNativeToolDefinition(
+                descriptor = descriptor,
+                executor = AgentNativeToolExecutor { AgentNativeToolExecutionResult.success() },
+                availabilityProvider = AgentNativeToolAvailabilityProvider {
+                    availabilityChecks.incrementAndGet()
+                    AgentNativeToolAvailability(AgentNativeToolAvailabilityStatus.AVAILABLE)
+                }
+            )
+        )
+
+        assertEquals(setOf("phone.test.fast-id"), registry.ids())
+        assertEquals(0, availabilityChecks.get())
+        assertEquals(1, registry.descriptors().size)
+        assertEquals(1, availabilityChecks.get())
+    }
+
+    @Test
     fun serializesCompleteDeterministicCatalog() {
         val descriptor = descriptor(
             id = "phone.contacts.lookup",

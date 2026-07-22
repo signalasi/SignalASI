@@ -137,7 +137,7 @@ class GlobalAutonomousToolHost(
             skillRuntimeProvider?.invoke(availableToolIds) ?: AgentSkillRuntime(
                 store = skillStore,
                 availableNativeToolIds = availableToolIds
-            ).also(AgentBuiltInSkills::installAvailable)
+            ).also { AgentBuiltInSkills.synchronizeIfNeeded(appContext, it) }
         }
     }
 

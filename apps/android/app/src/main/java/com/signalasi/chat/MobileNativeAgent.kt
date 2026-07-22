@@ -267,6 +267,8 @@ class MobileNativeAgent(
 
     fun nativeToolCatalog(): List<AgentNativeToolDescriptor> = nativeToolRegistry.descriptors()
 
+    fun nativeToolIds(): Set<String> = AgentPhoneNativeToolCatalog.defaultToolIds
+
     fun executeDirectAction(
         action: AgentAction,
         conversationId: String = "",

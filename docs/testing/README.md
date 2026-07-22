@@ -43,6 +43,8 @@ Run `npm run test:android:team-process-death` after installing the debug APK and
 
 Run `npm run test:android:team-paired-process-death` with SignalASI paired to a running Desktop whose Codex Agent is ready. The acceptance test sends observer and primary assignments through the encrypted production connector, waits until the delayed primary assignment is dispatched, force-stops Android, and proves that the naturally late Desktop response completes the durable team exactly once after process recreation. Managed team prompts and internal replies must not enter ordinary contact chat history.
 
+Run `npm run test:android:agent-lifecycle-ui` after installing the debug APK and Android test APK. The real-device test renders queued, running, succeeded, partially degraded, failed, cancelled, and interrupted supervised teams from the production encrypted store at compact and large phone viewport profiles. It verifies that the Task Center header remains fixed while content scrolls, opens member details, captures visual evidence under `build/reports/android-agent-lifecycle-ui`, restores the original display override, removes only its own fixture Runs, and relaunches SignalASI.
+
 Run `npm run audit:release` to print the release gate checklist and the latest public GitHub Actions status. Run `npm run audit:release:strict` after the local gates and GitHub Actions should be green; strict mode fails if the working tree is dirty or the required workflows are not successful for the current commit.
 
 ## Product Coverage

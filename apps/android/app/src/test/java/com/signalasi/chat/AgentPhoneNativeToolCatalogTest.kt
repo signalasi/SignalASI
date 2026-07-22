@@ -79,6 +79,23 @@ class AgentPhoneNativeToolCatalogTest {
     }
 
     @Test
+    fun exposesCompleteDefaultIdsWithoutBuildingAndroidExecutors() {
+        val expected = linkedSetOf<String>().apply {
+            addAll(AgentPhoneNativeToolCatalog.toolIds)
+            addAll(AgentWebMediaNativeTools.toolIds)
+            addAll(AgentHardwareNativeTools.toolIds)
+            addAll(AgentVisibleCaptureNativeTools.toolIds)
+            addAll(AgentNotificationNativeTools.toolIds)
+            addAll(AgentAndroidSystemNativeTools.toolIds)
+            addAll(AgentMcpNativeTools.toolIds)
+            addAll(AgentOnDeviceRuntimeTools.toolIds)
+            addAll(AgentDesktopRemoteNativeTools.toolIds)
+        }
+
+        assertEquals(expected, AgentPhoneNativeToolCatalog.defaultToolIds)
+    }
+
+    @Test
     fun everyDefinitionCarriesCompletePolicyAndProvenance() {
         val registry = registry()
 

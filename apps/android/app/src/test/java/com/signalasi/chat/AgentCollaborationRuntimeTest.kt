@@ -188,6 +188,30 @@ class AgentCollaborationRuntimeTest {
     }
 
     @Test
+    fun oneTeamCanBeMarkedInterruptedWithoutMutatingAnotherActiveTeam() = runBlocking {
+        val store = InMemoryAgentTeamExecutionStore()
+        val first = request().copy(runId = "first-run")
+        val second = request().copy(runId = "second-run")
+        store.create(teamDefinition(), first)
+        store.create(teamDefinition().copy(teamId = "second-team"), second)
+        listOf(first, second).forEach { request ->
+            store.append(AgentSubagentEvent(
+                sequence = 1L,
+                supervisorId = request.runId,
+                kind = AgentSubagentEventKinds.SUPERVISOR_STARTED,
+                timestampMillis = 1_000L
+            ))
+        }
+
+        val interrupted = store.markInterrupted(first.runId, 2_000L)
+
+        assertEquals(AgentTeamExecutionState.INTERRUPTED, interrupted?.state)
+        assertEquals(AgentTeamExecutionState.RUNNING, store.snapshot(second.runId)?.state)
+        assertEquals(0L, store.snapshot(second.runId)?.interruptedAtMillis)
+        assertNull(store.markInterrupted("missing-run", 2_000L))
+    }
+
+    @Test
     fun lateManagedResponsesCompleteInterruptedTeamExactlyOnce() = runBlocking {
         val store = InMemoryAgentTeamExecutionStore()
         val definition = AgentTeamDefinition(

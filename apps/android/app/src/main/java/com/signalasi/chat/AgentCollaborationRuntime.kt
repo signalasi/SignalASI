@@ -113,6 +113,10 @@ interface AgentTeamExecutionStore : AgentSubagentEventHook {
     fun snapshot(supervisorRunId: String): AgentTeamExecutionSnapshot?
     fun snapshots(): List<AgentTeamExecutionSnapshot>
     fun applyLateResponse(record: AgentManagedResponseRecord): Boolean
+    fun markInterrupted(
+        supervisorRunId: String,
+        nowMillis: Long = System.currentTimeMillis()
+    ): AgentTeamExecutionSnapshot?
     fun markNonTerminalInterrupted(nowMillis: Long = System.currentTimeMillis()): List<AgentTeamExecutionSnapshot>
     fun remove(supervisorRunId: String)
     fun clear()
@@ -167,6 +171,18 @@ class InMemoryAgentTeamExecutionStore : AgentTeamExecutionStore {
         if (!mutation.accepted) return false
         records[record.supervisorRunId] = mutation.record
         return true
+    }
+
+    @Synchronized
+    override fun markInterrupted(supervisorRunId: String, nowMillis: Long): AgentTeamExecutionSnapshot? {
+        val current = records[supervisorRunId] ?: return null
+        if (!current.toSnapshot().state.isTerminal) {
+            records[supervisorRunId] = current.copy(
+                interruptedAtMillis = nowMillis,
+                updatedAtMillis = maxOf(current.updatedAtMillis, nowMillis)
+            )
+        }
+        return records[supervisorRunId]?.toSnapshot()
     }
 
     @Synchronized
@@ -257,6 +273,22 @@ class EncryptedAgentTeamExecutionStore(context: Context) : AgentTeamExecutionSto
             save(records)
         }
         return true
+    }
+
+    @Synchronized
+    override fun markInterrupted(supervisorRunId: String, nowMillis: Long): AgentTeamExecutionSnapshot? {
+        val records = load().toMutableList()
+        val index = records.indexOfFirst { it.request.runId == supervisorRunId }
+        if (index < 0) return null
+        val current = records[index]
+        if (!current.toSnapshot().state.isTerminal) {
+            records[index] = current.copy(
+                interruptedAtMillis = nowMillis,
+                updatedAtMillis = maxOf(current.updatedAtMillis, nowMillis)
+            )
+            save(records)
+        }
+        return records[index].toSnapshot()
     }
 
     @Synchronized

@@ -799,6 +799,9 @@ class AgentNativeToolRegistry(
     @Synchronized
     fun lookup(id: String): AgentNativeToolDefinition? = definitions[id]
 
+    @Synchronized
+    fun ids(): Set<String> = definitions.keys.toSet()
+
     /** Creates an independent registry view without exposing executor implementations to callers. */
     @Synchronized
     fun subset(predicate: (AgentNativeToolDescriptor) -> Boolean): AgentNativeToolRegistry =

@@ -25,6 +25,7 @@ from agent_gateway import (
 from agent_config import load_config, save_config
 from api_response import api_error
 from agent_task_manager import agent_task_manager
+from backend_instance_lock import BackendInstanceLock
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("signalasi")
@@ -85,8 +86,11 @@ def signalasi_pairing_payload(include_agents: bool = False) -> dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     file_server_process = None
-    init_db()
     external_services_enabled = os.environ.get("SIGNALASI_DISABLE_EXTERNAL_SERVICES") != "1"
+    instance_lock = BackendInstanceLock() if external_services_enabled else None
+    if instance_lock is not None:
+        instance_lock.acquire()
+    init_db()
     if external_services_enabled:
         # Start the local Signal Protocol sidecar.
         try:
@@ -146,6 +150,8 @@ async def lifespan(app: FastAPI):
                 stop_signal_sidecar()
             except Exception as exc:
                 log.warning("Signal sidecar shutdown failed: %s", exc)
+        if instance_lock is not None:
+            instance_lock.release()
 
 app = FastAPI(title="SignalASI Link", lifespan=lifespan)
 app.add_middleware(

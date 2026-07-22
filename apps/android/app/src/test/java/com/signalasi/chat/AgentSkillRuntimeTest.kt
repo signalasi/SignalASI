@@ -39,6 +39,30 @@ class AgentSkillRuntimeTest {
     }
 
     @Test
+    fun installsAvailableSkillsWithOneStoreReadAndOneAtomicWrite() {
+        val store = CountingAgentSkillStore()
+        val runtime = AgentSkillRuntime(store, setOf("phone.echo")) { 100L }
+        val manifests = listOf(
+            manifest(version = "1.0.0"),
+            manifest(version = "2.0.0", title = "Echo v2")
+        )
+
+        assertEquals(2, runtime.installAvailable(manifests).size)
+        assertEquals(1, store.listCalls)
+        assertEquals(1, store.replaceAllCalls)
+        assertEquals(2, store.values.size)
+
+        assertEquals(2, runtime.installAvailable(manifests).size)
+        assertEquals(2, store.listCalls)
+        assertEquals(1, store.replaceAllCalls)
+
+        val conflicting = manifests.first().copy(instructions = "Changed without a version bump")
+        assertTrue(runtime.installAvailable(listOf(conflicting)).isEmpty())
+        assertEquals(3, store.listCalls)
+        assertEquals(1, store.replaceAllCalls)
+    }
+
+    @Test
     fun expandsTypedTemplatesAndTopologicallyOrdersDagSteps() {
         val runtime = AgentSkillRuntime(
             availableNativeToolIds = setOf("phone.prepare", "phone.send")
@@ -260,6 +284,37 @@ class AgentSkillRuntimeTest {
         parameters = parameters,
         steps = steps
     )
+
+    private class CountingAgentSkillStore : AgentSkillStore {
+        var values: List<AgentSkillInstallation> = emptyList()
+        var listCalls: Int = 0
+        var replaceAllCalls: Int = 0
+
+        override fun list(): List<AgentSkillInstallation> {
+            listCalls += 1
+            return values
+        }
+
+        override fun upsert(installation: AgentSkillInstallation) {
+            values = values.filterNot { it.id == installation.id && it.version == installation.version } + installation
+        }
+
+        override fun replaceAll(installations: List<AgentSkillInstallation>) {
+            replaceAllCalls += 1
+            values = installations.toList()
+        }
+
+        override fun delete(id: String, version: String): Boolean {
+            val remaining = values.filterNot { it.id == id && it.version == version }
+            if (remaining.size == values.size) return false
+            values = remaining
+            return true
+        }
+
+        override fun clear() {
+            values = emptyList()
+        }
+    }
 
     private fun codes(result: AgentSkillValidationResult): Set<String> = result.issues.mapTo(mutableSetOf()) { it.code }
 }
