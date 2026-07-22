@@ -31,7 +31,7 @@ Team definitions, requests, child lifecycle events, outputs, errors, provenance,
 
 Each dispatched managed connector Run also writes an encrypted correlation record before the response is released. A response that arrives after process recreation is attached to its original child and supervisor, advances the durable team snapshot idempotently, and never falls through into ordinary chat. Applied correlation records remain as bounded, seven-day deduplication tombstones. Interrupted work is not automatically replayed; only independently returned evidence is reconciled.
 
-The process-wide team controller is initialized with the global Agent runtime rather than on first UI access. Background connector responses therefore trigger reconciliation even when no Activity has opened the team page. A managed response consumed by the team returns immediately from the background message service, so observer evidence and primary intermediate replies cannot be appended to ordinary chat history.
+The process-wide team controller is initialized with the global Agent runtime rather than on first UI access. Background connector responses therefore trigger reconciliation even when no Activity has opened the team page. Managed team assignments use stable host-owned source identities without creating user chat rows. A managed response consumed by the team returns immediately from the background message service, so observer evidence, primary assignments, and primary intermediate replies cannot be appended to ordinary chat history.
 
 Terminal team delivery has a separate encrypted deduplication ledger. The final response is persisted before its supervisor identity is marked delivered, so a crash cannot silently lose the result. Reopening the same persisted Action does not start a second team when its stable supervisor snapshot already exists.
 
@@ -62,5 +62,6 @@ Automated coverage proves:
 - duplicate live and late response suppression;
 - Android instrumentation coverage for encrypted store recreation and ordinary-chat isolation.
 - two-process Android device coverage that force-stops the app between team creation and background response delivery, then proves recovery, single final delivery, duplicate suppression, and zero raw child-message leakage.
+- real paired-Desktop coverage that dispatches through the encrypted production connector, force-stops Android after the delayed primary assignment is accepted, and proves the naturally late result completes the original team exactly once after process recreation.
 
-Release still requires a real-device paired-team scenario with forced process death, a naturally late Desktop reply, reconnect, cancellation, and UI inspection.
+The paired process-death and reconnect scenario is automated by `test:android:team-paired-process-death`. Release inspection still covers user cancellation and the expanded Recent Tasks team UI.

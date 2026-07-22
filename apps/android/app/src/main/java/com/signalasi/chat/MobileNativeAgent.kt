@@ -8116,6 +8116,9 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
 
     private fun dispatchContactTask(action: AgentAction, contactId: String, prompt: String): AgentActionResult {
         val deliveryMode = deliveryMode(action)
+        val managedTeamAction = action.parameters[MANAGED_AGENT_TEAM_ACTION_PARAMETER]
+            .orEmpty()
+            .toBoolean()
         val observationTargetId = action.parameters["connector_id"].orEmpty().ifBlank { contactId }
         val conversationId = action.parameters[INTERNAL_CONVERSATION_ID].orEmpty()
         if (deliveryMode == AgentDeliveryMode.IGNORE) {
@@ -8152,13 +8155,18 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
                 .put("stage", "agent_confirmed")
                 .put("at", System.currentTimeMillis())
                 .put("detail", action.target))
-        val messageId = ChatHistoryStore.appendOutgoing(
-            context = context,
-            contactId = contactId,
-            content = historyPrompt,
-            deliveryStatus = context.getString(R.string.delivery_status_sending),
-            deliveryTrace = trace
-        )
+        val messageId = if (managedTeamAction) {
+            val stableIdentity = action.parameters["idempotency_key"].orEmpty().ifBlank { action.id }
+            AgentTeamDispatchIds.sourceMessageId("member:$stableIdentity")
+        } else {
+            ChatHistoryStore.appendOutgoing(
+                context = context,
+                contactId = contactId,
+                content = historyPrompt,
+                deliveryStatus = context.getString(R.string.delivery_status_sending),
+                deliveryTrace = trace
+            )
+        }
         val observed = observationContextStore.peek(observationTargetId, conversationId)
         val published = SignalASIMqttClient.publishUserMessage(
             content = promptWithConversationContext(action, promptWithObservedContext(prompt, observed)),
@@ -8170,14 +8178,16 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             turnId = action.parameters[INTERNAL_TURN_ID].orEmpty()
         )
         if (published) observationContextStore.acknowledge(observed.mapTo(linkedSetOf()) { it.id })
-        ChatHistoryStore.markOutgoingDelivery(
-            context = context,
-            contactId = contactId,
-            messageId = messageId,
-            stage = if (published) "mqtt_published" else "publish_failed",
-            detail = topic,
-            status = context.getString(if (published) R.string.delivery_status_sent else R.string.delivery_status_failed)
-        )
+        if (!managedTeamAction) {
+            ChatHistoryStore.markOutgoingDelivery(
+                context = context,
+                contactId = contactId,
+                messageId = messageId,
+                stage = if (published) "mqtt_published" else "publish_failed",
+                detail = topic,
+                status = context.getString(if (published) R.string.delivery_status_sent else R.string.delivery_status_failed)
+            )
+        }
         return AgentActionResult(
             actionId = action.id,
             success = published,

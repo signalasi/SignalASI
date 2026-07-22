@@ -18,6 +18,8 @@ import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 
+internal const val MANAGED_AGENT_TEAM_ACTION_PARAMETER = "_signalasi_managed_team"
+
 enum class AgentTeamExecutionState {
     QUEUED,
     RUNNING,
@@ -596,7 +598,7 @@ class ActionExecutorAgentTeamMemberWorker internal constructor(
                 "_signalasi_conversation_id" to context.request.conversationId,
                 "_signalasi_turn_id" to context.request.messageId,
                 "idempotency_key" to context.request.idempotencyKey,
-                MANAGED_TEAM_ACTION_KEY to "true"
+                MANAGED_AGENT_TEAM_ACTION_PARAMETER to "true"
             ),
             requiresConfirmation = false
         )
@@ -634,7 +636,6 @@ class ActionExecutorAgentTeamMemberWorker internal constructor(
     private companion object {
         const val DEFAULT_TIMEOUT_MILLIS = 3L * 60L * 1_000L
         const val MANAGED_TEAM_CONTEXT_KEY = "managed_team"
-        const val MANAGED_TEAM_ACTION_KEY = "_signalasi_managed_team"
         const val MAX_TEAM_PROMPT_CHARACTERS = 12_000
     }
 }
