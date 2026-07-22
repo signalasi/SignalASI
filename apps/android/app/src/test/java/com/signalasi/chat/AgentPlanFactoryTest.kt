@@ -1,6 +1,8 @@
 package com.signalasi.chat
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AgentPlanFactoryTest {
@@ -34,6 +36,28 @@ class AgentPlanFactoryTest {
         assertEquals(listOf("codex", "hermes"), plan.actions.map { it.id })
     }
 
+    @Test
+    fun emptyPlanFallsBackToAvailableReasoningConnector() {
+        val plan = AgentPlanFactory.actions(request(), emptyList())
+
+        assertEquals(1, plan.actions.size)
+        assertEquals(AgentActionKind.CALL_CONNECTOR, plan.actions.single().kind)
+        assertEquals("desktop:codex", plan.actions.single().parameters["connector_id"])
+        assertFalse(plan.actions.any { it.target == "local-agent-runtime" })
+        assertTrue(plan.validation.valid)
+    }
+
+    @Test
+    fun emptyPlanWithoutProviderFailsExplicitlyInsteadOfUsingLocalRuntime() {
+        val plan = AgentPlanFactory.actions(request(targets = emptyList()), emptyList())
+
+        assertEquals(1, plan.actions.size)
+        assertEquals(AgentActionKind.CALL_CONNECTOR, plan.actions.single().kind)
+        assertEquals("reasoning-provider-unavailable", plan.actions.single().parameters["connector_id"])
+        assertFalse(plan.actions.any { it.target == "local-agent-runtime" })
+        assertTrue(plan.validation.valid)
+    }
+
     private fun connectorAction(id: String, connectorId: String) = AgentAction(
         id = id,
         kind = AgentActionKind.CALL_CONNECTOR,
@@ -44,7 +68,7 @@ class AgentPlanFactoryTest {
         parameters = mapOf("connector_id" to connectorId, "prompt" to "Convert the file")
     )
 
-    private fun request(): AgentRequest {
+    private fun request(targets: List<AgentCallableTarget>? = null): AgentRequest {
         val screen = ScreenContext(foregroundApp = "SignalASI", pageTitle = "Agent")
         val target = AgentCallableTarget(
             id = "desktop:codex",
@@ -53,10 +77,11 @@ class AgentPlanFactoryTest {
             status = AgentConnectorStatus.AVAILABLE,
             capabilities = emptyList()
         )
+        val callableTargets = targets ?: listOf(target.copy(capabilities = listOf(AgentCapability.CHAT)))
         return AgentRequest(
             goal = "Convert the file",
             screen = screen,
-            targets = listOf(target),
+            targets = callableTargets,
             memories = emptyList(),
             runtimeContext = AgentRuntimeContextBuilder.build(
                 sessionId = "test",
@@ -65,7 +90,7 @@ class AgentPlanFactoryTest {
                 permissionMode = PermissionMode.AUTO_LOW_RISK,
                 highRiskGuard = true,
                 memoryCapture = false,
-                callableTargets = listOf(target),
+                callableTargets = callableTargets,
                 memories = emptyList(),
                 nativeTools = emptyList()
             )

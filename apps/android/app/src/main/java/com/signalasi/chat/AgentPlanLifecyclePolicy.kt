@@ -40,6 +40,17 @@ data class AgentSessionLifecycleNormalization(
 
 object AgentPlanLifecyclePolicy {
     fun normalize(plan: AgentPlan): AgentPlanLifecycleNormalization {
+        val legacyRuntimeDrafts = plan.actions.takeIf { actions ->
+            actions.isNotEmpty() && actions.all { action ->
+                action.kind == AgentActionKind.DRAFT_PLAN &&
+                    action.target.equals(LOCAL_AGENT_RUNTIME_TARGET, ignoreCase = true)
+            }
+        }.orEmpty()
+        if (legacyRuntimeDrafts.isNotEmpty()) {
+            val recovered = recoverCompletedHistory(plan, legacyRuntimeDrafts)
+            if (recovered.changed) return recovered
+            return retireLegacyRuntimeFallback(plan, legacyRuntimeDrafts)
+        }
         val trailingDrafts = plan.actions.asReversed()
             .takeWhile { action ->
                 action.kind == AgentActionKind.DRAFT_PLAN &&
@@ -87,6 +98,37 @@ object AgentPlanLifecyclePolicy {
             expectedResult = recoveredAction.result,
             verificationResults = plan.verificationResults.filterNot { it.actionId in removedIds },
             checkpoints = plan.checkpoints.filterNot { it.actionId in removedIds }
+        ).let { candidate ->
+            candidate.copy(validation = AgentPlanValidator.validate(candidate))
+        }
+        return AgentPlanLifecycleNormalization(normalized, drafts)
+    }
+
+    private fun retireLegacyRuntimeFallback(
+        plan: AgentPlan,
+        drafts: List<AgentAction>
+    ): AgentPlanLifecycleNormalization {
+        val retired = drafts.last().copy(
+            target = TASK_COMPLETE_TARGET,
+            status = AgentActionStatus.FAILED,
+            description = "Task routing failed",
+            requiresConfirmation = false,
+            result = "No Agent or model accepted this task. Send it again to retry with current resources.",
+            evidence = "retired_legacy_runtime_fallback"
+        )
+        val normalized = plan.copy(
+            actions = listOf(retired),
+            selectedAgentOrModel = "",
+            expectedResult = retired.result,
+            confirmationRequired = false,
+            route = AgentRouteResolver.resolve(retired, emptyList()),
+            routeRationale = "Legacy internal planner fallback retired.",
+            verificationResults = plan.verificationResults.filterNot { result ->
+                drafts.any { it.id == result.actionId }
+            },
+            checkpoints = plan.checkpoints.filterNot { checkpoint ->
+                drafts.any { it.id == checkpoint.actionId }
+            }
         ).let { candidate ->
             candidate.copy(validation = AgentPlanValidator.validate(candidate))
         }

@@ -6893,16 +6893,7 @@ object AgentPlanFactory {
 
     fun actions(request: AgentRequest, actions: List<AgentAction>): AgentPlan {
         val plannedActions = collapseDuplicateConnectorCalls(actions).ifEmpty {
-            listOf(
-                AgentAction(
-                    id = "draft-plan",
-                    kind = AgentActionKind.DRAFT_PLAN,
-                    target = "local-agent-runtime",
-                    risk = AgentRisk.LOW,
-                    status = AgentActionStatus.PENDING_CONFIRMATION,
-                    description = "Create a safe local task plan"
-                )
-            )
+            listOf(emptyPlanFallbackAction(request))
         }
         val routeAction = plannedActions.firstOrNull {
             it.kind == AgentActionKind.CALL_CONNECTOR || it.kind == AgentActionKind.CONTROL_DEVICE
@@ -6931,6 +6922,41 @@ object AgentPlanFactory {
             routeRationale = routeRationaleFor(routeAction, request)
         )
         return plan.copy(validation = AgentPlanValidator.validate(plan))
+    }
+
+    private fun emptyPlanFallbackAction(request: AgentRequest): AgentAction {
+        val target = AgentConnectorRouteSelector.select(request.targets, decision = null)?.target
+        return if (target != null) {
+            AgentAction(
+                id = "fallback-connector-${request.goal.hashCode().toUInt()}",
+                kind = AgentActionKind.CALL_CONNECTOR,
+                target = target.title,
+                risk = AgentRisk.LOW,
+                status = AgentActionStatus.PENDING_CONFIRMATION,
+                description = "Ask ${target.title}",
+                parameters = mapOf(
+                    "connector_id" to target.id,
+                    "prompt" to request.goal,
+                    "planner_fallback" to "empty_action_plan"
+                ),
+                requiresConfirmation = false
+            )
+        } else {
+            AgentAction(
+                id = "connector-unavailable-${request.goal.hashCode().toUInt()}",
+                kind = AgentActionKind.CALL_CONNECTOR,
+                target = "Agent or model",
+                risk = AgentRisk.LOW,
+                status = AgentActionStatus.PENDING_CONFIRMATION,
+                description = "Report that no reasoning provider is configured",
+                parameters = mapOf(
+                    "connector_id" to UNAVAILABLE_REASONING_CONNECTOR_ID,
+                    "prompt" to request.goal,
+                    "planner_fallback" to "empty_action_plan"
+                ),
+                requiresConfirmation = false
+            )
+        }
     }
 
     private fun collapseDuplicateConnectorCalls(actions: List<AgentAction>): List<AgentAction> {
@@ -7197,12 +7223,15 @@ object AgentRouteResolver {
             candidate.id == connectorId || candidate.title == action.target
         }
         val kind = when (action.kind) {
-            AgentActionKind.CALL_CONNECTOR -> when (target?.kind) {
-                AgentConnectorKind.MODEL -> if (target.id == "local-llm") AgentRouteKind.LOCAL_MODEL else AgentRouteKind.CLOUD_MODEL
-                AgentConnectorKind.AGENT -> AgentRouteKind.DESKTOP_AGENT
-                AgentConnectorKind.DEVICE -> AgentRouteKind.DEVICE_CONNECTOR
-                AgentConnectorKind.KNOWLEDGE -> AgentRouteKind.KNOWLEDGE
-                null -> AgentRouteKind.UNKNOWN
+            AgentActionKind.CALL_CONNECTOR -> when {
+                connectorId == UNAVAILABLE_REASONING_CONNECTOR_ID -> AgentRouteKind.LOCAL_SYSTEM
+                else -> when (target?.kind) {
+                    AgentConnectorKind.MODEL -> if (target.id == "local-llm") AgentRouteKind.LOCAL_MODEL else AgentRouteKind.CLOUD_MODEL
+                    AgentConnectorKind.AGENT -> AgentRouteKind.DESKTOP_AGENT
+                    AgentConnectorKind.DEVICE -> AgentRouteKind.DEVICE_CONNECTOR
+                    AgentConnectorKind.KNOWLEDGE -> AgentRouteKind.KNOWLEDGE
+                    null -> AgentRouteKind.UNKNOWN
+                }
             }
             AgentActionKind.CONTROL_DEVICE -> AgentRouteKind.DEVICE_CONNECTOR
             AgentActionKind.CALL_NATIVE_TOOL -> AgentRouteKind.LOCAL_SYSTEM

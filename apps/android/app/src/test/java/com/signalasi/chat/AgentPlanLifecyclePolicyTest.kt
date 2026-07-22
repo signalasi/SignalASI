@@ -59,7 +59,7 @@ class AgentPlanLifecyclePolicyTest {
     }
 
     @Test
-    fun standaloneDraftAndTaskCompleteMarkersRemainValid() {
+    fun standaloneLegacyRuntimeDraftIsRetiredWhileTaskCompleteMarkerRemainsValid() {
         val standalone = plan(
             action("draft-plan", AgentActionKind.DRAFT_PLAN, "local-agent-runtime", AgentActionStatus.COMPLETED)
         )
@@ -68,7 +68,13 @@ class AgentPlanLifecyclePolicyTest {
             action("done", AgentActionKind.DRAFT_PLAN, "task-complete", AgentActionStatus.COMPLETED)
         )
 
-        assertFalse(AgentPlanLifecyclePolicy.normalize(standalone).changed)
+        val normalized = AgentPlanLifecyclePolicy.normalize(standalone)
+
+        assertTrue(normalized.changed)
+        assertEquals("task-complete", normalized.plan.actions.single().target)
+        assertEquals(AgentActionStatus.FAILED, normalized.plan.actions.single().status)
+        assertTrue(normalized.plan.actions.single().result.contains("Send it again"))
+        assertTrue(normalized.plan.validation.valid)
         assertFalse(AgentPlanLifecyclePolicy.normalize(taskComplete).changed)
     }
 
