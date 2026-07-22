@@ -1411,7 +1411,7 @@ class MobileNativeAgent(
                 append(currentScreen.visibleTexts.take(20).joinToString("\n") { "- ${it.take(300)}" })
             }.take(6_000)
         } else ""
-        val draftPlan = planned.copy(
+        val contextualPlan = planned.copy(
             actions = planned.actions.map { action ->
                 val targetIds = setOf(
                     action.parameters["connector_id"].orEmpty(),
@@ -1439,6 +1439,11 @@ class MobileNativeAgent(
                     INTERNAL_LONG_TERM_WRITE_ALLOWED to (!activeConversationContext.privateMode).toString()
                 ))
             }
+        )
+        val draftPlan = AgentTeamPlanCompiler.compile(
+            plan = contextualPlan,
+            targets = targets,
+            enabled = modelPlannerSettings().multiAgentCoordination
         )
         val safetyReview = safetyPolicy.review(draftPlan)
         currentPlan = draftPlan.withSafetyReview(safetyReview)
@@ -7882,6 +7887,12 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
     }
 
     private fun dispatchConnectorTask(action: AgentAction): AgentActionResult {
+        val encodedTeam = action.parameters[AGENT_TEAM_SPEC_PARAMETER].orEmpty()
+        if (encodedTeam.isNotBlank()) {
+            val spec = AgentTeamDispatchSpecCodec.decode(encodedTeam)
+                ?: return AgentActionResult(action.id, false, "Agent team plan is invalid")
+            return dispatchAgentTeam(action, spec)
+        }
         val prompt = if (action.parameters["connector_task_mode"] == PHONE_DEVELOPMENT_CONNECTOR_MODE) {
             action.parameters["prompt"].orEmpty()
         } else if (action.id == "knowledge-answer") {
@@ -7928,6 +7939,91 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             lastFailure = result
         }
         return lastFailure
+    }
+
+    private fun dispatchAgentTeam(
+        action: AgentAction,
+        spec: AgentTeamDispatchSpec
+    ): AgentActionResult {
+        if (action.parameters[AGENT_TEAM_RUN_PARAMETER] != spec.supervisorRunId ||
+            action.parameters[AGENT_TEAM_SOURCE_PARAMETER]?.toLongOrNull() != spec.sourceMessageId ||
+            action.parameters["connector_id"] != spec.definition.primaryAgentId
+        ) {
+            return AgentActionResult(action.id, false, "Agent team identity validation failed")
+        }
+        val registrations = AppStoreAgentConnectorRegistry(context).registrations()
+            .associateBy(AgentRegistration::agentId)
+        val missing = spec.definition.members.map(AgentTeamMember::agentId)
+            .filterNot(registrations::containsKey)
+        if (missing.isNotEmpty()) {
+            return AgentActionResult(
+                action.id,
+                false,
+                "Agent team member is unavailable: ${missing.joinToString(", ").take(240)}"
+            )
+        }
+        val conversationId = action.parameters[INTERNAL_CONVERSATION_ID].orEmpty()
+        val turnId = action.parameters[INTERNAL_TURN_ID].orEmpty().ifBlank { action.id }
+        val runtime = GlobalSuperAgentRuntime.get(context)
+        val existing = runtime.agentTeamSnapshot(spec.supervisorRunId)
+        if (existing == null) {
+            val requestContext = linkedMapOf<String, Any?>(
+                INTERNAL_CONVERSATION_CONTEXT to action.parameters[INTERNAL_CONVERSATION_CONTEXT].orEmpty(),
+                INTERNAL_MEMORY_CONTEXT to action.parameters[INTERNAL_MEMORY_CONTEXT].orEmpty(),
+                INTERNAL_CLOUD_KNOWLEDGE_CONTEXT to action.parameters[INTERNAL_CLOUD_KNOWLEDGE_CONTEXT].orEmpty(),
+                INTERNAL_AGENT_KNOWLEDGE_CONTEXT to action.parameters[INTERNAL_AGENT_KNOWLEDGE_CONTEXT].orEmpty(),
+                INTERNAL_SCREEN_CONTEXT to action.parameters[INTERNAL_SCREEN_CONTEXT].orEmpty(),
+                INTERNAL_LONG_TERM_WRITE_ALLOWED to action.parameters[INTERNAL_LONG_TERM_WRITE_ALLOWED].orEmpty(),
+                "team_action_id" to action.id,
+                "team_source_message_id" to spec.sourceMessageId
+            )
+            val primaryCapabilities = spec.definition.members
+                .first { it.agentId == spec.definition.primaryAgentId }
+                .requiredCapabilities
+            val request = AgentRunRequest(
+                conversationId = conversationId,
+                messageId = turnId,
+                taskId = turnId,
+                runId = spec.supervisorRunId,
+                goal = action.parameters["original_goal"].orEmpty()
+                    .ifBlank { action.parameters["prompt"].orEmpty() }
+                    .ifBlank { action.description },
+                deliveryMode = AgentDeliveryMode.RESPOND,
+                requiredCapabilities = primaryCapabilities,
+                context = requestContext,
+                idempotencyKey = spec.supervisorRunId
+            )
+            val started = runCatching { runtime.startAgentTeam(spec.definition, request) }
+            if (started.isFailure) {
+                return AgentActionResult(
+                    action.id,
+                    false,
+                    started.exceptionOrNull()?.message ?: "Agent team could not start"
+                )
+            }
+        }
+        val state = runtime.agentTeamSnapshot(spec.supervisorRunId)?.state
+            ?: AgentTeamExecutionState.RUNNING
+        return AgentActionResult(
+            actionId = action.id,
+            success = true,
+            message = "Coordinating ${spec.definition.members.size} specialist Agents",
+            metadata = mapOf(
+                "delivery_mode" to AgentDeliveryMode.RESPOND.name.lowercase(Locale.ROOT),
+                "awaiting_response" to "true",
+                "source_message_id" to spec.sourceMessageId.toString(),
+                "contact_id" to spec.responseContactId,
+                "target" to action.target,
+                "resource_id" to "agent-team:${spec.definition.teamId}",
+                "failure_domain" to "agent-team:${spec.definition.teamId}",
+                "resource_location" to "distributed",
+                "resource_started_at" to System.currentTimeMillis().toString(),
+                "team_run_id" to spec.supervisorRunId,
+                "team_id" to spec.definition.teamId,
+                "team_member_count" to spec.definition.members.size.toString(),
+                "team_state" to state.name.lowercase(Locale.ROOT)
+            )
+        )
     }
 
     private fun buildKnowledgeAnswerPrompt(action: AgentAction): String? {
@@ -10632,7 +10728,7 @@ data class AgentPlan(
     fun resetActionForRetry(actionId: String): AgentPlan = copy(
         actions = actions.map { action ->
             if (action.id == actionId) {
-                action.copy(
+                action.rekeyAgentTeamForRetry().copy(
                     status = AgentActionStatus.PENDING_CONFIRMATION,
                     result = "",
                     evidence = ""

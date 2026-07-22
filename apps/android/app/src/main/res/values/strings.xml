@@ -409,6 +409,8 @@
     <string name="agent_team_state_cancelled">Cancelled</string>
     <string name="agent_team_state_interrupted">Interrupted</string>
     <string name="agent_team_member_state_skipped">Skipped</string>
+    <string name="agent_team_failed_response">The Agent team could not complete the task.</string>
+    <string name="agent_team_failed_response_with_reason">The Agent team could not complete the task: %1$s</string>
     <string name="agent_recent_empty">No recent Agent tasks yet</string>
     <string name="agent_recent_meta">%1$s / %2$s / %3$s risk</string>
     <string name="agent_recent_status_blocked">Blocked</string>

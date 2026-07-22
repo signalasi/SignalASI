@@ -22,7 +22,7 @@ SignalASI owns one encrypted Personal ASI above topic conversations. Conversatio
 | Proactive discovery without new chat events | `GlobalProactiveDiscoveryCoordinator`, durable discovery leases | `GlobalProactiveDiscoveryTest` |
 | Quick, deep, continuous, and proactive research | research plans, evidence ledger, source quality and change gates | `GlobalIntelligenceAcquisitionTest` |
 | Dynamic action graphs and replanning | autonomous run planner, dependency graph, review policy | `GlobalAgentLongHorizonTest`, `GlobalAgentDeliberationTest` |
-| Native tools, Skills, and specialist Agents | host registry, Skill adapter, supervised handoff contract | `GlobalAutonomousToolsTest`, `GlobalAutonomousSkillsTest`, `GlobalAgentCollaborationTest` |
+| Native tools, Skills, and specialist Agents | host registry, Skill adapter, guarded planner-to-team compiler, supervised handoff contract, and one-response completion bridge | `GlobalAutonomousToolsTest`, `GlobalAutonomousSkillsTest`, `GlobalAgentCollaborationTest`, `AgentTeamPlanBridgeTest`, `AgentCollaborationRuntimeTest`, `AgentManagedResponsePersistenceTest` |
 | Verified completion | native receipts, evidence contracts, contested-result handling | `GlobalAgentLongHorizonTest`, `GlobalAgentCollaborationTest` |
 | Long-horizon goals and dependencies | encrypted goal graph, checkpoints, lifecycle outbox | `GlobalAgentLongHorizonTest`, `GlobalAgentKnowledgeGraphTest` |
 | Reboot, process-death, service, and connectivity recovery | durable leases, wake scheduler, boot and connectivity restoration | `GlobalAgentContinuityTest`, `GlobalAgentServiceContinuityTest` |
