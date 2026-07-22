@@ -6380,27 +6380,17 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 nativeTools = request.runtimeContext.nativeTools
             )
         }
-        val available = request.targets.filter { target ->
-            target.status == AgentConnectorStatus.AVAILABLE &&
-                (AgentCapability.CHAT in target.capabilities ||
-                    AgentCapability.REASONING in target.capabilities ||
-                    AgentCapability.RESEARCH in target.capabilities)
-        }
-        val target = if (routing != null) {
-            val selectedId = routing.primary?.resource?.targetId ?: return null
-            available.firstOrNull { it.id == selectedId } ?: return null
-        } else {
-            available.firstOrNull { it.id == "local-llm" }
-                ?: available.firstOrNull { it.kind == AgentConnectorKind.MODEL }
-                ?: available.firstOrNull { AgentCapability.RESEARCH in it.capabilities }
-                ?: return null
-        }
-        val currentInformation = routing?.requirements?.liveDataRequired == true
+        val selection = AgentConnectorRouteSelector.select(request.targets, routing) ?: return null
+        val currentInformation = selection.decision?.requirements?.liveDataRequired == true
         return connectorAction(
             request,
-            target.id,
-            if (currentInformation) "Get current information from ${target.title}" else "Ask ${target.title}",
-            routing
+            selection.target.id,
+            if (currentInformation) {
+                "Get current information from ${selection.target.title}"
+            } else {
+                "Ask ${selection.target.title}"
+            },
+            selection.decision
         )
     }
 
@@ -6453,15 +6443,13 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
                 tools = request.runtimeContext.systemTools,
                 nativeTools = request.runtimeContext.nativeTools
             )
-        }?.let { decision ->
-            val ordered = listOfNotNull(decision.primary) + decision.fallbacks
-            val explicit = ordered.firstOrNull { it.resource.targetId == target.id }
-            if (explicit == null) null else decision.copy(
-                primary = explicit,
-                fallbacks = ordered.filterNot { it.resource.targetId == target.id }.take(4)
-            )
         }
-        return connectorAction(request, target.id, "Send task to ${target.title}", routing)
+        val connectorRouting = AgentConnectorRouteSelector.select(
+            targets = request.targets,
+            decision = routing,
+            preferredTargetId = target.id
+        )?.decision
+        return connectorAction(request, target.id, "Send task to ${target.title}", connectorRouting)
     }
 
     private fun draftPlanAction(request: AgentRequest): AgentAction = AgentAction(
