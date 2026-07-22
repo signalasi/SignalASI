@@ -300,6 +300,18 @@ class AgentDeliveryReq(BaseModel):
     required_features: list[str] = []
 
 
+class DesktopNativeToolInvokeReq(BaseModel):
+    tool_id: str
+    tool_version: str = "1.0.0"
+    arguments: dict = {}
+    invocation_id: str = ""
+    task_id: str = ""
+    conversation_id: str = ""
+    workspace_id: str = ""
+    idempotency_key: str = ""
+    confirmation: dict | None = None
+
+
 @app.get("/api/agent-adapters")
 def api_agent_adapters(request: Request):
     require_loopback(request)
@@ -308,6 +320,45 @@ def api_agent_adapters(request: Request):
         "agents": provider.enumerate(),
         "recoverable_runs": [item.public() for item in provider.recover()],
     }
+
+
+@app.get("/api/desktop-tools")
+def api_desktop_native_tools(request: Request):
+    require_loopback(request)
+    from desktop_native_tools import desktop_native_tool_registry
+
+    return desktop_native_tool_registry().manifest()
+
+
+@app.post("/api/desktop-tools/invoke")
+def api_invoke_desktop_native_tool(req: DesktopNativeToolInvokeReq, request: Request):
+    require_loopback(request)
+    from desktop_native_tools import desktop_native_tool_registry
+
+    arguments = dict(req.arguments)
+    if req.workspace_id and "workspace_id" not in arguments:
+        arguments["workspace_id"] = req.workspace_id
+    return desktop_native_tool_registry().invoke(
+        req.tool_id,
+        arguments,
+        {
+            "tool_version": req.tool_version,
+            "invocation_id": req.invocation_id,
+            "task_id": req.task_id,
+            "conversation_id": req.conversation_id,
+            "idempotency_key": req.idempotency_key,
+            "confirmation": req.confirmation,
+            "caller_id": "signalasi.desktop.loopback",
+        },
+    )
+
+
+@app.post("/api/desktop-tools/{invocation_id}/cancel")
+def api_cancel_desktop_native_tool(invocation_id: str, request: Request):
+    require_loopback(request)
+    from desktop_native_tools import desktop_native_tool_registry
+
+    return {"cancelled": desktop_native_tool_registry().cancel(invocation_id)}
 
 
 @app.post("/api/agent-adapters/{agent_id}/deliver")

@@ -435,6 +435,7 @@
     <string name="cc_chat_history_subtitle">按会话管理的本机加密存储</string>
     <string name="cc_cache_cleared">已清理可重建缓存</string>
     <string name="cc_tools_phone">手机</string>
+    <string name="cc_tools_desktop">电脑</string>
     <string name="cc_tools_application">应用</string>
     <string name="cc_tools_android_system">Android 系统</string>
     <string name="cc_tools_accessibility">无障碍服务</string>

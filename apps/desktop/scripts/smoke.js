@@ -221,7 +221,7 @@ async function smoke() {
 
   log("checking backend Python syntax");
   const python = findPython();
-  run(python, ["-m", "py_compile", "agent_gateway.py", "agent_task_manager.py", "main.py", "mqtt_bridge.py", "agent_config.py"], { cwd: backendDir });
+  run(python, ["-m", "py_compile", "agent_gateway.py", "agent_task_manager.py", "main.py", "mqtt_bridge.py", "agent_config.py", "desktop_native_tools.py"], { cwd: backendDir });
 
   log("starting or reusing backend");
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalasi-smoke-"));
@@ -239,6 +239,32 @@ async function smoke() {
     const syncResult = await fetchJson("/api/agents/sync-mobile-status", { method: "POST" });
     if (!("ok" in syncResult) || syncResult.reason !== "manual_desktop_sync" || !syncResult.code || !syncResult.params || syncResult.params.reason !== "manual_desktop_sync") {
       fail(`Unexpected sync-mobile-status response: ${JSON.stringify(syncResult)}`);
+    }
+
+    log("checking typed Desktop native tool manifest and workspace execution");
+    const desktopTools = await fetchJson("/api/desktop-tools");
+    const desktopToolIds = new Set((desktopTools.tools || []).map((item) => item.id));
+    for (const toolId of [
+      "signalasi.desktop.windows.system.status",
+      "signalasi.desktop.workspace.file.list",
+      "signalasi.desktop.terminal.run",
+      "signalasi.desktop.office.document.convert"
+    ]) {
+      if (!desktopToolIds.has(toolId)) fail(`Desktop native tool manifest missing ${toolId}`);
+    }
+    const workspaceList = await fetchJson("/api/desktop-tools/invoke", {
+      method: "POST",
+      body: JSON.stringify({
+        tool_id: "signalasi.desktop.workspace.file.list",
+        invocation_id: "desktop-smoke-list",
+        task_id: "desktop-smoke-task",
+        conversation_id: "desktop-smoke-conversation",
+        workspace_id: "desktop-smoke-workspace",
+        arguments: {}
+      })
+    });
+    if (workspaceList.status !== "succeeded" || workspaceList.verification?.status !== "passed") {
+      fail(`Desktop native workspace tool failed: ${JSON.stringify(workspaceList)}`);
     }
 
     log("running connector self-test without mobile delivery");

@@ -8500,6 +8500,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun nativeToolLocationLabel(location: AgentNativeToolLocation): String = getString(
         when (location) {
             AgentNativeToolLocation.PHONE -> R.string.cc_tools_phone
+            AgentNativeToolLocation.DESKTOP -> R.string.cc_tools_desktop
             AgentNativeToolLocation.APPLICATION -> R.string.cc_tools_application
             AgentNativeToolLocation.ANDROID_SYSTEM -> R.string.cc_tools_android_system
             AgentNativeToolLocation.ACCESSIBILITY_SERVICE -> R.string.cc_tools_accessibility

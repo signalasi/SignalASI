@@ -524,7 +524,7 @@ Release readiness requires automated unit, integration, Android build, real-devi
 
 ## 20. Current Repository Implementation Matrix
 
-Snapshot basis: source tree inspected on 2026-07-14. `Implemented` means source exists in the current repository; it does not by itself mean release-grade or real-device accepted. `Scaffold` means a contract or isolated implementation exists but is not wired end to end.
+Snapshot basis: source tree inspected on 2026-07-21. `Implemented` means source exists in the current repository; it does not by itself mean release-grade or real-device accepted. `Scaffold` means a contract or isolated implementation exists but is not wired end to end.
 
 | Capability | Status | Current repository evidence | Required next work |
 | --- | --- | --- | --- |
@@ -548,6 +548,7 @@ Snapshot basis: source tree inspected on 2026-07-14. `Implemented` means source 
 | Device Owner and Shizuku | Privileged only | Capability catalog marks both non-normal-app capabilities and notes no controller/integration | Keep unavailable unless separately provisioned, implemented, reviewed, and policy-scoped |
 | Root | Policy blocked | Capability catalog explicitly refuses `su` execution even if a binary is detected | No implementation planned under this specification |
 | Direct cloud model contacts | Partial | `CloudModelClient.kt`, `AppStoreAgentConnectorRegistry`, and Android product flows call configured providers directly | Normalize provider contract, privacy metadata, streaming, usage, artifacts, and cancellation |
+| Desktop native tools | Partial | `desktop_native_tools.py`, encrypted `desktop_tool_call_*` Link messages, Android `AgentDesktopRemoteNativeTools`, capability manifests, durable receipts, cancellation, and per-phone workspace namespaces provide typed Windows status/process, workspace file/archive, terminal, and Office operations | Complete paired-phone real-device execution, disconnect/reconnect, cancellation, and ambiguous-restart acceptance |
 | Desktop Codex, Claude Code, Hermes | Partial | `agent_gateway.py`, `codex_app_server.py`, `agent_task_manager.py`, and Link bridge expose local CLI/App Server tasks | Treat Desktop workspace as noncanonical, adopt phone session protocol, and align approvals with phone policy |
 | Desktop task workspace | Implemented for Desktop, not phone-owned | `task_workspace.py` creates isolated Desktop task directories and artifact metadata | Add bounded synchronization/proposals so the phone remains canonical |
 | MCP | Partial scaffold | `AgentMcpSession.kt` implements a bounded Android MCP client session contract; `mcp_agent_wrapper.py` exposes Desktop stdio MCP calls | Add concrete Android transports, registry translation, schema pinning, server trust, credentials isolation, and phone-side policy; no native Android stdio host yet |

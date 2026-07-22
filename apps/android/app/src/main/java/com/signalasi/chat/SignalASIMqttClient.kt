@@ -95,6 +95,52 @@ object SignalASIMqttClient {
         return true
     }
 
+    fun publishDesktopToolCall(desktopId: String, payload: JSONObject): Boolean =
+        publishDesktopControlPayload(desktopId, payload)
+
+    fun publishDesktopToolCancel(
+        desktopId: String,
+        callId: String,
+        taskId: String,
+        conversationId: String
+    ): Boolean = publishDesktopControlPayload(
+        desktopId,
+        JSONObject()
+            .put("type", "desktop_tool_call_cancel")
+            .put("call_id", callId)
+            .put("invocation_id", callId)
+            .put("task_id", taskId)
+            .put("conversation_id", conversationId)
+            .put("time", System.currentTimeMillis())
+    )
+
+    private fun publishDesktopControlPayload(desktopId: String, payload: JSONObject): Boolean {
+        val context = appContext ?: return false
+        val link = SignalASILinkProtocol.serverLink(context, desktopId) ?: return false
+        val mqtt = client ?: return false
+        if (!mqtt.isConnected || !link.paired || !SignalASICrypto.hasDesktopSession(context, desktopId)) return false
+        payload.put("desktop_id", desktopId)
+        val envelope = runCatching {
+            SignalASILinkProtocol.makeEnvelope(payload, SignalASICrypto.localSignalasiId(), desktopId)
+        }.getOrNull() ?: return false
+        val encrypted = SignalASICrypto.encryptPayloadForDesktop(desktopId, envelope) ?: return false
+        val messageId = envelope.getString("message_id")
+        val wirePayload = encrypted.toString()
+        SignalASILinkDeliveryStore.enqueue(context, messageId, link.routes.control, wirePayload)
+        SignalASILinkDeliveryStore.markAttempt(context, messageId)
+        return runCatching {
+            val token = mqtt.publish(
+                link.routes.control,
+                MqttMessage(wirePayload.toByteArray(Charsets.UTF_8)).apply {
+                    qos = MQTT_QOS
+                    isRetained = false
+                }
+            )
+            deliveryMessageIds[token.messageId] = messageId
+            true
+        }.getOrDefault(false)
+    }
+
     fun verifyPcIdentityFromQr(contents: String): Boolean {
         val context = appContext ?: return false
         val qr = runCatching { JSONObject(contents) }.getOrNull() ?: return false
@@ -574,6 +620,10 @@ object SignalASIMqttClient {
         } else {
             publishInboundReceipt(link, payload.optString("message_id"))
         }
+        if (payload.optString("type") == "capability_manifest") {
+            AgentDesktopRemoteNativeTools.updateManifest(context, payload)
+        }
+        if (AgentDesktopRemoteNativeTools.handleInbound(payload)) return
         if (handleSecureControlMessage(payload)) {
             listeners.forEach { it.onMessage(payload.toString()) }
             return
@@ -632,6 +682,7 @@ object SignalASIMqttClient {
                 Log.w(TAG, "Pairing revoked by desktop connector")
                 val desktopId = json.optString("desktop_id")
                 if (desktopId.isNotBlank()) {
+                    AgentDesktopRemoteNativeTools.removeDesktop(context, desktopId)
                     AppStore.deleteDesktopConnector(context, desktopId, deleteMessages = false)
                     SignalASICrypto.clearDesktopTrust(context, desktopId)
                     SignalASILinkProtocol.removeServer(context, desktopId)
