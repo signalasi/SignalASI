@@ -483,6 +483,7 @@ class GuestService:
             if bool(network.get("enabled")):
                 raise ValueError("Guest networking must use the host-mediated network tool")
             environment = runtime_environment()
+            inject_secret_environment(environment, payload.get("secret_environment"))
             commands = command_plan(
                 language,
                 ISOLATED_WORKSPACE_ROOT,
@@ -578,6 +579,20 @@ def runtime_environment() -> dict[str, str]:
         "ZIG_LOCAL_CACHE_DIR": str(task_temp / "zig-local-cache"),
         "JAVA_HOME": str(PACK_ROOT / "java"),
     }
+
+
+def inject_secret_environment(environment: dict[str, str], raw_values: Any) -> None:
+    values = raw_values or {}
+    if not isinstance(values, dict) or len(values) > 32:
+        raise ValueError("Runtime secret environment is invalid")
+    for raw_name, raw_value in values.items():
+        name = str(raw_name)
+        value = str(raw_value)
+        if not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,63}", name):
+            raise ValueError("Runtime secret environment key is invalid")
+        if "\x00" in value or len(value.encode("utf-8")) > 4096:
+            raise ValueError("Runtime secret environment value is invalid")
+        environment[name] = value
 
 
 def runtime_readiness(config: dict[str, Any]) -> tuple[bool, str]:

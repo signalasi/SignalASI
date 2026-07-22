@@ -1273,6 +1273,8 @@
     <string name="agent_mcp_open_authorization">打开授权页面</string>
     <string name="agent_mcp_auth_failed">无法完成认证</string>
     <string name="agent_mcp_endpoint">服务地址</string>
+    <string name="agent_mcp_runtime">运行环境</string>
+    <string name="agent_mcp_runtime_value">%1$s · 手机本机 Linux</string>
     <string name="agent_mcp_tools">工具</string>
     <string name="agent_mcp_tools_not_discovered">测试连接后发现工具</string>
     <string name="agent_mcp_test_connection">测试连接</string>

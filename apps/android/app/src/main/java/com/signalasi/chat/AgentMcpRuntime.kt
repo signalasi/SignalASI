@@ -129,23 +129,32 @@ class AgentMcpClientManager(
     private val packageRepository: AgentMcpPackageRepository = AgentMcpPackageRepository(context),
     private val client: OkHttpClient = AgentMcpStreamableHttpTransport.defaultClient()
 ) {
+    private val appContext = context.applicationContext
     private val sessions = ConcurrentHashMap<String, AgentMcpSession>()
     private val authCoordinator = AgentMcpAuthenticationCoordinator(registry, client)
+    private val localRuntimeClient = AgentMcpLocalRuntimeClient(appContext, registry, packageRepository)
 
     suspend fun listTools(connectionId: String): List<AgentMcpTool> {
         val connection = prepareConnection(requireConnection(connectionId))
-        if (connection.transport == AgentMcpTransportKind.DECLARATIVE_HTTP) {
-            return packageRepository.get(connection.id)?.tools.orEmpty().map { tool ->
-                AgentMcpTool(
-                    name = tool.name,
-                    title = tool.title,
-                    description = tool.description,
-                    inputSchema = nativeToMcpObject(tool.inputSchema),
-                    outputSchema = null,
-                    annotations = McpJsonObject.of("readOnlyHint" to !tool.mutating),
-                    raw = McpJsonObject.of("name" to tool.name)
-                )
-            }.also { registry.markConnected(connectionId, it.map(AgentMcpTool::name)) }
+        when (connection.transport) {
+            AgentMcpTransportKind.DECLARATIVE_HTTP -> {
+                return packageRepository.get(connection.id)?.tools.orEmpty().map { tool ->
+                    AgentMcpTool(
+                        name = tool.name,
+                        title = tool.title,
+                        description = tool.description,
+                        inputSchema = nativeToMcpObject(tool.inputSchema),
+                        outputSchema = null,
+                        annotations = McpJsonObject.of("readOnlyHint" to !tool.mutating),
+                        raw = McpJsonObject.of("name" to tool.name)
+                    )
+                }.also { registry.markConnected(connectionId, it.map(AgentMcpTool::name)) }
+            }
+            AgentMcpTransportKind.LOCAL_STDIO -> {
+                return withContext(Dispatchers.IO) { localRuntimeClient.listTools(connection) }
+                    .also { registry.markConnected(connectionId, it.map(AgentMcpTool::name)) }
+            }
+            AgentMcpTransportKind.STREAMABLE_HTTP -> Unit
         }
         return withRemoteSession(connection) { session ->
             session.listTools().items.also { registry.markConnected(connectionId, it.map(AgentMcpTool::name)) }
@@ -159,10 +168,14 @@ class AgentMcpClientManager(
     ): AgentNativeToolExecutionResult {
         val connection = prepareConnection(requireConnection(connectionId))
         return try {
-            if (connection.transport == AgentMcpTransportKind.DECLARATIVE_HTTP) {
-                callDeclarative(connection, toolName, arguments)
-            } else {
-                withRemoteSession(connection) { session ->
+            when (connection.transport) {
+                AgentMcpTransportKind.DECLARATIVE_HTTP -> callDeclarative(connection, toolName, arguments)
+                AgentMcpTransportKind.LOCAL_STDIO -> withContext(Dispatchers.IO) {
+                    localRuntimeClient.callTool(connection, toolName, arguments)
+                }.also { result ->
+                    if (result.isSuccess) registry.markConnected(connectionId, connection.toolIds.ifEmpty { listOf(toolName) })
+                }
+                AgentMcpTransportKind.STREAMABLE_HTTP -> withRemoteSession(connection) { session ->
                     val result = session.callTool(toolName, nativeToMcpObject(arguments))
                     if (result.isError) {
                         AgentNativeToolExecutionResult.failure(

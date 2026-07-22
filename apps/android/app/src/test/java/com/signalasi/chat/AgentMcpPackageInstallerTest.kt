@@ -67,6 +67,44 @@ class AgentMcpPackageInstallerTest {
         }
     }
 
+    @Test
+    fun acceptsSandboxedLocalStdioPackage() {
+        val manifest = localStdioManifest()
+        val inspection = AgentMcpPackageInstaller().inspect(
+            ByteArrayInputStream(zip("mcp.json" to manifest, "runtime/server.py" to "print('server')"))
+        )
+
+        assertEquals(AgentMcpTransportKind.LOCAL_STDIO, inspection.manifest.transport)
+        assertEquals(AgentRuntimeLanguage.PYTHON, inspection.manifest.localRuntime?.language)
+        assertEquals("runtime/server.py", inspection.manifest.localRuntime?.entrypoint)
+        assertTrue(inspection.manifest.localRuntime?.allowedNetworkDomains.orEmpty().isEmpty())
+        assertTrue("runtime/server.py" in inspection.runtimeFiles)
+        assertEquals("local-mcp:example.local_mcp", inspection.manifest.endpoint)
+    }
+
+    @Test
+    fun rejectsLocalStdioPackageWithoutEntrypointOrWithHttpAuthExchange() {
+        assertThrows(IllegalArgumentException::class.java) {
+            AgentMcpPackageInstaller().inspect(ByteArrayInputStream(zip("mcp.json" to localStdioManifest())))
+        }
+
+        val root = JSONObject(localStdioManifest())
+        root.put("authentication", JSONArray().put(JSONObject().apply {
+            put("method", "username_password")
+            put("steps", JSONArray().put(JSONObject().apply {
+                put("id", "login")
+                put("title", "Sign in")
+                put("fields", JSONArray())
+                put("exchange", JSONObject().put("method", "POST").put("path", "/login"))
+            }))
+        }))
+        assertThrows(IllegalArgumentException::class.java) {
+            AgentMcpPackageInstaller().inspect(
+                ByteArrayInputStream(zip("mcp.json" to root.toString(), "runtime/server.py" to "print('server')"))
+            )
+        }
+    }
+
     private fun validManifest(): String = JSONObject().apply {
         put("format_version", 1)
         put("id", "example.relay")
@@ -105,6 +143,25 @@ class AgentMcpPackageInstallerTest {
                 .put("body_template", "{\"enabled\":{{args.enabled}}}"))
             put("mutating", true)
         }))
+    }.toString()
+
+    private fun localStdioManifest(): String = JSONObject().apply {
+        put("format_version", 1)
+        put("id", "example.local_mcp")
+        put("version", "1.0.0")
+        put("name", "Local MCP")
+        put("description", "Runs inside the on-device Linux sandbox")
+        put("transport", JSONObject().apply {
+            put("type", "local_stdio")
+            put("runtime", "python")
+            put("entrypoint", "runtime/server.py")
+            put("arguments", JSONArray().put("--stdio"))
+            put("environment", JSONObject().put("ACCESS_TOKEN", "{{auth.access_token}}"))
+            put("allowed_network_domains", JSONArray())
+            put("timeout_ms", 45_000)
+        })
+        put("authentication", JSONArray().put(JSONObject().put("method", "bearer_token")))
+        put("tools", JSONArray())
     }.toString()
 
     private fun zip(vararg files: Pair<String, String>): ByteArray = ByteArrayOutputStream().also { output ->

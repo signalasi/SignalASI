@@ -17,7 +17,8 @@ enum class AgentMcpDistribution(val wireValue: String) {
 
 enum class AgentMcpTransportKind(val wireValue: String) {
     STREAMABLE_HTTP("streamable_http"),
-    DECLARATIVE_HTTP("declarative_http")
+    DECLARATIVE_HTTP("declarative_http"),
+    LOCAL_STDIO("local_stdio")
 }
 
 enum class AgentMcpAuthMethod(val wireValue: String) {
@@ -663,7 +664,10 @@ class AgentMcpRegistry(
             id = manifest.id,
             catalogId = manifest.catalogId,
             displayName = manifest.name,
-            endpoint = AgentMcpEndpointPolicy.normalize(manifest.endpoint),
+            endpoint = when (manifest.transport) {
+                AgentMcpTransportKind.LOCAL_STDIO -> manifest.endpoint
+                else -> AgentMcpEndpointPolicy.normalize(manifest.endpoint)
+            },
             distribution = AgentMcpDistribution.LOCAL_PACKAGE,
             transport = manifest.transport,
             authProfile = profile,

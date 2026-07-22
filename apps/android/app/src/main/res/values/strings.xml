@@ -1364,6 +1364,8 @@
     <string name="agent_mcp_open_authorization">Open authorization page</string>
     <string name="agent_mcp_auth_failed">Authentication could not be completed</string>
     <string name="agent_mcp_endpoint">Endpoint</string>
+    <string name="agent_mcp_runtime">Runtime</string>
+    <string name="agent_mcp_runtime_value">%1$s · On-device Linux</string>
     <string name="agent_mcp_tools">Tools</string>
     <string name="agent_mcp_tools_not_discovered">Run a connection test to discover tools</string>
     <string name="agent_mcp_test_connection">Test connection</string>

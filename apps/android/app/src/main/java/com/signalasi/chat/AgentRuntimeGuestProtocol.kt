@@ -497,7 +497,7 @@ class AgentRuntimeGuestBridge(
 
     private fun executePayload(request: AgentRuntimeExecutionRequest): AgentNativeJsonObject {
         val limits = request.resourceLimits.validated()
-        return mapOf(
+        return linkedMapOf<String, Any?>(
             "language" to request.language.wireValue,
             "arguments" to request.arguments,
             "workspace_id" to request.workspaceId,
@@ -516,7 +516,11 @@ class AgentRuntimeGuestBridge(
                 "max_output_bytes" to limits.maxOutputBytes,
                 "max_artifact_bytes" to limits.maxArtifactBytes
             )
-        )
+        ).apply {
+            if (request.secretEnvironment.isNotEmpty()) {
+                put("secret_environment", request.secretEnvironment)
+            }
+        }
     }
 
     private fun responseFrom(envelope: AgentRuntimeGuestEnvelope, startedAt: Long): AgentRuntimeExecutionResponse =

@@ -242,7 +242,8 @@ data class AgentRuntimeExecutionRequest(
     ),
     val cancellationToken: AgentNativeToolCancellationToken = AgentNativeToolCancellationToken.NONE,
     val progressListener: (AgentRuntimeProgress) -> Unit = {},
-    val guestWorkspacePath: String = ""
+    val guestWorkspacePath: String = "",
+    val secretEnvironment: Map<String, String> = emptyMap()
 )
 
 data class AgentRuntimeExecutionResponse(
@@ -362,6 +363,11 @@ class AgentOnDeviceRuntimeManager(
         require(request.requestId.matches(REQUEST_ID_PATTERN)) { "Runtime request id is invalid" }
         require(request.workspaceId.isNotBlank()) { "Runtime workspace id is required" }
         require(request.allowedNetworkDomains.size <= MAX_NETWORK_DOMAINS) { "Too many runtime network domains" }
+        require(request.secretEnvironment.size <= MAX_SECRET_ENVIRONMENT_VALUES) { "Too many runtime secret environment values" }
+        require(request.secretEnvironment.all { (name, value) ->
+            SECRET_ENVIRONMENT_KEY.matches(name) && value.toByteArray(Charsets.UTF_8).size <= MAX_SECRET_ENVIRONMENT_VALUE_BYTES &&
+                '\u0000' !in value
+        }) { "Runtime secret environment is invalid" }
         if (request.networkEnabled) require(request.allowedNetworkDomains.isNotEmpty()) {
             "Runtime network access requires an explicit domain allowlist"
         }
@@ -681,6 +687,8 @@ class AgentOnDeviceRuntimeManager(
         private const val MAX_ARGUMENT_BYTES = 8 * 1024
         private const val MAX_ARTIFACTS = 32
         private const val MAX_NETWORK_DOMAINS = 64
+        private const val MAX_SECRET_ENVIRONMENT_VALUES = 32
+        private const val MAX_SECRET_ENVIRONMENT_VALUE_BYTES = 4 * 1024
         private const val MAX_OUTPUT_CHARS = 512 * 1024
         private const val MAX_ID_CHARS = 80
         private const val MAX_CAPABILITIES = 128
@@ -697,6 +705,7 @@ class AgentOnDeviceRuntimeManager(
         private val SHA256_PATTERN = Regex("[0-9a-f]{64}")
         private val PACK_ID_PATTERN = Regex("[a-z0-9][a-z0-9._-]{0,79}")
         private val REQUEST_ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+        private val SECRET_ENVIRONMENT_KEY = Regex("[A-Z_][A-Z0-9_]{0,63}")
         private val CAPABILITY_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
     }
 }

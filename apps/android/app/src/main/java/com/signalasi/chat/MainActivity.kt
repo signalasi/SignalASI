@@ -10467,12 +10467,23 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             if (connection.isCallable(System.currentTimeMillis())) "#14C66A" else "#F0A500",
             mcpConnectionStatus(connection)
         ))
-        featureContent.addView(featureRow(
-            getString(R.string.agent_mcp_endpoint),
-            connection.endpoint,
-            R.drawable.ic_protocol_link,
-            ""
-        ))
+        if (connection.transport == AgentMcpTransportKind.LOCAL_STDIO) {
+            val runtime = agentMcpPackageRepository.get(connection.id)?.localRuntime
+            featureContent.addView(featureRow(
+                getString(R.string.agent_mcp_runtime),
+                runtime?.let { getString(R.string.agent_mcp_runtime_value, it.language.wireValue) }
+                    ?: getString(R.string.badge_unavailable),
+                R.drawable.ic_local_model,
+                getString(R.string.agent_mcp_local_package_badge)
+            ))
+        } else {
+            featureContent.addView(featureRow(
+                getString(R.string.agent_mcp_endpoint),
+                connection.endpoint,
+                R.drawable.ic_protocol_link,
+                ""
+            ))
+        }
         featureContent.addView(featureRow(
             getString(R.string.agent_mcp_auth_method),
             mcpAuthMethodLabel(connection.authProfile.method),
@@ -10566,8 +10577,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val manifest = inspection.manifest
         val details = buildString {
             append(manifest.description)
-            append("\n\n").append(getString(R.string.agent_mcp_tools)).append(":\n")
-            manifest.tools.take(12).forEach { append("• ").append(it.title).append('\n') }
+            if (manifest.transport == AgentMcpTransportKind.LOCAL_STDIO) {
+                manifest.localRuntime?.let { runtime ->
+                    append("\n\n").append(getString(R.string.agent_mcp_runtime)).append(": ")
+                    append(getString(R.string.agent_mcp_runtime_value, runtime.language.wireValue))
+                }
+            } else {
+                append("\n\n").append(getString(R.string.agent_mcp_tools)).append(":\n")
+                manifest.tools.take(12).forEach { append("• ").append(it.title).append('\n') }
+            }
             append("\n").append(getString(if (inspection.integrityVerified) R.string.agent_mcp_integrity_verified else R.string.agent_mcp_integrity_unsigned))
         }
         AlertDialog.Builder(this)
