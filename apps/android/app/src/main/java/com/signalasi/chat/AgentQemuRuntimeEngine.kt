@@ -61,7 +61,7 @@ internal object AgentQemuLaunchPlanBuilder {
                 "-kernel", spec.baseImageFile.absolutePath,
                 "-append", "console=ttyAMA0,115200 panic=1 quiet loglevel=3 signalasi.runtime=1",
                 "-chardev",
-                "socket,id=signalasi_api,path=${spec.socketFile.absolutePath},server=on,wait=off",
+                "socket,id=signalasi_api,path=${spec.socketFile.absolutePath},server=on,wait=on",
                 "-device", "virtio-serial-device",
                 "-device", "virtserialport,chardev=signalasi_api,name=org.signalasi.runtime",
                 "-fsdev",
