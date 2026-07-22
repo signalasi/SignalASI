@@ -894,7 +894,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             response.contactId,
             response.conversationId,
             response.turnId
-        ) ?: return
+        )
+        if (runtime == null) {
+            consumeOrphanedAgentConnectorResponse(response)
+            return
+        }
         val responseKey = "${response.sourceMessageId}:${response.contactId}"
         if (!agentConnectorResponsesInFlight.add(responseKey)) return
         resumeAgentConnectorResponse(response, runtime, responseKey)
@@ -906,7 +910,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         responseKey: String,
         attempt: Int = 0
     ) {
-        val turnId = response.turnId.ifBlank { agentRuntimeTurnIds[runtime].orEmpty() }
+        val turnId = agentRuntimeTurnIds[runtime].orEmpty().ifBlank { response.turnId }
         val conversationId = connectorConversationId(response.conversationId, runtime, turnId)
         if (conversationId == null) {
             Log.w(
@@ -1071,6 +1075,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         thread(name = "signalasi-pending-agent-responses") {
             val pending = runCatching { AgentConnectorResponseStore.pending(applicationContext) }
                 .getOrDefault(emptyList())
+            Log.i(
+                "SignalASIAgent",
+                "Pending connector responses count=${pending.size}"
+            )
             if (pending.isEmpty()) return@thread
             runOnUiThread { pending.forEach(::consumeAgentConnectorResponse) }
         }
@@ -1108,9 +1116,81 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 return restored
             }
         }
+        SharedPreferencesAgentSessionStore.taskStorageKeyForConnectorResponse(
+            this,
+            sourceMessageId,
+            contactId
+        )?.let { storageKey ->
+            if (storageKey == "task:$cleanTurnId") return@let
+            val storedTurnId = storageKey.removePrefix("task:")
+            val restored = MobileNativeAgent(
+                this,
+                sessionStore = SharedPreferencesAgentSessionStore(this, storageKey),
+                nativeToolEventSink = AgentNativeToolEventSink(::recordNativeToolLifecycleEvent)
+            )
+            if (restored.canAcceptConnectorResponse(sourceMessageId, contactId)) {
+                activeAgentTasks[sourceMessageId] = restored
+                agentRuntimeTurnIds[restored] = storedTurnId
+                connectorConversationId(conversationId, restored, storedTurnId)?.let {
+                    agentRuntimeConversationIds[restored] = it
+                }
+                Log.i(
+                    "SignalASIAgent",
+                    "Recovered connector response source=$sourceMessageId from saved task ${storedTurnId.take(8)}"
+                )
+                return restored
+            }
+        }
         return mobileNativeAgent.takeIf {
             it.canAcceptConnectorResponse(sourceMessageId, contactId)
         }
+    }
+
+    private fun consumeOrphanedAgentConnectorResponse(response: AgentConnectorResponse): Boolean {
+        val conversationId = response.conversationId.trim()
+            .takeIf(String::isNotBlank)
+            ?.let(agentTranscriptStore::resolveMergedConversationId)
+            ?: return false
+        val turnId = latestUnansweredAgentTurnId(conversationId) ?: return false
+        val taskId = response.taskId.ifBlank { turnId }
+        val stored = agentTranscriptStore.upsert(
+            role = AgentTranscriptRole.ASSISTANT,
+            text = response.content,
+            dedupeKey = "connector-response:$taskId",
+            conversationId = conversationId,
+            turnId = turnId,
+            taskId = taskId,
+            richOutputJson = response.richOutputJson
+        )
+        if (!stored) return false
+        agentTranscriptStore.deleteByDedupeKey(conversationId, "connector-task:$taskId")
+        AgentConnectorResponseStore.remove(this, response)
+        completedConnectorTaskIds.add(taskId)
+        agentTranscriptStore.recordUsage(
+            conversationId, response.inputTokens, response.outputTokens, response.costMicros
+        )
+        if (conversationId == agentTranscriptStore.activeConversation().id) {
+            renderAgentTranscript(agentTranscriptStore.list(conversationId))
+            refreshAgentConversationHeader()
+        }
+        Log.i(
+            "SignalASIAgent",
+            "Recovered orphan connector response source=${response.sourceMessageId} turn=${turnId.take(8)}"
+        )
+        return true
+    }
+
+    private fun latestUnansweredAgentTurnId(conversationId: String): String? {
+        val entries = agentTranscriptStore.list(conversationId)
+        val answeredTurns = entries.asSequence()
+            .filter { it.role == AgentTranscriptRole.ASSISTANT && it.turnId.isNotBlank() }
+            .map(AgentTranscriptEntry::turnId)
+            .toSet()
+        return entries.asReversed().firstOrNull {
+            it.role == AgentTranscriptRole.USER &&
+                it.turnId.isNotBlank() &&
+                it.turnId !in answeredTurns
+        }?.turnId
     }
 
     private fun connectorConversationId(
@@ -1211,11 +1291,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 completedConnectorTaskIds.add(responseTaskId)
             }
             if (!nativeAgentResponse && resolvedResponseConversationId.isNotBlank()) {
+                val directResponseTurnId = responseTurnId.ifBlank {
+                    latestUnansweredAgentTurnId(resolvedResponseConversationId).orEmpty()
+                }
                 agentTranscriptStore.append(
                     AgentTranscriptRole.ASSISTANT,
                     msg.content,
                     conversationId = resolvedResponseConversationId,
-                    turnId = responseTurnId,
+                    turnId = directResponseTurnId,
                     taskId = envelope?.optString("task_id").orEmpty(),
                     richOutputJson = AgentRichContentCodec.fromEnvelope(envelope)
                 )
@@ -4745,7 +4828,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val tools = mobileNativeAgent.nativeToolCatalog()
         val availableTools = tools.count { it.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE }
         val toolsNeedingAttention = tools.size - availableTools
-        val availableResources = state.callableTargets.count { it.status == AgentConnectorStatus.AVAILABLE }
+        val availableResources = controlCenterResourceTargets(state.callableTargets)
+            .count { it.status == AgentConnectorStatus.AVAILABLE }
         val trustedDeviceCount = desktopSecuritySummaries(activePcConnectorContacts()).size
         val memoryCount = mobileNativeAgent.memorySnapshot().activeCount
         val knowledgeCount = mobileNativeAgent.knowledgeSourceGroups().size
@@ -6226,7 +6310,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val state = mobileNativeAgent.snapshot()
         val safety = mobileNativeAgent.safetySettings()
         val tools = mobileNativeAgent.nativeToolCatalog()
-        val availableResources = state.callableTargets.count { it.status == AgentConnectorStatus.AVAILABLE }
+        val visibleTargets = controlCenterResourceTargets(state.callableTargets)
+        val availableResources = visibleTargets.count { it.status == AgentConnectorStatus.AVAILABLE }
         val linkReady = SignalASIMqttClient.isConnected() && SignalASIMqttClient.isSecureReady()
         val knowledgeCount = mobileNativeAgent.knowledgeSourceGroups().size
         val needsAttention = safety.executionPaused || !linkReady ||
@@ -6246,7 +6331,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     iconRes = R.drawable.ic_info_outline,
                     metrics = listOf(
                         ControlCenterMetricSpec(tools.count { it.availability.status == AgentNativeToolAvailabilityStatus.AVAILABLE }.toString(), getString(R.string.cc_metric_native_tools)),
-                        ControlCenterMetricSpec("$availableResources/${state.callableTargets.size}", getString(R.string.cc_metric_available_resources)),
+                        ControlCenterMetricSpec("$availableResources/${visibleTargets.size}", getString(R.string.cc_metric_available_resources)),
                         ControlCenterMetricSpec(state.recentTasks.size.toString(), getString(R.string.cc_metric_tasks))
                     )
                 ),
@@ -6256,7 +6341,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         listOf(
                             ControlCenterRowSpec(routeAction(ControlCenterRoute.AGENT_CORE), getString(R.string.cc_service_runtime), getString(if (safety.executionPaused) R.string.cc_agent_paused_subtitle else R.string.cc_service_runtime_subtitle), R.drawable.ic_agent_node, getString(if (safety.executionPaused) R.string.on_device_agent_status_paused else R.string.cc_status_online), if (safety.executionPaused) ControlCenterTone.AMBER else ControlCenterTone.GREEN),
                             ControlCenterRowSpec(routeAction(ControlCenterRoute.NODES), getString(R.string.cc_service_link), getString(if (linkReady) R.string.cc_service_link_connected else R.string.cc_service_link_offline), R.drawable.ic_protocol_link, getString(if (linkReady) R.string.cc_status_online else R.string.cc_status_degraded), if (linkReady) ControlCenterTone.GREEN else ControlCenterTone.AMBER),
-                            ControlCenterRowSpec(routeAction(ControlCenterRoute.RESOURCE_ROUTING), getString(R.string.cc_service_router), getString(R.string.cc_service_router_subtitle, availableResources, state.callableTargets.size), R.drawable.ic_settings_model, getString(if (availableResources > 0) R.string.cc_status_ready else R.string.cc_status_degraded), if (availableResources > 0) ControlCenterTone.BLUE else ControlCenterTone.AMBER),
+                            ControlCenterRowSpec(routeAction(ControlCenterRoute.RESOURCE_ROUTING), getString(R.string.cc_service_router), getString(R.string.cc_service_router_subtitle, availableResources, visibleTargets.size), R.drawable.ic_settings_model, getString(if (availableResources > 0) R.string.cc_status_ready else R.string.cc_status_degraded), if (availableResources > 0) ControlCenterTone.BLUE else ControlCenterTone.AMBER),
                             ControlCenterRowSpec(routeAction(ControlCenterRoute.KNOWLEDGE), getString(R.string.cc_service_knowledge), getString(R.string.cc_service_knowledge_subtitle, knowledgeCount), R.drawable.ic_agent_knowledge, getString(if (knowledgeCount > 0) R.string.cc_status_ready else R.string.status_needs_setup), if (knowledgeCount > 0) ControlCenterTone.BLUE else ControlCenterTone.NEUTRAL)
                         )
                     )
@@ -7825,7 +7910,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun renderControlCenterRoutingPage() {
-        val targets = mobileNativeAgent.snapshot().callableTargets
+        val targets = controlCenterResourceTargets(mobileNativeAgent.snapshot().callableTargets)
         val available = targets.count { it.status == AgentConnectorStatus.AVAILABLE }
         val resourceRows = targets
             .filterNot { it.id == "phone" || it.id == "local-system" }
@@ -7917,6 +8002,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             controlCenterCapabilityLabel(it)
         }
         return capabilities.ifBlank { controlCenterTargetKindLabel(target.kind) }
+    }
+
+    private fun controlCenterResourceTargets(
+        targets: List<AgentCallableTarget>
+    ): List<AgentCallableTarget> = targets.filterNot { target ->
+        target.id == "cloud-models"
     }
 
     private fun controlCenterCapabilityLabel(capability: AgentCapability): String = getString(
@@ -8148,7 +8239,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun renderControlCenterNodesPage() {
         val state = mobileNativeAgent.snapshot()
         val desktops = desktopSecuritySummaries(activePcConnectorContacts())
-        val targets = state.callableTargets.distinctBy { it.id }
+        val targets = controlCenterResourceTargets(state.callableTargets).distinctBy { it.id }
         val availableTargetIds = targets
             .filter { it.status == AgentConnectorStatus.AVAILABLE }
             .mapTo(linkedSetOf()) { it.id }
@@ -14484,7 +14575,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 val apiKey = keyInput.text?.toString()?.trim().orEmpty()
                 val modelId = modelInput.text?.toString()?.trim().orEmpty()
                 val endpoint = endpointInput.text?.toString()?.trim().orEmpty()
-                if (apiKey.isBlank() || modelId.isBlank() || endpoint.isBlank()) {
+                if (!CloudModelCredentialPolicy.isStoredCredential(apiKey) || modelId.isBlank() || endpoint.isBlank()) {
                     Toast.makeText(this@MainActivity, getString(R.string.cloud_required_fields), Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
@@ -15459,7 +15550,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         featureContent.addView(screenshotFrame, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
-            dp(216)
+            dp(432)
         ).apply {
             topMargin = dp(2)
         })
@@ -17438,8 +17529,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 if (contact.optString("setup_status").ifBlank { "ready" } != "ready") continue
                 val id = contact.optString("id").ifBlank { contact.optString("signalasi_id") }
                 val selected = AppStore.selectedCloudModelContact(this@MainActivity, id) ?: contact
-                if (id.isBlank() || selected.optString("cloud_model").isBlank()) continue
-                if (selected.optString("cloud_endpoint").isBlank() || selected.optString("cloud_api_key").isBlank()) continue
+                if (id.isBlank() || !CloudModelCredentialPolicy.isAutoRoutable(selected)) continue
                 val provider = selected.optString("cloud_provider")
                     .ifBlank { selected.optString("display_name") }
                     .ifBlank { selected.optString("name") }

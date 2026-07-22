@@ -42,6 +42,9 @@ class AgentEncryptedPreferences(context: Context, private val preferencesName: S
     fun contains(key: String): Boolean = preferences.contains(key)
 
     @Synchronized
+    fun keys(): Set<String> = preferences.all.keys.toSet()
+
+    @Synchronized
     fun clear() {
         preferences.edit().clear().commit()
     }

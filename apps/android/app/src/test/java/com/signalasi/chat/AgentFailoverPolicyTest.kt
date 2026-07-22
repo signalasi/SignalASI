@@ -67,8 +67,8 @@ class AgentFailoverPolicyTest {
 
         assertEquals(5_000L, regular.acceptedMs)
         assertEquals(8_000L, regular.runningMs)
-        assertEquals(15_000L, attachment.acceptedMs)
-        assertEquals(30_000L, attachment.runningMs)
+        assertEquals(60_000L, attachment.acceptedMs)
+        assertEquals(90_000L, attachment.runningMs)
         assertTrue(attachment.liveStaleMs > regular.liveStaleMs)
     }
 

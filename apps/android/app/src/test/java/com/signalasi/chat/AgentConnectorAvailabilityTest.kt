@@ -32,8 +32,11 @@ class AgentConnectorAvailabilityTest {
             .put("cloud_api_key", "secret")
         assertTrue(AgentConnectorAvailability.cloudModelReady(complete))
         assertFalse(AgentConnectorAvailability.cloudModelReady(JSONObject(complete.toString()).put("cloud_api_key", "")))
+        assertFalse(AgentConnectorAvailability.cloudModelReady(JSONObject(complete.toString()).put("cloud_api_key", "****-key")))
+        assertFalse(AgentConnectorAvailability.cloudModelReady(JSONObject(complete.toString()).put("cloud_api_key", "sk-signalasi-smoke-key")))
         assertFalse(AgentConnectorAvailability.cloudModelReady(JSONObject(complete.toString()).put("cloud_model", "")))
         assertFalse(AgentConnectorAvailability.cloudModelReady(JSONObject(complete.toString()).put("cloud_endpoint", "")))
+        assertFalse(AgentConnectorAvailability.cloudModelReady(JSONObject(complete.toString()).put("cloud_endpoint", "https://api.example.com/v1/chat/completions")))
         assertFalse(AgentConnectorAvailability.cloudModelReady(JSONObject(complete.toString()).put("setup_status", "needs_setup")))
     }
 }

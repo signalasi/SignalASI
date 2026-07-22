@@ -1132,19 +1132,28 @@ object AppStore {
             val existingModels = contact.optJSONArray("cloud_models")
             if (existingModels != null && existingModels.length() > 0) {
                 for (j in 0 until existingModels.length()) {
-                    existingModels.optJSONObject(j)?.let { putUniqueCloudModel(models, it) }
+                    existingModels.optJSONObject(j)?.let { model ->
+                        if (CloudModelCredentialPolicy.isDebugFixtureCredential(model.optString("api_key"))) {
+                            changed = true
+                        } else {
+                            putUniqueCloudModel(models, model)
+                        }
+                    }
                 }
             } else {
                 val modelId = contact.optString("cloud_model")
-                if (modelId.isNotBlank()) {
+                val apiKey = contact.optString("cloud_api_key")
+                if (modelId.isNotBlank() && !CloudModelCredentialPolicy.isDebugFixtureCredential(apiKey)) {
                     putUniqueCloudModel(models, cloudModelEntry(
                         contact.optString("name", modelId),
                         modelId,
                         contact.optString("cloud_endpoint"),
-                        contact.optString("cloud_api_key"),
+                        apiKey,
                         contact.optString("cloud_api_style", "openai"),
                         contact.optLong("created_at", System.currentTimeMillis())
                     ))
+                } else if (CloudModelCredentialPolicy.isDebugFixtureCredential(apiKey)) {
+                    changed = true
                 }
             }
             if (providerContact.optString("selected_cloud_model").isBlank()) {
@@ -1159,7 +1168,18 @@ object AppStore {
             }
         }
         providers.values.forEach { providerContact ->
+            if (providerContact.optJSONArray("cloud_models")?.length() == 0) {
+                changed = true
+                return@forEach
+            }
             applySelectedCloudModelFields(providerContact)
+            val desiredSetupStatus =
+                if (CloudModelCredentialPolicy.isAutoRoutable(providerContact)) "ready" else "needs_setup"
+            if (providerContact.optString("setup_status") != desiredSetupStatus) changed = true
+            providerContact.put(
+                "setup_status",
+                desiredSetupStatus
+            )
             cleaned.put(providerContact)
         }
         if (changed) writeArray(context, KEY_CONTACTS, cleaned)

@@ -8547,8 +8547,7 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
         if (preferredContactId.isNotBlank()) {
             AppStore.selectedCloudModelContact(context, preferredContactId)?.let { contact ->
                 if (!contact.optBoolean("deleted", false) &&
-                    contact.optString("setup_status").ifBlank { "ready" } == "ready" &&
-                    contact.optString("cloud_model").isNotBlank()
+                    CloudModelCredentialPolicy.isAutoRoutable(contact)
                 ) {
                     results += contact
                 }
@@ -8559,9 +8558,8 @@ class AndroidAgentActionExecutor(private val context: Context) : AgentActionExec
             val contact = contacts.optJSONObject(index) ?: continue
             if (contact.optBoolean("deleted", false)) continue
             if (contact.optString("delivery_mode") != "cloud_api") continue
-            if (contact.optString("setup_status").ifBlank { "ready" } != "ready") continue
-            if (contact.optString("cloud_model").isBlank()) continue
             val selected = AppStore.selectedCloudModelContact(context, contact.optString("id")) ?: contact
+            if (!CloudModelCredentialPolicy.isAutoRoutable(selected)) continue
             if (results.none { existing ->
                     existing.optString("id") == selected.optString("id") &&
                         existing.optString("cloud_model") == selected.optString("cloud_model")
@@ -9824,12 +9822,7 @@ object AgentConnectorAvailability {
         return ageMillis in -MAX_CLOCK_SKEW_MILLIS..DESKTOP_STATUS_TTL_MILLIS
     }
 
-    fun cloudModelReady(contact: JSONObject): Boolean =
-        contact.optString("setup_status").ifBlank { "ready" }.equals("ready", ignoreCase = true) &&
-            contact.optString("cloud_provider").isNotBlank() &&
-            contact.optString("cloud_model").isNotBlank() &&
-            contact.optString("cloud_endpoint").isNotBlank() &&
-            contact.optString("cloud_api_key").isNotBlank()
+    fun cloudModelReady(contact: JSONObject): Boolean = CloudModelCredentialPolicy.isAutoRoutable(contact)
 }
 
 interface AgentSessionStore {
@@ -10526,7 +10519,34 @@ class SharedPreferencesAgentSessionStore(
     companion object {
         private const val PREFS = "signalasi_agent_runtime"
         private const val KEY_SESSION = "session"
+        private const val TASK_PREFIX = "task:"
         private const val MAX_SESSION_VISUAL_ELEMENTS = 60
+
+        fun taskStorageKeys(context: Context): List<String> =
+            AgentEncryptedPreferences(context, PREFS).keys()
+                .asSequence()
+                .filter { it.startsWith(TASK_PREFIX) }
+                .sorted()
+                .toList()
+
+        fun taskStorageKeyForConnectorResponse(
+            context: Context,
+            sourceMessageId: Long,
+            contactId: String
+        ): String? = taskStorageKeys(context).firstOrNull { storageKey ->
+            val snapshot = SharedPreferencesAgentSessionStore(context, storageKey).load()
+                ?: return@firstOrNull false
+            val pending = snapshot.lastActionResult ?: return@firstOrNull false
+            val recoverable = snapshot.phase == AgentPhase.WAITING_RESPONSE || (
+                snapshot.phase == AgentPhase.FAILED &&
+                    !pending.success &&
+                    pending.metadata["timeout_stage"].orEmpty().isNotBlank()
+                )
+            val expectedContact = pending.metadata["contact_id"].orEmpty()
+            recoverable &&
+                pending.metadata["source_message_id"]?.toLongOrNull() == sourceMessageId &&
+                (expectedContact.isBlank() || contactId.isBlank() || expectedContact == contactId)
+        }
     }
 }
 
