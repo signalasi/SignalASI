@@ -111,7 +111,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val state: AgentUiState,
         val conversation: AgentConversation,
         val entries: List<AgentTranscriptEntry>,
-        val contextCount: Int,
         val insightCount: Int
     )
 
@@ -144,6 +143,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val INITIAL_VISIBLE_AGENT_TRANSCRIPT_ITEMS = 24
         private const val AGENT_TRANSCRIPT_PAGE_ITEMS = 24
         private const val AGENT_PROCESS_TIMER_TICK_MS = 250L
+        private const val UNROUTABLE_CONNECTOR_GRACE_MILLIS = 5L * 60L * 1_000L
         private const val GLOBAL_AGENT_FOREGROUND_RETRY_MILLIS = 5_000L
         private const val AGENT_BRAND_LOGO_BASE_DP = 39
         private const val AGENT_BRAND_LOGO_MIN_DP = 32
@@ -664,22 +664,49 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 val outcome = runCatching {
                     val state = mobileNativeAgent.snapshot()
                     val conversation = agentTranscriptStore.activeConversation()
+                    val initialEntries = agentTranscriptStore.list(conversation.id)
+                    val tasks = SharedPreferencesAgentTaskStore(applicationContext).forSession(conversation.id)
+                    AgentTranscriptLifecyclePolicy.staleConnectorRecoveries(
+                        entries = initialEntries,
+                        tasks = tasks,
+                        activeTaskIds = AgentTaskRuntime.supervisor(applicationContext).activeTaskIds(),
+                        nowMillis = System.currentTimeMillis()
+                    ).forEach { recovery ->
+                        val result = recovery.result.ifBlank {
+                            applicationContext.getString(R.string.agent_stale_connector_no_result)
+                        }
+                        agentTranscriptStore.append(
+                            role = AgentTranscriptRole.ASSISTANT,
+                            text = CodexStyleResponsePolicy.sanitizeAssistantText(result),
+                            dedupeKey = "stale-connector:${recovery.taskId}",
+                            conversationId = recovery.conversationId,
+                            turnId = recovery.turnId,
+                            taskId = recovery.taskId
+                        )
+                    }
                     val entries = agentTranscriptStore.list(conversation.id)
-                    val contextCount = entries.count { it.role != AgentTranscriptRole.PROCESS }
                     val insightCount = globalSuperAgentRuntime.newProactiveInsightCount()
-                    AgentInitialHydration(state, conversation, entries, contextCount, insightCount)
+                    AgentInitialHydration(state, conversation, entries, insightCount)
                 }
                 runOnUiThread {
                     outcome.onSuccess { hydration ->
                         resetAgentTranscriptRendering(hydration.conversation.id)
+                        val restoredTurnId = hydration.entries.asReversed().firstOrNull { entry ->
+                            entry.taskId == hydration.state.sessionId && entry.turnId.isNotBlank()
+                        }?.turnId.orEmpty()
                         renderAgentState(
                             hydration.state,
                             conversationId = hydration.conversation.id,
-                            syncTranscript = false,
+                            turnId = restoredTurnId,
+                            syncTranscript = true,
                             activeConversationId = hydration.conversation.id
                         )
-                        renderAgentTranscript(hydration.entries)
-                        refreshAgentConversationHeader(hydration.conversation, hydration.contextCount)
+                        val reconciledEntries = agentTranscriptStore.list(hydration.conversation.id)
+                        renderAgentTranscript(reconciledEntries)
+                        refreshAgentConversationHeader(
+                            hydration.conversation,
+                            reconciledEntries.count { it.role != AgentTranscriptRole.PROCESS }
+                        )
                         refreshGlobalInsightIndicator(hydration.insightCount)
                         Log.i(
                             "SignalASIStartup",
@@ -896,7 +923,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             response.turnId
         )
         if (runtime == null) {
-            consumeOrphanedAgentConnectorResponse(response)
+            val consumed = consumeOrphanedAgentConnectorResponse(response)
+            if (!consumed && shouldDiscardUnroutableConnectorResponse(response)) {
+                AgentConnectorResponseStore.remove(this, response)
+                Log.i(
+                    "SignalASIAgent",
+                    "Discarded unroutable connector response source=${response.sourceMessageId}"
+                )
+            }
             return
         }
         val responseKey = "${response.sourceMessageId}:${response.contactId}"
@@ -1147,11 +1181,38 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun consumeOrphanedAgentConnectorResponse(response: AgentConnectorResponse): Boolean {
-        val conversationId = response.conversationId.trim()
-            .takeIf(String::isNotBlank)
-            ?.let(agentTranscriptStore::resolveMergedConversationId)
+        val indexedTurnId = SharedPreferencesAgentSessionStore.taskStorageKeyForConnectorResponse(
+            this,
+            response.sourceMessageId,
+            response.contactId
+        )?.removePrefix("task:").orEmpty()
+        val responseTurnId = response.turnId.trim()
+        val responseTaskId = response.taskId.trim()
+        val conversationId = sequenceOf(
+            response.conversationId.trim().takeIf(String::isNotBlank),
+            responseTurnId.takeIf(String::isNotBlank)?.let(agentTranscriptStore::conversationIdForTurn),
+            responseTaskId.takeIf(String::isNotBlank)?.let(agentTranscriptStore::conversationIdForTask),
+            indexedTurnId.takeIf(String::isNotBlank)?.let(agentTranscriptStore::conversationIdForTurn)
+        ).filterNotNull()
+            .mapNotNull(agentTranscriptStore::resolveMergedConversationId)
+            .firstOrNull()
             ?: return false
-        val turnId = latestUnansweredAgentTurnId(conversationId) ?: return false
+        val entries = agentTranscriptStore.list(conversationId)
+        val candidateTurnIds = listOf(
+            responseTurnId,
+            responseTaskId.takeIf(String::isNotBlank)?.let(agentTranscriptStore::turnIdForTask).orEmpty(),
+            indexedTurnId
+        ).filter(String::isNotBlank)
+        val turnId = candidateTurnIds.firstOrNull { candidate ->
+            entries.any { it.role == AgentTranscriptRole.USER && it.turnId == candidate }
+        } ?: latestUnansweredAgentTurnId(conversationId) ?: return false
+        val alreadyAnswered = entries.any {
+            it.role == AgentTranscriptRole.ASSISTANT && it.turnId == turnId && !isAgentApprovalEntry(it)
+        }
+        if (alreadyAnswered) {
+            AgentConnectorResponseStore.remove(this, response)
+            return true
+        }
         val taskId = response.taskId.ifBlank { turnId }
         val stored = agentTranscriptStore.upsert(
             role = AgentTranscriptRole.ASSISTANT,
@@ -1191,6 +1252,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 it.turnId.isNotBlank() &&
                 it.turnId !in answeredTurns
         }?.turnId
+    }
+
+    private fun shouldDiscardUnroutableConnectorResponse(response: AgentConnectorResponse): Boolean {
+        val explicitConversation = response.conversationId.trim()
+        if (explicitConversation.isNotBlank() &&
+            agentTranscriptStore.resolveMergedConversationId(explicitConversation) == null
+        ) {
+            return true
+        }
+        val hasRouteReference = response.turnId.isNotBlank() || response.taskId.isNotBlank()
+        val ageMillis = System.currentTimeMillis() - response.receivedAtMillis
+        return hasRouteReference && ageMillis >= UNROUTABLE_CONNECTOR_GRACE_MILLIS
     }
 
     private fun connectorConversationId(
