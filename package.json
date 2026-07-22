@@ -36,6 +36,7 @@
     "test:release:local": "node tools/dev/run-release-local-gates.js",
     "test:release:device": "node tools/dev/run-release-device-gates.js",
     "test:android:team-process-death": "node tools/dev/test-android-team-process-death.js",
+    "test:android:team-paired-process-death": "node tools/dev/test-android-team-paired-process-death.js",
     "test:runtime-tools": "node --test tools/runtime/runtime-signing.test.mjs tools/runtime/runtime-build.integration.test.mjs tools/runtime/runtime-image.test.mjs tools/runtime/android-elf-bundle.test.mjs tools/runtime/android-elf-normalizer.test.mjs tools/runtime/android-default-runtime.test.mjs",
     "test:guest-runtime": "python -m unittest discover -s apps/android/runtime/guest -p \"test_*.py\"",
     "runtime:build-linux-base": "bash tools/runtime/build-linux-base.sh",
