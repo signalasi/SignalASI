@@ -91,6 +91,17 @@ Many goals need more than one resource. SignalASI represents them as a validated
 
 Outputs are untrusted data when handed from one Agent to another. They are size limited, sensitive values are redacted, graph depth and tool-call counts are capped, and every side effect is revalidated locally.
 
+## Typed Home Assistant execution
+
+Home Assistant participates in the same phone-native tool contract as Android system tools. The phone advertises four dynamically available tools:
+
+- `signalasi.home_assistant.connection.status` checks connectivity without returning the endpoint or token.
+- `signalasi.home_assistant.entities.list` returns a bounded, filtered inventory and redacts protected states.
+- `signalasi.home_assistant.entity.read` reads one exact entity under remembered read consent.
+- `signalasi.home_assistant.service.call` targets one entity, accepts bounded JSON service data, requires an idempotency key, and rereads controller state after deterministic service calls.
+
+Ordinary entity control uses per-entity confirm-once consent. Locks, alarms, security devices, cameras, sirens, valves, automations, scripts, and security-named targets always require confirmation. Administrative core services and secret-bearing service parameters are rejected before network execution. A successful REST response proves only that Home Assistant accepted the service. A matching follow-up state proves the controller state, never the physical-world outcome.
+
 ## Policy modes
 
 - **Balanced:** reliability first, then capability, privacy, latency, cost, and quality.

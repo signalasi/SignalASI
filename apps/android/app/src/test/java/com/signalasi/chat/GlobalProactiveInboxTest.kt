@@ -94,11 +94,11 @@ class GlobalProactiveInboxTest {
 
     @Test
     fun legacyProductTitleIsUpdatedWithoutChangingProtocolNames() {
-        val legacy = message("legacy").copy(title = "Signal 建议")
+        val legacy = message("legacy").copy(title = "Signal \u5efa\u8bae")
 
         val item = GlobalProactiveInboxPolicy.project(listOf(legacy), emptyList()).single()
 
-        assertEquals("SignalASI 建议", item.title)
+        assertEquals("SignalASI \u5efa\u8bae", item.title)
         assertEquals("Signal Protocol", GlobalAgentText.productTitle("Signal Protocol"))
     }
 

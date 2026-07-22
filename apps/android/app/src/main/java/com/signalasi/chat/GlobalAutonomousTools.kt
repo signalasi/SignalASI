@@ -115,7 +115,12 @@ object GlobalAutonomousToolCatalogPolicy {
         listOf("camera", "photo", "capture") to listOf("camera", "photo", "picture", "\u76f8\u673a", "\u62cd\u7167", "\u7167\u7247"),
         listOf("workspace", "file", "zip", "archive") to listOf("file", "project", "code", "zip", "archive", "\u6587\u4ef6", "\u9879\u76ee", "\u4ee3\u7801", "\u538b\u7f29", "\u89e3\u538b"),
         listOf("runtime", "linux", "python", "execute") to listOf("runtime", "linux", "python", "program", "execute", "verify", "\u7a0b\u5e8f", "\u8fd0\u884c", "\u9a8c\u8bc1", "\u672c\u673a"),
-        listOf("mcp", "device", "home") to listOf("mcp", "device", "home assistant", "\u667a\u80fd\u8bbe\u5907", "\u8bbe\u5907\u63a7\u5236")
+        listOf("mcp", "device", "home") to listOf(
+            "mcp", "device", "home assistant", "light", "switch", "scene", "automation",
+            "\u667a\u80fd\u8bbe\u5907", "\u8bbe\u5907\u63a7\u5236", "\u667a\u80fd\u5bb6\u5c45",
+            "\u5f00\u706f", "\u5173\u706f", "\u706f", "\u7a97\u5e18", "\u7a7a\u8c03", "\u95e8\u9501",
+            "\u573a\u666f", "\u81ea\u52a8\u5316"
+        )
     )
 }
 
