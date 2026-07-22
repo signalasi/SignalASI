@@ -105,6 +105,7 @@ class BackendIntegrationContractTest(unittest.TestCase):
                 "/api/agents",
                 "/api/agents/diagnostics",
                 "/api/pairing/status",
+                "/api/pairing/qr",
                 "/api/desktop-tools",
                 "/api/agent-adapters",
                 "/signalasi/verify",

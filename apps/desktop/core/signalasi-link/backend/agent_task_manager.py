@@ -37,8 +37,13 @@ class AgentTask:
     status_seq: int = 0
     thread_id: str = ""
     turn_id: str = ""
+    delegate_agent_id: str = ""
     current_step: str = ""
+    events: list[dict] = field(default_factory=list)
     output_files: list[dict] = field(default_factory=list)
+    attachments: list[str] = field(default_factory=list)
+    retry_of: str = ""
+    attempt: int = 1
     process: subprocess.Popen | None = field(default=None, repr=False, compare=False)
     cancel_requested: bool = field(default=False, repr=False, compare=False)
 
@@ -62,8 +67,13 @@ class AgentTask:
             "status_seq": self.status_seq,
             "thread_id": self.thread_id,
             "turn_id": self.turn_id,
+            "delegate_agent_id": self.delegate_agent_id,
             "current_step": self.current_step,
+            "events": self.events[-100:],
             "output_files": self.output_files,
+            "attachments": self.attachments,
+            "retry_of": self.retry_of,
+            "attempt": self.attempt,
             "process_id": self.process.pid if self.process is not None and self.process.poll() is None else 0,
         }
         if include_prompt:
@@ -92,6 +102,9 @@ class AgentTaskManager:
         task_id: str = "",
         conversation_id: str = "",
         client_route_id: str = "",
+        attachments: list[str] | None = None,
+        retry_of: str = "",
+        attempt: int = 1,
     ) -> AgentTask:
         task = AgentTask(
             task_id=task_id.strip() or str(uuid.uuid4()),
@@ -101,6 +114,9 @@ class AgentTaskManager:
             prompt=prompt,
             conversation_id=conversation_id,
             client_route_id=client_route_id,
+            attachments=[str(value) for value in (attachments or [])[:12]],
+            retry_of=str(retry_of or ""),
+            attempt=max(1, int(attempt or 1)),
         )
         with self._lock:
             if task.task_id in self._tasks:
@@ -134,6 +150,7 @@ class AgentTaskManager:
     def update(
         self, task_id: str, status: str, on_event: EventCallback | None = None,
         *, thread_id: str | None = None, turn_id: str | None = None,
+        delegate_agent_id: str | None = None,
         current_step: str | None = None, result: str | None = None,
         error: str | None = None,
     ) -> AgentTask | None:
@@ -151,6 +168,8 @@ class AgentTaskManager:
                 task.thread_id = thread_id
             if turn_id is not None:
                 task.turn_id = turn_id
+            if delegate_agent_id is not None:
+                task.delegate_agent_id = delegate_agent_id
             if current_step is not None:
                 task.current_step = current_step
             if result is not None:
@@ -160,6 +179,44 @@ class AgentTaskManager:
             if status in TERMINAL_STATES or status == "interrupted":
                 task.completed_at = now
                 task.output_files = self._task_artifacts(task.task_id)
+            self._save_locked()
+        self._emit(task, on_event)
+        return task
+
+    def add_event(
+        self,
+        task_id: str,
+        kind: str,
+        title: str,
+        *,
+        status: str = "completed",
+        detail: str = "",
+        metadata: dict | None = None,
+        on_event: EventCallback | None = None,
+    ) -> AgentTask | None:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or task.status in TERMINAL_STATES:
+                return task
+            event = {
+                "event_id": str(uuid.uuid4()),
+                "created_at": int(time.time() * 1000),
+                "kind": str(kind or "step")[:48],
+                "title": str(title or "Task step")[:240],
+                "status": str(status or "completed")[:32],
+                "detail": str(detail or "")[:4_000],
+                "metadata": dict(metadata or {}),
+            }
+            try:
+                encoded = json.dumps(event["metadata"], ensure_ascii=False, separators=(",", ":"))
+                if len(encoded.encode("utf-8")) > 16_384:
+                    event["metadata"] = {"truncated": True}
+            except Exception:
+                event["metadata"] = {}
+            task.events = [*task.events[-99:], event]
+            task.current_step = event["title"]
+            task.updated_at = event["created_at"]
+            task.status_seq += 1
             self._save_locked()
         self._emit(task, on_event)
         return task
@@ -263,10 +320,34 @@ class AgentTaskManager:
         with self._lock:
             return self._tasks.get(task_id)
 
-    def list(self, limit: int = 100) -> list[dict]:
+    def list(self, limit: int = 100, include_prompt: bool = False) -> list[dict]:
         with self._lock:
             tasks = sorted(self._tasks.values(), key=lambda item: item.updated_at, reverse=True)
-            return [item.public() for item in tasks[:max(1, min(limit, 500))]]
+            return [item.public(include_prompt=include_prompt) for item in tasks[:max(1, min(limit, 500))]]
+
+    def conversation_messages(self, conversation_id: str, limit: int = 12) -> list[dict]:
+        clean_id = str(conversation_id or "").strip()
+        if not clean_id:
+            return []
+        with self._lock:
+            tasks = sorted(
+                (
+                    task for task in self._tasks.values()
+                    if task.conversation_id == clean_id and task.source_message_id.startswith("desktop:")
+                ),
+                key=lambda item: item.created_at,
+            )[-max(1, min(limit, 40)):]
+            return [
+                {
+                    "task_id": task.task_id,
+                    "prompt": task.prompt,
+                    "result": task.result,
+                    "status": task.status,
+                    "agent_id": task.agent_id,
+                }
+                for task in tasks
+                if task.prompt
+            ]
 
     def delete_conversation(self, conversation_id: str, task_ids: set[str] | None = None) -> list[str]:
         clean_id = str(conversation_id or "").strip()
@@ -384,8 +465,13 @@ class AgentTaskManager:
                     status_seq=int(row.get("status_seq") or 0),
                     thread_id=str(row.get("thread_id") or ""),
                     turn_id=str(row.get("turn_id") or ""),
+                    delegate_agent_id=str(row.get("delegate_agent_id") or ""),
                     current_step=str(row.get("current_step") or ""),
+                    events=list(row.get("events") or [])[-100:],
                     output_files=list(row.get("output_files") or [])[:100],
+                    attachments=[str(value) for value in list(row.get("attachments") or [])[:12]],
+                    retry_of=str(row.get("retry_of") or ""),
+                    attempt=max(1, int(row.get("attempt") or 1)),
                 )
                 self._tasks[task.task_id] = task
                 if interrupted:

@@ -2,373 +2,219 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; frame-src http://127.0.0.1:8765; style-src 'self'; script-src 'self'">
   <title>SignalASI Desktop</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-  <main class="shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <img class="mark" src="./signalasi-mark.png" alt="SignalASI">
-        <div>
-          <h1>SignalASI</h1>
-          <p>Desktop Connector</p>
+  <main id="agentApp" class="desktop-shell">
+    <aside class="task-sidebar">
+      <div class="sidebar-brand">
+        <img src="./signalasi-mark.png" alt="SignalASI">
+        <div><strong>SignalASI</strong><span>Desktop Agent</span></div>
+      </div>
+      <button id="newTaskButton" class="new-task-button"><span>+</span><b data-i18n="New task">New task</b></button>
+
+      <div id="taskHistory" class="task-history" aria-label="Task history"></div>
+
+      <div class="sidebar-footer">
+        <button class="sidebar-action" data-open-panel="agents"><span class="line-icon agent-icon"></span><b data-i18n="Agents">Agents</b><em id="agentCount">0</em></button>
+        <button class="sidebar-action" data-open-panel="capabilities"><span class="line-icon capability-icon"></span><b data-i18n="Capabilities">Capabilities</b><em id="capabilityCount">0</em></button>
+        <button class="sidebar-action" data-open-panel="gateway"><span class="line-icon gateway-icon"></span><b data-i18n="Mobile Gateway">Mobile Gateway</b><em id="gatewayCount">Offline</em></button>
+        <button class="sidebar-action" data-open-panel="settings"><span class="line-icon settings-icon"></span><b data-i18n="Settings">Settings</b></button>
+        <div class="desktop-profile">
+          <img src="./signalasi-mark.png" alt="">
+          <div><strong id="desktopName">Desktop</strong><span data-i18n="Super agent">Super agent</span></div>
+          <i id="backendDot" title="Backend status"></i>
         </div>
       </div>
-      <nav>
-        <button class="nav active" data-target="overview">Overview</button>
-        <button class="nav" data-target="pairing">Pairing</button>
-        <button class="nav" data-target="agents">Agents</button>
-        <button class="nav" data-target="models">Models</button>
-      </nav>
     </aside>
 
-    <section class="content">
-      <header class="topbar">
-        <div>
-          <h2>Local Agent Connector</h2>
-          <p>Hermes, Codex, Claude Code, OpenClaw, local models, and custom agents do not need native SignalASI support. This desktop connector wraps them as secure mobile contacts.</p>
+    <section class="agent-workspace">
+      <header class="workspace-header">
+        <div class="workspace-title">
+          <h1 id="conversationTitle" data-i18n="New task">New task</h1>
+          <p><span id="taskStateText" data-i18n="Ready">Ready</span><span class="header-separator">·</span><span id="routeText" data-i18n="Automatic routing">Automatic routing</span></p>
         </div>
-        <div class="topbar-actions">
-          <label class="language-switch">
-            <span>Language</span>
-            <select id="languageSelect" aria-label="Language">
-              <option value="zh-CN">Chinese (Simplified)</option>
-              <option value="en">English</option>
-            </select>
-          </label>
-          <div id="backendBadge" class="badge pending">Checking</div>
+        <div class="workspace-status">
+          <button class="compact-status active" data-open-panel="computer" title="Computer control"><span class="computer-symbol"></span><b data-i18n="Computer">Computer</b></button>
+          <button class="compact-status" data-open-panel="agents" title="Agents"><span class="agent-symbol"></span><b id="headerAgentCount">0 Agents</b></button>
+          <button class="compact-status" data-open-panel="gateway" title="Mobile Gateway"><span class="gateway-symbol"></span><b id="headerGatewayCount">0 phones</b></button>
+          <button id="workspaceMenuButton" class="icon-button more-button" title="More" aria-label="More">...</button>
+        </div>
+        <div id="workspaceMenu" class="workspace-menu" hidden>
+          <button id="cancelRunningTask" data-i18n="Stop running task">Stop running task</button>
+          <button id="revealWorkspaceButton" data-i18n="Show task workspace">Show task workspace</button>
+          <button id="deleteConversationButton" class="danger-text" data-i18n="Delete conversation">Delete conversation</button>
         </div>
       </header>
 
-      <section id="overview" class="section active-section">
-        <div class="steps">
-          <article class="step-card">
-            <span>1</span>
-            <strong>Start the connector</strong>
-            <p>The connector starts the local backend, MQTT bridge, and SignalASI Link identity.</p>
-            <button class="inline-action" data-nav="pairing">Open pairing</button>
-          </article>
-          <article class="step-card">
-            <span>2</span>
-            <strong>Scan the QR code</strong>
-            <p>Scan once from the mobile app. Hermes is added, and connector-managed agents appear as contacts.</p>
-            <button class="inline-action" id="copyPairingLink">Copy pairing link</button>
-          </article>
-          <article class="step-card">
-            <span>3</span>
-            <strong>Configure agents</strong>
-            <p>CLI agents use commands. Local models use Ollama, LM Studio, vLLM, or OpenAI-compatible local APIs.</p>
-            <button class="inline-action" data-nav="agents">Open agent setup</button>
-          </article>
-          <article class="step-card">
-            <span>4</span>
-            <strong>Run self-test</strong>
-            <p>Check setup status, optional agent calls, and encrypted mobile delivery in one place.</p>
-            <button class="inline-action" id="jumpSelfTest">Run below</button>
-          </article>
+      <section id="conversationStream" class="conversation-stream" aria-live="polite">
+        <div id="emptyState" class="empty-state">
+          <img src="./signalasi-mark.png" alt="">
+          <h2 data-i18n="What should we work on?">What should we work on?</h2>
+          <p data-i18n="Ask SignalASI to work with files, code, the browser, desktop tools, or a paired phone.">Ask SignalASI to work with files, code, the browser, desktop tools, or a paired phone.</p>
         </div>
-
-        <section class="panel setup-guide">
-          <div class="panel-head">
-            <div>
-              <h3>First-run setup</h3>
-              <p>Follow these steps to pair the phone and turn each local agent or model into a SignalASI contact.</p>
-            </div>
-            <button id="refreshSetupGuide">Refresh guide</button>
-          </div>
-          <div class="setup-progress">
-            <div>
-              <strong id="setupProgressText">Checking setup</strong>
-              <span id="setupProgressDetail">Waiting for connector diagnostics</span>
-            </div>
-            <div class="setup-track"><span id="setupProgressBar"></span></div>
-          </div>
-          <div id="pairingState" class="pairing-state">Checking phone pairing state</div>
-          <div id="setupChecklist" class="setup-checklist"></div>
-          <div class="hint">
-            Hermes, Codex, Claude Code, local models, and custom agents do not need their own SignalASI plugin. The desktop connector is the trusted bridge: it pairs once with the phone, then calls each local tool through CLI or local API. Cloud models are added directly on the phone.
-          </div>
-        </section>
-
-        <section class="panel contact-map">
-          <div class="panel-head">
-            <div>
-              <h3>Phone contact map</h3>
-              <p>The phone pairs with this desktop identity once. Desktop then exposes each tool as a normal SignalASI contact.</p>
-            </div>
-            <button id="copyContactMap">Copy map</button>
-          </div>
-          <div class="map-grid">
-            <div><strong>Hermes</strong><span>contact: hermes</span><p>Default assistant contact. Uses Hermes CLI or bridge.</p></div>
-            <div><strong>Codex</strong><span>contact: codex</span><p>Uses <code>gpt-5.6-sol</code> with low reasoning by default.</p></div>
-            <div><strong>Claude Code</strong><span>contact: claude</span><p>Wrapped through <code>claude -p</code>; no native SignalASI plugin required.</p></div>
-            <div><strong>OpenClaw</strong><span>contact: openclaw</span><p>Uses the independently installed OpenClaw CLI through its agent JSON interface.</p></div>
-            <div><strong>Local LLM</strong><span>contact: local-llm</span><p>Ollama, LM Studio, vLLM, or OpenAI-compatible localhost.</p></div>
-            <div><strong>Custom Agent</strong><span>contact: custom-agent</span><p>Any CLI or MCP wrapper command using <code>{prompt}</code> or stdin.</p></div>
-          </div>
-        </section>
-
-        <section class="panel status-matrix">
-          <div class="panel-head">
-            <div>
-              <h3>Connector status matrix</h3>
-              <p>Live readiness for every phone contact, with the exact next action needed before it is product-ready.</p>
-            </div>
-            <button id="syncStatusToPhone">Sync phone status</button>
-            <button id="refreshStatusMatrix">Refresh status</button>
-          </div>
-          <div id="statusSummary" class="status-summary">Waiting for connector diagnostics</div>
-          <div class="matrix-table" role="table" aria-label="SignalASI connector status matrix">
-            <div class="matrix-row matrix-head" role="row">
-              <span role="columnheader">Contact</span>
-              <span role="columnheader">Current</span>
-              <span role="columnheader">Proof</span>
-              <span role="columnheader">Next step</span>
-            </div>
-            <div id="connectorMatrixRows"></div>
-          </div>
-        </section>
-
-        <section class="panel architecture">
-          <div class="panel-head">
-            <div>
-              <h3>Connector diagnostics</h3>
-              <p>Inspect pairing, desktop service state, and agent/model availability.</p>
-            </div>
-            <button id="refreshDiagnostics">Refresh</button>
-          </div>
-          <div class="flow">
-            <span>Mobile SignalASI</span>
-            <strong>SignalASI Link Protocol</strong>
-            <span>Desktop Connector</span>
-            <strong>CLI / API</strong>
-            <span>Agent / Model</span>
-          </div>
-          <pre id="diagnosticsResult" class="test-result compact">Waiting for diagnostics</pre>
-        </section>
-
-        <section class="panel architecture">
-          <div class="panel-head">
-            <div>
-              <h3>Runtime requirements</h3>
-              <p>Check whether the desktop package can start the local Python backend and Signal sidecar.</p>
-            </div>
-            <button id="refreshRuntime">Check runtime</button>
-          </div>
-          <pre id="runtimeResult" class="test-result compact">Waiting for runtime check</pre>
-        </section>
+        <div id="messageList" class="message-list"></div>
       </section>
 
-      <section id="pairing" class="section">
-        <article class="panel pairing">
-          <div class="panel-head">
-            <div>
-              <h3>Mobile pairing</h3>
-              <p>Scan this QR code in SignalASI mobile. One verified desktop identity exposes Hermes, Codex, Claude, OpenClaw, Local LLM, and Custom Agent contacts. Cloud models are added directly in the mobile app.</p>
-            </div>
-            <button id="refreshPairing">Refresh</button>
-          </div>
-          <iframe id="pairingFrame" title="SignalASI pairing QR"></iframe>
-          <div id="pairingStatusDetail" class="pairing-state">Checking phone pairing state</div>
-          <div id="pairedClients" class="paired-clients"></div>
-          <div class="pairing-actions">
-            <button id="copyPairingLinkSecondary">Copy pairing link</button>
-            <button data-nav="agents">Configure agents</button>
-            <button id="pairingSelfTest">Run self-test</button>
-            <button id="forgetPhone">Revoke all clients</button>
-          </div>
-          <div class="hint">
-            The pairing route is <code>/signalasi/verify</code>. Every client receives an independent encrypted relationship and can be revoked without affecting other clients.
-          </div>
-        </article>
-      </section>
-
-      <section id="agents" class="section">
-        <article class="panel agents">
-          <div class="panel-head">
-            <div>
-              <h3>Connectable agents</h3>
-              <p>The connector calls each agent locally, then routes replies back through the verified SignalASI Link tunnel.</p>
-            </div>
-            <button id="detectAgents">Detect again</button>
-          </div>
-          <div id="agentList" class="agent-list"></div>
-        </article>
-
-        <article class="panel audit">
-          <div class="panel-head">
-            <div>
-              <h3>Remote Agent tasks</h3>
-              <p>Live lifecycle state for Codex, Hermes, Claude Code, OpenClaw, local models, and custom agents.</p>
-            </div>
-            <button id="refreshAgentTasks">Refresh tasks</button>
-          </div>
-          <div id="agentTasks" class="audit-log">Waiting for Agent tasks</div>
-        </article>
-
-        <article class="panel audit">
-          <div class="panel-head">
-            <div>
-              <h3>Agent permissions and execution log</h3>
-              <p>Every local Agent call is recorded without storing the full prompt text.</p>
-            </div>
-            <button id="refreshExecutionLog">Refresh log</button>
-          </div>
-          <div class="permission-grid">
-            <div><strong>local_process</strong><span>Hermes, Codex, Claude Code, OpenClaw, Custom Agent</span></div>
-            <div><strong>local_http</strong><span>Ollama, LM Studio, vLLM, local OpenAI-compatible APIs</span></div>
-            <div><strong>cloud_http</strong><span>Cloud APIs are configured directly on the mobile app</span></div>
-          </div>
-          <div id="executionLog" class="audit-log">Waiting for execution log</div>
-        </article>
-
-        <article class="panel connector">
-          <div class="panel-head">
-            <div>
-              <h3>CLI agent settings</h3>
-              <p>Prompt text is sent through stdin by default. Use <code>{prompt}</code> only when a tool requires arguments.</p>
-            </div>
-            <button id="saveConfig">Save settings</button>
-          </div>
-          <div class="form-grid three">
-            <label>
-              <span>Hermes command</span>
-              <input id="cmdHermes" spellcheck="false">
-            </label>
-            <label>
-              <span>Codex command</span>
-              <input id="cmdCodex" spellcheck="false">
-            </label>
-            <label>
-              <span>Claude Code command</span>
-              <input id="cmdClaude" spellcheck="false">
-            </label>
-            <label>
-              <span>OpenClaw command</span>
-              <input id="cmdOpenClaw" spellcheck="false">
-            </label>
-            <label>
-              <span>Custom Agent name</span>
-              <input id="customAgentName" maxlength="48" placeholder="Custom Agent" spellcheck="false">
-            </label>
-            <label>
-              <span>Custom Agent command</span>
-              <input id="cmdCustomAgent" placeholder="python custom_agent_stdio.py -" spellcheck="false">
-            </label>
-          </div>
-          <div class="custom-agent-editor">
-            <div class="subhead">
-              <div>
-                <strong>Additional custom agents</strong>
-                <p>Add one row per CLI, MCP wrapper, automation, or local tool. Each row becomes a phone contact after pairing.</p>
-              </div>
-              <button id="addCustomAgent" type="button">Add agent</button>
-            </div>
-            <div class="custom-agent-head">
-              <span>Contact ID</span>
-              <span>Display name</span>
-              <span>Command</span>
-              <span></span>
-            </div>
-            <div id="customAgentsList" class="custom-agent-list"></div>
-          </div>
-          <div class="action-row">
-            <button id="copyDefaultCommands">Copy default commands</button>
-            <button id="openClaudeDocs">Open Claude Code docs</button>
-            <button id="openOpenClawDocs">Open OpenClaw docs</button>
-            <button id="useCustomStdinTemplate">Use stdin template</button>
-            <button id="useCustomMcpTemplate">Use MCP wrapper template</button>
-            <button id="testClaudeConfig">Test Claude Code</button>
-            <button id="testOpenClawConfig">Test OpenClaw</button>
-            <button id="testCustomAgentConfig">Test Custom Agent</button>
-          </div>
-          <div class="hint">
-            Claude Code and other tools do not need native SignalASI support. For MCP, use <code>mcp_agent_wrapper.py</code> as the command and expose it as Custom Agent.
-          </div>
-        </article>
-      </section>
-
-      <section id="models" class="section">
-        <article class="panel connector">
-          <div class="panel-head">
-            <div>
-              <h3>Model settings</h3>
-              <p>Local models can use Ollama, LM Studio, vLLM, or another OpenAI-compatible local endpoint. Cloud models are configured directly in the mobile app.</p>
-            </div>
-            <button id="saveModelConfig">Save model settings</button>
-          </div>
-
-          <div class="form-grid">
-            <label>
-              <span>Local contact name</span>
-              <input id="localModelName" maxlength="48" placeholder="Local LLM" spellcheck="false">
-            </label>
-            <label>
-              <span>Local provider</span>
-              <select id="localProvider">
-                <option value="auto">Auto</option>
-                <option value="ollama">Ollama generate</option>
-                <option value="openai">OpenAI-compatible</option>
-              </select>
-            </label>
-            <label>
-              <span>Local URL</span>
-              <input id="localUrl" placeholder="http://127.0.0.1:11434/api/generate" spellcheck="false">
-            </label>
-            <label>
-              <span>Local model</span>
-              <input id="localModel" placeholder="qwen2.5:7b" spellcheck="false">
-            </label>
-            <label>
-              <span>Local API key</span>
-              <input id="localKey" type="password" spellcheck="false">
-            </label>
-          </div>
-          <div class="model-actions">
-            <div>
-              <strong>Local model shortcuts</strong>
-              <div class="action-row">
-                <button id="useOllamaPreset">Use Ollama defaults</button>
-                <button id="useLmStudioPreset">Use LM Studio preset</button>
-                <button id="testLocalModel">Save and test Local LLM</button>
-              </div>
-            </div>
-          </div>
-        </article>
-      </section>
-
-      <section class="panel test-panel">
-        <div class="panel-head">
-          <div>
-            <h3>Closed-loop tests</h3>
-            <p>Test one agent, send an encrypted mobile diagnostic, or run the connector self-test for every contact.</p>
+      <footer class="composer-shell">
+        <div id="attachmentTray" class="attachment-tray" hidden></div>
+        <div class="composer">
+          <textarea id="promptInput" rows="1" maxlength="24000" data-i18n-placeholder="Tell SignalASI what to do..." placeholder="Tell SignalASI what to do..."></textarea>
+          <div class="composer-toolbar">
+            <button id="attachButton" class="composer-icon attach-icon" title="Add files" aria-label="Add files">+</button>
+            <button id="voiceButton" class="composer-icon voice-icon" title="Voice input" aria-label="Voice input"><span></span></button>
+            <button id="agentPickerButton" class="agent-picker"><span>@</span><b id="selectedAgentLabel" data-i18n="Agent">Agent</b></button>
+            <button id="autoModeButton" class="mode-button active" data-i18n="Auto">Auto</button>
+            <button id="localModeButton" class="mode-button" data-i18n="This desktop">This desktop</button>
+            <button id="sendButton" class="send-button" title="Send" aria-label="Send">↑</button>
           </div>
         </div>
-        <div class="test-row">
-          <select id="testAgent">
-            <option value="hermes">Hermes Agent</option>
-            <option value="codex">Codex Agent</option>
-            <option value="claude">Claude Code</option>
-            <option value="openclaw">OpenClaw</option>
-            <option value="local-llm">Local LLM</option>
-            <option value="custom-agent">Custom Agent</option>
-          </select>
-          <input id="testPrompt" value="hello" spellcheck="false">
-          <button id="runTest">Test agent</button>
-          <button id="sendMobileTest">Send to phone</button>
-          <button id="syncStatusToPhoneSecondary">Sync status</button>
-          <button id="runSelfTest">Self-test all</button>
-        </div>
-        <label class="inline-check">
-          <input id="includeAgentCalls" type="checkbox">
-          <span>Also call ready agents during self-test</span>
-        </label>
-        <pre id="testResult" class="test-result">Waiting for test</pre>
-      </section>
+      </footer>
     </section>
   </main>
-  <script src="./renderer.js"></script>
+
+  <div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
+  <aside id="utilityDrawer" class="utility-drawer" aria-hidden="true">
+    <header class="drawer-header">
+      <div><h2 id="drawerTitle">Panel</h2><p id="drawerSubtitle"></p></div>
+      <button id="closeDrawer" class="icon-button close-button" aria-label="Close">×</button>
+    </header>
+
+    <section id="agentsPanel" class="drawer-panel">
+      <div class="panel-action-row">
+        <div><strong data-i18n="Agent contacts">Agent contacts</strong><p data-i18n="Choose one for this conversation or start a private task.">Choose one for this conversation or start a private task.</p></div>
+        <button id="refreshAgentsButton" class="secondary-button" data-i18n="Refresh">Refresh</button>
+      </div>
+      <div id="agentContactList" class="agent-contact-list"></div>
+      <details class="drawer-details">
+        <summary data-i18n="Add custom agent">Add custom agent</summary>
+        <div class="form-stack">
+          <label><span data-i18n="Contact ID">Contact ID</span><input id="customAgentId" maxlength="48" placeholder="research-agent"></label>
+          <label><span data-i18n="Display name">Display name</span><input id="customAgentName" maxlength="48" placeholder="Research Agent"></label>
+          <label><span data-i18n="Command">Command</span><input id="customAgentCommand" placeholder="python custom_agent_stdio.py -"></label>
+          <button id="saveCustomAgentButton" class="primary-button" data-i18n="Add agent">Add agent</button>
+        </div>
+      </details>
+    </section>
+
+    <section id="gatewayPanel" class="drawer-panel">
+      <div id="gatewaySummary" class="gateway-summary"><span class="status-orb"></span><div><strong>SignalASI Link</strong><p data-i18n="Checking phone connections">Checking phone connections</p></div><button id="refreshGatewayButton" class="secondary-button" data-i18n="Refresh">Refresh</button></div>
+      <div id="pairedClientList" class="paired-client-list"></div>
+      <details id="pairingDetails" class="drawer-details pairing-details">
+        <summary data-i18n="Pair another phone">Pair another phone</summary>
+        <div class="pairing-qr-surface">
+          <img id="pairingFrame" alt="SignalASI pairing QR">
+          <small id="pairingFingerprint"></small>
+        </div>
+      </details>
+    </section>
+
+    <section id="computerPanel" class="drawer-panel">
+      <div id="computerSummary" class="computer-summary"><span class="status-orb"></span><div><strong data-i18n="Desktop control">Desktop control</strong><p data-i18n="Loading available local tools">Loading available local tools</p></div></div>
+      <div class="desktop-control-settings">
+        <label class="setting-row compact-setting"><span><strong data-i18n="Enable Desktop Executor">Enable Desktop Executor</strong><small data-i18n="Only approved phones can view or control this desktop">Only approved phones can view or control this desktop</small></span><input id="desktopExecutorEnabled" type="checkbox"></label>
+        <label class="setting-row compact-setting"><span><strong data-i18n="Require unlocked desktop">Require unlocked desktop</strong><small data-i18n="Reject remote actions while Windows is locked">Reject remote actions while Windows is locked</small></span><input id="desktopControlRequireUnlocked" type="checkbox"></label>
+        <p id="desktopControlHint" class="control-hint" data-i18n="Enable the executor, refresh the pairing QR, then approve the phone once.">Enable the executor, refresh the pairing QR, then approve the phone once.</p>
+        <button id="showDesktopControlQrButton" class="primary-button full-width" data-i18n="Add control phone">Add control phone</button>
+      </div>
+      <section class="control-list-section">
+        <div class="mini-section-title"><strong data-i18n="Authorization requests">Authorization requests</strong><span id="desktopControlPendingCount">0</span></div>
+        <div id="desktopControlPendingList" class="desktop-control-list"></div>
+      </section>
+      <section class="control-list-section">
+        <div class="mini-section-title"><strong data-i18n="Authorized phones">Authorized phones</strong><span id="desktopControlActiveCount">0</span></div>
+        <div id="desktopControlAuthorizedList" class="desktop-control-list"></div>
+      </section>
+      <details class="drawer-details">
+        <summary data-i18n="Recent control activity">Recent control activity</summary>
+        <div id="desktopControlAuditList" class="desktop-control-audit"></div>
+      </details>
+      <button id="readSystemStatusButton" class="primary-button full-width" data-i18n="Read system status">Read system status</button>
+      <pre id="systemStatusOutput" class="tool-output" hidden></pre>
+      <div id="desktopToolList" class="desktop-tool-list"></div>
+    </section>
+
+    <section id="capabilitiesPanel" class="drawer-panel">
+      <div class="capability-tabs" role="tablist">
+        <button class="active" data-capability-tab="memory" data-i18n="Memory">Memory</button>
+        <button data-capability-tab="skills" data-i18n="Skills">Skills</button>
+        <button data-capability-tab="mcp">MCP</button>
+      </div>
+
+      <div id="memoryCapability" class="capability-pane active">
+        <div class="capability-summary"><div><strong data-i18n="Long-term memory">Long-term memory</strong><p id="memorySummary" data-i18n="Loading">Loading</p></div><button id="refreshMemoryButton" class="secondary-button" data-i18n="Refresh">Refresh</button></div>
+        <label class="search-field"><span class="search-symbol"></span><input id="memorySearch" data-i18n-placeholder="Search memory" placeholder="Search memory"></label>
+        <div id="memoryList" class="capability-list"></div>
+        <details class="drawer-details">
+          <summary data-i18n="Add memory">Add memory</summary>
+          <div class="form-stack">
+            <textarea id="memoryContent" rows="3" maxlength="2000" data-i18n-placeholder="What should SignalASI remember?" placeholder="What should SignalASI remember?"></textarea>
+            <button id="addMemoryButton" class="primary-button" data-i18n="Remember">Remember</button>
+          </div>
+        </details>
+      </div>
+
+      <div id="skillsCapability" class="capability-pane">
+        <div class="capability-summary"><div><strong data-i18n="Workflow skills">Workflow skills</strong><p id="skillSummary"></p></div></div>
+        <div id="skillList" class="capability-list"></div>
+        <details class="drawer-details">
+          <summary data-i18n="Add custom skill">Add custom skill</summary>
+          <div class="form-stack">
+            <label><span data-i18n="Skill ID">Skill ID</span><input id="skillId" maxlength="64" placeholder="team.release-review"></label>
+            <label><span data-i18n="Name">Name</span><input id="skillName" maxlength="80"></label>
+            <label><span data-i18n="Triggers">Triggers</span><input id="skillTriggers" data-i18n-placeholder="Comma-separated phrases" placeholder="Comma-separated phrases"></label>
+            <label><span data-i18n="Instructions">Instructions</span><textarea id="skillInstructions" rows="5" maxlength="12000"></textarea></label>
+            <button id="saveSkillButton" class="primary-button" data-i18n="Add skill">Add skill</button>
+          </div>
+        </details>
+      </div>
+
+      <div id="mcpCapability" class="capability-pane">
+        <div class="capability-summary"><div><strong data-i18n="MCP connections">MCP connections</strong><p id="mcpSummary"></p></div></div>
+        <div id="mcpList" class="capability-list"></div>
+        <details class="drawer-details">
+          <summary data-i18n="Add local MCP">Add local MCP</summary>
+          <div class="form-stack">
+            <label><span data-i18n="Connection ID">Connection ID</span><input id="mcpId" maxlength="64" placeholder="home-relay"></label>
+            <label><span data-i18n="Name">Name</span><input id="mcpName" maxlength="80" placeholder="Home Relay"></label>
+            <label><span data-i18n="Server command">Server command</span><input id="mcpCommand" maxlength="4000" placeholder="python server.py"></label>
+            <label><span data-i18n="Default tool">Default tool</span><input id="mcpTool" maxlength="160" placeholder="control_relay"></label>
+            <label><span data-i18n="Triggers">Triggers</span><input id="mcpTriggers" data-i18n-placeholder="Comma-separated phrases" placeholder="Comma-separated phrases"></label>
+            <label class="check-row"><input id="mcpAutoInvoke" type="checkbox"><span><strong data-i18n="Allow automatic use">Allow automatic use</strong><small data-i18n="Use this MCP when a trigger matches">Use this MCP when a trigger matches</small></span></label>
+            <button id="saveMcpButton" class="primary-button" data-i18n="Add MCP">Add MCP</button>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section id="settingsPanel" class="drawer-panel">
+      <div class="settings-group">
+        <h3 data-i18n="General">General</h3>
+        <label class="setting-row"><span><strong data-i18n="Language">Language</strong><small data-i18n="Desktop interface language">Desktop interface language</small></span><select id="languageSelect"><option value="en">English</option><option value="zh-CN">Simplified Chinese</option></select></label>
+        <div class="setting-row"><span><strong data-i18n="Backend">Backend</strong><small id="backendDetail" data-i18n="Checking">Checking</small></span><span id="backendBadge" class="state-badge pending" data-i18n="Checking">Checking</span></div>
+      </div>
+      <div class="settings-group">
+        <h3 data-i18n="Agent commands">Agent commands</h3>
+        <div class="form-stack compact-forms">
+          <label><span>Hermes</span><input id="cmdHermes" spellcheck="false"></label>
+          <label><span>Codex</span><input id="cmdCodex" spellcheck="false"></label>
+          <label><span>Claude Code</span><input id="cmdClaude" spellcheck="false"></label>
+          <label><span>OpenClaw</span><input id="cmdOpenClaw" spellcheck="false"></label>
+          <button id="saveAgentCommandsButton" class="primary-button" data-i18n="Save commands">Save commands</button>
+        </div>
+      </div>
+      <div class="settings-group">
+        <h3 data-i18n="Diagnostics">Diagnostics</h3>
+        <button id="runDiagnosticsButton" class="secondary-button full-width" data-i18n="Run diagnostics">Run diagnostics</button>
+        <pre id="diagnosticsOutput" class="tool-output" hidden></pre>
+      </div>
+    </section>
+  </aside>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="./workspace.js"></script>
 </body>
 </html>
