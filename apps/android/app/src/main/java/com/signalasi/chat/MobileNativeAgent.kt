@@ -504,6 +504,38 @@ class MobileNativeAgent(
             AgentNotificationNativeTools.NOTIFICATIONS_LIST -> renderNotificationList(output, zh = false)
             AgentNotificationNativeTools.NOTIFICATION_REPLY ->
                 "The reply was dispatched to ${text("target_title").ifBlank { text("package_name") }.ifBlank { "the notification" }}. Android did not provide a delivery receipt."
+            AgentHomeAssistantNativeTools.CONNECTION_STATUS ->
+                "Home Assistant is connected."
+            AgentHomeAssistantNativeTools.ENTITIES_LIST -> {
+                val entities = (output["entities"] as? Iterable<*>)
+                    ?.mapNotNull { it as? Map<*, *> }
+                    .orEmpty()
+                val lines = entities.take(20).map { entity ->
+                    val name = entity["friendly_name"]?.toString().orEmpty()
+                        .ifBlank { entity["entity_id"]?.toString().orEmpty() }
+                    val state = entity["state"]?.toString().orEmpty()
+                    "- $name: $state"
+                }
+                "Found ${entities.size} Home Assistant entities." +
+                    (if (lines.isEmpty()) "" else lines.joinToString("\n", prefix = "\n"))
+            }
+            AgentHomeAssistantNativeTools.ENTITY_READ -> {
+                val entity = output["entity"] as? Map<*, *> ?: emptyMap<Any?, Any?>()
+                val name = entity["friendly_name"]?.toString().orEmpty()
+                    .ifBlank { entity["entity_id"]?.toString().orEmpty() }
+                "$name is ${entity["state"]?.toString().orEmpty().ifBlank { "unknown" }}."
+            }
+            AgentHomeAssistantNativeTools.SERVICE_CALL -> {
+                val target = text("entity_id").ifBlank { "the Home Assistant entity" }
+                val service = text("service").replace('_', ' ')
+                when {
+                    bool("controller_state_verified") ->
+                        "Ran $service for $target. Home Assistant now reports ${text("current_state").ifBlank { "the requested state" }}."
+                    bool("verification_supported") ->
+                        "Home Assistant accepted $service for $target, but its controller state has not matched yet."
+                    else -> "Home Assistant accepted $service for $target."
+                }
+            }
             AgentHardwareNativeTools.BATTERY_STATUS -> {
                 val percent = long("percent")?.toString() ?: "unknown"
                 val charging = bool("charging")
@@ -844,6 +876,38 @@ class MobileNativeAgent(
             AgentNotificationNativeTools.NOTIFICATIONS_LIST -> renderNotificationList(output, zh = true)
             AgentNotificationNativeTools.NOTIFICATION_REPLY ->
                 "\u5df2\u5c06\u56de\u590d\u4ea4\u7ed9 ${text("target_title").ifBlank { text("package_name") }.ifBlank { "\u8be5\u901a\u77e5" }} \u53d1\u9001\u3002Android \u672a\u63d0\u4f9b\u9001\u8fbe\u56de\u6267\u3002"
+            AgentHomeAssistantNativeTools.CONNECTION_STATUS ->
+                "Home Assistant \u8fde\u63a5\u6b63\u5e38\u3002"
+            AgentHomeAssistantNativeTools.ENTITIES_LIST -> {
+                val entities = (output["entities"] as? Iterable<*>)
+                    ?.mapNotNull { it as? Map<*, *> }
+                    .orEmpty()
+                val lines = entities.take(20).map { entity ->
+                    val name = entity["friendly_name"]?.toString().orEmpty()
+                        .ifBlank { entity["entity_id"]?.toString().orEmpty() }
+                    val state = entity["state"]?.toString().orEmpty()
+                    "- $name: $state"
+                }
+                "\u627e\u5230 ${entities.size} \u4e2a Home Assistant \u5b9e\u4f53\u3002" +
+                    (if (lines.isEmpty()) "" else lines.joinToString("\n", prefix = "\n"))
+            }
+            AgentHomeAssistantNativeTools.ENTITY_READ -> {
+                val entity = output["entity"] as? Map<*, *> ?: emptyMap<Any?, Any?>()
+                val name = entity["friendly_name"]?.toString().orEmpty()
+                    .ifBlank { entity["entity_id"]?.toString().orEmpty() }
+                "$name \u5f53\u524d\u72b6\u6001\uff1a${entity["state"]?.toString().orEmpty().ifBlank { "\u672a\u77e5" }}\u3002"
+            }
+            AgentHomeAssistantNativeTools.SERVICE_CALL -> {
+                val target = text("entity_id").ifBlank { "Home Assistant \u5b9e\u4f53" }
+                val service = text("service").replace('_', ' ')
+                when {
+                    bool("controller_state_verified") ->
+                        "\u5df2\u5bf9 $target \u6267\u884c $service\uff0cHome Assistant \u63a7\u5236\u5668\u72b6\u6001\u4e3a ${text("current_state").ifBlank { "\u76ee\u6807\u72b6\u6001" }}\u3002"
+                    bool("verification_supported") ->
+                        "Home Assistant \u5df2\u63a5\u53d7 $target \u7684 $service\uff0c\u4f46\u63a7\u5236\u5668\u72b6\u6001\u5c1a\u672a\u5339\u914d\u3002"
+                    else -> "Home Assistant \u5df2\u63a5\u53d7 $target \u7684 $service\u3002"
+                }
+            }
             AgentHardwareNativeTools.BATTERY_STATUS -> {
                 val percent = long("percent")?.toString() ?: "\u672a\u77e5"
                 when {
@@ -6555,6 +6619,33 @@ class RuleBasedAgentPlanner(private val context: Context? = null) : AgentPlanner
             lower.contains("script") -> "Run a Home Assistant script"
             lower.contains("scene") -> "Activate a Home Assistant scene"
             else -> "Control a trusted device connector"
+        }
+        val homeAssistantCall = if (customConnector == null && context != null) {
+            HomeAssistantDeviceClient.serviceCallForPrompt(context, request.goal)
+        } else {
+            null
+        }
+        if (homeAssistantCall != null) {
+            val toolInput = JSONObject()
+                .put("service_domain", homeAssistantCall.serviceDomain)
+                .put("service", homeAssistantCall.service)
+                .put("entity_id", homeAssistantCall.entityId)
+                .put("service_data", JSONObject(homeAssistantCall.serviceData))
+                .toString()
+            return AgentAction(
+                id = "home-assistant-service-${AgentNativeJsonCodec.sha256(toolInput).take(16)}",
+                kind = AgentActionKind.CALL_NATIVE_TOOL,
+                target = homeAssistantCall.entityId,
+                risk = risk,
+                status = AgentActionStatus.PENDING_CONFIRMATION,
+                description = description,
+                parameters = mapOf(
+                    "tool_id" to AgentHomeAssistantNativeTools.SERVICE_CALL,
+                    "input_json" to toolInput,
+                    "connector_id" to "home-assistant",
+                    "response_language" to if (request.goal.any { it in '\u3400'..'\u9fff' }) "zh" else "en"
+                )
+            )
         }
         return AgentAction(
             id = "device-control",
