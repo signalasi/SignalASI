@@ -85,6 +85,43 @@ class PairingRegistryTests(unittest.TestCase):
         self.assertIsNotNone(pairing_state.get_client(second_id))
         self.assertTrue(pairing_state.is_paired())
 
+    def test_identity_lookup_only_returns_active_replaced_routes(self):
+        first_id = link_protocol.new_route_id()
+        second_id = link_protocol.new_route_id()
+        other_id = link_protocol.new_route_id()
+        fingerprint = "a" * 64
+        pairing_state.record_pairing_success(
+            fingerprint,
+            "signalasi:shared",
+            client_route_id=first_id,
+        )
+        pairing_state.record_pairing_success(
+            fingerprint,
+            "signalasi:shared",
+            client_route_id=second_id,
+        )
+        pairing_state.record_pairing_success(
+            "b" * 64,
+            "signalasi:other",
+            client_route_id=other_id,
+        )
+
+        matches = pairing_state.clients_for_identity(
+            fingerprint,
+            "signalasi:shared",
+            exclude_route_id=second_id,
+        )
+        self.assertEqual([first_id], [client["client_route_id"] for client in matches])
+        pairing_state.revoke_client(first_id, "replaced_by_new_pairing")
+        self.assertEqual(
+            [],
+            pairing_state.clients_for_identity(
+                fingerprint,
+                "signalasi:shared",
+                exclude_route_id=second_id,
+            ),
+        )
+
     def test_pairing_token_is_one_time(self):
         token = pairing_state.new_pairing_token()
         self.assertTrue(pairing_state.validate_pairing_token(token, consume=True))

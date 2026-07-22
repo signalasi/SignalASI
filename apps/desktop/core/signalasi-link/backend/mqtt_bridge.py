@@ -36,6 +36,7 @@ from link_delivery import (
 )
 from link_protocol import LinkTopics, PROTOCOL_NAME, PROTOCOL_VERSION, decrypt_pairing_claim, make_envelope, parse_topic, validate_envelope, valid_route_id
 from pairing_state import (
+    clients_for_identity,
     get_client,
     is_paired,
     list_clients,
@@ -719,6 +720,17 @@ def _subscribe_client(mqttc, client: dict) -> None:
         topic = str(topics.get(key) or "")
         if topic:
             mqttc.subscribe(topic, qos=MQTT_QOS)
+
+
+def _unsubscribe_client(mqttc, client: dict) -> None:
+    topics = client.get("topics") or {}
+    active_topics = [
+        str(topics.get(key) or "")
+        for key in ("up", "control")
+        if str(topics.get(key) or "")
+    ]
+    if active_topics:
+        mqttc.unsubscribe(active_topics)
 
 
 def _subscribe_all_routes(mqttc) -> None:
@@ -1780,11 +1792,33 @@ def handle_pairing_claim(mqttc, payload: dict):
     if not validate_pairing_token(token, consume=True):
         log.warning("MQTT pairing claim rejected: invalid token")
         return
+    replaced_clients = clients_for_identity(
+        fingerprint,
+        signal_name,
+        exclude_route_id=client_route_id,
+    )
+    for previous_client in replaced_clients:
+        result = publish_pairing_revoked(
+            mqttc,
+            reason="replaced_by_new_pairing",
+            client_route_id=previous_client["client_route_id"],
+        )
+        if not result.get("ok"):
+            log.warning(
+                "Previous pairing notification failed route=%s code=%s",
+                previous_client["client_route_id"],
+                result.get("code"),
+            )
     result = replace_peer_signal_bundle(
         bundle,
         remote_name=signal_name,
         remote_device_id=int(payload.get("signal_device_id") or 1),
     )
+    for previous_client in replaced_clients:
+        previous_route_id = previous_client["client_route_id"]
+        revoke_client(previous_route_id, "replaced_by_new_pairing")
+        _unsubscribe_client(mqttc, previous_client)
+        _close_phone_tool_sessions(previous_route_id, "pairing replaced")
     paired_client = record_pairing_success(
         fingerprint=fingerprint,
         remote_name=signal_name,
@@ -2260,4 +2294,3 @@ def stop():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     start()
-

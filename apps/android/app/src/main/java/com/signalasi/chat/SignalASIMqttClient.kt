@@ -376,7 +376,11 @@ object SignalASIMqttClient {
     fun publishPairingClaim(pairingQr: JSONObject): Boolean {
         val context = appContext ?: return false
         if (!SignalASILinkProtocol.validatePairingQr(pairingQr)) return false
-        val link = SignalASILinkProtocol.ensureServerLink(context, pairingQr)
+        val link = SignalASILinkProtocol.ensureServerLink(
+            context,
+            pairingQr,
+            rotateClientRoute = true
+        )
         subscribeLink(link)
         val profile = AppStore.profile(context)
         val payload = JSONObject()

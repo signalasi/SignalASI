@@ -10,6 +10,7 @@ const exe = path.join(packageDir, "SignalASI Desktop.exe");
 const resources = path.join(packageDir, "resources");
 const bundledPython = path.join(resources, "python", "venv", "Scripts", "python.exe");
 const backendMain = path.join(resources, "signalasi-link", "backend", "main.py");
+const packagedBackendInstanceLock = path.join(resources, "signalasi-link", "backend", "backend_instance_lock.py");
 const packagedTaskWorkspace = path.join(resources, "signalasi-link", "backend", "task_workspace.py");
 const packagedResponsePolicy = path.join(resources, "signalasi-link", "backend", "response_policy.py");
 const packagedBackendDir = path.dirname(backendMain);
@@ -133,6 +134,7 @@ async function main() {
   console.log("[packaged-smoke] checking portable package layout");
   assertExists(exe, "SignalASI Desktop exe");
   assertExists(backendMain, "Packaged backend");
+  assertExists(packagedBackendInstanceLock, "Packaged backend instance lock");
   assertExists(packagedTaskWorkspace, "Packaged task workspace module");
   assertExists(packagedResponsePolicy, "Packaged response policy module");
   assertExists(packagedCustomAgent, "Packaged Custom Agent wrapper");
@@ -149,7 +151,7 @@ async function main() {
   console.log("[packaged-smoke] checking bundled Python dependencies");
   const pythonCheck = spawn(
     bundledPython,
-    ["-c", "import cryptography, fastapi, multipart, uvicorn, paho.mqtt.client, sqlalchemy, pydantic, websockets, qrcode, desktop_agent_adapters, desktop_native_tools, mqtt_bridge, phone_tool_broker, rich_output; print('ok')"],
+    ["-c", "import cryptography, fastapi, multipart, uvicorn, paho.mqtt.client, sqlalchemy, pydantic, websockets, qrcode, backend_instance_lock, desktop_agent_adapters, desktop_native_tools, mqtt_bridge, phone_tool_broker, rich_output; print('ok')"],
     { cwd: packagedBackendDir, windowsHide: true }
   );
   await new Promise((resolve, reject) => {
