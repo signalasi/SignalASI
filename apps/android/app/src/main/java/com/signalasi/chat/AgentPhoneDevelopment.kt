@@ -62,6 +62,15 @@ internal object AgentPhoneDevelopmentPolicy {
         return selfContained && codeArtifact && normalized.length <= MAX_INTERACTIVE_GOAL_CHARACTERS
     }
 
+    fun isPhoneDevelopmentTool(toolId: String): Boolean =
+        toolId.startsWith(PHONE_WORKSPACE_TOOL_PREFIX) || toolId in PHONE_RUNTIME_TOOL_IDS
+
+    fun acceptsModelPlan(goal: String, actions: List<AgentAction>): Boolean =
+        shouldUsePhoneRuntime(goal) || actions.none { action ->
+            action.kind == AgentActionKind.CALL_NATIVE_TOOL &&
+                isPhoneDevelopmentTool(action.parameters["tool_id"].orEmpty())
+        }
+
     fun planningPrompt(goal: String): String = buildString {
         append("Act only as a code author for SignalASI's Android-local Linux runtime. ")
         append("Do not run commands, create files, or modify anything on this desktop. ")
@@ -121,6 +130,13 @@ internal object AgentPhoneDevelopmentPolicy {
     private const val MAX_REPAIR_MANIFEST_CHARACTERS = 24_000
     private const val MAX_REPAIR_EVIDENCE_CHARACTERS = 12_000
     private const val MAX_RUNTIME_SUMMARY_CHARACTERS = 8_000
+    private const val PHONE_WORKSPACE_TOOL_PREFIX = "signalasi.workspace."
+    private val PHONE_RUNTIME_TOOL_IDS = setOf(
+        AgentOnDeviceRuntimeTools.STATUS,
+        AgentOnDeviceRuntimeTools.LIST_PACKS,
+        AgentOnDeviceRuntimeTools.INSTALL_PACK,
+        AgentOnDeviceRuntimeTools.EXECUTE
+    )
 }
 
 internal data class AgentPhoneDevelopmentManifest(
