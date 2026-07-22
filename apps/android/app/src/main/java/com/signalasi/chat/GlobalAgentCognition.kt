@@ -219,9 +219,9 @@ object GlobalAgentText {
         "Signal insight" to "SignalASI insight",
         "Signal prepared" to "SignalASI prepared",
         "Signal digest" to "SignalASI digest",
-        "Signal 建议" to "SignalASI 建议",
-        "Signal 已准备" to "SignalASI 已准备",
-        "Signal 摘要" to "SignalASI 摘要"
+        "Signal \u5efa\u8bae" to "SignalASI \u5efa\u8bae",
+        "Signal \u5df2\u51c6\u5907" to "SignalASI \u5df2\u51c6\u5907",
+        "Signal \u6458\u8981" to "SignalASI \u6458\u8981"
     )
     private val cjkStopWords = setOf(
         "\u8fd9\u4e2a", "\u90a3\u4e2a", "\u73b0\u5728", "\u7136\u540e", "\u53ef\u4ee5", "\u9700\u8981", "\u5e94\u8be5", "\u8fdb\u884c", "\u5df2\u7ecf", "\u8fd8\u662f", "\u4e00\u4e2a", "\u4e00\u4e9b", "\u4ec0\u4e48", "\u600e\u4e48"
