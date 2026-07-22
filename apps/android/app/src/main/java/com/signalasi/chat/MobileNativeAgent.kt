@@ -1525,7 +1525,28 @@ class MobileNativeAgent(
     }
 
     private fun executeFirstPendingAction(): AgentUiState {
-        val plan = currentPlan ?: return snapshot()
+        val originalPlan = currentPlan ?: return snapshot()
+        val normalization = AgentPlanLifecyclePolicy.normalize(originalPlan)
+        val plan = normalization.plan
+        if (normalization.changed) {
+            currentPlan = plan
+            lastActionResult = normalization.recoverResult(lastActionResult)
+            recordAudit(
+                AgentAuditEvent.INVOCATION_AUDIT,
+                "removed_trailing_draft_actions=${normalization.removedActions.joinToString(",", transform = AgentAction::id)}"
+            )
+            if (plan.actions.none {
+                    it.status == AgentActionStatus.PENDING_CONFIRMATION ||
+                        it.status == AgentActionStatus.PROPOSED ||
+                        it.status == AgentActionStatus.RUNNING ||
+                        it.status == AgentActionStatus.WAITING_RESPONSE
+                }
+            ) {
+                phase = AgentPhase.COMPLETED
+                saveTaskRecord(result = lastActionResult?.message.orEmpty())
+                return snapshot()
+            }
+        }
         val hardenedPlan = AgentActionRiskHardener.enforce(appContext, plan)
         val preparedPlan = hardenedPlan
             .blockActionsWithFailedDependencies()
@@ -1767,6 +1788,7 @@ class MobileNativeAgent(
                 installedPackIds = installedPackIds
             )
         }
+        responsePlan = AgentPlanLifecyclePolicy.normalize(responsePlan).plan
         currentPlan = responsePlan
         lastActionResult = completedResult
         val hasPendingActions = responsePlan.actions.any {
@@ -5586,19 +5608,27 @@ class MobileNativeAgent(
 
     private fun restoreSession(session: AgentSessionSnapshot?) {
         if (session == null) return
-        val executionWasInterrupted = session.phase == AgentPhase.EXECUTING ||
-            session.phase == AgentPhase.VERIFYING
-        sessionId = session.sessionId.ifBlank { UUID.randomUUID().toString() }
-        phase = if (executionWasInterrupted) AgentPhase.PAUSED else session.phase
-        currentGoal = session.currentGoal
-        currentScreen = session.currentScreen
+        val persistedTask = session.currentPlan?.planId?.let(taskStore::find)
+        val lifecycleNormalization = AgentPlanLifecyclePolicy.normalize(session)
+        val restoredSession = AgentPlanLifecyclePolicy.recoverCompletedConnector(
+            lifecycleNormalization.session,
+            persistedTask,
+            appContext.getString(R.string.agent_stale_connector_no_result)
+        )
+        logRestoredLifecycle(session, restoredSession, persistedTask)
+        val executionWasInterrupted = restoredSession.phase == AgentPhase.EXECUTING ||
+            restoredSession.phase == AgentPhase.VERIFYING
+        sessionId = restoredSession.sessionId.ifBlank { UUID.randomUUID().toString() }
+        phase = if (executionWasInterrupted) AgentPhase.PAUSED else restoredSession.phase
+        currentGoal = restoredSession.currentGoal
+        currentScreen = restoredSession.currentScreen
         if (!safetySettingsStore.load().screenObservationAllowed) {
             currentScreen = captureScreen()
         }
         currentPlan = if (executionWasInterrupted) {
-            session.currentPlan?.recoverInterruptedExecution()
+            restoredSession.currentPlan?.recoverInterruptedExecution()
         } else {
-            session.currentPlan
+            restoredSession.currentPlan
         }
         lastActionResult = if (executionWasInterrupted) {
             AgentActionResult(
@@ -5607,14 +5637,39 @@ class MobileNativeAgent(
                 message = "Execution was interrupted and restored at the last checkpoint"
             )
         } else {
-            session.lastActionResult
+            restoredSession.lastActionResult
         }
-        activeWorkflowExecutionId = session.activeWorkflowExecutionId.takeIf { it.isNotBlank() }
+        activeWorkflowExecutionId = restoredSession.activeWorkflowExecutionId.takeIf { it.isNotBlank() }
         auditTrail.clear()
-        auditTrail.addAll(session.auditTrail.takeLast(MAX_AUDIT_ITEMS))
+        auditTrail.addAll(restoredSession.auditTrail.takeLast(MAX_AUDIT_ITEMS))
+        if (lifecycleNormalization.changed) {
+            recordAudit(
+                AgentAuditEvent.INVOCATION_AUDIT,
+                "restored_plan_removed_trailing_drafts=${lifecycleNormalization.removedActions.joinToString(",", transform = AgentAction::id)}"
+            )
+        }
         if (executionWasInterrupted) {
             recordAudit(AgentAuditEvent.TASK_INTERRUPTED, "restored_to_safe_pause")
         }
+    }
+
+    private fun logRestoredLifecycle(
+        original: AgentSessionSnapshot,
+        restored: AgentSessionSnapshot,
+        persistedTask: AgentTaskRecord?
+    ) {
+        fun actionSummary(plan: AgentPlan?): String = plan?.actions.orEmpty().joinToString(",") { action ->
+            "${action.kind.name}:${action.target}:${action.status.name}:${action.result.length}"
+        }.ifBlank { "none" }
+        Log.i(
+            "SignalASIAgentLifecycle",
+            "restore phase=${original.phase.name}->${restored.phase.name} " +
+                "actions=${actionSummary(original.currentPlan)}->${actionSummary(restored.currentPlan)} " +
+                "last=${original.lastActionResult?.actionId.orEmpty()}:${original.lastActionResult?.message?.length ?: 0}" +
+                "->${restored.lastActionResult?.actionId.orEmpty()}:${restored.lastActionResult?.message?.length ?: 0} " +
+                "task=${persistedTask?.phase?.name.orEmpty()}:${persistedTask?.routeKind?.name.orEmpty()}:" +
+                "${persistedTask?.targetTitle.orEmpty()}:${persistedTask?.result?.length ?: 0}"
+        )
     }
 
     private fun persistSession() {

@@ -172,6 +172,92 @@ class AgentTranscriptPresentationPolicyTest {
         )
     }
 
+    @Test
+    fun hidesLegacyLocalAgentRuntimeAuditRows() {
+        val entries = listOf(
+            entry("user", AgentTranscriptRole.USER, "conversation", "turn", 1L),
+            entry("Codex completed", AgentTranscriptRole.PROCESS, "conversation", "turn", 2L,
+                "audit:2:TOOL_COMPLETED:codex"),
+            entry("Running local-agent-runtime", AgentTranscriptRole.PROCESS, "conversation", "turn", 3L,
+                "audit:3:TOOL_STARTED:runtime"),
+            entry("local-agent-runtime completed", AgentTranscriptRole.PROCESS, "conversation", "turn", 4L,
+                "audit:4:TOOL_COMPLETED:runtime"),
+            entry("assistant", AgentTranscriptRole.ASSISTANT, "conversation", "turn", 5L)
+        )
+
+        val visible = AgentTranscriptPresentationPolicy.collapseProcessGroups(entries)
+
+        assertEquals(listOf("user", "Codex completed", "assistant"), visible.map(AgentTranscriptEntry::text))
+    }
+
+    @Test
+    fun recoversAStaleConnectorTurnWithoutAnAssistantReply() {
+        val entries = listOf(
+            entry("user", AgentTranscriptRole.USER, "conversation", "turn", 1L),
+            entry("remote", AgentTranscriptRole.PROCESS, "conversation", "turn", 2L, "connector-task:task")
+        )
+        val task = AgentTaskRecord(
+            taskId = "task",
+            sessionId = "conversation",
+            goal = "goal",
+            phase = AgentPhase.COMPLETED,
+            routeKind = AgentRouteKind.DESKTOP_AGENT,
+            targetTitle = "Codex",
+            risk = AgentRisk.LOW,
+            blocked = false,
+            result = "Recovered result",
+            createdAtMillis = 1L,
+            updatedAtMillis = 2L
+        )
+
+        val recovered = AgentTranscriptLifecyclePolicy.staleConnectorRecoveries(
+            entries = entries,
+            tasks = listOf(task),
+            activeTaskIds = emptySet(),
+            nowMillis = 5L * 60L * 1_000L + 3L
+        )
+
+        assertEquals(1, recovered.size)
+        assertEquals("Recovered result", recovered.single().result)
+        assertEquals("turn", recovered.single().turnId)
+    }
+
+    @Test
+    fun doesNotRecoverAnActiveOrAlreadyAnsweredConnectorTurn() {
+        val entries = listOf(
+            entry("user", AgentTranscriptRole.USER, "conversation", "turn", 1L),
+            entry("remote", AgentTranscriptRole.PROCESS, "conversation", "turn", 2L, "connector-task:task"),
+            entry("assistant", AgentTranscriptRole.ASSISTANT, "conversation", "turn", 3L)
+        )
+        val task = AgentTaskRecord(
+            taskId = "task",
+            sessionId = "conversation",
+            goal = "goal",
+            phase = AgentPhase.EXECUTING,
+            routeKind = AgentRouteKind.DESKTOP_AGENT,
+            targetTitle = "Codex",
+            risk = AgentRisk.LOW,
+            blocked = false,
+            updatedAtMillis = 2L
+        )
+
+        val answered = AgentTranscriptLifecyclePolicy.staleConnectorRecoveries(
+            entries,
+            listOf(task),
+            emptySet(),
+            10L * 60L * 1_000L
+        )
+        val active = AgentTranscriptLifecyclePolicy.staleConnectorRecoveries(
+            entries.dropLast(1),
+            listOf(task),
+            setOf("task"),
+            10L * 60L * 1_000L
+        )
+
+        assertTrue(answered.isEmpty())
+        assertTrue(active.isEmpty())
+    }
+
     private fun entry(
         id: String,
         role: AgentTranscriptRole,
