@@ -262,6 +262,37 @@ class AgentSystemToolPlannerTest {
     }
 
     @Test
+    fun temporaryDisconnectedConnectorDoesNotFallBackToLocalAgentRuntime() {
+        val screen = ScreenContext(foregroundApp = "com.signalasi.chat", pageTitle = "SignalASI")
+        val recoveringCodex = AgentCallableTarget(
+            id = "codex",
+            title = "Codex",
+            kind = AgentConnectorKind.AGENT,
+            status = AgentConnectorStatus.DISCONNECTED,
+            capabilities = listOf(AgentCapability.CHAT, AgentCapability.REASONING, AgentCapability.RESEARCH)
+        )
+
+        val plan = RuleBasedAgentPlanner().plan(
+            request("Explain why the sky is blue", screen, emptyList(), listOf(recoveringCodex))
+        )
+
+        assertEquals(AgentActionKind.CALL_CONNECTOR, plan.actions.single().kind)
+        assertEquals("codex", plan.actions.single().parameters["connector_id"])
+        assertFalse(plan.actions.any { action -> action.target == "local-agent-runtime" })
+    }
+
+    @Test
+    fun missingReasoningProviderReportsUnavailableInsteadOfLocalRuntime() {
+        val screen = ScreenContext(foregroundApp = "com.signalasi.chat", pageTitle = "SignalASI")
+
+        val plan = RuleBasedAgentPlanner().plan(request("Explain why the sky is blue", screen, emptyList()))
+
+        assertEquals(AgentActionKind.CALL_CONNECTOR, plan.actions.single().kind)
+        assertEquals("reasoning-provider-unavailable", plan.actions.single().parameters["connector_id"])
+        assertFalse(plan.actions.any { action -> action.target == "local-agent-runtime" })
+    }
+
+    @Test
     fun ordinaryConnectorResearchDoesNotInheritPhoneToolConsentTerms() {
         val action = AgentAction(
             id = "connector-codex",

@@ -15,6 +15,7 @@
     <string name="agent_camera_capturing">正在拍照…</string>
     <string name="agent_camera_saved">照片已保存</string>
     <string name="agent_camera_unavailable">摄像头不可用</string>
+    <string name="agent_reasoning_provider_unavailable">当前没有可用的 Agent 或模型。请先配对 Desktop Agent 或配置云端模型，然后重试。</string>
     <string name="agent_camera_permission_required">需要摄像头权限</string>
     <string name="agent_camera_save_failed">无法保存照片</string>
     <string name="agent_camera_capture_failed">无法完成拍照</string>

@@ -74,9 +74,20 @@ class AgentConnectorRouteSelectorTest {
     }
 
     @Test
-    fun returnsNullWhenNoReasoningResourceIsAvailable() {
-        val unavailable = target("codex", AgentConnectorKind.AGENT).copy(
+    fun recoversPairedReasoningResourceWhileStatusHeartbeatIsInFlight() {
+        val recovering = target("codex", AgentConnectorKind.AGENT).copy(
             status = AgentConnectorStatus.DISCONNECTED
+        )
+
+        val selected = AgentConnectorRouteSelector.select(listOf(recovering), null)
+
+        assertEquals("codex", selected?.target?.id)
+    }
+
+    @Test
+    fun returnsNullWhenReasoningResourceStillNeedsSetup() {
+        val unavailable = target("codex", AgentConnectorKind.AGENT).copy(
+            status = AgentConnectorStatus.NEEDS_SETUP
         )
 
         assertNull(AgentConnectorRouteSelector.select(listOf(unavailable), null))
