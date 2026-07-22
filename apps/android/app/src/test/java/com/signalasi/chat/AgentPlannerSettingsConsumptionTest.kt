@@ -1,5 +1,6 @@
 package com.signalasi.chat
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -10,7 +11,7 @@ class AgentPlannerSettingsConsumptionTest {
     fun maximumActionsRejectsOversizedModelPlans() {
         val raw = planJson(
             actionJson("first", "READ_SCREEN"),
-            actionJson("second", "DRAFT_PLAN")
+            actionJson("second", "BACK")
         )
 
         assertNull(AgentModelPlanParser.parse(request(), raw, AgentModelPlannerSettings(maxActions = 1)))
@@ -21,7 +22,7 @@ class AgentPlannerSettingsConsumptionTest {
     fun multiAgentCoordinationControlsDependencyGraphs() {
         val raw = planJson(
             actionJson("first", "READ_SCREEN"),
-            actionJson("second", "DRAFT_PLAN", dependsOn = listOf("first"))
+            actionJson("second", "BACK", dependsOn = listOf("first"))
         )
 
         assertNull(
@@ -44,12 +45,54 @@ class AgentPlannerSettingsConsumptionTest {
     fun maximumAgentHopsLimitsDependencyDepth() {
         val raw = planJson(
             actionJson("first", "READ_SCREEN"),
-            actionJson("second", "DRAFT_PLAN", dependsOn = listOf("first")),
-            actionJson("third", "DRAFT_PLAN", dependsOn = listOf("second"))
+            actionJson("second", "BACK", dependsOn = listOf("first")),
+            actionJson("third", "HOME", dependsOn = listOf("second"))
         )
 
         assertNull(AgentModelPlanParser.parse(request(), raw, AgentModelPlannerSettings(maxAgentHops = 1)))
         assertNotNull(AgentModelPlanParser.parse(request(), raw, AgentModelPlannerSettings(maxAgentHops = 3)))
+    }
+
+    @Test
+    fun initialPlansRejectStandaloneDraftActions() {
+        val raw = planJson(actionJson("draft", "DRAFT_PLAN", target = "local-agent-runtime"))
+
+        assertNull(AgentModelPlanParser.parse(request(), raw, AgentModelPlannerSettings()))
+    }
+
+    @Test
+    fun executablePlansRejectTrailingDraftActions() {
+        val raw = planJson(
+            actionJson("execute", "READ_SCREEN"),
+            actionJson(
+                ref = "draft",
+                kind = "DRAFT_PLAN",
+                dependsOn = listOf("execute"),
+                target = "local-agent-runtime"
+            )
+        )
+
+        assertNull(
+            AgentModelPlanParser.parse(
+                request(replanReason = "connector_response_received"),
+                raw,
+                AgentModelPlannerSettings()
+            )
+        )
+    }
+
+    @Test
+    fun completedReplansAcceptOnlyTaskCompleteMarker() {
+        val raw = planJson(actionJson("done", "DRAFT_PLAN", target = "task-complete"))
+
+        val plan = AgentModelPlanParser.parse(
+            request(replanReason = "connector_response_received"),
+            raw,
+            AgentModelPlannerSettings()
+        )
+
+        assertNotNull(plan)
+        assertEquals("task-complete", plan?.actions?.single()?.target)
     }
 
     @Test
@@ -69,7 +112,7 @@ class AgentPlannerSettingsConsumptionTest {
         assertFalse(decision.allowed)
     }
 
-    private fun request(): AgentRequest {
+    private fun request(replanReason: String = ""): AgentRequest {
         val screen = ScreenContext(foregroundApp = "SignalASI", pageTitle = "Agent")
         return AgentRequest(
             goal = "Test planning settings",
@@ -86,7 +129,8 @@ class AgentPlannerSettingsConsumptionTest {
                 callableTargets = emptyList(),
                 memories = emptyList(),
                 nativeTools = emptyList()
-            )
+            ),
+            replanReason = replanReason
         )
     }
 
@@ -106,9 +150,10 @@ class AgentPlannerSettingsConsumptionTest {
     private fun actionJson(
         ref: String,
         kind: String,
-        dependsOn: List<String> = emptyList()
+        dependsOn: List<String> = emptyList(),
+        target: String = ""
     ): String {
         val dependencies = dependsOn.joinToString(",") { "\"$it\"" }
-        return "{\"ref\":\"$ref\",\"kind\":\"$kind\",\"depends_on\":[$dependencies],\"parameters\":{}}"
+        return "{\"ref\":\"$ref\",\"kind\":\"$kind\",\"target\":\"$target\",\"depends_on\":[$dependencies],\"parameters\":{}}"
     }
 }
