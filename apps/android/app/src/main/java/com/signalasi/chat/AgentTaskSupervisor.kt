@@ -686,6 +686,9 @@ class AgentTaskSupervisor(
             throw failure
         }
 
+        val recoveringFromStall = workspaceStore.find(normalizedWorkspace.workspaceId)
+            ?.let(livenessPolicy::hasUnresolvedStall)
+            ?: false
         val queued = try {
             queueWorkspace(normalizedWorkspace, resumed)
         } catch (failure: Throwable) {
@@ -694,6 +697,14 @@ class AgentTaskSupervisor(
             throw failure
         }
         control.lastActivityAtMillis = now()
+        if (recoveringFromStall) {
+            notifyLiveness(
+                AgentTaskLivenessSignalKind.RECOVERED,
+                queued,
+                "task_resumed",
+                now()
+            )
+        }
         val context = AgentTaskContext(
             workspaceKey = queued.key,
             lane = lane,
