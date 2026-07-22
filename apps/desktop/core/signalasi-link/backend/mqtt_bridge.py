@@ -100,6 +100,14 @@ DESKTOP_TOOL_CALL_RESULT_TYPE = "desktop_tool_call_result"
 DESKTOP_TOOL_CALL_CANCEL_TYPE = "desktop_tool_call_cancel"
 DESKTOP_TOOL_CANCEL_ACK_TYPE = "desktop_tool_cancel_ack"
 DESKTOP_TOOL_REQUEST_SLOTS = threading.BoundedSemaphore(8)
+DESKTOP_EXECUTOR_REQUEST_TYPE = "desktop_executor_request"
+DESKTOP_EXECUTOR_EVENT_TYPE = "desktop_executor_event"
+DESKTOP_ACTION_RECEIPT_TYPE = "desktop_action_receipt"
+DESKTOP_CONTROL_AUTHORIZATIONS_REQUEST_TYPE = "desktop_control_authorizations_request"
+DESKTOP_CONTROL_AUTHORIZATIONS_TYPE = "desktop_control_authorizations"
+DESKTOP_CONTROL_REVOKE_TYPE = "desktop_control_revoke"
+DESKTOP_CONTROL_AUTHORIZATION_CHANGED_TYPE = "desktop_control_authorization_changed"
+DESKTOP_CONTROL_REQUEST_SLOTS = threading.BoundedSemaphore(4)
 
 
 class PhoneToolSessionRoutingError(RuntimeError):
@@ -628,6 +636,231 @@ def _route_desktop_tool_payload(
     return True
 
 
+def _desktop_control_status_payload(paired_client: dict, reason: str = "status") -> dict:
+    from desktop_control import desktop_control_manager
+
+    manager = desktop_control_manager()
+    own = manager.status(str(paired_client.get("client_route_id") or ""))
+    own_rows = own.get("authorizations") or []
+    may_view_all = any(row.get("status") == "active" for row in own_rows)
+    visible = manager.status() if may_view_all else own
+    return {
+        "type": DESKTOP_CONTROL_AUTHORIZATIONS_TYPE,
+        "desktop_id": desktop_id(),
+        "desktop_name": desktop_name(),
+        "desktop_fingerprint": get_signal_bundle().get("identityKeySha256", ""),
+        "server_route_id": server_route_id(),
+        "contract_version": visible.get("contract_version"),
+        "enabled": bool(visible.get("enabled")),
+        "require_unlocked": bool(visible.get("require_unlocked")),
+        "allowed_tools": list(visible.get("allowed_tools") or []),
+        "items": list(visible.get("authorizations") or []),
+        "current_authorization": own_rows[0] if own_rows else None,
+        "recent_audit": list(visible.get("recent_audit") or []),
+        "reason": str(reason or "status")[:80],
+        "sender": "system",
+        "time": time.time(),
+    }
+
+
+def publish_desktop_control_status(mqttc, client_route_id: str, reason: str = "status") -> bool:
+    paired_client = get_client(client_route_id)
+    if not paired_client or mqttc is None:
+        return False
+    try:
+        info = _publish_to_registered_client(
+            mqttc,
+            paired_client,
+            _desktop_control_status_payload(paired_client, reason),
+            "control",
+            durable=False,
+        )
+        return info.rc == mqtt.MQTT_ERR_SUCCESS
+    except Exception as exc:
+        log.warning("Desktop control status publish failed client=%s: %s", client_route_id, exc)
+        return False
+
+
+def publish_desktop_control_status_all(reason: str = "status") -> dict:
+    mqttc = client
+    results = {}
+    for paired_client in list_clients():
+        route_id = str(paired_client.get("client_route_id") or "")
+        results[route_id] = publish_desktop_control_status(mqttc, route_id, reason)
+    return {"ok": all(results.values()) if results else True, "clients": results}
+
+
+def publish_desktop_control_authorization_changed(
+    authorization: dict,
+    reason: str = "changed",
+) -> bool:
+    route_id = str(authorization.get("client_route_id") or "")
+    paired_client = get_client(route_id)
+    mqttc = client
+    if not paired_client or mqttc is None:
+        return False
+    payload = {
+        "type": DESKTOP_CONTROL_AUTHORIZATION_CHANGED_TYPE,
+        "desktop_id": desktop_id(),
+        "desktop_name": desktop_name(),
+        "authorization": authorization,
+        "reason": str(reason or "changed")[:80],
+        "sender": "system",
+        "time": time.time(),
+    }
+    try:
+        info = _publish_to_registered_client(mqttc, paired_client, payload, "control", durable=True)
+        return info.rc == mqtt.MQTT_ERR_SUCCESS
+    except Exception as exc:
+        log.warning("Desktop control authorization publish failed client=%s: %s", route_id, exc)
+        return False
+
+
+def _desktop_control_failure_receipt(payload: dict, code: str, message: str, retryable: bool = False) -> dict:
+    now_ms = int(time.time() * 1_000)
+    return {
+        "type": DESKTOP_ACTION_RECEIPT_TYPE,
+        "task_id": str(payload.get("task_id") or ""),
+        "action_id": str(payload.get("action_id") or "")[:160],
+        "authorization_id": str(payload.get("authorization_id") or "")[:160],
+        "tool_id": str(payload.get("tool_id") or "")[:160],
+        "status": "failed",
+        "summary": str(message or "Desktop control request failed")[:500],
+        "error": {
+            "code": str(code or "desktop_control_failed")[:120],
+            "message": str(message or "Desktop control request failed")[:500],
+            "retryable": bool(retryable),
+        },
+        "started_at": now_ms,
+        "completed_at": now_ms,
+        "duration_ms": 0,
+        "replayed": False,
+        "post_screenshot": None,
+    }
+
+
+def _route_desktop_control_payload(
+    mqttc,
+    paired_client: dict,
+    application_envelope: dict,
+    payload: dict,
+    channel: str,
+) -> bool:
+    message_type = str(payload.get("type") or "")
+    supported = {
+        DESKTOP_EXECUTOR_REQUEST_TYPE,
+        DESKTOP_CONTROL_AUTHORIZATIONS_REQUEST_TYPE,
+        DESKTOP_CONTROL_REVOKE_TYPE,
+    }
+    if message_type not in supported:
+        return False
+    if channel != "control":
+        log.warning("Desktop control request rejected on non-control channel=%s", channel)
+        return True
+    if application_envelope.get("target_id") != desktop_id():
+        log.warning("Desktop control request rejected: target does not match this Desktop")
+        return True
+
+    if message_type == DESKTOP_CONTROL_AUTHORIZATIONS_REQUEST_TYPE:
+        publish_desktop_control_status(
+            mqttc,
+            str(paired_client.get("client_route_id") or ""),
+            reason="requested_by_phone",
+        )
+        return True
+
+    if message_type == DESKTOP_CONTROL_REVOKE_TYPE:
+        from desktop_control import DesktopControlError, desktop_control_manager
+
+        try:
+            authorization = desktop_control_manager().revoke_by_client(
+                str(payload.get("authorization_id") or ""),
+                paired_client,
+            )
+            response = {
+                "type": DESKTOP_CONTROL_AUTHORIZATION_CHANGED_TYPE,
+                "desktop_id": desktop_id(),
+                "desktop_name": desktop_name(),
+                "authorization": authorization,
+                "reason": "revoked_by_phone",
+                "sender": "system",
+                "time": time.time(),
+            }
+        except DesktopControlError as exc:
+            response = {
+                "type": DESKTOP_CONTROL_AUTHORIZATION_CHANGED_TYPE,
+                "desktop_id": desktop_id(),
+                "desktop_name": desktop_name(),
+                "authorization": None,
+                "status": "failed",
+                "error": {"code": exc.code, "message": str(exc)},
+                "reason": "revoke_failed",
+                "sender": "system",
+                "time": time.time(),
+            }
+        _publish_phone_payload(
+            mqttc,
+            {"_client_route_id": paired_client["client_route_id"], "scheme": "signal"},
+            response,
+        )
+        return True
+
+    wire_payload = {"_client_route_id": paired_client["client_route_id"], "scheme": "signal"}
+    if not DESKTOP_CONTROL_REQUEST_SLOTS.acquire(blocking=False):
+        receipt = _desktop_control_failure_receipt(
+            payload,
+            "desktop_control_busy",
+            "Desktop control capacity is busy",
+            retryable=True,
+        )
+        receipt.update({"desktop_id": desktop_id(), "desktop_name": desktop_name(), "sender": "system", "time": time.time()})
+        _publish_phone_payload(mqttc, wire_payload, receipt)
+        return True
+
+    def execute() -> None:
+        try:
+            from desktop_control import DesktopControlError, desktop_control_manager
+
+            def publish_running(event: dict) -> None:
+                event.update({
+                    "desktop_id": desktop_id(),
+                    "desktop_name": desktop_name(),
+                    "sender": "system",
+                    "time": time.time(),
+                })
+                _publish_phone_payload(mqttc, wire_payload, event)
+
+            try:
+                receipt = desktop_control_manager().execute_request(
+                    payload,
+                    paired_client,
+                    on_running=publish_running,
+                )
+            except DesktopControlError as exc:
+                receipt = _desktop_control_failure_receipt(payload, exc.code, str(exc), exc.retryable)
+            receipt.update({
+                "desktop_id": desktop_id(),
+                "desktop_name": desktop_name(),
+                "sender": "system",
+                "time": time.time(),
+            })
+            _publish_phone_payload(mqttc, wire_payload, receipt)
+        except Exception as exc:
+            log.warning("Desktop control request failed action=%s: %s", payload.get("action_id"), exc)
+            receipt = _desktop_control_failure_receipt(payload, "desktop_control_failed", str(exc))
+            receipt.update({"desktop_id": desktop_id(), "desktop_name": desktop_name(), "sender": "system", "time": time.time()})
+            _publish_phone_payload(mqttc, wire_payload, receipt)
+        finally:
+            DESKTOP_CONTROL_REQUEST_SLOTS.release()
+
+    threading.Thread(
+        target=execute,
+        daemon=True,
+        name=f"signalasi-desktop-control-{str(payload.get('action_id') or '')[-8:]}",
+    ).start()
+    return True
+
+
 def request_phone_tool_call(
     session_id: str,
     *,
@@ -1102,6 +1335,8 @@ def _publish_phone_payload(mqttc, wire_payload: dict, reply_payload: dict) -> bo
     channel = "control" if reply_payload.get("type") in {
         "delivery_ack", "agent_task_event", "pairing_revoked", "connector_status", "capability_manifest",
         DESKTOP_TOOL_CALL_RESULT_TYPE, DESKTOP_TOOL_CANCEL_ACK_TYPE,
+        DESKTOP_EXECUTOR_EVENT_TYPE, DESKTOP_ACTION_RECEIPT_TYPE,
+        DESKTOP_CONTROL_AUTHORIZATIONS_TYPE, DESKTOP_CONTROL_AUTHORIZATION_CHANGED_TYPE,
     } else "down"
     target_topic = paired_client["topics"][channel]
     with phone_publish_lock:
@@ -1552,6 +1787,15 @@ def _process_message(mqttc, userdata, msg):
                 accepted_delivery_ack_payload(payload, message_id, trace),
             )
 
+        if _route_desktop_control_payload(
+            mqttc,
+            paired_client,
+            application_envelope,
+            payload,
+            channel,
+        ):
+            return
+
         if _route_desktop_tool_payload(
             mqttc,
             paired_client,
@@ -1582,7 +1826,12 @@ def _process_message(mqttc, userdata, msg):
         log.info(f"MQTT received: [{msg_type}] {content[:50]}")
 
         if msg_type == "client_revoked":
+            from desktop_control import desktop_control_manager
+
             _close_phone_tool_sessions(client_route_id, "paired phone revoked this Desktop")
+            desktop_control_manager().revoke_for_client(
+                client_route_id, "pairing_revoked_by_phone"
+            )
             revoke_client(client_route_id, str(payload.get("reason") or "forgotten_by_client"))
             remove_peer_signal_session(
                 paired_client["signal_name"], int(paired_client.get("signal_device_id") or 1)
@@ -1597,6 +1846,7 @@ def _process_message(mqttc, userdata, msg):
                 client_route_id=client_route_id,
             )
             publish_capability_manifest(mqttc, client_route_id)
+            publish_desktop_control_status(mqttc, client_route_id, reason="client_connected")
             if not status.get("ok"):
                 log.warning("Requested connector status publish failed: %s", status)
             return
@@ -1827,6 +2077,24 @@ def handle_pairing_claim(mqttc, payload: dict):
         display_name=str(payload.get("client_name") or "SignalASI Client")[:120],
         platform=str(payload.get("platform") or "unknown")[:32],
     )
+    control_authorization = None
+    try:
+        from desktop_control import DesktopControlError, desktop_control_manager
+
+        control_token = str(payload.get("desktop_control_authorization_token") or "")
+        if control_token:
+            control_authorization = desktop_control_manager().accept_pairing_offer(
+                control_token,
+                token,
+                paired_client,
+            )
+    except DesktopControlError as exc:
+        log.warning("Desktop control authorization offer rejected: %s", exc)
+    for previous_client in replaced_clients:
+        desktop_control_manager().revoke_for_client(
+            previous_client["client_route_id"],
+            "pairing_replaced",
+        )
     _subscribe_client(mqttc, paired_client)
     log.info(f"MQTT pairing claim accepted fingerprint={fingerprint[:16]} result={result}")
 
@@ -1845,6 +2113,10 @@ def handle_pairing_claim(mqttc, payload: dict):
         "signal_bundle": get_signal_bundle(),
         "sender": "system",
         "connector_agents": mobile_connector_agents(client_route_id),
+        "desktop_control": {
+            "enabled": bool(desktop_control_manager().settings().get("enabled")),
+            "authorization_status": str((control_authorization or {}).get("status") or "not_requested"),
+        },
         "delivery_trace": _desktop_trace(_trace_event("desktop_pairing_confirmed", fingerprint[:16])),
         "time": time.time(),
     }
@@ -1853,6 +2125,13 @@ def handle_pairing_claim(mqttc, payload: dict):
     timer = threading.Timer(1.0, publish_capability_manifest, args=(mqttc, client_route_id))
     timer.daemon = True
     timer.start()
+    control_timer = threading.Timer(
+        1.25,
+        publish_desktop_control_status,
+        args=(mqttc, client_route_id, "pairing_completed"),
+    )
+    control_timer.daemon = True
+    control_timer.start()
 
 
 def mobile_connector_agents(client_route_id: str = "") -> list[dict]:
@@ -1892,8 +2171,10 @@ def mobile_connector_agents(client_route_id: str = "") -> list[dict]:
 
 def capability_manifest(client_route_id: str = "") -> dict:
     from desktop_native_tools import desktop_native_tool_registry
+    from desktop_control import desktop_control_manager
 
     diagnostics = connector_diagnostics()
+    control_status = desktop_control_manager().status(client_route_id)
     return {
         "type": "capability_manifest",
         "manifest_version": 1,
@@ -1905,8 +2186,23 @@ def capability_manifest(client_route_id: str = "") -> dict:
         },
         "agents": mobile_connector_agents(client_route_id),
         "models": [],
-        "tools": ["agent_tasks", "agent_adapters", "voice_stt", "file_transfer", "desktop_native_tools"],
+        "tools": ["agent_tasks", "agent_adapters", "voice_stt", "file_transfer", "desktop_native_tools", "desktop_control"],
         "desktop_native_tools": desktop_native_tool_registry().manifest(),
+        "desktop_control": {
+            "contract_version": control_status.get("contract_version"),
+            "enabled": bool(control_status.get("enabled")),
+            "require_unlocked": bool(control_status.get("require_unlocked")),
+            "allowed_tools": list(control_status.get("allowed_tools") or []),
+            "capabilities": [
+                {
+                    "id": tool_id,
+                    "risk": "low" if tool_id == "desktop.screenshot" else "medium",
+                    "requires_desktop_control_authorization": True,
+                }
+                for tool_id in control_status.get("allowed_tools") or []
+            ],
+            "authorizations": list(control_status.get("authorizations") or []),
+        },
         "features": [
             "tasks",
             "task_events",
@@ -1920,6 +2216,9 @@ def capability_manifest(client_route_id: str = "") -> dict:
             "agent_protocol_negotiation",
             "desktop_native_tool_registry_v1",
             "desktop_native_tool_receipts",
+            "desktop_control_authorization_v1",
+            "desktop_control_screenshot_v1",
+            "desktop_control_input_v1",
         ],
         "limits": {
             "max_parallel_tasks": int(os.environ.get("SIGNALASI_MAX_PARALLEL_TASKS", "4")),

@@ -38,8 +38,13 @@ const backendFiles = [
   "codex_app_server.py",
   "custom_agent_stdio.py",
   "desktop_agent_adapters.py",
+  "desktop_control.py",
   "desktop_file_tools.py",
+  "desktop_memory.py",
+  "desktop_mcp.py",
   "desktop_native_tools.py",
+  "desktop_skills.py",
+  "desktop_super_agent.py",
   "file_server.py",
   "link_delivery.py",
   "link_protocol.py",
@@ -293,17 +298,28 @@ if (bundlePython) {
 }
 
 const iconPath = path.join(root, "assets", "signalasi.ico");
-if (fs.existsSync(iconPath)) {
-  const rcedit = findRceditExecutable();
-  if (rcedit) {
-    try {
-      run(rcedit, [signalExe, "--set-icon", iconPath]);
-    } catch (error) {
-      console.warn(`Unable to embed the executable icon; continuing with the window icon: ${error.message}`);
-    }
-  } else {
-    console.warn("rcedit not found; packaged exe will use the window icon but may keep the default file icon.");
+const rcedit = findRceditExecutable();
+if (rcedit) {
+  try {
+    const versionParts = String(packageMetadata.version || "0.0.0").split(".");
+    const fileVersion = [...versionParts, "0", "0", "0", "0"].slice(0, 4).join(".");
+    const resourceArgs = [
+      signalExe,
+      "--set-file-version", fileVersion,
+      "--set-product-version", String(packageMetadata.version || "0.0.0"),
+      "--set-version-string", "ProductName", "SignalASI Desktop",
+      "--set-version-string", "FileDescription", "SignalASI Desktop super agent and mobile gateway",
+      "--set-version-string", "CompanyName", "SignalASI",
+      "--set-version-string", "OriginalFilename", `${appName}.exe`,
+      "--set-version-string", "LegalCopyright", "Copyright SignalASI contributors"
+    ];
+    if (fs.existsSync(iconPath)) resourceArgs.push("--set-icon", iconPath);
+    run(rcedit, resourceArgs);
+  } catch (error) {
+    console.warn(`Unable to embed SignalASI executable resources: ${error.message}`);
   }
+} else {
+  console.warn("rcedit not found; packaged exe will keep the Electron file resources.");
 }
 
 writeJson(path.join(packagedBackendDir, "signalasi_agents.json"), {

@@ -10,20 +10,27 @@ import base64
 import csv
 import ctypes
 import hashlib
+import ipaddress
 import json
 import os
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import threading
 import time
 import uuid
+import webbrowser
 import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping
+from urllib.parse import urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 CONTRACT_VERSION = "signalasi.desktop-native-tools/1.0"
@@ -41,6 +48,11 @@ WORKSPACE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}\Z")
 
 SYSTEM_STATUS = "signalasi.desktop.windows.system.status"
 PROCESS_LIST = "signalasi.desktop.windows.process.list"
+APP_LIST = "signalasi.desktop.windows.app.list"
+APP_LAUNCH = "signalasi.desktop.windows.app.launch"
+HOST_FILE_SEARCH = "signalasi.desktop.files.search"
+BROWSER_OPEN = "signalasi.desktop.browser.open"
+WEB_FETCH = "signalasi.desktop.web.fetch"
 FILE_LIST = "signalasi.desktop.workspace.file.list"
 FILE_READ_TEXT = "signalasi.desktop.workspace.file.read.text"
 FILE_WRITE_TEXT = "signalasi.desktop.workspace.file.write.text"
@@ -194,6 +206,45 @@ def _office_availability() -> tuple[str, str]:
     return "available", "Microsoft Office is required only for PDF/CSV conversion"
 
 
+class _WebTextParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.title_parts: list[str] = []
+        self._hidden_depth = 0
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, _attrs) -> None:
+        if tag in {"script", "style", "noscript", "svg"}:
+            self._hidden_depth += 1
+        if tag == "title":
+            self._in_title = True
+        if tag in {"p", "div", "br", "li", "article", "section", "h1", "h2", "h3"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "noscript", "svg"} and self._hidden_depth:
+            self._hidden_depth -= 1
+        if tag == "title":
+            self._in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self._hidden_depth:
+            return
+        text = re.sub(r"\s+", " ", str(data or "")).strip()
+        if not text:
+            return
+        self.parts.append(text)
+        if self._in_title:
+            self.title_parts.append(text)
+
+    def result(self) -> tuple[str, str]:
+        title = re.sub(r"\s+", " ", " ".join(self.title_parts)).strip()
+        text = re.sub(r"[ \t]+", " ", " ".join(self.parts))
+        text = re.sub(r"\s*\n\s*", "\n", text)
+        return title[:500], text.strip()
+
+
 def _specs() -> tuple[DesktopToolSpec, ...]:
     return (
         DesktopToolSpec(
@@ -211,6 +262,55 @@ def _specs() -> tuple[DesktopToolSpec, ...]:
             _object_schema({"query": _string(max_length=128), "max_entries": _integer(1, 200)}),
             capabilities=("windows.process.list",),
             availability=_windows_availability,
+        ),
+        DesktopToolSpec(
+            APP_LIST,
+            "List Windows applications",
+            "Lists bounded launchable system applications and Start menu shortcuts.",
+            _object_schema({"query": _string(max_length=128), "max_entries": _integer(1, 200)}),
+            capabilities=("windows.app.list",),
+            availability=_windows_availability,
+        ),
+        DesktopToolSpec(
+            APP_LAUNCH,
+            "Launch Windows application",
+            "Launches one named application from the bounded system and Start menu catalog.",
+            _object_schema({"name": _string(max_length=160)}, ("name",)),
+            capabilities=("windows.app.launch",),
+            idempotency="non_idempotent",
+            availability=_windows_availability,
+        ),
+        DesktopToolSpec(
+            HOST_FILE_SEARCH,
+            "Search user files",
+            "Searches names in a bounded known user folder without reading file contents.",
+            _object_schema({
+                "root": _string(max_length=20, enum=("workspace", "home", "desktop", "documents", "downloads", "pictures", "videos", "music")),
+                "query": _string(max_length=180),
+                "extensions": _array(_string(max_length=24), 24),
+                "max_depth": _integer(1, 12),
+                "max_entries": _integer(1, 200),
+            }, ("root", "query")),
+            capabilities=("desktop.files.search",),
+        ),
+        DesktopToolSpec(
+            BROWSER_OPEN,
+            "Open URL in browser",
+            "Opens one explicit HTTP or HTTPS URL in the user's default browser.",
+            _object_schema({"url": _string(max_length=4_096)}, ("url",)),
+            capabilities=("desktop.browser.open",),
+            idempotency="non_idempotent",
+        ),
+        DesktopToolSpec(
+            WEB_FETCH,
+            "Fetch public web page",
+            "Fetches bounded text from a public HTTP or HTTPS page while blocking local and private network targets.",
+            _object_schema({
+                "url": _string(max_length=4_096),
+                "max_bytes": _integer(1_024, 512 * 1_024),
+            }, ("url",)),
+            capabilities=("desktop.web.fetch",),
+            timeout_ms=35_000,
         ),
         DesktopToolSpec(
             FILE_LIST,
@@ -454,18 +554,36 @@ class DesktopNativeToolRegistry:
         state_root: Path | None = None,
         workspace_root: Path | None = None,
         now: Callable[[], float] = time.time,
+        known_roots: Mapping[str, Path] | None = None,
+        app_catalog: Callable[[], list[dict[str, str]]] | None = None,
+        app_launcher: Callable[[dict[str, str]], None] | None = None,
+        browser_opener: Callable[[str], bool] | None = None,
     ) -> None:
         root = Path(state_root) if state_root else Path(
             os.environ.get("SIGNALASI_STATE_DIR") or Path(os.environ.get("APPDATA") or Path.home()) / "SignalASI"
         )
-        self.workspace_root = Path(workspace_root) if workspace_root else root / "desktop-native-workspaces"
+        if workspace_root is not None:
+            self.workspace_root = Path(workspace_root)
+        else:
+            from task_workspace import workspace_root as signalasi_workspace_root
+
+            self.workspace_root = signalasi_workspace_root() / "tasks"
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         self.receipts = DesktopToolReceiptStore(root / "desktop-native-tool-receipts.json")
         self.now = now
+        self.known_roots = dict(known_roots or self._default_known_roots())
+        self.app_catalog = app_catalog or self._windows_app_catalog
+        self.app_launcher = app_launcher or self._launch_catalog_entry
+        self.browser_opener = browser_opener or webbrowser.open
         self.specs = {spec.tool_id: spec for spec in _specs()}
         self.handlers: dict[str, Callable[[dict[str, Any], dict[str, Any]], DesktopToolExecution]] = {
             SYSTEM_STATUS: self._system_status,
             PROCESS_LIST: self._process_list,
+            APP_LIST: self._app_list,
+            APP_LAUNCH: self._app_launch,
+            HOST_FILE_SEARCH: self._host_file_search,
+            BROWSER_OPEN: self._browser_open,
+            WEB_FETCH: self._web_fetch,
             FILE_LIST: self._file_list,
             FILE_READ_TEXT: self._file_read_text,
             FILE_WRITE_TEXT: self._file_write_text,
@@ -613,6 +731,21 @@ class DesktopNativeToolRegistry:
             process.kill()
             return True
         return False
+
+    def cancel_task(self, task_id: str) -> int:
+        prefix = f"{str(task_id or '').strip()}:"
+        if prefix == ":":
+            return 0
+        with self._process_lock:
+            invocation_ids = [key for key in self._processes if key.startswith(prefix)]
+            self._cancelled.update(invocation_ids)
+            processes = [self._processes[key] for key in invocation_ids]
+        cancelled = 0
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                cancelled += 1
+        return cancelled
 
     def _result(
         self,
@@ -770,6 +903,212 @@ class DesktopNativeToolRegistry:
                 break
         output = {"processes": rows, "count": len(rows), "truncated": len(rows) >= maximum}
         return DesktopToolExecution(output, f"Read {len(rows)} Windows processes", verification_evidence={"count": len(rows)})
+
+    def _default_known_roots(self) -> dict[str, Path]:
+        home = Path.home()
+        return {
+            "workspace": self.workspace_root,
+            "home": home,
+            "desktop": home / "Desktop",
+            "documents": home / "Documents",
+            "downloads": home / "Downloads",
+            "pictures": home / "Pictures",
+            "videos": home / "Videos",
+            "music": home / "Music",
+        }
+
+    @staticmethod
+    def _windows_app_catalog() -> list[dict[str, str]]:
+        aliases = [
+            {"id": "notepad", "name": "Notepad", "kind": "executable", "launch": "notepad.exe"},
+            {"id": "calculator", "name": "Calculator", "kind": "executable", "launch": "calc.exe"},
+            {"id": "paint", "name": "Paint", "kind": "executable", "launch": "mspaint.exe"},
+            {"id": "file-explorer", "name": "File Explorer", "kind": "executable", "launch": "explorer.exe"},
+            {"id": "settings", "name": "Settings", "kind": "uri", "launch": "ms-settings:"},
+        ]
+        roots = [
+            Path(os.environ.get("APPDATA") or "") / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+            Path(os.environ.get("PROGRAMDATA") or "") / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+        ]
+        rows = list(aliases)
+        seen = {item["name"].casefold() for item in rows}
+        for root in roots:
+            if not root.is_dir():
+                continue
+            try:
+                shortcuts = root.rglob("*.lnk")
+                for shortcut in shortcuts:
+                    name = shortcut.stem.strip()
+                    normalized = name.casefold()
+                    if not name or normalized in seen or any(term in normalized for term in ("uninstall", "readme", "help")):
+                        continue
+                    digest = hashlib.sha256(str(shortcut).encode("utf-8")).hexdigest()[:16]
+                    rows.append({"id": f"shortcut-{digest}", "name": name[:160], "kind": "shortcut", "launch": str(shortcut)})
+                    seen.add(normalized)
+                    if len(rows) >= 1_000:
+                        break
+            except OSError:
+                continue
+        return rows
+
+    @staticmethod
+    def _launch_catalog_entry(entry: dict[str, str]) -> None:
+        launch = str(entry.get("launch") or "")
+        kind = str(entry.get("kind") or "")
+        if not launch:
+            raise DesktopNativeToolError("app_not_launchable", "Application has no launch target")
+        if kind in {"shortcut", "uri"}:
+            os.startfile(launch)
+            return
+        subprocess.Popen([launch], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+
+    def _app_list(self, arguments: dict[str, Any], _context: dict[str, Any]) -> DesktopToolExecution:
+        query = str(arguments.get("query") or "").strip().casefold()
+        maximum = int(arguments.get("max_entries") or 100)
+        rows = []
+        for item in self.app_catalog():
+            if query and query not in str(item.get("name") or "").casefold():
+                continue
+            rows.append({"id": str(item.get("id") or ""), "name": str(item.get("name") or ""), "kind": str(item.get("kind") or "")})
+            if len(rows) >= maximum:
+                break
+        output = {"applications": rows, "count": len(rows), "truncated": len(rows) >= maximum}
+        return DesktopToolExecution(output, f"Listed {len(rows)} Windows applications", verification_evidence={"count": len(rows)})
+
+    def _app_launch(self, arguments: dict[str, Any], _context: dict[str, Any]) -> DesktopToolExecution:
+        requested = str(arguments.get("name") or "").strip()
+        normalized = requested.casefold()
+        catalog = list(self.app_catalog())
+        exact = [item for item in catalog if str(item.get("name") or "").casefold() == normalized or str(item.get("id") or "").casefold() == normalized]
+        candidates = exact or [item for item in catalog if normalized in str(item.get("name") or "").casefold()]
+        if not candidates:
+            raise DesktopNativeToolError("app_not_found", f"Application was not found: {requested}")
+        if len(candidates) > 1 and not exact:
+            names = [str(item.get("name") or "") for item in candidates[:8]]
+            raise DesktopNativeToolError("app_ambiguous", "Application name is ambiguous", details={"candidates": names})
+        selected = sorted(candidates, key=lambda item: len(str(item.get("name") or "")))[0]
+        self.app_launcher(selected)
+        output = {"id": selected.get("id"), "name": selected.get("name"), "launched": True}
+        return DesktopToolExecution(output, f"Launched {selected.get('name')}", verification_evidence={"launch_requested": True})
+
+    def _host_file_search(self, arguments: dict[str, Any], _context: dict[str, Any]) -> DesktopToolExecution:
+        root_id = str(arguments.get("root") or "workspace")
+        root = Path(self.known_roots.get(root_id) or "").expanduser().resolve()
+        if not root.is_dir():
+            raise DesktopNativeToolError("search_root_unavailable", f"Search root is unavailable: {root_id}")
+        query = str(arguments.get("query") or "").strip().casefold()
+        extensions = {
+            f".{str(value).strip().casefold().lstrip('.')}"
+            for value in list(arguments.get("extensions") or [])
+            if str(value).strip()
+        }
+        maximum = int(arguments.get("max_entries") or 100)
+        max_depth = int(arguments.get("max_depth") or 6)
+        rows = []
+        for current, directories, files in os.walk(root, followlinks=False):
+            current_path = Path(current)
+            try:
+                depth = len(current_path.relative_to(root).parts)
+            except ValueError:
+                continue
+            directories[:] = [name for name in directories if not name.startswith(".") and depth < max_depth]
+            for name in files:
+                if name.startswith(".") or (query and query not in name.casefold()):
+                    continue
+                path = current_path / name
+                if path.is_symlink() or (extensions and path.suffix.casefold() not in extensions):
+                    continue
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                rows.append({
+                    "name": name[:260],
+                    "path": str(path),
+                    "relative_path": path.relative_to(root).as_posix(),
+                    "size_bytes": int(stat.st_size),
+                    "modified_at": int(stat.st_mtime * 1_000),
+                })
+                if len(rows) >= maximum:
+                    break
+            if len(rows) >= maximum:
+                break
+        output = {"root": root_id, "files": rows, "count": len(rows), "truncated": len(rows) >= maximum}
+        return DesktopToolExecution(output, f"Found {len(rows)} matching files", verification_evidence={"root": root_id, "count": len(rows)})
+
+    @staticmethod
+    def _validated_url(value: str, *, public_only: bool) -> str:
+        url = str(value or "").strip()
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise DesktopNativeToolError("invalid_url", "URL must be HTTP or HTTPS and must not embed credentials")
+        if public_only:
+            host = parsed.hostname.casefold()
+            if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+                raise DesktopNativeToolError("private_network_blocked", "Local and private network web targets are blocked")
+            try:
+                addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)}
+            except OSError as exc:
+                raise DesktopNativeToolError("dns_failed", "Web target could not be resolved", retryable=True) from exc
+            if not addresses or any(not ipaddress.ip_address(address.split("%", 1)[0]).is_global for address in addresses):
+                raise DesktopNativeToolError("private_network_blocked", "Local and private network web targets are blocked")
+        return url
+
+    def _browser_open(self, arguments: dict[str, Any], _context: dict[str, Any]) -> DesktopToolExecution:
+        url = self._validated_url(arguments["url"], public_only=False)
+        opened = bool(self.browser_opener(url))
+        if not opened:
+            raise DesktopNativeToolError("browser_open_failed", "The default browser did not accept the URL")
+        output = {"url": url, "opened": True}
+        return DesktopToolExecution(output, "Opened URL in default browser", verification_evidence={"open_requested": True})
+
+    def _web_fetch(self, arguments: dict[str, Any], _context: dict[str, Any]) -> DesktopToolExecution:
+        url = self._validated_url(arguments["url"], public_only=True)
+        maximum = int(arguments.get("max_bytes") or 256 * 1_024)
+        request = Request(
+            url,
+            headers={
+                "User-Agent": "SignalASI-Desktop/0.1",
+                "Accept": "text/html,application/json,text/plain;q=0.9,*/*;q=0.5",
+            },
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                final_url = self._validated_url(response.geturl(), public_only=True)
+                content_type = str(response.headers.get_content_type() or "application/octet-stream")
+                charset = str(response.headers.get_content_charset() or "utf-8")
+                raw = response.read(maximum + 1)
+                status = int(getattr(response, "status", 200) or 200)
+        except HTTPError as exc:
+            raise DesktopNativeToolError("web_http_error", f"Web server returned HTTP {exc.code}", retryable=500 <= int(exc.code) < 600) from exc
+        except (URLError, OSError) as exc:
+            raise DesktopNativeToolError("web_fetch_failed", "Public web page could not be fetched", retryable=True) from exc
+        truncated = len(raw) > maximum
+        raw = raw[:maximum]
+        try:
+            decoded = raw.decode(charset, errors="replace")
+        except LookupError:
+            decoded = raw.decode("utf-8", errors="replace")
+        title = ""
+        if content_type in {"text/html", "application/xhtml+xml"}:
+            parser = _WebTextParser()
+            parser.feed(decoded)
+            title, text = parser.result()
+        elif content_type.startswith("text/") or content_type in {"application/json", "application/xml"}:
+            text = decoded.strip()
+        else:
+            raise DesktopNativeToolError("unsupported_web_content", f"Web content type is not text: {content_type}")
+        output = {
+            "url": final_url,
+            "status_code": status,
+            "content_type": content_type,
+            "title": title,
+            "text": text[:MAX_TEXT_BYTES],
+            "size_bytes": len(raw),
+            "truncated": truncated or len(text) > MAX_TEXT_BYTES,
+            "fetched_at": int(self.now() * 1_000),
+        }
+        return DesktopToolExecution(output, f"Fetched {len(raw)} bytes from public web", verification_evidence={"url": final_url, "status_code": status})
 
     def _file_list(self, arguments: dict[str, Any], _context: dict[str, Any]) -> DesktopToolExecution:
         workspace_id = arguments["workspace_id"]

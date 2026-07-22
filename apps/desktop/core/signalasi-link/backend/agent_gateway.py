@@ -274,7 +274,10 @@ def decode_output(data: bytes) -> str:
     """Decode CLI output on Windows without producing mojibake."""
     if not data:
         return ""
-    for encoding in ("gb18030", "utf-8"):
+    # UTF-8 must be attempted first. GB18030 accepts many valid UTF-8 byte
+    # sequences without raising, which silently corrupts smart punctuation
+    # and other Unicode emitted by modern Agent CLIs.
+    for encoding in ("utf-8-sig", "gb18030"):
         try:
             return data.decode(encoding)
         except UnicodeDecodeError:
@@ -477,8 +480,8 @@ def desktop_agent_provider() -> DesktopAgentProvider:
         return _agent_adapter_provider
 
 
-def list_agents() -> list[dict]:
-    return [agent_status(spec) for spec in visible_agent_specs().values()]
+def list_agents(quick: bool = False) -> list[dict]:
+    return [agent_status(spec, quick=quick) for spec in visible_agent_specs().values()]
 
 
 def connector_diagnostics(quick: bool = False) -> dict:

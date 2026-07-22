@@ -16,7 +16,12 @@ const packagedResponsePolicy = path.join(resources, "signalasi-link", "backend",
 const packagedBackendDir = path.dirname(backendMain);
 const packagedCustomAgent = path.join(packagedBackendDir, "custom_agent_stdio.py");
 const packagedDesktopAgentAdapters = path.join(packagedBackendDir, "desktop_agent_adapters.py");
+const packagedDesktopControl = path.join(packagedBackendDir, "desktop_control.py");
 const packagedDesktopNativeTools = path.join(packagedBackendDir, "desktop_native_tools.py");
+const packagedDesktopMemory = path.join(packagedBackendDir, "desktop_memory.py");
+const packagedDesktopMcp = path.join(packagedBackendDir, "desktop_mcp.py");
+const packagedDesktopSkills = path.join(packagedBackendDir, "desktop_skills.py");
+const packagedDesktopSuperAgent = path.join(packagedBackendDir, "desktop_super_agent.py");
 const packagedMcpWrapper = path.join(packagedBackendDir, "mcp_agent_wrapper.py");
 const packagedPhoneToolBroker = path.join(packagedBackendDir, "phone_tool_broker.py");
 const packagedRichOutput = path.join(packagedBackendDir, "rich_output.py");
@@ -139,7 +144,12 @@ async function main() {
   assertExists(packagedResponsePolicy, "Packaged response policy module");
   assertExists(packagedCustomAgent, "Packaged Custom Agent wrapper");
   assertExists(packagedDesktopAgentAdapters, "Packaged Desktop Agent adapters");
+  assertExists(packagedDesktopControl, "Packaged Desktop control module");
   assertExists(packagedDesktopNativeTools, "Packaged Desktop native tools");
+  assertExists(packagedDesktopMemory, "Packaged Desktop memory");
+  assertExists(packagedDesktopMcp, "Packaged Desktop MCP registry");
+  assertExists(packagedDesktopSkills, "Packaged Desktop skills");
+  assertExists(packagedDesktopSuperAgent, "Packaged Desktop super agent");
   assertExists(packagedMcpWrapper, "Packaged MCP wrapper");
   assertExists(packagedPhoneToolBroker, "Packaged phone tool broker");
   assertExists(packagedRichOutput, "Packaged rich output module");
@@ -151,7 +161,7 @@ async function main() {
   console.log("[packaged-smoke] checking bundled Python dependencies");
   const pythonCheck = spawn(
     bundledPython,
-    ["-c", "import cryptography, fastapi, multipart, uvicorn, paho.mqtt.client, sqlalchemy, pydantic, websockets, qrcode, backend_instance_lock, desktop_agent_adapters, desktop_native_tools, mqtt_bridge, phone_tool_broker, rich_output; print('ok')"],
+    ["-c", "import cryptography, fastapi, multipart, uvicorn, paho.mqtt.client, sqlalchemy, pydantic, websockets, qrcode, backend_instance_lock, desktop_agent_adapters, desktop_control, desktop_native_tools, mqtt_bridge, phone_tool_broker, rich_output; print('ok')"],
     { cwd: packagedBackendDir, windowsHide: true }
   );
   await new Promise((resolve, reject) => {
@@ -184,6 +194,10 @@ async function main() {
       await new Promise((resolve) => setTimeout(resolve, 500));
       try {
         await fetchOk(`http://127.0.0.1:${tempPort}/signalasi/verify`);
+        const pairingQr = await fetchJson(`http://127.0.0.1:${tempPort}/api/pairing/qr`);
+        if (!String(pairingQr.image_data_url || "").startsWith("data:image/png;base64,") || !pairingQr.fingerprint) {
+          throw new Error("Packaged Desktop pairing QR API returned an invalid payload");
+        }
         const diagnostics = await fetchJson(`http://127.0.0.1:${tempPort}/api/agents/diagnostics`);
         const capabilities = new Set(diagnostics.capabilities || []);
         for (const capability of ["model_display_names", "local_model_endpoint_probe", "mobile_cloud_models", "mcp_stdio_wrapper", "multiple_custom_agents", "api_response_codes", "agent_diagnostics_codes"]) {
@@ -213,6 +227,10 @@ async function main() {
         });
         if (nativeStatus.status !== "succeeded" || nativeStatus.verification?.status !== "passed") {
           throw new Error(`Packaged Desktop native status failed: ${JSON.stringify(nativeStatus)}`);
+        }
+        const desktopControl = await fetchJson(`http://127.0.0.1:${tempPort}/api/desktop-control`);
+        if (desktopControl.enabled !== false || !Array.isArray(desktopControl.authorizations)) {
+          throw new Error(`Packaged Desktop control status is invalid: ${JSON.stringify(desktopControl)}`);
         }
         backendOk = true;
         break;
