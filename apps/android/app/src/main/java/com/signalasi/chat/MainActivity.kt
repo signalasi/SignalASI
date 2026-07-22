@@ -261,6 +261,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var featureTitle: TextView
     private lateinit var featureContent: LinearLayout
     private lateinit var featureBackButton: TextView
+    private var activeDesktopControlId: String? = null
     private lateinit var mainTitle: TextView
     private lateinit var mainActionButton: TextView
     private lateinit var chatPage: LinearLayout
@@ -1172,6 +1173,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         ?.recordConnectorTransportAccepted(acknowledgedId)
                 }
             }
+            if (handleDesktopRemoteControlEvent(envelope)) return@runOnUiThread
             if (handleAgentTaskEvent(envelope)) return@runOnUiThread
             val msg = parseIncomingMessage(payload)
             if (msg.content.isBlank()) return@runOnUiThread
@@ -4760,6 +4762,23 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         } else GlobalSuperAgentRuntime.get(this)
         val globalDashboard = globalRuntime.dashboard()
         val globalSettings = globalRuntime.settings()
+        val remoteControlDevices = desktopControlDevices()
+        val remoteControlSnapshots = remoteControlDevices.map { device ->
+            DesktopRemoteControl.snapshot(this, device.id)
+        }
+        val remoteControlStatus = when {
+            remoteControlDevices.isEmpty() -> getString(R.string.status_needs_setup)
+            remoteControlSnapshots.any { it.authorized } -> getString(R.string.status_enabled)
+            remoteControlSnapshots.any { it.pending } -> getString(R.string.desktop_control_pending)
+            remoteControlSnapshots.any { it.enabled } -> getString(R.string.desktop_control_not_authorized)
+            else -> getString(R.string.desktop_control_executor_off)
+        }
+        val remoteControlTone = when {
+            remoteControlSnapshots.any { it.authorized } -> ControlCenterTone.GREEN
+            remoteControlSnapshots.any { it.pending } -> ControlCenterTone.AMBER
+            remoteControlDevices.isEmpty() -> ControlCenterTone.NEUTRAL
+            else -> ControlCenterTone.BLUE
+        }
 
         controlCenterRenderer.render(
             content,
@@ -4817,6 +4836,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             ccRouteRow(ControlCenterRoute.PHONE_CAPABILITIES, getString(R.string.cc_phone_title), getString(R.string.cc_phone_subtitle, availableTools, toolsNeedingAttention), R.drawable.ic_agent_control, "$availableTools/${tools.size}", if (availableTools > 0) ControlCenterTone.GREEN else ControlCenterTone.AMBER),
                             ccRouteRow(ControlCenterRoute.ON_DEVICE_RUNTIME, R.string.cc_runtime_title, R.string.cc_runtime_subtitle, R.drawable.ic_settings_diagnostics, getString(if (onDeviceRuntime.backendReady) R.string.cc_status_ready else R.string.status_needs_setup), if (onDeviceRuntime.backendReady) ControlCenterTone.GREEN else ControlCenterTone.AMBER),
                             ccRouteRow(ControlCenterRoute.APP_TOOLS, R.string.cc_apps_title, R.string.cc_apps_subtitle, R.drawable.ic_tab_discover, "", ControlCenterTone.BLUE),
+                            ControlCenterRowSpec(
+                                actionId = "desktop.remote_control",
+                                title = getString(R.string.desktop_control_title),
+                                subtitle = getString(R.string.desktop_control_home_subtitle),
+                                iconRes = R.drawable.ic_device_node,
+                                status = remoteControlStatus,
+                                tone = remoteControlTone
+                            ),
                             ccRouteRow(
                                 ControlCenterRoute.SMART_SPACES,
                                 R.string.cc_spaces_title,
@@ -5051,6 +5078,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             "phone.catalog" -> openExistingControlCenterPage { showNativeToolCatalogPage() }
             "apps.adapters" -> openExistingControlCenterPage { showAgentAppAdaptersPage() }
+            "desktop.remote_control" -> openExistingControlCenterPage { showDesktopControlPicker() }
             "spaces.configure" -> openExistingControlCenterPage { showDeviceFeaturePage() }
             "spaces.entities" -> showHomeAssistantCollectionPage("entities")
             "spaces.automations" -> showHomeAssistantCollectionPage("automations")
@@ -15268,8 +15296,401 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             getString(R.string.device_remote_control),
             getString(R.string.device_remote_control_subtitle),
             R.drawable.ic_security_shield,
-            getString(if (mobileNativeAgent.safetySettings().highRiskGuard) R.string.status_protected else R.string.common_off)
+            getString(
+                when {
+                    pairedDesktopCount == 0 -> R.string.status_needs_setup
+                    desktopSecuritySummaries(activePcConnectorContacts()).any {
+                        DesktopRemoteControl.snapshot(this, it.id).authorized
+                    } -> R.string.status_enabled
+                    else -> R.string.status_protected
+                }
+            )
+        ).apply {
+            setOnClickListener { showDesktopControlPicker() }
+        })
+    }
+
+    private fun desktopControlDevices(): List<DesktopSecuritySummary> {
+        val fromContacts = desktopSecuritySummaries(activePcConnectorContacts()).associateBy { it.id }.toMutableMap()
+        SignalASILinkProtocol.allServerLinks(this).filter { it.paired }.forEach { link ->
+            fromContacts.putIfAbsent(
+                link.desktopId,
+                DesktopSecuritySummary(
+                    id = link.desktopId,
+                    name = link.desktopName,
+                    fingerprint = link.desktopFingerprint,
+                    agentCount = 0,
+                    lastActivityAt = 0L,
+                    agentIds = emptySet()
+                )
+            )
+        }
+        return fromContacts.values.sortedBy { it.name.lowercase(Locale.ROOT) }
+    }
+
+    private fun showDesktopControlPicker() {
+        val devices = desktopControlDevices()
+        if (devices.size == 1) {
+            DesktopRemoteControl.requestAuthorizations(devices.single().id)
+            showDesktopRemoteControlPage(devices.single())
+            return
+        }
+        showFeaturePage(getString(R.string.desktop_control_title))
+        setFeatureBackAction { showDeviceFeaturePage() }
+        featureContent.addView(featureHeroCard(
+            getString(R.string.desktop_control_title),
+            getString(R.string.desktop_control_picker_subtitle),
+            R.drawable.ic_device_node,
+            "#2878FF",
+            getString(R.string.count_devices, devices.size)
         ))
+        addSectionTitle(getString(R.string.desktop_control_computers))
+        if (devices.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.security_no_paired_pc),
+                getString(R.string.security_no_paired_pc_subtitle),
+                R.drawable.ic_device_node,
+                getString(R.string.security_scan)
+            ).apply {
+                setOnClickListener {
+                    scanMode = "security"
+                    startSecurityScan()
+                }
+            })
+        } else {
+            devices.forEach { device ->
+                val snapshot = DesktopRemoteControl.snapshot(this, device.id)
+                featureContent.addView(featureRow(
+                    device.name,
+                    formatFingerprint(device.fingerprint),
+                    R.drawable.ic_device_node,
+                    getString(
+                        when {
+                            snapshot.authorized -> R.string.status_enabled
+                            snapshot.pending -> R.string.desktop_control_pending
+                            else -> R.string.security_manage
+                        }
+                    )
+                ).apply {
+                    setOnClickListener {
+                        DesktopRemoteControl.requestAuthorizations(device.id)
+                        showDesktopRemoteControlPage(device)
+                    }
+                })
+            }
+        }
+    }
+
+    private fun showDesktopRemoteControlPage(device: DesktopSecuritySummary) {
+        val snapshot = DesktopRemoteControl.snapshot(this, device.id)
+        showFeaturePage(getString(R.string.desktop_control_title))
+        activeDesktopControlId = device.id
+        setFeatureBackAction { showDesktopControlPicker() }
+        featureContent.addView(featureHeroCard(
+            device.name,
+            getString(R.string.desktop_control_trusted_subtitle),
+            R.drawable.ic_device_node,
+            when {
+                snapshot.authorized -> "#14C66A"
+                snapshot.pending -> "#F0A500"
+                else -> "#8A939B"
+            },
+            getString(
+                when {
+                    snapshot.authorized -> R.string.desktop_control_authorized
+                    snapshot.pending -> R.string.desktop_control_pending
+                    !snapshot.enabled -> R.string.desktop_control_executor_off
+                    else -> R.string.desktop_control_not_authorized
+                }
+            )
+        ))
+
+        addSectionTitle(getString(R.string.desktop_control_live_display))
+        val screenshotFrame = FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                cornerRadius = dp(8).toFloat()
+                setColor(Color.parseColor("#11161C"))
+            }
+            clipToOutline = true
+        }
+        val screenshotView = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            contentDescription = getString(R.string.desktop_control_screen_content_description)
+        }
+        screenshotFrame.addView(screenshotView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        val placeholder = TextView(this).apply {
+            text = getString(
+                if (snapshot.authorized) R.string.desktop_control_tap_refresh
+                else R.string.desktop_control_authorization_required
+            )
+            gravity = Gravity.CENTER
+            setTextColor(Color.parseColor("#AAB3BD"))
+            textSize = 14f
+        }
+        screenshotFrame.addView(placeholder, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        snapshot.screenshot?.let { screenshot ->
+            android.graphics.BitmapFactory.decodeByteArray(
+                screenshot.jpegBytes,
+                0,
+                screenshot.jpegBytes.size
+            )?.let(screenshotView::setImageBitmap)
+            placeholder.visibility = View.GONE
+            if (snapshot.authorized) {
+                screenshotView.setOnTouchListener { view, event ->
+                    if (event.action != MotionEvent.ACTION_UP) return@setOnTouchListener true
+                    mapDesktopScreenshotPoint(view as ImageView, event, screenshot)?.let { (x, y) ->
+                        if (DesktopRemoteControl.click(device.id, x, y)) {
+                            Toast.makeText(
+                                this@MainActivity,
+                                getString(R.string.desktop_control_click_sent, x, y),
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                    true
+                }
+            }
+        }
+        featureContent.addView(screenshotFrame, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(216)
+        ).apply {
+            topMargin = dp(2)
+        })
+        featureContent.addView(featureRow(
+            getString(R.string.desktop_control_refresh_screen),
+            snapshot.screenshot?.let {
+                getString(
+                    R.string.desktop_control_screen_metadata,
+                    it.originalWidth,
+                    it.originalHeight,
+                    securityTime(it.capturedAt)
+                )
+            }.orEmpty().ifBlank { getString(R.string.desktop_control_refresh_screen_subtitle) },
+            R.drawable.ic_import,
+            getString(R.string.common_view)
+        ).apply {
+            isEnabled = snapshot.authorized
+            alpha = if (snapshot.authorized) 1f else 0.5f
+            setOnClickListener {
+                if (DesktopRemoteControl.requestScreenshot(device.id)) {
+                    Toast.makeText(this@MainActivity, getString(R.string.desktop_control_request_sent), Toast.LENGTH_SHORT).show()
+                }
+            }
+        })
+
+        if (snapshot.lastActionSummary.isNotBlank()) {
+            featureContent.addView(featureRow(
+                getString(R.string.desktop_control_latest_action),
+                snapshot.lastActionSummary,
+                R.drawable.ic_agent_history,
+                desktopControlStatusLabel(snapshot.lastActionStatus)
+            ))
+        }
+
+        addSectionTitle(getString(R.string.desktop_control_actions))
+        featureContent.addView(desktopControlButtonRow(
+            getString(R.string.desktop_control_scroll_up) to { DesktopRemoteControl.scroll(device.id, 480) },
+            getString(R.string.desktop_control_scroll_down) to { DesktopRemoteControl.scroll(device.id, -480) },
+            enabled = snapshot.authorized
+        ))
+        featureContent.addView(desktopControlButtonRow(
+            getString(R.string.desktop_control_alt_tab) to { DesktopRemoteControl.hotkey(device.id, "alt", "tab") },
+            getString(R.string.desktop_control_escape) to { DesktopRemoteControl.hotkey(device.id, "escape") },
+            enabled = snapshot.authorized
+        ))
+        featureContent.addView(featureRow(
+            getString(R.string.desktop_control_type_text),
+            getString(R.string.desktop_control_type_text_subtitle),
+            R.drawable.ic_protocol_link,
+            getString(R.string.common_edit)
+        ).apply {
+            isEnabled = snapshot.authorized
+            alpha = if (snapshot.authorized) 1f else 0.5f
+            setOnClickListener {
+                showTextSettingDialog(getString(R.string.desktop_control_type_text), "") { text ->
+                    if (!DesktopRemoteControl.typeText(device.id, text)) {
+                        Toast.makeText(this@MainActivity, getString(R.string.desktop_control_request_failed), Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        })
+
+        addSectionTitle(getString(R.string.desktop_control_authorization))
+        val desktopFingerprint = snapshot.desktopFingerprint.ifBlank { device.fingerprint }
+        featureContent.addView(featureRow(
+            getString(R.string.security_desktop_fingerprint),
+            formatFingerprint(desktopFingerprint),
+            R.drawable.ic_security_shield,
+            getString(R.string.common_copy)
+        ).apply {
+            isEnabled = desktopFingerprint.isNotBlank()
+            setOnClickListener {
+                copyText(desktopFingerprint, getString(R.string.security_copied_desktop_fingerprint))
+            }
+        })
+        snapshot.authorizations.filter { it.status != "revoked" }.forEach { authorization ->
+            val timeSummary = when {
+                authorization.grantedAt > 0L && authorization.lastUsedAt > 0L -> getString(
+                    R.string.desktop_control_granted_and_used,
+                    securityTime(authorization.grantedAt),
+                    securityTime(authorization.lastUsedAt)
+                )
+                authorization.grantedAt > 0L -> getString(
+                    R.string.desktop_control_granted_at,
+                    securityTime(authorization.grantedAt)
+                )
+                else -> ""
+            }
+            featureContent.addView(featureRow(
+                authorization.phoneName.ifBlank { getString(R.string.desktop_control_this_phone) },
+                listOf(formatFingerprint(authorization.phoneFingerprint), timeSummary)
+                    .filter { it.isNotBlank() }
+                    .joinToString("\n"),
+                R.drawable.ic_security_shield,
+                desktopControlStatusLabel(authorization.status)
+            ))
+        }
+        if (snapshot.currentAuthorization?.status == "active") {
+            featureContent.addView(featureRow(
+                getString(R.string.desktop_control_revoke),
+                getString(R.string.desktop_control_revoke_subtitle),
+                R.drawable.ic_delete,
+                getString(R.string.security_revoke)
+            ).apply {
+                setOnClickListener {
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle(getString(R.string.desktop_control_revoke))
+                        .setMessage(getString(R.string.desktop_control_revoke_confirm))
+                        .setPositiveButton(getString(R.string.security_revoke)) { _, _ ->
+                            DesktopRemoteControl.revoke(device.id, snapshot.currentAuthorization.authorizationId)
+                        }
+                        .setNegativeButton(getString(R.string.common_cancel), null)
+                        .show()
+                }
+            })
+        }
+        addSectionTitle(getString(R.string.desktop_control_recent_activity))
+        if (snapshot.recentAudit.isEmpty()) {
+            featureContent.addView(featureRow(
+                getString(R.string.desktop_control_no_recent_activity),
+                "",
+                R.drawable.ic_agent_history,
+                ""
+            ))
+        } else {
+            snapshot.recentAudit.take(12).forEach { event ->
+                featureContent.addView(featureRow(
+                    event.summary.ifBlank { event.eventType },
+                    securityTime(event.createdAt),
+                    R.drawable.ic_agent_history,
+                    desktopControlStatusLabel(event.status)
+                ))
+            }
+        }
+        featureContent.addView(TextView(this).apply {
+            text = getString(R.string.desktop_control_security_footer)
+            setTextColor(getColorCompat(R.color.text_secondary))
+            textSize = 12f
+            setPadding(dp(4), dp(14), dp(4), dp(20))
+        })
+    }
+
+    private fun desktopControlButtonRow(
+        left: Pair<String, () -> Boolean>,
+        right: Pair<String, () -> Boolean>,
+        enabled: Boolean
+    ): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(desktopControlActionButton(left.first, enabled, left.second), LinearLayout.LayoutParams(
+            0,
+            dp(44),
+            1f
+        ).apply { marginEnd = dp(5) })
+        addView(desktopControlActionButton(right.first, enabled, right.second), LinearLayout.LayoutParams(
+            0,
+            dp(44),
+            1f
+        ).apply { marginStart = dp(5) })
+    }
+
+    private fun desktopControlActionButton(
+        label: String,
+        enabled: Boolean,
+        action: () -> Boolean
+    ): TextView = TextView(this).apply {
+        text = label
+        gravity = Gravity.CENTER
+        textSize = 14f
+        setTextColor(Color.parseColor(if (enabled) "#1677E8" else "#9AA3AC"))
+        background = GradientDrawable().apply {
+            cornerRadius = dp(8).toFloat()
+            setColor(Color.parseColor("#F2F6FE"))
+            setStroke(dp(1), Color.parseColor("#DCE8F8"))
+        }
+        isEnabled = enabled
+        setOnClickListener {
+            if (!action()) {
+                Toast.makeText(this@MainActivity, getString(R.string.desktop_control_request_failed), Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun mapDesktopScreenshotPoint(
+        view: ImageView,
+        event: MotionEvent,
+        screenshot: DesktopControlScreenshot
+    ): Pair<Int, Int>? {
+        if (view.width <= 0 || view.height <= 0) return null
+        val scale = minOf(
+            view.width.toFloat() / screenshot.width.toFloat(),
+            view.height.toFloat() / screenshot.height.toFloat()
+        )
+        val displayedWidth = screenshot.width * scale
+        val displayedHeight = screenshot.height * scale
+        val left = (view.width - displayedWidth) / 2f
+        val top = (view.height - displayedHeight) / 2f
+        if (event.x !in left..(left + displayedWidth) || event.y !in top..(top + displayedHeight)) return null
+        val imageX = (event.x - left) / scale
+        val imageY = (event.y - top) / scale
+        val originalX = (imageX * screenshot.originalWidth / screenshot.width).roundToInt()
+            .coerceIn(0, screenshot.originalWidth - 1)
+        val originalY = (imageY * screenshot.originalHeight / screenshot.height).roundToInt()
+            .coerceIn(0, screenshot.originalHeight - 1)
+        return originalX to originalY
+    }
+
+    private fun desktopControlStatusLabel(status: String): String = getString(
+        when (status) {
+            "active", "succeeded" -> R.string.status_enabled
+            "pending", "sending", "running" -> R.string.desktop_control_pending
+            "revoked" -> R.string.desktop_control_revoked
+            "failed" -> R.string.agent_task_status_failed
+            else -> R.string.status_unknown
+        }
+    )
+
+    private fun handleDesktopRemoteControlEvent(json: JSONObject?): Boolean {
+        val payload = json ?: return false
+        if (payload.optString("type") !in setOf(
+                "desktop_control_authorizations",
+                "desktop_control_authorization_changed",
+                "desktop_executor_event",
+                "desktop_action_receipt"
+            )
+        ) return false
+        val desktopId = payload.optString("desktop_id")
+        if (desktopId.isNotBlank() && activeDesktopControlId == desktopId && featurePage.visibility == View.VISIBLE) {
+            desktopControlDevices().firstOrNull { it.id == desktopId }?.let(::showDesktopRemoteControlPage)
+        }
+        return true
     }
 
     private fun showCustomDeviceConnectorEditor(connector: CustomDeviceConnector) {
@@ -15733,6 +16154,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             setOnClickListener { copyText(device.fingerprint, getString(R.string.security_copied_desktop_fingerprint)) }
         })
         featureContent.addView(featureRow(getString(R.string.security_last_active_title), securityTime(device.lastActivityAt), R.drawable.ic_protocol_link, ""))
+        featureContent.addView(featureRow(
+            getString(R.string.device_remote_control),
+            getString(R.string.desktop_control_manage_subtitle),
+            R.drawable.ic_security_shield,
+            getString(if (DesktopRemoteControl.snapshot(this, device.id).authorized) R.string.status_enabled else R.string.security_manage)
+        ).apply {
+            setOnClickListener {
+                DesktopRemoteControl.requestAuthorizations(device.id)
+                showDesktopRemoteControlPage(device)
+            }
+        })
         addSectionTitle("Agent")
         agents.forEach { contact ->
             val name = contact.optString("agent_name").ifBlank { contact.optString("name", "Agent") }
@@ -17143,6 +17575,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun showFeaturePage(title: String) {
+        activeDesktopControlId = null
         if (!renderingControlCenterDestination &&
             featurePage.visibility == View.VISIBLE &&
             controlCenterDestination != null
