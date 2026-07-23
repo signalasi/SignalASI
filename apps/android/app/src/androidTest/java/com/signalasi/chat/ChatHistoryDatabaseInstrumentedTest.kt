@@ -80,6 +80,23 @@ class ChatHistoryDatabaseInstrumentedTest {
     }
 
     @Test
+    fun deletedContactCannotBeRestoredByStaleSnapshot() {
+        val database = database()
+        val first = message(11L, "contact-delete", "first")
+        val second = message(12L, "contact-delete", "second")
+        assertTrue(database.upsert(first))
+        assertTrue(database.upsert(second))
+
+        assertEquals(2, database.deleteContact("contact-delete"))
+
+        val staleSnapshot = JSONObject()
+            .put("contact-delete", JSONArray().put(first).put(second))
+        assertFalse(database.mergeSnapshot(staleSnapshot))
+        assertEquals(0, database.readContact("contact-delete").length())
+        database.close()
+    }
+
+    @Test
     fun replacementPreservesEveryBackupMessageAndAdvancesIds() {
         val database = database()
         val root = JSONObject()

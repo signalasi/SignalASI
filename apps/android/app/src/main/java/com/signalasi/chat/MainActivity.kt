@@ -18971,10 +18971,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 setColor(Color.parseColor("#FF3B30"))
             }
             setOnClickListener {
+                handler.removeCallbacks(historySaveRunnable)
+                historySaveSeq.incrementAndGet()
+                ChatHistoryStore.deleteContact(this@MainActivity, contact.id)
                 messages.remove(contact.id)
                 summaries.remove(contact.id)
                 CloudConversationContextStore.removeContact(this@MainActivity, contact.id)
-                saveChatHistory()
                 refreshContactList()
                 Toast.makeText(this@MainActivity, getString(R.string.delete_chat_toast), Toast.LENGTH_SHORT).show()
                 hideFeaturePage()
