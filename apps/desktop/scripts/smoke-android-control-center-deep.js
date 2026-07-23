@@ -270,7 +270,7 @@ async function openPage(page) {
   }
   try { adb(["shell", "am", "force-stop", "com.google.android.documentsui"]); } catch (_) {}
   const coldStart = process.env.SIGNALASI_CC_FORCE_COLD_START === "1"
-    || !adb(["shell", "pidof", packageName]).trim();
+    || !appProcessRunning();
   if (coldStart) adb(["shell", "am", "force-stop", packageName]);
   adb(["shell", "am", "start", "-W", "-n", activityName, "--es", "signalasi_debug_control_center_page", page]);
   await sleep(coldStart ? 600 : 150);
@@ -287,7 +287,7 @@ async function openDebugBoolean(extra) {
   }
   try { adb(["shell", "am", "force-stop", "com.google.android.documentsui"]); } catch (_) {}
   const coldStart = process.env.SIGNALASI_CC_FORCE_COLD_START === "1"
-    || !adb(["shell", "pidof", packageName]).trim();
+    || !appProcessRunning();
   if (coldStart) adb(["shell", "am", "force-stop", packageName]);
   adb(["shell", "am", "start", "-W", "-n", activityName, "--ez", extra, "true"]);
   await sleep(coldStart ? 600 : 150);
@@ -318,13 +318,20 @@ async function dismissKeyboard() {
   await sleep(350);
 }
 
+function appProcessRunning() {
+  try {
+    return Boolean(adb(["shell", "pidof", packageName]).trim());
+  } catch (_) {
+    return false;
+  }
+}
+
 function visiblePackages(xml) {
   return [...new Set(uiNodes(xml).map(node => node.package).filter(Boolean))];
 }
 
 function ensureAppHealthy() {
-  const pid = adb(["shell", "pidof", packageName]).trim();
-  if (!pid) throw new Error("SignalASI process is not running");
+  if (!appProcessRunning()) throw new Error("SignalASI process is not running");
   const fatal = adb(["logcat", "-d", "-v", "threadtime", "AndroidRuntime:E", "*:S"]);
   const appFatal = /FATAL EXCEPTION[\s\S]{0,2000}?Process:\s*com\.signalasi\.chat\b/i.exec(fatal);
   if (appFatal) {
@@ -617,7 +624,7 @@ async function main() {
       await openPage("agent_core");
       await tapText(["Smart Automatic", "\u667a\u80fd\u81ea\u52a8"], "agent-policy", true);
       await expectText(labels.execution, "agent-policy-open");
-      await tapText(["Permission mode", "\u6267\u884c\u6a21\u5f0f"], "policy-permission-mode", true, true);
+      await tapText(["Execution Mode", "\u6267\u884c\u6a21\u5f0f"], "policy-permission-mode", true, true);
       await expectText(["Observe Only", "\u4ec5\u89c2\u5bdf"], "policy-permission-options");
       adb(["shell", "input", "keyevent", "KEYCODE_BACK"]);
       await expectText(labels.execution, "policy-back");
@@ -631,7 +638,7 @@ async function main() {
       try {
         await openPage("agent_core");
         await tapText(["Smart Automatic", "\u667a\u80fd\u81ea\u52a8"], "permission-policy", true);
-        await tapText(["Permission mode", "\u6267\u884c\u6a21\u5f0f"], "permission-mode", true, true);
+        await tapText(["Execution Mode", "\u6267\u884c\u6a21\u5f0f"], "permission-mode", true, true);
         await tapText(["Observe Only", "\u4ec5\u89c2\u5bdf"], "permission-observe", true);
         await expectNear(
           ["Observe Only", "\u4ec5\u89c2\u5bdf"],
