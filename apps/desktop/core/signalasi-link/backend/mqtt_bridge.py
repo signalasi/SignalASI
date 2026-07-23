@@ -1010,7 +1010,16 @@ def warm_codex_app_server() -> None:
 
 
 phone_publish_lock = threading.RLock()
-pending_task_events: dict[str, tuple[dict, dict]] = {}
+
+
+@dataclass
+class _PendingTaskEvent:
+    wire_payload: dict
+    task: dict
+    trace: list[dict]
+
+
+pending_task_events: dict[str, _PendingTaskEvent] = {}
 pending_task_events_lock = threading.Lock()
 task_event_publish_queue: queue.Queue[tuple[object, dict, dict, list[dict]] | None] = queue.Queue()
 task_event_publisher_started = threading.Event()
@@ -1434,7 +1443,7 @@ def _publish_phone_payload(mqttc, wire_payload: dict, reply_payload: dict) -> bo
 
 
 def _client_task_turn_id(task: dict) -> str:
-    return str(task.get("client_turn_id") or task.get("turn_id") or "")
+    return str(task.get("client_turn_id") or "")
 
 
 def _task_control_matches(
@@ -1473,7 +1482,14 @@ def _codex_terminal_result(content: str, status: str, result: object) -> str | N
     return result if isinstance(result, str) else None
 
 
-def _agent_task_payload(task: dict, trace: list[dict]) -> dict:
+def _agent_task_payload(
+    task: dict,
+    trace: list[dict],
+    *,
+    resolved_desktop_id: str,
+    resolved_desktop_name: str,
+    resolved_connector_agents: list[dict],
+) -> dict:
     status = str(task.get("status") or "")
     stage = f"agent_{status}"
     return {
@@ -1497,9 +1513,9 @@ def _agent_task_payload(task: dict, trace: list[dict]) -> dict:
         "current_step": task.get("current_step", ""),
         "error": task.get("error", ""),
         "output_files": task.get("output_files", []),
-        "desktop_id": desktop_id(),
-        "desktop_name": desktop_name(),
-        "connector_agents": mobile_connector_agents(),
+        "desktop_id": resolved_desktop_id,
+        "desktop_name": resolved_desktop_name,
+        "connector_agents": resolved_connector_agents,
         "sender": "system",
         "time": time.time(),
         "delivery_trace": _delivery_trace({"delivery_trace": trace}, _trace_event(stage, task.get("agent_id", ""))),
@@ -1507,30 +1523,56 @@ def _agent_task_payload(task: dict, trace: list[dict]) -> dict:
     }
 
 
+def _task_event_order(task: dict) -> tuple[int, int]:
+    return int(task.get("status_seq") or 0), int(task.get("updated_at") or 0)
+
+
+def _try_publish_task_event(mqttc, pending: _PendingTaskEvent) -> bool:
+    if mqttc is None or not mqttc.is_connected():
+        return False
+    payload = _agent_task_payload(
+        pending.task,
+        pending.trace,
+        resolved_desktop_id=desktop_id(),
+        resolved_desktop_name=desktop_name(),
+        resolved_connector_agents=mobile_connector_agents(),
+    )
+    return bool(_publish_phone_payload(mqttc, pending.wire_payload, payload))
+
+
 def _publish_or_queue_task_event(mqttc, wire_payload: dict, task: dict, trace: list[dict]) -> bool:
-    payload = _agent_task_payload(task, trace)
     task_id = str(task.get("task_id") or "")
+    pending = _PendingTaskEvent(
+        wire_payload=dict(wire_payload),
+        task=dict(task),
+        trace=list(trace),
+    )
     try:
-        published = bool(mqttc is not None and mqttc.is_connected() and _publish_phone_payload(mqttc, wire_payload, payload))
+        published = _try_publish_task_event(mqttc, pending)
     except Exception as exc:
-        log.warning(f"Agent task event queued task_id={task_id}: {exc}")
+        log.warning("Agent task event queued task_id=%s: %s", task_id, exc)
         published = False
     with pending_task_events_lock:
         if published:
-            pending_task_events.pop(task_id, None)
+            queued = pending_task_events.get(task_id)
+            if queued is None or _task_event_order(queued.task) <= _task_event_order(task):
+                pending_task_events.pop(task_id, None)
         elif task_id:
-            pending_task_events[task_id] = (dict(wire_payload), payload)
+            queued = pending_task_events.get(task_id)
+            if queued is None or _task_event_order(queued.task) <= _task_event_order(task):
+                pending_task_events[task_id] = pending
     return published
 
 
 def flush_pending_task_events(mqttc) -> None:
     with pending_task_events_lock:
         queued = list(pending_task_events.items())
-    for task_id, (wire_payload, payload) in queued:
+    for task_id, pending in queued:
         try:
-            if _publish_phone_payload(mqttc, wire_payload, payload):
+            if _try_publish_task_event(mqttc, pending):
                 with pending_task_events_lock:
-                    pending_task_events.pop(task_id, None)
+                    if pending_task_events.get(task_id) is pending:
+                        pending_task_events.pop(task_id, None)
         except Exception as exc:
             log.warning(f"Agent task event replay deferred task_id={task_id}: {exc}")
 

@@ -14,6 +14,12 @@ class DisconnectedMqtt:
         return False
 
 
+class ConnectedMqtt:
+    @staticmethod
+    def is_connected() -> bool:
+        return True
+
+
 class MqttTaskTurnRoutingTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -25,6 +31,10 @@ class MqttTaskTurnRoutingTests(unittest.TestCase):
         self.database_patch.start()
 
     def tearDown(self):
+        with mqtt_bridge.pending_task_events_lock:
+            mqtt_bridge.pending_task_events.clear()
+        with mqtt_bridge.pending_task_results_lock:
+            mqtt_bridge.pending_task_results.clear()
         self.database_patch.stop()
         self.temporary.cleanup()
 
@@ -37,15 +47,129 @@ class MqttTaskTurnRoutingTests(unittest.TestCase):
         }
 
         self.assertEqual("phone-turn-1", mqtt_bridge._client_task_turn_id(task))
-        payload = mqtt_bridge._agent_task_payload(task, [])
+        payload = mqtt_bridge._agent_task_payload(
+            task,
+            [],
+            resolved_desktop_id="desktop-test",
+            resolved_desktop_name="Test Desktop",
+            resolved_connector_agents=[],
+        )
         self.assertEqual("phone-turn-1", payload["turn_id"])
         self.assertEqual("codex-turn-1", payload["agent_turn_id"])
 
-    def test_legacy_task_without_client_turn_id_remains_routable(self):
-        task = {"task_id": "task-1", "status": "completed", "turn_id": "legacy-turn-1"}
+    def test_task_without_client_turn_id_does_not_expose_internal_agent_turn(self):
+        task = {"task_id": "task-1", "status": "completed", "turn_id": "codex-turn-1"}
 
-        self.assertEqual("legacy-turn-1", mqtt_bridge._client_task_turn_id(task))
-        self.assertEqual("legacy-turn-1", mqtt_bridge._agent_task_payload(task, [])["turn_id"])
+        payload = mqtt_bridge._agent_task_payload(
+            task,
+            [],
+            resolved_desktop_id="desktop-test",
+            resolved_desktop_name="Test Desktop",
+            resolved_connector_agents=[],
+        )
+
+        self.assertEqual("", mqtt_bridge._client_task_turn_id(task))
+        self.assertEqual("", payload["turn_id"])
+        self.assertEqual("codex-turn-1", payload["agent_turn_id"])
+
+    def test_offline_task_event_queues_without_starting_signal_sidecar(self):
+        task = {
+            "task_id": "task-offline",
+            "status": "running",
+            "status_seq": 4,
+            "updated_at": 100,
+            "client_turn_id": "phone-turn-1",
+        }
+
+        with patch.object(
+            mqtt_bridge,
+            "desktop_id",
+            side_effect=AssertionError("identity must not resolve while offline"),
+        ):
+            published = mqtt_bridge._publish_or_queue_task_event(
+                DisconnectedMqtt(),
+                {"scheme": "signal", "_client_route_id": "phone-1"},
+                task,
+                [],
+            )
+
+        self.assertFalse(published)
+        self.assertEqual(task, mqtt_bridge.pending_task_events["task-offline"].task)
+
+    def test_queued_task_event_resolves_identity_only_when_flushed(self):
+        task = {
+            "task_id": "task-reconnect",
+            "status": "running",
+            "status_seq": 5,
+            "updated_at": 200,
+            "client_turn_id": "phone-turn-2",
+        }
+        mqtt_bridge._publish_or_queue_task_event(
+            DisconnectedMqtt(),
+            {"scheme": "signal", "_client_route_id": "phone-1"},
+            task,
+            [],
+        )
+
+        with (
+            patch.object(mqtt_bridge, "desktop_id", return_value="desktop-test"),
+            patch.object(mqtt_bridge, "desktop_name", return_value="Test Desktop"),
+            patch.object(mqtt_bridge, "mobile_connector_agents", return_value=[]),
+            patch.object(mqtt_bridge, "_publish_phone_payload", return_value=True) as publish,
+        ):
+            mqtt_bridge.flush_pending_task_events(ConnectedMqtt())
+
+        payload = publish.call_args.args[2]
+        self.assertEqual("desktop-test", payload["desktop_id"])
+        self.assertEqual("phone-turn-2", payload["turn_id"])
+        self.assertNotIn("task-reconnect", mqtt_bridge.pending_task_events)
+
+    def test_online_task_event_is_queued_when_signal_sidecar_is_temporarily_unavailable(self):
+        task = {
+            "task_id": "task-sidecar-recovery",
+            "status": "running",
+            "status_seq": 6,
+            "updated_at": 220,
+        }
+
+        with patch.object(
+            mqtt_bridge,
+            "desktop_id",
+            side_effect=FileNotFoundError("sidecar temporarily unavailable"),
+        ):
+            published = mqtt_bridge._publish_or_queue_task_event(
+                ConnectedMqtt(),
+                {"scheme": "signal", "_client_route_id": "phone-1"},
+                task,
+                [],
+            )
+
+        self.assertFalse(published)
+        self.assertEqual(
+            "running",
+            mqtt_bridge.pending_task_events["task-sidecar-recovery"].task["status"],
+        )
+
+    def test_older_offline_event_cannot_replace_newer_terminal_state(self):
+        terminal = {
+            "task_id": "task-order",
+            "status": "completed",
+            "status_seq": 9,
+            "updated_at": 300,
+        }
+        stale = {
+            "task_id": "task-order",
+            "status": "running",
+            "status_seq": 8,
+            "updated_at": 250,
+        }
+
+        mqtt_bridge._publish_or_queue_task_event(DisconnectedMqtt(), {}, terminal, [])
+        mqtt_bridge._publish_or_queue_task_event(DisconnectedMqtt(), {}, stale, [])
+
+        queued = mqtt_bridge.pending_task_events["task-order"]
+        self.assertEqual("completed", queued.task["status"])
+        self.assertEqual(9, queued.task["status_seq"])
 
     def test_cancelled_codex_task_never_publishes_partial_or_failure_text(self):
         self.assertEqual(
