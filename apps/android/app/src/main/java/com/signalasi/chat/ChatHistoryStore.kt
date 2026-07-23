@@ -119,10 +119,11 @@ object ChatHistoryStore {
             .put("remoteMessageId", parsed.remoteMessageId)
             .put("deliveryTrace", deliveryTrace))
         root.put(parsed.contactId, trim(array))
-        prefs.edit()
+        val persisted = prefs.edit()
             .putString(HISTORY_KEY, root.toString())
             .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis())
-            .apply()
+            .commit()
+        if (!persisted) return null
         if (parsed.contactId != CONTACT_SYSTEM) {
             GlobalConversationEventBus.publishChatMessage(
                 appContext,
@@ -150,7 +151,8 @@ object ChatHistoryStore {
             messageId,
             "notified",
             "system_notification",
-            context.getString(R.string.delivery_status_notified)
+            context.getString(R.string.delivery_status_notified),
+            durable = true
         )
     }
 
@@ -236,7 +238,15 @@ object ChatHistoryStore {
             .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis()).apply()
     }
 
-    private fun markMessageTrace(context: Context, contactId: String, messageId: Long, stage: String, detail: String, status: String) {
+    private fun markMessageTrace(
+        context: Context,
+        contactId: String,
+        messageId: Long,
+        stage: String,
+        detail: String,
+        status: String,
+        durable: Boolean = false
+    ) {
         if (contactId.isBlank() || messageId <= 0L) return
         val appContext = context.applicationContext
         val prefs = appContext.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
@@ -262,10 +272,14 @@ object ChatHistoryStore {
         }
         if (!changed) return
         root.put(contactId, array)
-        prefs.edit()
+        val editor = prefs.edit()
             .putString(HISTORY_KEY, root.toString())
             .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis())
-            .apply()
+        if (durable) {
+            editor.commit()
+        } else {
+            editor.apply()
+        }
     }
 
     private fun parseIncoming(context: Context, payload: String): StoredIncomingMessage {
