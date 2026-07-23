@@ -123,6 +123,38 @@ internal class AgentTranscriptEntryDatabase(
         ).use(::decodeEntries)
 
     @Synchronized
+    fun listConversationAfterEntry(
+        conversationId: String,
+        entryId: String
+    ): List<AgentTranscriptEntry>? {
+        val cleanConversationId = conversationId.trim()
+        val cleanEntryId = entryId.trim()
+        if (cleanConversationId.isBlank()) return emptyList()
+        if (cleanEntryId.isBlank()) return null
+        val cursorSequence = readableDatabase.query(
+            TABLE_ENTRIES,
+            arrayOf("sequence"),
+            "conversation_id = ? AND entry_id = ?",
+            arrayOf(cleanConversationId, cleanEntryId),
+            null,
+            null,
+            null,
+            "1"
+        ).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getLong(0) else null
+        } ?: return null
+        return readableDatabase.query(
+            TABLE_ENTRIES,
+            PAYLOAD_COLUMNS,
+            "conversation_id = ? AND sequence > ?",
+            arrayOf(cleanConversationId, cursorSequence.toString()),
+            null,
+            null,
+            "sequence ASC"
+        ).use(::decodeEntries)
+    }
+
+    @Synchronized
     fun listConversationPage(
         conversationId: String,
         beforeSequenceExclusive: Long? = null,
