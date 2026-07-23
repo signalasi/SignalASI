@@ -115,7 +115,12 @@ object AgentTranscriptPresentationPolicy {
         val representatives = linkedMapOf<String, AgentTranscriptEntry>()
         normalizedEntries.asSequence()
             .filter { it.role == AgentTranscriptRole.PROCESS }
-            .forEach { representatives[processGroupKey(it)] = it }
+            .forEach { process ->
+                val key = processGroupKey(process)
+                representatives[key] = representatives[key]
+                    ?.let { previous -> process.copy(id = previous.id) }
+                    ?: process
+            }
         val emitted = mutableSetOf<String>()
         return buildList {
             normalizedEntries.forEach { entry ->

@@ -403,6 +403,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var agentTranscriptAutoFollow = true
     private val agentTranscriptWindow = AgentTranscriptWindow()
     private val renderedAgentTranscriptIds = linkedSetOf<String>()
+    private val renderedAgentTranscriptSignatures = mutableMapOf<String, Int>()
     private val expandedAgentProcessGroups = linkedSetOf<String>()
     private val collapsedActiveAgentProcessGroups = linkedSetOf<String>()
     private val expandedAgentToolSegments = linkedSetOf<String>()
@@ -9676,25 +9677,49 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val visibleEntries = AgentTranscriptPresentationPolicy.collapseProcessGroups(filteredEntries)
         val incomingIds = visibleEntries.map(AgentTranscriptEntry::id)
         val renderedIds = renderedAgentTranscriptIds.toList()
-        val canAppend = renderedIds.size <= incomingIds.size &&
-            incomingIds.take(renderedIds.size) == renderedIds
+        val diff = AgentTranscriptRenderPolicy.diff(
+            renderedIds,
+            renderedAgentTranscriptSignatures,
+            visibleEntries
+        )
+        val reset = diff.reset || agentOutputList.childCount != renderedIds.size
         val shouldFollow = agentTranscriptAutoFollow
         val preservedScrollY = agentOutputScroll.scrollY
-        if (!canAppend) {
+        var changed = false
+        if (reset) {
             agentOutputList.removeAllViews()
             renderedAgentTranscriptIds.clear()
-        }
-        visibleEntries.asSequence()
-            .filterNot { it.id in renderedAgentTranscriptIds }
-            .forEach { entry ->
+            renderedAgentTranscriptSignatures.clear()
+            visibleEntries.forEach { entry ->
                 agentOutputList.addView(agentTranscriptRow(entry))
                 renderedAgentTranscriptIds += entry.id
+                renderedAgentTranscriptSignatures[entry.id] =
+                    AgentTranscriptRenderPolicy.signature(entry)
             }
-        if (incomingIds == renderedIds) return
+            changed = visibleEntries.isNotEmpty() || renderedIds.isNotEmpty()
+        } else {
+            diff.replacementIndices.forEach { index ->
+                val entry = visibleEntries[index]
+                agentOutputList.removeViewAt(index)
+                agentOutputList.addView(agentTranscriptRow(entry), index)
+                renderedAgentTranscriptSignatures[entry.id] =
+                    AgentTranscriptRenderPolicy.signature(entry)
+                changed = true
+            }
+            visibleEntries.drop(diff.appendFromIndex).forEach { entry ->
+                agentOutputList.addView(agentTranscriptRow(entry))
+                renderedAgentTranscriptIds += entry.id
+                renderedAgentTranscriptSignatures[entry.id] =
+                    AgentTranscriptRenderPolicy.signature(entry)
+                changed = true
+            }
+        }
+        renderedAgentTranscriptSignatures.keys.retainAll(incomingIds.toSet())
+        if (!changed) return
         agentOutputScroll.post {
             if (shouldFollow) {
                 agentOutputScroll.fullScroll(View.FOCUS_DOWN)
-            } else if (!canAppend) {
+            } else if (reset || diff.replacementIndices.isNotEmpty()) {
                 agentOutputScroll.scrollTo(0, preservedScrollY)
             }
         }
