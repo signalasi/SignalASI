@@ -73,4 +73,46 @@ class MqttPublishGuardTest {
 
         assertEquals(2L, policy.nextDelayMillis())
     }
+
+    @Test
+    fun `relationship subscriptions become ready only when every link succeeds`() {
+        val state = MqttSubscriptionRecoveryState()
+        val generation = state.begin(2)
+
+        assertEquals(
+            MqttSubscriptionAttemptOutcome.PENDING,
+            state.complete(generation, succeeded = true)
+        )
+        assertEquals(
+            MqttSubscriptionAttemptOutcome.READY,
+            state.complete(generation, succeeded = true)
+        )
+    }
+
+    @Test
+    fun `any relationship subscription failure requests a retry`() {
+        val state = MqttSubscriptionRecoveryState()
+        val generation = state.begin(2)
+
+        assertEquals(
+            MqttSubscriptionAttemptOutcome.PENDING,
+            state.complete(generation, succeeded = false)
+        )
+        assertEquals(
+            MqttSubscriptionAttemptOutcome.RETRY,
+            state.complete(generation, succeeded = true)
+        )
+    }
+
+    @Test
+    fun `late subscription callbacks from an invalidated connection are ignored`() {
+        val state = MqttSubscriptionRecoveryState()
+        val generation = state.begin(1)
+        state.invalidate()
+
+        assertEquals(
+            MqttSubscriptionAttemptOutcome.STALE,
+            state.complete(generation, succeeded = true)
+        )
+    }
 }

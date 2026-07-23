@@ -3,6 +3,7 @@ const http = require("node:http");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { findBackendPython } = require("./python-runtime");
 const { withSignalasiLock } = require("./smoke-lock");
 
 const root = path.resolve(__dirname, "..");
@@ -53,16 +54,6 @@ function stopBackendPort(port = backendPort) {
   );
 }
 
-function findPython() {
-  const candidates = [
-    path.join(root, ".runtime-python", "venv", "Scripts", "python.exe"),
-    path.join(os.homedir(), "AppData", "Local", "hermes", "hermes-agent", "venv", "Scripts", "python.exe"),
-    path.join(os.homedir(), "AppData", "Roaming", "uv", "python", "cpython-3.11-windows-x86_64-none", "python.exe"),
-    "python"
-  ];
-  return candidates.find((candidate) => candidate === "python" || fs.existsSync(candidate)) || "python";
-}
-
 async function fetchJson(pathname, options = {}) {
   const response = await fetch(`${backendOrigin}${pathname}`, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -77,7 +68,7 @@ async function fetchJson(pathname, options = {}) {
 
 function runBackendJson(code) {
   return new Promise((resolve, reject) => {
-    execFile(findPython(), ["-c", code], {
+    execFile(findBackendPython(), ["-c", code], {
       cwd: backendDir,
       encoding: "utf8",
       windowsHide: true,
@@ -155,7 +146,7 @@ async function startBackendIfNeeded(stateDir = "") {
     stopBackendPort();
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-  const python = findPython();
+  const python = findBackendPython();
   const child = spawn(python, ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", String(backendPort)], {
     cwd: backendDir,
     windowsHide: true,
@@ -210,7 +201,7 @@ function createFakeClaude(tmpDir) {
     ].join("\n"),
     "utf8"
   );
-  const python = findPython().replaceAll("\\", "/");
+  const python = findBackendPython().replaceAll("\\", "/");
   return `"${python}" "${script.replaceAll("\\", "/")}" -`;
 }
 
@@ -227,7 +218,7 @@ function createFakeCustomAgent(tmpDir) {
     ].join("\n"),
     "utf8"
   );
-  const python = findPython().replaceAll("\\", "/");
+  const python = findBackendPython().replaceAll("\\", "/");
   return `"${python}" "${script.replaceAll("\\", "/")}" -`;
 }
 
@@ -274,7 +265,7 @@ function createFakeMcpServer(tmpDir) {
 }
 
 function createMcpWrapperCommand(fakeMcpServer) {
-  const python = findPython().replaceAll("\\", "/");
+  const python = findBackendPython().replaceAll("\\", "/");
   const wrapper = path.join(backendDir, "mcp_agent_wrapper.py").replaceAll("\\", "/");
   return `"${python}" "${wrapper}" --server-python "${fakeMcpServer.replaceAll("\\", "/")}" --tool echo -`;
 }
@@ -310,7 +301,7 @@ function startFakeModelServer() {
 async function main() {
   log("checking syntax before e2e");
   run(process.execPath, ["--check", path.join(root, "scripts", "smoke-e2e.js")]);
-  run(findPython(), ["-m", "py_compile", "agent_gateway.py", "agent_config.py", "main.py", "custom_agent_stdio.py", "mcp_agent_wrapper.py"], { cwd: backendDir });
+  run(findBackendPython(), ["-m", "py_compile", "agent_gateway.py", "agent_config.py", "main.py", "custom_agent_stdio.py", "mcp_agent_wrapper.py"], { cwd: backendDir });
 
   log("starting or reusing backend");
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalasi-e2e-"));

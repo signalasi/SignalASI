@@ -47,6 +47,16 @@ def _connect() -> sqlite3.Connection:
             value TEXT NOT NULL
         )"""
     )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS task_result_outbox (
+            task_id TEXT PRIMARY KEY,
+            client_route_id TEXT NOT NULL,
+            wire_payload TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )"""
+    )
     return db
 
 
@@ -178,6 +188,88 @@ def outbound_status(client_route_id: str, message_id: str) -> str | None:
         finally:
             db.close()
     return str(row[0]) if row else None
+
+
+def queue_task_result(
+    task_id: str,
+    client_route_id: str,
+    wire_payload: dict,
+    payload: dict,
+) -> None:
+    normalized_task_id = str(task_id or "").strip()
+    normalized_route_id = str(client_route_id or "").strip()
+    if not normalized_task_id:
+        raise ValueError("task id is required")
+    if not normalized_route_id:
+        raise ValueError("client route id is required")
+    now = time.time()
+    encoded_wire_payload = json.dumps(wire_payload, ensure_ascii=False, separators=(",", ":"))
+    encoded_payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    with _lock:
+        db = _connect()
+        try:
+            db.execute(
+                """INSERT INTO task_result_outbox
+                   (task_id,client_route_id,wire_payload,payload,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(task_id) DO UPDATE SET
+                       client_route_id=excluded.client_route_id,
+                       wire_payload=excluded.wire_payload,
+                       payload=excluded.payload,
+                       updated_at=excluded.updated_at""",
+                (
+                    normalized_task_id,
+                    normalized_route_id,
+                    encoded_wire_payload,
+                    encoded_payload,
+                    now,
+                    now,
+                ),
+            )
+            db.commit()
+        finally:
+            db.close()
+
+
+def pending_task_results() -> list[dict]:
+    with _lock:
+        db = _connect()
+        try:
+            db.execute(
+                "DELETE FROM task_result_outbox WHERE created_at < ?",
+                (time.time() - OUTBOUND_RETENTION_SECONDS,),
+            )
+            rows = db.execute(
+                """SELECT task_id,client_route_id,wire_payload,payload,created_at
+                   FROM task_result_outbox
+                   ORDER BY created_at"""
+            ).fetchall()
+            db.commit()
+        finally:
+            db.close()
+    return [
+        {
+            "task_id": row[0],
+            "client_route_id": row[1],
+            "wire_payload": json.loads(row[2]),
+            "payload": json.loads(row[3]),
+            "created_at": row[4],
+        }
+        for row in rows
+    ]
+
+
+def remove_task_result(task_id: str) -> None:
+    with _lock:
+        db = _connect()
+        try:
+            db.execute(
+                "DELETE FROM task_result_outbox WHERE task_id=?",
+                (str(task_id or "").strip(),),
+            )
+            db.commit()
+        finally:
+            db.close()
 
 
 def pending_outbound(max_attempts: int = 8) -> list[dict]:

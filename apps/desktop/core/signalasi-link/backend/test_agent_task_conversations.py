@@ -123,6 +123,109 @@ class AgentTaskConversationTests(unittest.TestCase):
             self.assertGreater(manager.get("external-waiting").status_seq, resumed_seq)
             manager.update("external-waiting", "cancelled", on_event=events.append)
 
+    def test_hung_runner_times_out_once_and_discards_late_result(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
+        ):
+            release = threading.Event()
+            terminal = threading.Event()
+            events = []
+            results = []
+
+            class RegisteredProcess:
+                pid = 123
+
+                @staticmethod
+                def poll():
+                    return None
+
+            registered_process = RegisteredProcess()
+            manager = agent_task_manager.AgentTaskManager(
+                heartbeat_interval_seconds=0.01,
+                task_timeout_seconds=0.05,
+            )
+
+            def run(running_task):
+                manager.register_process(running_task.task_id, registered_process)
+                release.wait(1)
+                return "late result"
+
+            def capture(event):
+                events.append(dict(event))
+                if event["status"] in agent_task_manager.TERMINAL_STATES:
+                    terminal.set()
+
+            with patch.object(manager, "_terminate") as terminate:
+                task = manager.create(
+                    "hermes",
+                    "hermes-contact",
+                    "desktop:timeout",
+                    "run a task",
+                    run,
+                    capture,
+                    on_result=lambda event: results.append(dict(event)),
+                )
+
+                self.assertTrue(terminal.wait(1))
+                timed_out = manager.get(task.task_id)
+                self.assertEqual("timed_out", timed_out.status)
+                self.assertIn("execution time limit", timed_out.result)
+                self.assertEqual("", timed_out.current_step)
+                terminal_seq = timed_out.status_seq
+                terminate.assert_called_once_with(registered_process)
+
+                release.set()
+                time.sleep(0.08)
+
+                settled = manager.get(task.task_id)
+                self.assertEqual("timed_out", settled.status)
+                self.assertEqual(terminal_seq, settled.status_seq)
+                self.assertNotEqual("late result", settled.result)
+                self.assertEqual(1, len(results))
+                self.assertEqual("timed_out", results[0]["status"])
+                terminal_events = [
+                    event for event in events
+                    if event["status"] in agent_task_manager.TERMINAL_STATES
+                ]
+                self.assertEqual(1, len(terminal_events))
+
+                restored = agent_task_manager.AgentTaskManager(
+                    task_timeout_seconds=0.05
+                ).get(task.task_id)
+                self.assertEqual("timed_out", restored.status)
+
+    def test_task_completion_before_deadline_does_not_emit_timeout(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
+        ):
+            terminal = threading.Event()
+            events = []
+            manager = agent_task_manager.AgentTaskManager(
+                heartbeat_interval_seconds=0.01,
+                task_timeout_seconds=0.2,
+            )
+
+            def capture(event):
+                events.append(dict(event))
+                if event["status"] in agent_task_manager.TERMINAL_STATES:
+                    terminal.set()
+
+            task = manager.create(
+                "hermes",
+                "hermes-contact",
+                "desktop:complete",
+                "run a task",
+                lambda _task: "done",
+                capture,
+            )
+
+            self.assertTrue(terminal.wait(1))
+            time.sleep(0.25)
+            settled = manager.get(task.task_id)
+            self.assertEqual("completed", settled.status)
+            self.assertEqual("done", settled.result)
+            self.assertNotIn("timed_out", [event["status"] for event in events])
+
     def test_delete_conversation_removes_only_matching_tasks(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
             agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
