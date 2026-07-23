@@ -3,6 +3,7 @@ const http = require("node:http");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { findBackendPython } = require("./python-runtime");
 const { withSignalasiLock } = require("./smoke-lock");
 
 const root = path.resolve(__dirname, "..");
@@ -67,15 +68,6 @@ function stopBackendPort(port = backendPort) {
   );
 }
 
-function findPython() {
-  const candidates = [
-    path.join(os.homedir(), "AppData", "Local", "hermes", "hermes-agent", "venv", "Scripts", "python.exe"),
-    path.join(os.homedir(), "AppData", "Roaming", "uv", "python", "cpython-3.11-windows-x86_64-none", "python.exe"),
-    "python"
-  ];
-  return candidates.find((candidate) => candidate === "python" || fs.existsSync(candidate)) || "python";
-}
-
 async function fetchJson(pathname, options = {}) {
   const response = await fetch(`${backendOrigin}${pathname}`, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -136,7 +128,7 @@ function startBackendIfNeeded(stateDir = "") {
         // Start below.
       }
     }
-    const python = findPython();
+    const python = findBackendPython();
     const child = spawn(python, ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", String(backendPort)], {
       cwd: backendDir,
       windowsHide: true,
@@ -220,7 +212,7 @@ async function smoke() {
   }
 
   log("checking backend Python syntax");
-  const python = findPython();
+  const python = findBackendPython();
   run(python, ["-m", "py_compile", "agent_gateway.py", "agent_task_manager.py", "main.py", "mqtt_bridge.py", "agent_config.py", "desktop_native_tools.py"], { cwd: backendDir });
 
   log("starting or reusing backend");
