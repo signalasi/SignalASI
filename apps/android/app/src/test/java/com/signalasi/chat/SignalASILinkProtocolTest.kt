@@ -53,6 +53,32 @@ class SignalASILinkProtocolTest {
         assertEquals(3, source.length())
     }
 
+    @Test
+    fun deliveryRetriesRemainEligibleAfterManyAttempts() {
+        assertEquals(2_000L, SignalASILinkRetryPolicy.delayMillis(1))
+        assertEquals(256_000L, SignalASILinkRetryPolicy.delayMillis(8))
+        assertEquals(300_000L, SignalASILinkRetryPolicy.delayMillis(9))
+        assertEquals(300_000L, SignalASILinkRetryPolicy.delayMillis(10_000))
+
+        val now = 1_000_000L
+        val values = JSONArray()
+            .put(
+                outboxMessage("many-attempts", "topic")
+                    .put("attempts", 10_000)
+                    .put("next_attempt_at", now)
+                    .put("created_at", 1L)
+            )
+            .put(
+                outboxMessage("not-due", "topic")
+                    .put("attempts", 1)
+                    .put("next_attempt_at", now + 1L)
+                    .put("created_at", 2L)
+            )
+        val pending = SignalASILinkDeliveryStore.pendingFromArray(values, now)
+        assertEquals(1, pending.size)
+        assertEquals("many-attempts", pending.single().messageId)
+    }
+
     private fun outboxMessage(id: String, topic: String): JSONObject = JSONObject()
         .put("message_id", id)
         .put("topic", topic)
