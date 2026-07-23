@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import threading
@@ -18,6 +19,21 @@ TASKS_DB_PATH = Path.home() / ".signalasi" / "agent_tasks.sqlite3"
 TERMINAL_STATES = {"completed", "failed", "cancelled", "timed_out"}
 MAX_AUTOMATIC_RECOVERY_ATTEMPTS = 2
 EventCallback = Callable[[dict], None]
+
+
+def _environment_timeout_seconds(name: str, default: float, minimum: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value) if math.isfinite(value) else default
+
+
+DEFAULT_TASK_TIMEOUT_SECONDS = _environment_timeout_seconds(
+    "SIGNALASI_AGENT_TASK_TIMEOUT_SECONDS",
+    default=900.0,
+    minimum=30.0,
+)
 
 
 @dataclass
@@ -95,6 +111,7 @@ class AgentTaskManager:
     def __init__(
         self,
         heartbeat_interval_seconds: float = 5.0,
+        task_timeout_seconds: float | None = None,
         state_path: Path | None = None,
     ) -> None:
         self._lock = threading.RLock()
@@ -103,6 +120,14 @@ class AgentTaskManager:
         self._external_task_ids: set[str] = set()
         self._external_heartbeat_stops: dict[str, threading.Event] = {}
         self._heartbeat_interval_seconds = max(0.01, float(heartbeat_interval_seconds))
+        self._task_timeout_seconds = max(
+            0.01,
+            float(
+                DEFAULT_TASK_TIMEOUT_SECONDS
+                if task_timeout_seconds is None
+                else task_timeout_seconds
+            ),
+        )
         self._store = AgentTaskStore(state_path or TASKS_DB_PATH)
         self._load()
 
@@ -285,21 +310,30 @@ class AgentTaskManager:
         heartbeat_stop = threading.Event()
         heartbeat = threading.Thread(target=self._heartbeat, args=(task, on_event, heartbeat_stop), daemon=True)
         heartbeat.start()
+        deadline_stop = threading.Event()
+        threading.Thread(
+            target=self._deadline_watchdog,
+            args=(task, on_event, on_result, deadline_stop),
+            daemon=True,
+            name=f"signalasi-task-deadline-{task.task_id[:8]}",
+        ).start()
         try:
             result = runner(task)
+            transitioned = False
             if task.cancel_requested:
-                self._finish(task, "cancelled", on_event)
+                transitioned = self._finish(task, "cancelled", on_event)
             elif task.status == "timed_out" or self._looks_timed_out(result):
-                self._finish(task, "timed_out", on_event, result=result)
+                transitioned = self._finish(task, "timed_out", on_event, result=result)
             elif self._looks_failed(result):
-                self._finish(task, "failed", on_event, result=result, error=result[:240])
+                transitioned = self._finish(task, "failed", on_event, result=result, error=result[:240])
             else:
-                self._finish(task, "completed", on_event, result=result)
-            if not task.cancel_requested and task.result and on_result is not None:
+                transitioned = self._finish(task, "completed", on_event, result=result)
+            if transitioned and not task.cancel_requested and task.result and on_result is not None:
                 self._emit(task, on_result)
         except Exception as exc:
             self._finish(task, "failed", on_event, error=str(exc)[:500])
         finally:
+            deadline_stop.set()
             heartbeat_stop.set()
             task.process = None
 
@@ -311,7 +345,39 @@ class AgentTaskManager:
                 task.updated_at = int(time.time() * 1000)
                 task.status_seq += 1
                 self._save_locked(task)
-            self._emit(task, on_event)
+                snapshot = task.public()
+            self._emit_snapshot(snapshot, on_event)
+
+    def _deadline_watchdog(
+        self,
+        task: AgentTask,
+        on_event: EventCallback,
+        on_result: EventCallback | None,
+        stop: threading.Event,
+    ) -> None:
+        if stop.wait(self._task_timeout_seconds):
+            return
+        with self._lock:
+            if task.status in TERMINAL_STATES:
+                return
+            process = task.process
+        if process is not None:
+            self._terminate(process)
+        prefers_chinese = any("\u4e00" <= character <= "\u9fff" for character in task.prompt)
+        result = (
+            "\u4efb\u52a1\u8d85\u8fc7\u6700\u957f\u6267\u884c\u65f6\u95f4\uff0c\u5df2\u505c\u6b62\u4ee5\u907f\u514d\u6301\u7eed\u5360\u7528\u961f\u5217\u3002"
+            if prefers_chinese else
+            "The task exceeded its execution time limit and was stopped to keep the queue responsive."
+        )
+        transitioned = self._finish(
+            task,
+            "timed_out",
+            on_event,
+            result=result,
+            error=f"Task exceeded {self._task_timeout_seconds:g} seconds",
+        )
+        if transitioned and on_result is not None:
+            self._emit(task, on_result)
 
     def _ensure_external_heartbeat_locked(
         self,
@@ -354,7 +420,8 @@ class AgentTaskManager:
                     task.updated_at = int(time.time() * 1000)
                     task.status_seq += 1
                     self._save_locked(task)
-                self._emit(task, on_event)
+                    snapshot = task.public()
+                self._emit_snapshot(snapshot, on_event)
         finally:
             with self._lock:
                 if self._external_heartbeat_stops.get(task_id) is stop:
@@ -541,10 +608,17 @@ class AgentTaskManager:
             self._save_locked(task)
         self._emit(task, on_event)
 
-    def _finish(self, task: AgentTask, status: str, on_event: EventCallback | None, result: str = "", error: str = "") -> None:
+    def _finish(
+        self,
+        task: AgentTask,
+        status: str,
+        on_event: EventCallback | None,
+        result: str = "",
+        error: str = "",
+    ) -> bool:
         with self._lock:
             if task.status in TERMINAL_STATES:
-                return
+                return False
             now = int(time.time() * 1000)
             task.status = status
             task.updated_at = now
@@ -557,12 +631,17 @@ class AgentTaskManager:
             self._stop_external_heartbeat_locked(task.task_id, forget_task=True)
             self._save_locked(task)
         self._emit(task, on_event)
+        return True
 
     def _emit(self, task: AgentTask, on_event: EventCallback | None) -> None:
+        self._emit_snapshot(task.public(), on_event)
+
+    @staticmethod
+    def _emit_snapshot(snapshot: dict, on_event: EventCallback | None) -> None:
         if on_event is None:
             return
         try:
-            on_event(task.public())
+            on_event(snapshot)
         except Exception:
             pass
 
