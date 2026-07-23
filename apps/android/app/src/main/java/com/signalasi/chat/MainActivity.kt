@@ -115,7 +115,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private data class AgentInitialHydration(
         val state: AgentUiState,
         val conversation: AgentConversation,
-        val entries: List<AgentTranscriptEntry>,
+        val transcriptPage: AgentTranscriptPage,
         val insightCount: Int
     )
 
@@ -397,12 +397,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     @Volatile private var initialAgentHydrationPending = true
     private var initialAgentHydrationScheduled = false
     private var completedInitialResume = false
-    private var agentTranscriptVisibleLimit = INITIAL_VISIBLE_AGENT_TRANSCRIPT_ITEMS
     private var agentTranscriptPageLoading = false
     private var agentTranscriptAllLoaded = false
     private var agentRenderedConversationId = ""
     private var agentTranscriptAutoFollow = true
+    private val agentTranscriptWindow = AgentTranscriptWindow()
     private val renderedAgentTranscriptIds = linkedSetOf<String>()
+    private val renderedAgentTranscriptSignatures = mutableMapOf<String, Int>()
     private val expandedAgentProcessGroups = linkedSetOf<String>()
     private val collapsedActiveAgentProcessGroups = linkedSetOf<String>()
     private val expandedAgentToolSegments = linkedSetOf<String>()
@@ -705,14 +706,22 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             taskId = recovery.taskId
                         )
                     }
-                    val entries = agentTranscriptStore.list(conversation.id)
+                    val transcriptPage = agentTranscriptStore.page(
+                        conversationId = conversation.id,
+                        pageSize = INITIAL_VISIBLE_AGENT_TRANSCRIPT_ITEMS
+                    )
                     val insightCount = globalSuperAgentRuntime.newProactiveInsightCount()
-                    AgentInitialHydration(state, conversation, entries, insightCount)
+                    AgentInitialHydration(state, conversation, transcriptPage, insightCount)
                 }
                 runOnUiThread {
                     outcome.onSuccess { hydration ->
                         resetAgentTranscriptRendering(hydration.conversation.id)
-                        val restoredTurnId = hydration.entries.asReversed().firstOrNull { entry ->
+                        agentTranscriptWindow.replace(
+                            hydration.conversation.id,
+                            hydration.transcriptPage
+                        )
+                        agentTranscriptAllLoaded = !hydration.transcriptPage.hasMore
+                        val restoredTurnId = hydration.transcriptPage.entries.asReversed().firstOrNull { entry ->
                             entry.taskId == hydration.state.sessionId && entry.turnId.isNotBlank()
                         }?.turnId.orEmpty()
                         renderAgentState(
@@ -722,16 +731,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             syncTranscript = true,
                             activeConversationId = hydration.conversation.id
                         )
-                        val reconciledEntries = agentTranscriptStore.list(hydration.conversation.id)
-                        renderAgentTranscript(reconciledEntries)
-                        refreshAgentConversationHeader(
-                            hydration.conversation,
-                            reconciledEntries.count { it.role != AgentTranscriptRole.PROCESS }
-                        )
+                        refreshAgentTranscriptWindow(hydration.conversation.id)
+                        refreshAgentConversationHeader(hydration.conversation)
                         refreshGlobalInsightIndicator(hydration.insightCount)
                         Log.i(
                             "SignalASIStartup",
-                            "agent_hydration total=${SystemClock.elapsedRealtime() - hydrationStartedAt}ms entries=${hydration.entries.size} visible=${renderedAgentTranscriptIds.size}"
+                            "agent_hydration total=${SystemClock.elapsedRealtime() - hydrationStartedAt}ms entries=${hydration.transcriptPage.entries.size} visible=${renderedAgentTranscriptIds.size}"
                         )
                     }.onFailure { error ->
                         Log.w("SignalASIStartup", "Initial Agent hydration failed", error)
@@ -1145,8 +1150,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     )
 
     private fun clearAgentTaskWatchdogTranscript(conversationId: String, turnId: String) {
-        agentTranscriptStore.deleteByDedupeKey(conversationId, "task-watchdog:$turnId")
-        agentTranscriptStore.deleteByDedupeKey(conversationId, "task-watchdog-timeout:$turnId")
+        deleteAgentTranscriptByDedupeKey(conversationId, "task-watchdog:$turnId")
+        deleteAgentTranscriptByDedupeKey(conversationId, "task-watchdog-timeout:$turnId")
     }
 
     private fun consumePendingAgentConnectorResponses() {
@@ -1274,14 +1279,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             richOutputJson = response.richOutputJson
         )
         if (!stored) return false
-        agentTranscriptStore.deleteByDedupeKey(conversationId, "connector-task:$taskId")
+        deleteAgentTranscriptByDedupeKey(conversationId, "connector-task:$taskId")
         AgentConnectorResponseStore.remove(this, response)
         completedConnectorTaskIds.add(taskId)
         agentTranscriptStore.recordUsage(
             conversationId, response.inputTokens, response.outputTokens, response.costMicros
         )
         if (conversationId == agentTranscriptStore.activeConversation().id) {
-            renderAgentTranscript(agentTranscriptStore.list(conversationId))
+            refreshAgentTranscriptWindow(conversationId)
             refreshAgentConversationHeader()
         }
         Log.i(
@@ -1426,7 +1431,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     richOutputJson = AgentRichContentCodec.fromEnvelope(envelope)
                 )
                 if (resolvedResponseConversationId == agentTranscriptStore.activeConversation().id) {
-                    renderAgentTranscript(agentTranscriptStore.list(resolvedResponseConversationId))
+                    refreshAgentTranscriptWindow(resolvedResponseConversationId)
                 }
             }
             if (!nativeAgentResponse) {
@@ -1530,7 +1535,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         // accepted, running steps, and completion update one process row in place.
         val connectorProcessKey = "connector-task:$taskId"
         if (turnId.isNotBlank()) {
-            agentTranscriptStore.deleteByDedupeKey(conversationId, "connector-turn:$turnId")
+            deleteAgentTranscriptByDedupeKey(conversationId, "connector-turn:$turnId")
         }
         agentTranscriptStore.upsert(
             AgentTranscriptRole.PROCESS,
@@ -1583,7 +1588,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ))
         }
         if (conversationId == agentTranscriptStore.activeConversation().id) {
-            renderAgentTranscript(agentTranscriptStore.list(conversationId))
+            refreshAgentTranscriptWindow(conversationId)
         }
         if (nativeState != null) {
             renderAgentState(nativeState, conversationId, turnId)
@@ -1728,7 +1733,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         ) {
             clearAgentTaskWatchdogTranscript(conversationId, workspace.taskId)
             if (conversationId == agentTranscriptStore.activeConversation().id) {
-                renderAgentTranscript(agentTranscriptStore.list(conversationId))
+                refreshAgentTranscriptWindow(conversationId)
             }
             return
         }
@@ -1751,10 +1756,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
             }
             AgentTaskLivenessSignalKind.RECOVERED -> {
-                agentTranscriptStore.deleteByDedupeKey(conversationId, dedupeKey)
+                deleteAgentTranscriptByDedupeKey(conversationId, dedupeKey)
             }
             AgentTaskLivenessSignalKind.TIMED_OUT -> {
-                agentTranscriptStore.deleteByDedupeKey(conversationId, dedupeKey)
+                deleteAgentTranscriptByDedupeKey(conversationId, dedupeKey)
                 agentTranscriptStore.append(
                     role = AgentTranscriptRole.ASSISTANT,
                     text = getString(R.string.agent_task_watchdog_timed_out),
@@ -1766,7 +1771,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
         }
         if (conversationId == agentTranscriptStore.activeConversation().id) {
-            renderAgentTranscript(agentTranscriptStore.list(conversationId))
+            refreshAgentTranscriptWindow(conversationId)
         }
     }
 
@@ -2228,30 +2233,41 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (agentTranscriptPageLoading || agentTranscriptAllLoaded || agentRenderedConversationId.isBlank()) return
         agentTranscriptPageLoading = true
         val conversationId = agentRenderedConversationId
+        val beforeSequence = agentTranscriptWindow.nextBeforeSequence
+        if (beforeSequence == null) {
+            agentTranscriptAllLoaded = true
+            agentTranscriptPageLoading = false
+            return
+        }
         thread(name = "signalasi-agent-transcript-page") {
-            val entries = runCatching { agentTranscriptStore.list(conversationId) }.getOrDefault(emptyList())
+            val pageResult = runCatching {
+                agentTranscriptStore.page(
+                    conversationId = conversationId,
+                    beforeSequenceExclusive = beforeSequence,
+                    pageSize = AGENT_TRANSCRIPT_PAGE_ITEMS
+                )
+            }
             runOnUiThread {
                 if (conversationId != agentRenderedConversationId) {
                     agentTranscriptPageLoading = false
                     return@runOnUiThread
                 }
-                val firstRenderedId = renderedAgentTranscriptIds.firstOrNull()
-                val firstRenderedIndex = entries.indexOfFirst { it.id == firstRenderedId }
-                val currentlyVisible = if (firstRenderedIndex >= 0) {
-                    entries.size - firstRenderedIndex
-                } else {
-                    agentTranscriptVisibleLimit
+                val page = pageResult.getOrElse {
+                    agentTranscriptPageLoading = false
+                    return@runOnUiThread
                 }
-                val nextLimit = minOf(
-                    entries.size,
-                    maxOf(agentTranscriptVisibleLimit, currentlyVisible) + AGENT_TRANSCRIPT_PAGE_ITEMS
-                )
-                agentTranscriptAllLoaded = nextLimit >= entries.size
-                if (nextLimit > currentlyVisible) {
-                    agentTranscriptVisibleLimit = nextLimit
+                val previousHeight = agentOutputList.height
+                val previousScrollY = agentOutputScroll.scrollY
+                val added = agentTranscriptWindow.prependOlder(conversationId, page)
+                agentTranscriptAllLoaded = !page.hasMore
+                if (added > 0) {
                     agentOutputList.removeAllViews()
                     renderedAgentTranscriptIds.clear()
-                    renderAgentTranscript(entries)
+                    renderAgentTranscript(agentTranscriptWindow.entries)
+                    agentOutputScroll.post {
+                        val insertedHeight = (agentOutputList.height - previousHeight).coerceAtLeast(0)
+                        agentOutputScroll.scrollTo(0, previousScrollY + insertedHeight)
+                    }
                 }
                 agentTranscriptPageLoading = false
             }
@@ -2261,10 +2277,52 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun resetAgentTranscriptRendering(conversationId: String = "") {
         agentOutputList.removeAllViews()
         renderedAgentTranscriptIds.clear()
-        agentTranscriptVisibleLimit = INITIAL_VISIBLE_AGENT_TRANSCRIPT_ITEMS
         agentTranscriptPageLoading = false
         agentTranscriptAllLoaded = false
         agentRenderedConversationId = conversationId
+        agentTranscriptWindow.reset(conversationId)
+    }
+
+    private fun deleteAgentTranscriptByDedupeKey(
+        conversationId: String,
+        dedupeKey: String
+    ): Boolean {
+        val removed = agentTranscriptStore.deleteByDedupeKey(conversationId, dedupeKey)
+        if (removed && agentTranscriptWindow.conversationId == conversationId) {
+            agentTranscriptWindow.entries
+                .filter { it.dedupeKey == dedupeKey }
+                .map(AgentTranscriptEntry::id)
+                .forEach(agentTranscriptWindow::remove)
+        }
+        return removed
+    }
+
+    private fun refreshAgentTranscriptWindow(
+        conversationId: String = agentTranscriptStore.activeConversation().id
+    ) {
+        if (agentTranscriptWindow.conversationId != conversationId ||
+            agentTranscriptWindow.newestSequence == null
+        ) {
+            val page = agentTranscriptStore.page(
+                conversationId = conversationId,
+                pageSize = INITIAL_VISIBLE_AGENT_TRANSCRIPT_ITEMS
+            )
+            agentTranscriptWindow.replace(conversationId, page)
+            agentTranscriptAllLoaded = !page.hasMore
+        } else {
+            var afterSequence = checkNotNull(agentTranscriptWindow.newestSequence)
+            var hasMore: Boolean
+            do {
+                val delta = agentTranscriptStore.entriesAfter(
+                    conversationId = conversationId,
+                    afterSequenceExclusive = afterSequence
+                )
+                agentTranscriptWindow.appendNewer(conversationId, delta)
+                afterSequence = delta.newestSequence ?: afterSequence
+                hasMore = delta.hasMore
+            } while (hasMore)
+        }
+        renderAgentTranscript(agentTranscriptWindow.entries)
     }
 
     private fun cancelRemoteAgentTask(state: AgentUiState) {
@@ -2288,7 +2346,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 "${contactById(contactId).name} · ${getString(R.string.agent_task_status_cancelling)}",
                 dedupeKey = "remote-task:$taskId"
             )
-            renderAgentTranscript(agentTranscriptStore.list())
+            refreshAgentTranscriptWindow()
         } else {
             Toast.makeText(this, getString(R.string.delivery_status_send_failed), Toast.LENGTH_SHORT).show()
         }
@@ -2393,7 +2451,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         refreshGlobalAgentCognition()
         AgentTurnAttachmentRegistry.put(turnId, attachments)
         refreshAgentConversationHeader()
-        renderAgentTranscript(agentTranscriptStore.list())
+        refreshAgentTranscriptWindow()
         agentGoalInput.setText("")
         agentInputAttachments.clear()
         renderAgentInputAttachments()
@@ -2493,7 +2551,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 taskId = turnId
             )
             Log.d("SignalASIAgent", "fast_local_completed turn=${turnId.take(8)}")
-            renderAgentTranscript(agentTranscriptStore.list(conversationId))
+            refreshAgentTranscriptWindow(conversationId)
             return
         }
         val conversationContext = globalSuperAgentRuntime.augmentContext(
@@ -2860,7 +2918,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             turnId = turnId,
             taskId = turnId
         )
-        renderAgentTranscript(agentTranscriptStore.list(conversationId))
+        refreshAgentTranscriptWindow(conversationId)
         return true
     }
 
@@ -2914,7 +2972,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         turnId = turnId,
                         taskId = turnId
                     )
-                    renderAgentTranscript(agentTranscriptStore.list(conversationId))
+                    refreshAgentTranscriptWindow(conversationId)
                     recordSkillAgentRun(turnId, result)
                 } else {
                     agentTranscriptStore.append(
@@ -3298,7 +3356,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             turnId = turnId,
             taskId = turnId
         )
-        renderAgentTranscript(agentTranscriptStore.list(conversationId))
+        refreshAgentTranscriptWindow(conversationId)
     }
 
     private fun requestMissingAgentNativePermissions(state: AgentUiState): Boolean {
@@ -3410,7 +3468,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         }
                         if (activeMainTab == PAGE_AGENT) {
                             refreshAgentConversationHeader()
-                            renderAgentTranscript(agentTranscriptStore.list())
+                            refreshAgentTranscriptWindow()
                             refreshGlobalInsightIndicator()
                         }
                     }
@@ -3464,7 +3522,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         renderAgentState(mobileNativeAgent.startNewConversation(conversation.id), conversation.id, syncTranscript = false)
         resetAgentTranscriptRendering(conversation.id)
         refreshAgentConversationHeader()
-        renderAgentTranscript(agentTranscriptStore.list())
+        refreshAgentTranscriptWindow()
         if (featurePage.visibility == View.VISIBLE) hideFeaturePage()
     }
 
@@ -3606,7 +3664,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     agentTranscriptStore.switchConversation(destination)
                     resetAgentTranscriptRendering(destination)
                     refreshAgentConversationHeader()
-                    renderAgentTranscript(agentTranscriptStore.list())
+                    refreshAgentTranscriptWindow()
                     dialog.dismiss()
                 }
                 setOnLongClickListener {
@@ -3742,7 +3800,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                             refreshAgentConversationHeader()
                             renderedAgentTranscriptIds.clear()
                             agentOutputList.removeAllViews()
-                            renderAgentTranscript(agentTranscriptStore.list())
+                            refreshAgentTranscriptWindow()
                             showAgentSessionsPage(showArchived)
                         }
                         .setNegativeButton(getString(R.string.common_cancel), null)
@@ -3769,7 +3827,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .setPositiveButton(getString(R.string.common_delete)) { _, _ ->
                 deleteAgentConversationData(conversation)
                 refreshAgentConversationHeader()
-                renderAgentTranscript(agentTranscriptStore.list())
+                refreshAgentTranscriptWindow()
                 showAgentSessionsPage(showArchived)
             }
             .setNegativeButton(getString(R.string.common_cancel), null)
@@ -3878,7 +3936,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 resetAgentTranscriptRendering(targetId)
                 showMainTab(PAGE_AGENT)
                 refreshAgentConversationHeader()
-                renderAgentTranscript(agentTranscriptStore.list(targetId))
+                refreshAgentTranscriptWindow(targetId)
                 refreshGlobalAgentCognition()
                 Toast.makeText(
                     this,
@@ -5887,7 +5945,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
             }
             runOnUiThread {
-                renderAgentTranscript(agentTranscriptStore.list())
+                refreshAgentTranscriptWindow()
                 if (controlCenterDestination?.route == ControlCenterRoute.GLOBAL_AGENT) {
                     renderControlCenterGlobalAgentPage()
                 }
@@ -6436,7 +6494,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         resetAgentTranscriptRendering(destination)
         showMainTab(PAGE_AGENT)
         refreshAgentConversationHeader()
-        renderAgentTranscript(agentTranscriptStore.list(destination))
+        refreshAgentTranscriptWindow(destination)
         refreshGlobalInsightIndicator()
     }
 
@@ -9461,7 +9519,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         syncAgentTranscript(state, conversationId, turnId)
         if (conversationId == agentTranscriptStore.activeConversation().id) {
             refreshAgentConversationHeader()
-            renderAgentTranscript(agentTranscriptStore.list(conversationId))
+            refreshAgentTranscriptWindow(conversationId)
         }
     }
 
@@ -9608,42 +9666,60 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun renderAgentTranscript(entries: List<AgentTranscriptEntry>) {
-        val firstRenderedId = renderedAgentTranscriptIds.firstOrNull()
-        val firstRenderedIndex = entries.indexOfFirst { it.id == firstRenderedId }
-        val visibleWindow = if (firstRenderedIndex >= 0) {
-            entries.drop(firstRenderedIndex)
-        } else {
-            entries.takeLast(agentTranscriptVisibleLimit)
-        }
-        agentTranscriptAllLoaded = visibleWindow.size >= entries.size
-        val filteredEntries = visibleWindow.filterNot { entry ->
+        val filteredEntries = entries.filterNot { entry ->
             val staleApproval = isAgentApprovalEntry(entry) &&
                 (isDirectActionApprovalEntry(entry) || !isAgentApprovalStillWaiting(entry.taskId))
-            if (staleApproval) agentTranscriptStore.deleteEntry(entry.id)
+            if (staleApproval && agentTranscriptStore.deleteEntry(entry.id)) {
+                agentTranscriptWindow.remove(entry.id)
+            }
             staleApproval
         }
         val visibleEntries = AgentTranscriptPresentationPolicy.collapseProcessGroups(filteredEntries)
         val incomingIds = visibleEntries.map(AgentTranscriptEntry::id)
         val renderedIds = renderedAgentTranscriptIds.toList()
-        val canAppend = renderedIds.size <= incomingIds.size &&
-            incomingIds.take(renderedIds.size) == renderedIds
+        val diff = AgentTranscriptRenderPolicy.diff(
+            renderedIds,
+            renderedAgentTranscriptSignatures,
+            visibleEntries
+        )
+        val reset = diff.reset || agentOutputList.childCount != renderedIds.size
         val shouldFollow = agentTranscriptAutoFollow
         val preservedScrollY = agentOutputScroll.scrollY
-        if (!canAppend) {
+        var changed = false
+        if (reset) {
             agentOutputList.removeAllViews()
             renderedAgentTranscriptIds.clear()
-        }
-        visibleEntries.asSequence()
-            .filterNot { it.id in renderedAgentTranscriptIds }
-            .forEach { entry ->
+            renderedAgentTranscriptSignatures.clear()
+            visibleEntries.forEach { entry ->
                 agentOutputList.addView(agentTranscriptRow(entry))
                 renderedAgentTranscriptIds += entry.id
+                renderedAgentTranscriptSignatures[entry.id] =
+                    AgentTranscriptRenderPolicy.signature(entry)
             }
-        if (incomingIds == renderedIds) return
+            changed = visibleEntries.isNotEmpty() || renderedIds.isNotEmpty()
+        } else {
+            diff.replacementIndices.forEach { index ->
+                val entry = visibleEntries[index]
+                agentOutputList.removeViewAt(index)
+                agentOutputList.addView(agentTranscriptRow(entry), index)
+                renderedAgentTranscriptSignatures[entry.id] =
+                    AgentTranscriptRenderPolicy.signature(entry)
+                changed = true
+            }
+            visibleEntries.drop(diff.appendFromIndex).forEach { entry ->
+                agentOutputList.addView(agentTranscriptRow(entry))
+                renderedAgentTranscriptIds += entry.id
+                renderedAgentTranscriptSignatures[entry.id] =
+                    AgentTranscriptRenderPolicy.signature(entry)
+                changed = true
+            }
+        }
+        renderedAgentTranscriptSignatures.keys.retainAll(incomingIds.toSet())
+        if (!changed) return
         agentOutputScroll.post {
             if (shouldFollow) {
                 agentOutputScroll.fullScroll(View.FOCUS_DOWN)
-            } else if (!canAppend) {
+            } else if (reset || diff.replacementIndices.isNotEmpty()) {
                 agentOutputScroll.scrollTo(0, preservedScrollY)
             }
         }
@@ -9721,7 +9797,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun agentProcessTranscriptRow(entry: AgentTranscriptEntry): View {
         val groupKey = AgentTranscriptPresentationPolicy.processGroupKey(entry)
-        val turnEntries = agentTranscriptStore.list(entry.conversationId)
+        val turnEntries = when {
+            entry.turnId.isNotBlank() -> agentTranscriptStore.entriesForTurn(entry.turnId)
+            entry.taskId.isNotBlank() -> agentTranscriptStore.entriesForTask(entry.taskId)
+            else -> listOf(entry)
+        }
         val processEntries = turnEntries
             .filter { candidate ->
                 candidate.role == AgentTranscriptRole.PROCESS &&
@@ -9819,7 +9899,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     }
                     renderedAgentTranscriptIds.clear()
                     agentOutputList.removeAllViews()
-                    renderAgentTranscript(agentTranscriptStore.list(entry.conversationId))
+                    refreshAgentTranscriptWindow(entry.conversationId)
                 }
             })
             if (expanded) {
@@ -9904,7 +9984,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 else expandedAgentToolSegments.add(segmentKey)
                 renderedAgentTranscriptIds.clear()
                 agentOutputList.removeAllViews()
-                renderAgentTranscript(agentTranscriptStore.list())
+                refreshAgentTranscriptWindow()
             }
         })
         if (detailsExpanded) {
@@ -10179,9 +10259,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         }
                         deleteLabel -> {
                             if (agentTranscriptStore.deleteEntry(entry.id)) {
+                                agentTranscriptWindow.remove(entry.id)
                                 renderedAgentTranscriptIds.clear()
                                 agentOutputList.removeAllViews()
-                                renderAgentTranscript(agentTranscriptStore.list())
+                                refreshAgentTranscriptWindow()
                             }
                         }
                     }
@@ -10377,10 +10458,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             Toast.makeText(this, getString(R.string.agent_task_detail_unavailable), Toast.LENGTH_SHORT).show()
             return
         }
-        agentTranscriptStore.deleteEntry(entry.id)
+        if (agentTranscriptStore.deleteEntry(entry.id)) {
+            agentTranscriptWindow.remove(entry.id)
+        }
         renderedAgentTranscriptIds.clear()
         agentOutputList.removeAllViews()
-        renderAgentTranscript(agentTranscriptStore.list(entry.conversationId))
+        refreshAgentTranscriptWindow(entry.conversationId)
         thread(name = "signalasi-rich-decision") {
             val state = if (approved) {
                 runtime.approveNextAction(highRiskConfirmed = true)
@@ -14202,7 +14285,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             getString(R.string.agent_voice_message_label, seconds),
             dedupeKey = "agent-voice-pending:${file.name}"
         )
-        renderAgentTranscript(agentTranscriptStore.list())
+        refreshAgentTranscriptWindow()
         requestAgentInputTranscription(file)
     }
 

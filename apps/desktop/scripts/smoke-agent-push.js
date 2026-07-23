@@ -1,8 +1,7 @@
 ﻿const { execFile, execFileSync } = require("node:child_process");
 const http = require("node:http");
-const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
+const { findBackendPython } = require("./python-runtime");
 const { withSignalasiLock } = require("./smoke-lock");
 
 const root = path.resolve(__dirname, "..");
@@ -15,16 +14,6 @@ function log(message) {
 
 function fail(message) {
   throw new Error(message);
-}
-
-function findPython() {
-  const candidates = [
-    path.join(root, ".runtime-python", "venv", "Scripts", "python.exe"),
-    path.join(os.homedir(), "AppData", "Local", "hermes", "hermes-agent", "venv", "Scripts", "python.exe"),
-    path.join(os.homedir(), "AppData", "Roaming", "uv", "python", "cpython-3.11-windows-x86_64-none", "python.exe"),
-    "python"
-  ];
-  return candidates.find((candidate) => candidate === "python" || fs.existsSync(candidate)) || "python";
 }
 
 function run(command, args, options = {}) {
@@ -73,7 +62,7 @@ async function withServer(handler) {
 }
 
 async function main() {
-  const python = findPython();
+  const python = findBackendPython();
   log("checking backend push files compile");
   run(python, ["-m", "py_compile", "main.py", "mqtt_bridge.py", "push_auth.py", "signalasi_notify.py"], { cwd: backendDir });
 
@@ -107,6 +96,7 @@ class FakeClient:
 
 mqtt_bridge.client = FakeClient()
 mqtt_bridge.encrypt_signal_payload = lambda payload, remote_name="android": {"scheme": "signal", "debug_payload": payload}
+mqtt_bridge.desktop_id = lambda: "desktop_agent_push_smoke"
 record_pairing_success(
     fingerprint="a" * 64,
     remote_name="signalasi:smoke-client",
