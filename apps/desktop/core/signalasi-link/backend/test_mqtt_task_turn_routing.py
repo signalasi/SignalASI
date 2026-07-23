@@ -34,6 +34,26 @@ class MqttTaskTurnRoutingTests(unittest.TestCase):
         self.assertEqual("legacy-turn-1", mqtt_bridge._client_task_turn_id(task))
         self.assertEqual("legacy-turn-1", mqtt_bridge._agent_task_payload(task, [])["turn_id"])
 
+    def test_cancelled_codex_task_never_publishes_partial_or_failure_text(self):
+        self.assertEqual(
+            "",
+            mqtt_bridge._codex_terminal_result(
+                "cancel this task",
+                "cancelled",
+                "partial answer that arrived during interruption",
+            ),
+        )
+
+    def test_failed_codex_task_keeps_natural_language_fallback(self):
+        self.assertEqual(
+            "Codex could not complete this task. Please send it again.",
+            mqtt_bridge._codex_terminal_result("run this task", "failed", None),
+        )
+        self.assertEqual(
+            "Codex \u672a\u80fd\u5b8c\u6210\u8fd9\u6b21\u4efb\u52a1\uff0c\u8bf7\u91cd\u65b0\u53d1\u9001\u4e00\u6b21\u3002",
+            mqtt_bridge._codex_terminal_result("\u8bf7\u6267\u884c\u4efb\u52a1", "timed_out", ""),
+        )
+
     def test_completed_result_is_queued_offline_and_flushed_after_reconnect(self):
         wire_payload = {"scheme": "signal", "_client_route_id": "phone-1"}
         payload = {"task_id": "task-1", "content": "done"}

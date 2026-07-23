@@ -245,8 +245,11 @@ if (!html.includes('<div class="sidebar-brand-copy"><strong>SignalASI</strong><s
   throw new Error("Desktop sidebar brand must use the localized Super agent subtitle");
 }
 
-if (!/\.sidebar-brand-copy\s*\{[^}]*align-items:\s*center;/s.test(styles)) {
-  throw new Error("Desktop sidebar brand title and subtitle must share a centered text axis");
+if (
+  !/\.sidebar-brand-copy\s*\{[^}]*width:\s*64px;[^}]*text-align:\s*center;/s.test(styles)
+  || !/\.sidebar-brand strong,\s*\.sidebar-brand span\s*\{[^}]*width:\s*100%;[^}]*text-align:\s*center;/s.test(styles)
+) {
+  throw new Error("Desktop sidebar brand title and subtitle must share one fixed centered text column");
 }
 
 if (Object.keys(localeEn).length !== 0) {

@@ -592,6 +592,7 @@
     <string name="agent_task_status_accepted">已接受</string>
     <string name="agent_task_status_queued">排队中</string>
     <string name="agent_task_status_starting">正在启动</string>
+    <string name="agent_task_status_recovering">正在恢复</string>
     <string name="agent_stale_connector_no_result">Agent 任务已停止，但没有返回最终结果。请在连接可用后重试。</string>
     <string name="agent_task_status_running">运行中</string>
     <string name="agent_task_status_running_elapsed">运行中 · %1$d 秒</string>
