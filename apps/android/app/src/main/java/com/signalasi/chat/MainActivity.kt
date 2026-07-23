@@ -12916,20 +12916,26 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val target = AppStore.outgoingTopicForContact(this, contact.id)
         if (target != null) {
             appendDeliveryTrace(msg.id, contact.id, "queued", target)
-            val published = SignalASIMqttClient.publishUserMessage(
+            val publishResult = SignalASIMqttClient.publishUserMessageResult(
                 content,
                 contact.id,
                 topicOverride = target,
                 clientMessageId = msg.id,
                 deliveryTrace = deliveryTraceJson(msg.deliveryTrace)
             )
-            if (published) {
-                appendDeliveryTrace(msg.id, contact.id, "mqtt_published", target)
-                updateMessageStatus(msg.id, contact.id, getString(R.string.delivery_status_sent))
-                markDeliveredSoon(msg, contact.id)
-            } else {
-                appendDeliveryTrace(msg.id, contact.id, "publish_failed", target)
-                updateMessageStatus(msg.id, contact.id, getString(R.string.delivery_status_failed))
+            when (publishResult) {
+                MqttPublishResult.PUBLISHED -> {
+                    appendDeliveryTrace(msg.id, contact.id, "mqtt_published", target)
+                    updateMessageStatus(msg.id, contact.id, getString(R.string.delivery_status_sent))
+                    markDeliveredSoon(msg, contact.id)
+                }
+                MqttPublishResult.QUEUED -> {
+                    updateMessageStatus(msg.id, contact.id, getString(R.string.delivery_status_queued))
+                }
+                MqttPublishResult.FAILED -> {
+                    appendDeliveryTrace(msg.id, contact.id, "publish_failed", target)
+                    updateMessageStatus(msg.id, contact.id, getString(R.string.delivery_status_failed))
+                }
             }
         } else {
             appendDeliveryTrace(msg.id, contact.id, "link_unavailable", "No paired SignalASI Link v1 relationship")

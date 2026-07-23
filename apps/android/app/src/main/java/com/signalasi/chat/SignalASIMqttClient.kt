@@ -24,6 +24,17 @@ internal object MqttPublishGuard {
     inline fun <T> attempt(operation: () -> T): Result<T> = runCatching(operation)
 }
 
+internal enum class MqttPublishResult(val accepted: Boolean) {
+    PUBLISHED(true),
+    QUEUED(true),
+    FAILED(false)
+}
+
+internal object MqttOutboxDispatchPolicy {
+    fun result(connected: Boolean, published: Boolean): MqttPublishResult =
+        if (connected && published) MqttPublishResult.PUBLISHED else MqttPublishResult.QUEUED
+}
+
 object SignalASIMqttClient {
     private const val TAG = "SignalASILink"
     private const val SERVER_URI = "ssl://broker.emqx.io:8883"
@@ -291,7 +302,25 @@ object SignalASIMqttClient {
         deliveryTrace: org.json.JSONArray? = null,
         conversationId: String = "",
         turnId: String = ""
-    ): Boolean {
+    ): Boolean = publishUserMessageResult(
+        content = content,
+        contactId = contactId,
+        topicOverride = topicOverride,
+        clientMessageId = clientMessageId,
+        deliveryTrace = deliveryTrace,
+        conversationId = conversationId,
+        turnId = turnId
+    ).accepted
+
+    internal fun publishUserMessageResult(
+        content: String,
+        contactId: String = "hermes",
+        topicOverride: String? = null,
+        clientMessageId: Long? = null,
+        deliveryTrace: org.json.JSONArray? = null,
+        conversationId: String = "",
+        turnId: String = ""
+    ): MqttPublishResult {
         val context = appContext
         val payload = JSONObject()
             .put("type", "text")
@@ -314,7 +343,7 @@ object SignalASIMqttClient {
                     .put("desktop_name", contact.optString("desktop_name"))
             }
         }
-        return publishJson(payload, topicOverride ?: outgoingTopic(contactId), contactId)
+        return publishJsonResult(payload, topicOverride ?: outgoingTopic(contactId), contactId)
     }
 
     private fun inlineTurnAttachments(context: Context?, turnId: String): JSONArray {
@@ -561,21 +590,21 @@ object SignalASIMqttClient {
         return publishPublicJson(topic, request)
     }
 
-    private fun publishJson(payload: JSONObject, topic: String?, contactId: String = "hermes"): Boolean {
-        val mqtt = client ?: run {
-            Log.w(TAG, "Publish rejected: MQTT client is null")
-            return false
-        }
-        if (!mqtt.isConnected) {
-            Log.w(TAG, "Publish rejected: MQTT is disconnected")
-            return false
-        }
+    private fun publishJson(payload: JSONObject, topic: String?, contactId: String = "hermes"): Boolean =
+        publishJsonResult(payload, topic, contactId).accepted
+
+    private fun publishJsonResult(
+        payload: JSONObject,
+        topic: String?,
+        contactId: String = "hermes"
+    ): MqttPublishResult {
         if (topic.isNullOrBlank()) {
             Log.w(TAG, "Publish rejected: target topic is blank")
-            return false
+            return MqttPublishResult.FAILED
         }
+        val context = appContext ?: return MqttPublishResult.FAILED
         val targetId = if (usesPcConnectorTunnel(contactId)) {
-            appContext?.let { AppStore.desktopIdForContact(it, contactId) }.orEmpty()
+            AppStore.desktopIdForContact(context, contactId)
         } else contactId
         val publishStartedAt = System.currentTimeMillis()
         payload.put("client_sent_at_ms", publishStartedAt)
@@ -592,7 +621,7 @@ object SignalASIMqttClient {
             targetId
         )
         val encrypted = if (usesPcConnectorTunnel(contactId)) {
-            val desktopId = appContext?.let { AppStore.desktopIdForContact(it, contactId) }.orEmpty()
+            val desktopId = AppStore.desktopIdForContact(context, contactId)
             if (desktopId.isNotBlank()) {
                 SignalASICrypto.encryptPayloadForDesktop(desktopId, applicationEnvelope)
             } else {
@@ -603,12 +632,20 @@ object SignalASIMqttClient {
         } ?: run {
             appContext?.let { requestSignalBundleForContact(it, contactId) }
             Log.w(TAG, "Encrypted publish deferred: secure session refresh requested for $contactId")
-            return false
+            return MqttPublishResult.FAILED
         }
-        val context = appContext ?: return false
         val messageId = applicationEnvelope.getString("message_id")
         val wirePayload = encrypted.toString()
         SignalASILinkDeliveryStore.enqueue(context, messageId, topic, wirePayload)
+
+        val mqtt = client
+        if (mqtt?.isConnected != true) {
+            Log.i(TAG, "Queued encrypted MQTT message until reconnect contact=$contactId")
+            connect(context)
+            scheduleOutboxRetries()
+            return MqttOutboxDispatchPolicy.result(connected = false, published = false)
+        }
+
         SignalASILinkDeliveryStore.markAttempt(context, messageId)
         val token = publishSafely(
             mqtt,
@@ -620,11 +657,11 @@ object SignalASIMqttClient {
             "encrypted_message"
         ) ?: run {
             scheduleOutboxRetries()
-            return true
+            return MqttOutboxDispatchPolicy.result(connected = true, published = false)
         }
         deliveryMessageIds[token.messageId] = messageId
         Log.i(TAG, "Published encrypted MQTT message topic=$topic bytes=${encrypted.optString("body").length}")
-        return true
+        return MqttOutboxDispatchPolicy.result(connected = true, published = true)
     }
 
     private fun retryPendingMessages() {
