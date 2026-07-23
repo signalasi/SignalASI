@@ -151,7 +151,7 @@ async function openDebugExtrasAndVerify(extras, titleTexts, requiredGroups, dump
   }
 }
 
-async function main() {
+async function runSmoke(onPairingStateTouched) {
   if (!fs.existsSync(apkPath)) {
     fail(`Android debug APK missing. Build it first: ${apkPath}`);
   }
@@ -188,6 +188,7 @@ async function main() {
   adb(["shell", "am", "force-stop", packageName]);
 
   log("scanning live Desktop QR and verifying confirmed connector contacts");
+  onPairingStateTouched();
   const { payload: pairingPayload } = await establishFreshSecurePairing({
     adb,
     packageName,
@@ -452,8 +453,75 @@ async function main() {
   if (trustStore.includes("verified_pc_identity_sha256") || activeResearchAgent) {
     fail("Debug pairing cleanup failed; trust or dynamic contact remains");
   }
+}
 
-  log(`OK: dynamic Agent UI, mobile cloud models, Security Center, and Settings feature pages verified. Dumps: ${windowDump}, ${cloudDump}, ${securityDump}, ${settingsDump}`);
+async function restoreLivePairing() {
+  log("restoring live Desktop pairing after smoke test");
+  const { payload, client } = await establishFreshSecurePairing({
+    adb,
+    packageName,
+    activityName,
+    log
+  });
+  const requiredContactText = [
+    "Hermes Agent",
+    "Codex Agent",
+    "Claude Code",
+    "Local LLM",
+    "Custom Agent",
+    payload.desktop_name,
+    "pc_connector"
+  ];
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const trustStore = readTrustStore();
+    const appStore = readAppStore();
+    const trustRestored = trustStore.includes(payload.identity_key_sha256);
+    const contactsRestored = requiredContactText.every((text) => appStore.includes(text));
+    if (trustRestored && contactsRestored) {
+      log(`live Desktop pairing restored for route ${client.client_route_id.slice(-8)}`);
+      return;
+    }
+    await sleep(500);
+  }
+  fail("Smoke test finished, but the live Desktop pairing could not be restored");
+}
+
+async function main() {
+  let pairingStateTouched = false;
+  let smokeError = null;
+  try {
+    await runSmoke(() => {
+      pairingStateTouched = true;
+    });
+  } catch (error) {
+    smokeError = error;
+  }
+
+  let restorationError = null;
+  if (pairingStateTouched) {
+    try {
+      await restoreLivePairing();
+    } catch (error) {
+      restorationError = error;
+    }
+  }
+
+  if (smokeError) {
+    if (restorationError) {
+      const combinedError = new Error(
+        `${smokeError.message}\nPairing restoration also failed: ${restorationError.message}`
+      );
+      combinedError.cause = smokeError;
+      throw combinedError;
+    }
+    throw smokeError;
+  }
+  if (restorationError) {
+    throw restorationError;
+  }
+
+  log(`OK: dynamic Agent UI, mobile cloud models, Security Center, and Settings feature pages verified; live pairing restored. Dumps: ${windowDump}, ${cloudDump}, ${securityDump}, ${settingsDump}`);
 }
 
 main().catch((error) => {
