@@ -13,7 +13,8 @@ const screenshots = [
   path.join(screenshotDir, "desktop-setup-guide.png"),
   path.join(screenshotDir, "desktop-status-matrix.png"),
   path.join(screenshotDir, "desktop-agents.png"),
-  path.join(screenshotDir, "desktop-capabilities.png")
+  path.join(screenshotDir, "desktop-capabilities.png"),
+  path.join(screenshotDir, "desktop-settings.png")
 ];
 
 if (!fs.existsSync(electronCli)) {

@@ -62,6 +62,7 @@ async function runUiSmoke() {
   const matrixPath = path.join(outDir, "desktop-status-matrix.png");
   const agentsPath = path.join(outDir, "desktop-agents.png");
   const capabilitiesPath = path.join(outDir, "desktop-capabilities.png");
+  const settingsPath = path.join(outDir, "desktop-settings.png");
   try {
     fs.mkdirSync(outDir, { recursive: true });
     let state;
@@ -176,6 +177,50 @@ async function runUiSmoke() {
     `);
     if (computerState.tools < 5) throw new Error(`Computer drawer did not render native tools: ${JSON.stringify(computerState)}`);
     await captureSmokeScreenshot(setupPath);
+    const settingsState = await mainWindow.webContents.executeJavaScript(`
+      (async () => {
+        document.querySelector('[data-open-panel="settings"]')?.click();
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          if (document.querySelector("#cloudModelBadge")?.textContent?.trim()) break;
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        return {
+          active: document.querySelector("#settingsPanel")?.classList.contains("active") || false,
+          provider: document.querySelector("#cloudProvider")?.value || "",
+          fields: document.querySelectorAll("#settingsPanel .cloud-settings-surface input, #settingsPanel .cloud-settings-surface select").length,
+          save: Boolean(document.querySelector("#saveCloudModelButton")),
+          test: Boolean(document.querySelector("#testCloudModelButton")),
+          badge: document.querySelector("#cloudModelBadge")?.textContent || "",
+          secureValidation: validateCloudModelSettings({
+            url: "https://api.example.com/v1/chat/completions",
+            model: "test-model",
+            api_key: "test-key",
+            context_window_tokens: 8192,
+            max_output_tokens: 1024
+          }),
+          insecureValidation: validateCloudModelSettings({
+            url: "http://api.example.com/v1/chat/completions",
+            model: "test-model",
+            api_key: "test-key",
+            context_window_tokens: 8192,
+            max_output_tokens: 1024
+          }),
+          budgetValidation: validateCloudModelSettings({
+            url: "https://api.example.com/v1/chat/completions",
+            model: "test-model",
+            api_key: "test-key",
+            context_window_tokens: 4096,
+            max_output_tokens: 4096
+          })
+        };
+      })()
+    `);
+    if (!settingsState.active || settingsState.fields < 7 || !settingsState.save || !settingsState.test
+        || !settingsState.badge.trim() || settingsState.secureValidation
+        || !settingsState.insecureValidation || !settingsState.budgetValidation) {
+      throw new Error(`Settings drawer did not expose cloud API configuration: ${JSON.stringify(settingsState)}`);
+    }
+    await captureSmokeScreenshot(settingsPath);
     const gatewayState = await mainWindow.webContents.executeJavaScript(`
       (async () => {
         document.querySelector('[data-open-panel="gateway"]')?.click();
@@ -204,6 +249,7 @@ async function runUiSmoke() {
     console.log(`[ui-smoke] screenshot: ${matrixPath}`);
     console.log(`[ui-smoke] screenshot: ${agentsPath}`);
     console.log(`[ui-smoke] screenshot: ${capabilitiesPath}`);
+    console.log(`[ui-smoke] screenshot: ${settingsPath}`);
     app.exit(0);
   } catch (error) {
     console.error(`[ui-smoke] failed: ${error.stack || error.message || error}`);

@@ -9,6 +9,28 @@ const DEFAULT_AGENT_CONTACTS = [
   ["openclaw", "OpenClaw", "local-cli"],
   ["local-llm", "Local LLM", "local-model"]
 ].map(([id, name, kind]) => ({ id, name, kind, status: "checking", detail: "Checking" }));
+const CLOUD_PROVIDER_PRESETS = Object.freeze({
+  openai: {
+    name: "OpenAI",
+    endpoint: "https://api.openai.com/v1/chat/completions"
+  },
+  deepseek: {
+    name: "DeepSeek",
+    endpoint: "https://api.deepseek.com/chat/completions"
+  },
+  qwen: {
+    name: "Qwen",
+    endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+  },
+  openrouter: {
+    name: "OpenRouter",
+    endpoint: "https://openrouter.ai/api/v1/chat/completions"
+  },
+  custom: {
+    name: "Cloud Model",
+    endpoint: ""
+  }
+});
 const state = {
   language: localStorage.getItem("signalasi-desktop-language") || "en",
   locale: {},
@@ -491,6 +513,132 @@ function fillAgentSettings() {
   $("#cmdCodex").value = commands.codex || "";
   $("#cmdClaude").value = commands.claude || "";
   $("#cmdOpenClaw").value = commands.openclaw || "";
+  fillCloudModelSettings(config.cloud_model || {});
+}
+
+function cloudProviderFor(config) {
+  const saved = String(config.provider || "").trim().toLowerCase();
+  if (Object.hasOwn(CLOUD_PROVIDER_PRESETS, saved)) return saved;
+  const endpoint = String(config.url || "").trim().toLowerCase();
+  return Object.entries(CLOUD_PROVIDER_PRESETS)
+    .find(([, preset]) => preset.endpoint && endpoint === preset.endpoint.toLowerCase())?.[0] || "custom";
+}
+
+function setCloudModelStatus(status, detail = "") {
+  const badge = $("#cloudModelBadge");
+  const result = $("#cloudModelTestResult");
+  const labels = {
+    ready: "Ready",
+    testing: "Testing...",
+    missing: "Not configured",
+    error: "Needs attention"
+  };
+  badge.className = `state-badge ${status === "ready" ? "ok" : (status === "error" ? "bad" : "pending")}`;
+  badge.textContent = t(labels[status] || labels.missing);
+  if (!detail) {
+    result.hidden = true;
+    result.textContent = "";
+    result.className = "cloud-test-result";
+    return;
+  }
+  result.hidden = false;
+  result.textContent = detail;
+  result.className = `cloud-test-result ${status === "ready" ? "ok" : (status === "error" ? "bad" : "")}`;
+}
+
+function fillCloudModelSettings(config = {}) {
+  const provider = cloudProviderFor(config);
+  $("#cloudProvider").value = provider;
+  $("#cloudDisplayName").value = config.name || CLOUD_PROVIDER_PRESETS[provider].name;
+  $("#cloudEndpoint").value = config.url || CLOUD_PROVIDER_PRESETS[provider].endpoint;
+  $("#cloudModelId").value = config.model || "";
+  $("#cloudApiKey").value = config.api_key || "";
+  $("#cloudContextWindow").value = String(config.context_window_tokens || 64000);
+  $("#cloudOutputReserve").value = String(config.max_output_tokens || 4096);
+  $("#cloudModelSummary").checked = ![false, "", "false", "0"].includes(config.context_model_summary);
+  const ready = Boolean($("#cloudEndpoint").value.trim() && $("#cloudModelId").value.trim() && $("#cloudApiKey").value.trim());
+  setCloudModelStatus(ready ? "ready" : "missing");
+}
+
+function applyCloudProviderPreset() {
+  const provider = $("#cloudProvider").value;
+  const preset = CLOUD_PROVIDER_PRESETS[provider] || CLOUD_PROVIDER_PRESETS.custom;
+  const endpoint = $("#cloudEndpoint");
+  const displayName = $("#cloudDisplayName");
+  const presetEndpoints = Object.values(CLOUD_PROVIDER_PRESETS).map((item) => item.endpoint).filter(Boolean);
+  if (provider === "custom") {
+    if (presetEndpoints.includes(endpoint.value.trim())) endpoint.value = "";
+  } else {
+    endpoint.value = preset.endpoint;
+  }
+  if (!displayName.value.trim() || Object.values(CLOUD_PROVIDER_PRESETS).some((item) => item.name === displayName.value.trim())) {
+    displayName.value = preset.name;
+  }
+}
+
+function boundedInteger(selector, fallback, minimum, maximum) {
+  const parsed = Number.parseInt($(selector).value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, parsed));
+}
+
+function readCloudModelSettings() {
+  return {
+    provider: $("#cloudProvider").value,
+    name: $("#cloudDisplayName").value.trim() || CLOUD_PROVIDER_PRESETS[$("#cloudProvider").value]?.name || "Cloud Model",
+    url: $("#cloudEndpoint").value.trim(),
+    model: $("#cloudModelId").value.trim(),
+    api_key: $("#cloudApiKey").value.trim(),
+    context_window_tokens: boundedInteger("#cloudContextWindow", 64000, 4096, 1000000),
+    max_output_tokens: boundedInteger("#cloudOutputReserve", 4096, 512, 128000),
+    context_model_summary: $("#cloudModelSummary").checked ? "true" : ""
+  };
+}
+
+function validateCloudModelSettings(config) {
+  if (!config.url || !config.model || !config.api_key) return t("Enter the endpoint, model ID, and API key.");
+  let parsed;
+  try {
+    parsed = new URL(config.url);
+  } catch (_error) {
+    return t("Enter a valid endpoint URL.");
+  }
+  const local = ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
+  if (parsed.protocol !== "https:" && !(local && parsed.protocol === "http:")) {
+    return t("Use HTTPS, except for a local endpoint.");
+  }
+  if (config.max_output_tokens >= config.context_window_tokens) {
+    return t("Reserved output must be smaller than the context window.");
+  }
+  return "";
+}
+
+async function saveCloudModelSettings(testAfterSave = false) {
+  const cloudModel = readCloudModelSettings();
+  const validation = validateCloudModelSettings(cloudModel);
+  if (validation) {
+    setCloudModelStatus("error", validation);
+    return;
+  }
+  const config = state.agentConfig || await window.signalasi.getAgentConfig();
+  config.cloud_model = { ...(config.cloud_model || {}), ...cloudModel };
+  setCloudModelStatus(testAfterSave ? "testing" : "ready", testAfterSave ? t("Testing the configured model...") : "");
+  try {
+    state.agentConfig = await window.signalasi.saveAgentConfig(config);
+    fillCloudModelSettings(state.agentConfig.cloud_model || cloudModel);
+    if (!testAfterSave) {
+      showToast(t("Cloud API settings saved."));
+      return;
+    }
+    setCloudModelStatus("testing", t("Testing the configured model..."));
+    const response = await window.signalasi.testAgent("cloud-model", "Reply with only: SignalASI cloud API ready.");
+    const reply = String(response?.reply || "").trim();
+    if (!reply) throw new Error(t("The model returned an empty response."));
+    setCloudModelStatus("ready", `${t("Connected")}: ${reply}`);
+    showToast(t("Cloud API is ready."));
+  } catch (error) {
+    setCloudModelStatus("error", error.message || String(error));
+  }
 }
 
 async function saveAgentCommands() {
@@ -840,7 +988,7 @@ const PANEL_META = {
   capabilities: ["Capabilities", "Long-term memory, Skills, and MCP"],
   gateway: ["Mobile Gateway", "Trusted phones and SignalASI Link"],
   computer: ["Computer", "Local tools and desktop permissions"],
-  settings: ["Settings", "Language, commands, and diagnostics"]
+  settings: ["Settings", "Language, cloud API, commands, and diagnostics"]
 };
 
 async function openPanel(name) {
@@ -1005,6 +1153,9 @@ function bindEvents() {
   });
   $("#saveCustomAgentButton").addEventListener("click", saveCustomAgent);
   $("#saveAgentCommandsButton").addEventListener("click", saveAgentCommands);
+  $("#cloudProvider").addEventListener("change", applyCloudProviderPreset);
+  $("#saveCloudModelButton").addEventListener("click", () => saveCloudModelSettings(false));
+  $("#testCloudModelButton").addEventListener("click", () => saveCloudModelSettings(true));
   $("#refreshGatewayButton").addEventListener("click", async () => { $("#pairingFrame").removeAttribute("src"); await refreshGateway(); await loadPairingFrame(); });
   $("#pairedClientList").addEventListener("click", async (event) => {
     const button = event.target.closest("[data-revoke-client]");
