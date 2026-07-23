@@ -1,7 +1,7 @@
 ﻿const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
+const { findBackendPython } = require("./python-runtime");
 const { withSignalasiLock } = require("./smoke-lock");
 
 const root = path.resolve(__dirname, "..");
@@ -25,16 +25,6 @@ function log(message) {
 
 function fail(message) {
   throw new Error(message);
-}
-
-function findPython() {
-  const candidates = [
-    path.join(root, ".runtime-python", "venv", "Scripts", "python.exe"),
-    path.join(os.homedir(), "AppData", "Local", "hermes", "hermes-agent", "venv", "Scripts", "python.exe"),
-    path.join(os.homedir(), "AppData", "Roaming", "uv", "python", "cpython-3.11-windows-x86_64-none", "python.exe"),
-    "python"
-  ];
-  return candidates.find((candidate) => candidate === "python" || fs.existsSync(candidate)) || "python";
 }
 
 function assertAndroidPersistentSessionConfig() {
@@ -136,7 +126,7 @@ if not ok:
 print("offline_qos1_delivery_ok topic=" + TOPIC)
 `;
 
-  execFileSync(findPython(), ["-c", code], {
+  execFileSync(findBackendPython(), ["-c", code], {
     cwd: root,
     stdio: "inherit",
     windowsHide: true

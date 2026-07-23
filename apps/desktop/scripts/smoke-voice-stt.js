@@ -1,7 +1,6 @@
 const { execFileSync } = require("node:child_process");
-const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
+const { findBackendPython } = require("./python-runtime");
 
 const root = path.resolve(__dirname, "..");
 const backendDir = path.join(root, "core", "signalasi-link", "backend");
@@ -14,18 +13,8 @@ function fail(message) {
   throw new Error(message);
 }
 
-function findPython() {
-  const candidates = [
-    path.join(root, ".runtime-python", "venv", "Scripts", "python.exe"),
-    path.join(os.homedir(), "AppData", "Local", "hermes", "hermes-agent", "venv", "Scripts", "python.exe"),
-    path.join(os.homedir(), "AppData", "Roaming", "uv", "python", "cpython-3.11-windows-x86_64-none", "python.exe"),
-    "python"
-  ];
-  return candidates.find((candidate) => candidate === "python" || fs.existsSync(candidate)) || "python";
-}
-
 function runBackendJson(code) {
-  const output = execFileSync(findPython(), ["-c", code], {
+  const output = execFileSync(findBackendPython(), ["-c", code], {
     cwd: backendDir,
     encoding: "utf8",
     windowsHide: true,

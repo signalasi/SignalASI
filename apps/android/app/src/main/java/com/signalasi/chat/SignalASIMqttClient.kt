@@ -58,12 +58,57 @@ internal class MqttConnectionRetryPolicy(
     }
 }
 
+internal enum class MqttSubscriptionAttemptOutcome {
+    STALE,
+    PENDING,
+    READY,
+    RETRY
+}
+
+internal class MqttSubscriptionRecoveryState {
+    private var generation = 0
+    private var remaining = 0
+    private var failed = false
+
+    @Synchronized
+    fun begin(subscriptionCount: Int): Int {
+        require(subscriptionCount > 0)
+        generation += 1
+        remaining = subscriptionCount
+        failed = false
+        return generation
+    }
+
+    @Synchronized
+    fun complete(attemptGeneration: Int, succeeded: Boolean): MqttSubscriptionAttemptOutcome {
+        if (attemptGeneration != generation || remaining <= 0) {
+            return MqttSubscriptionAttemptOutcome.STALE
+        }
+        if (!succeeded) failed = true
+        remaining -= 1
+        if (remaining > 0) return MqttSubscriptionAttemptOutcome.PENDING
+        return if (failed) {
+            MqttSubscriptionAttemptOutcome.RETRY
+        } else {
+            MqttSubscriptionAttemptOutcome.READY
+        }
+    }
+
+    @Synchronized
+    fun invalidate() {
+        generation += 1
+        remaining = 0
+        failed = false
+    }
+}
+
 object SignalASIMqttClient {
     private const val TAG = "SignalASILink"
     private const val SERVER_URI = "ssl://broker.emqx.io:8883"
     private const val MQTT_QOS = 1
     private const val MAX_INLINE_ATTACHMENT_BYTES = 320 * 1024
     private const val PAIRING_CLAIM_MAX_AGE_MILLIS = 9 * 60_000L
+    private const val SUBSCRIPTION_RETRY_DELAY_MILLIS = 3_000L
 
     private data class PendingPairingClaim(
         val desktopId: String,
@@ -76,6 +121,8 @@ object SignalASIMqttClient {
     private val connectionRetryScheduled = AtomicBoolean(false)
     private val retryHandler = Handler(Looper.getMainLooper())
     private val connectionRetryPolicy = MqttConnectionRetryPolicy()
+    private val subscriptionRecoveryState = MqttSubscriptionRecoveryState()
+    private val subscriptionRetryScheduled = AtomicBoolean(false)
     private val connectionRetryRunnable = Runnable {
         connectionRetryScheduled.set(false)
         if (!connected) {
@@ -89,6 +136,9 @@ object SignalASIMqttClient {
                 retryHandler.postDelayed(this, 30_000L)
             }
         }
+    }
+    private val subscriptionRetryRunnable = Runnable {
+        if (subscriptionRetryScheduled.compareAndSet(true, false)) subscribe()
     }
     private val pairingClaimRetryRunnable = Runnable { flushPendingPairingClaim() }
     private val listeners = CopyOnWriteArraySet<Listener>()
@@ -244,11 +294,11 @@ object SignalASIMqttClient {
         appContext = context.applicationContext
         SignalASICrypto.initialize(context.applicationContext)
         val current = client
-        if (
-            current?.isConnected == true ||
-            connectionRetryScheduled.get() ||
-            !connecting.compareAndSet(false, true)
-        ) return
+        if (current?.isConnected == true) {
+            onTransportConnected(context.applicationContext)
+            return
+        }
+        if (connectionRetryScheduled.get() || !connecting.compareAndSet(false, true)) return
 
         val mqtt = current ?: MqttAsyncClient(
             SERVER_URI,
@@ -259,19 +309,15 @@ object SignalASIMqttClient {
             it.setCallback(object : MqttCallbackExtended {
                 override fun connectComplete(reconnect: Boolean, serverURI: String?) {
                     Log.i(TAG, "MQTT connectComplete reconnect=$reconnect")
-                    connecting.set(false)
-                    cancelConnectionRetry()
-                    setConnected(true)
-                    subscribe()
-                    flushPendingPairingClaim()
-                    scheduleOutboxRetries()
-                    scheduleConnectorStatusRequest()
+                    appContext?.let(::onTransportConnected)
                 }
 
                 override fun connectionLost(cause: Throwable?) {
                     Log.w(TAG, "MQTT connection lost", cause)
                     connecting.set(false)
+                    invalidateSubscriptions()
                     setConnected(false)
+                    setSecureReady(false)
                     retryHandler.removeCallbacks(retryRunnable)
                     scheduleConnectionRetry("connection_lost_watchdog", 30_000L)
                 }
@@ -302,25 +348,15 @@ object SignalASIMqttClient {
         val listener = object : IMqttActionListener {
             override fun onSuccess(asyncActionToken: IMqttToken?) {
                 Log.i(TAG, "MQTT connected")
-                connecting.set(false)
-                cancelConnectionRetry()
-                setConnected(true)
-                subscribe()
-                scheduleOutboxRetries()
-                Handler(Looper.getMainLooper()).postDelayed(
-                    {
-                        requestMissingSignalSessions(context.applicationContext)
-                        requestConnectorStatuses(context.applicationContext)
-                        retryPendingMessages()
-                    },
-                    800L
-                )
+                onTransportConnected(context.applicationContext)
             }
 
             override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
                 Log.e(TAG, "MQTT connect failed", exception)
                 connecting.set(false)
+                invalidateSubscriptions()
                 setConnected(false)
+                setSecureReady(false)
                 scheduleConnectionRetry("connect_failure")
             }
         }
@@ -329,7 +365,9 @@ object SignalASIMqttClient {
         }.onFailure { exception ->
             Log.e(TAG, "MQTT connect could not start", exception)
             connecting.set(false)
+            invalidateSubscriptions()
             setConnected(false)
+            setSecureReady(false)
             scheduleConnectionRetry("connect_start_failure")
         }
     }
@@ -345,11 +383,12 @@ object SignalASIMqttClient {
         connectionRetryScheduled.set(false)
         connectionRetryPolicy.reset()
         connecting.set(false)
-        setSecureReady(false)
+        invalidateSubscriptions()
         runCatching { client?.disconnectForcibly(0, 0) }
         runCatching { client?.close() }
         client = null
         setConnected(false)
+        setSecureReady(false)
         connect(context)
     }
 
@@ -518,7 +557,7 @@ object SignalASIMqttClient {
             pairingQr,
             rotateClientRoute = true
         )
-        subscribeLink(link)
+        subscribe()
         val profile = AppStore.profile(context)
         DesktopRemoteControl.markPairingOffer(context, pairingQr)
         val controlAuthorizationToken = pairingQr
@@ -994,17 +1033,91 @@ object SignalASIMqttClient {
     private fun subscribe() {
         val mqtt = client ?: return
         if (!mqtt.isConnected) return
-        runCatching {
-            SignalASILinkProtocol.allServerLinks(appContext ?: return).forEach { subscribeLink(it) }
-            Log.i(TAG, "Subscribed to SignalASI Link v1 relationship topics")
-        }.onFailure { Log.e(TAG, "MQTT subscribe failed", it) }
+        val links = SignalASILinkProtocol.allServerLinks(appContext ?: return)
+        if (links.isEmpty()) {
+            cancelSubscriptionRetry()
+            setSecureReady(false)
+            return
+        }
+        val generation = subscriptionRecoveryState.begin(links.size)
+        links.forEach { subscribeLink(mqtt, it, generation) }
     }
 
-    private fun subscribeLink(link: SignalASILinkProtocol.ServerLink) {
-        val mqtt = client ?: return
-        if (!mqtt.isConnected) return
-        mqtt.subscribe(link.routes.down, MQTT_QOS)
-        mqtt.subscribe(link.routes.control, MQTT_QOS)
+    private fun subscribeLink(
+        mqtt: MqttAsyncClient,
+        link: SignalASILinkProtocol.ServerLink,
+        generation: Int
+    ) {
+        runCatching {
+            mqtt.subscribe(
+                arrayOf(link.routes.down, link.routes.control),
+                intArrayOf(MQTT_QOS, MQTT_QOS),
+                link.desktopId,
+                object : IMqttActionListener {
+                    override fun onSuccess(asyncActionToken: IMqttToken?) {
+                        completeSubscriptionAttempt(generation, succeeded = true)
+                    }
+
+                    override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                        Log.w(TAG, "MQTT relationship subscribe failed", exception)
+                        completeSubscriptionAttempt(generation, succeeded = false)
+                    }
+                }
+            )
+        }.onFailure {
+            Log.w(TAG, "MQTT relationship subscribe could not start", it)
+            completeSubscriptionAttempt(generation, succeeded = false)
+        }
+    }
+
+    private fun completeSubscriptionAttempt(generation: Int, succeeded: Boolean) {
+        when (subscriptionRecoveryState.complete(generation, succeeded)) {
+            MqttSubscriptionAttemptOutcome.STALE,
+            MqttSubscriptionAttemptOutcome.PENDING -> Unit
+            MqttSubscriptionAttemptOutcome.READY -> {
+                cancelSubscriptionRetry()
+                appContext?.let(::requestMissingSignalSessions)
+                Log.i(TAG, "Subscribed to SignalASI Link v1 relationship topics")
+            }
+            MqttSubscriptionAttemptOutcome.RETRY -> {
+                setSecureReady(false)
+                scheduleSubscriptionRetry()
+            }
+        }
+    }
+
+    private fun scheduleSubscriptionRetry() {
+        if (!connected || !subscriptionRetryScheduled.compareAndSet(false, true)) return
+        retryHandler.postDelayed(subscriptionRetryRunnable, SUBSCRIPTION_RETRY_DELAY_MILLIS)
+    }
+
+    private fun cancelSubscriptionRetry() {
+        retryHandler.removeCallbacks(subscriptionRetryRunnable)
+        subscriptionRetryScheduled.set(false)
+    }
+
+    private fun invalidateSubscriptions() {
+        subscriptionRecoveryState.invalidate()
+        cancelSubscriptionRetry()
+    }
+
+    private fun onTransportConnected(context: Context) {
+        connecting.set(false)
+        cancelConnectionRetry()
+        if (!setConnected(true)) return
+        setSecureReady(false)
+        cancelSubscriptionRetry()
+        subscribe()
+        flushPendingPairingClaim()
+        scheduleOutboxRetries()
+        scheduleConnectorStatusRequest()
+        retryHandler.postDelayed(
+            {
+                requestConnectorStatuses(context)
+                retryPendingMessages()
+            },
+            800L
+        )
     }
 
     private fun stableClientId(): String {
@@ -1012,10 +1125,11 @@ object SignalASIMqttClient {
         return "signalasi-android-$identity"
     }
 
-    private fun setConnected(value: Boolean) {
-        if (connected == value) return
+    private fun setConnected(value: Boolean): Boolean {
+        if (connected == value) return false
         connected = value
         listeners.forEach { it.onConnectionChanged(value) }
+        return true
     }
 
     private fun setSecureReady(value: Boolean) {

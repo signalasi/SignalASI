@@ -9,7 +9,6 @@ object SignalASILinkDeliveryStore {
     private const val KEY_OUTBOX = "outbox"
     private const val KEY_INBOX = "inbox"
     private const val MAX_INBOX_IDS = 4096
-    private const val MAX_RETRY_COUNT = 8
 
     data class PendingMessage(
         val messageId: String,
@@ -52,7 +51,7 @@ object SignalASILinkDeliveryStore {
     fun markAttempt(context: Context, messageId: String) {
         updateOutbox(context, messageId) { item ->
             val attempts = item.optInt("attempts") + 1
-            val delayMs = (2_000L shl (attempts - 1).coerceAtMost(7)).coerceAtMost(300_000L)
+            val delayMs = SignalASILinkRetryPolicy.delayMillis(attempts)
             item.put("status", "publishing")
                 .put("attempts", attempts)
                 .put("next_attempt_at", System.currentTimeMillis() + delayMs)
@@ -83,13 +82,14 @@ object SignalASILinkDeliveryStore {
     }
 
     @Synchronized
-    fun pending(context: Context): List<PendingMessage> {
-        val values = outboxArray(context)
-        return buildList {
+    fun pending(context: Context): List<PendingMessage> =
+        pendingFromArray(outboxArray(context), System.currentTimeMillis())
+
+    internal fun pendingFromArray(values: JSONArray, nowMillis: Long): List<PendingMessage> =
+        buildList {
             for (index in 0 until values.length()) {
                 val item = values.optJSONObject(index) ?: continue
-                if (item.optInt("attempts") >= MAX_RETRY_COUNT) continue
-                if (item.optLong("next_attempt_at") > System.currentTimeMillis()) continue
+                if (item.optLong("next_attempt_at") > nowMillis) continue
                 add(
                     PendingMessage(
                         item.optString("message_id"),
@@ -101,7 +101,6 @@ object SignalASILinkDeliveryStore {
                 )
             }
         }
-    }
 
     @Synchronized
     fun claimIncoming(context: Context, messageId: String): Boolean {
@@ -151,5 +150,15 @@ object SignalASILinkDeliveryStore {
             if (item.optString("topic") !in discardedTopics) kept.put(JSONObject(item.toString()))
         }
         return kept
+    }
+}
+
+internal object SignalASILinkRetryPolicy {
+    private const val INITIAL_DELAY_MILLIS = 2_000L
+    private const val MAX_DELAY_MILLIS = 300_000L
+
+    fun delayMillis(attempt: Int): Long {
+        val exponent = (attempt.coerceAtLeast(1) - 1).coerceAtMost(8)
+        return (INITIAL_DELAY_MILLIS shl exponent).coerceAtMost(MAX_DELAY_MILLIS)
     }
 }
