@@ -33,88 +33,71 @@ data class AgentWorkflowExecutionRecord(
     val resultSummary: String = ""
 )
 
-class AgentWorkflowExecutionHistoryStore(context: Context) {
-    private val preferences = AgentEncryptedPreferences(context, PREFS)
+class AgentWorkflowExecutionHistoryStore(
+    context: Context,
+    databaseName: String = AgentWorkflowExecutionHistoryDatabase.DEFAULT_DATABASE_NAME
+) {
+    private val database = if (
+        databaseName == AgentWorkflowExecutionHistoryDatabase.DEFAULT_DATABASE_NAME
+    ) {
+        defaultDatabase(context)
+    } else {
+        AgentWorkflowExecutionHistoryDatabase(context, databaseName)
+    }
 
     @Synchronized
     fun upsert(record: AgentWorkflowExecutionRecord) {
-        val normalized = normalizeForWrite(record)
-        save(
-            load()
-                .filterNot { it.id == normalized.id }
-                .plus(normalized)
-        )
+        database.upsert(normalizeForWrite(record))
     }
 
     @Synchronized
     fun findById(id: String): AgentWorkflowExecutionRecord? {
         val cleanId = id.trim()
         if (cleanId.isBlank()) return null
-        return load().firstOrNull { it.id == cleanId }
+        return database.findById(cleanId)
     }
 
     @Synchronized
     fun recent(limit: Int = DEFAULT_RECENT_LIMIT): List<AgentWorkflowExecutionRecord> =
-        load()
-            .sortedWith(NEWEST_FIRST)
-            .take(limit.coerceIn(0, MAX_ITEMS))
+        database.recent(limit.coerceAtLeast(0))
 
     @Synchronized
     fun deleteForWorkflow(workflowId: String): Int {
         val cleanWorkflowId = workflowId.trim()
         if (cleanWorkflowId.isBlank()) return 0
-        val items = load()
-        val kept = items.filterNot { it.workflowId == cleanWorkflowId }
-        if (kept.size != items.size) save(kept)
-        return items.size - kept.size
+        return database.deleteForWorkflow(cleanWorkflowId)
     }
 
     @Synchronized
     fun clear() {
-        preferences.clear()
+        database.clear()
     }
 
-    private fun load(): List<AgentWorkflowExecutionRecord> {
-        val raw = preferences.readString(KEY_ITEMS, "[]")
-        if (raw.length > MAX_SERIALIZED_CHARS) return emptyList()
-        return runCatching {
-            val array = JSONArray(raw)
-            buildList {
-                for (index in 0 until array.length()) {
-                    decode(array.optJSONObject(index) ?: continue)?.let(::add)
-                }
-            }.bounded()
-        }.getOrDefault(emptyList())
+    internal fun exportJson(): JSONArray {
+        val output = JSONArray()
+        database.listAll().forEach { output.put(encode(it)) }
+        return output
     }
 
-    private fun save(items: List<AgentWorkflowExecutionRecord>) {
-        val bounded = items.mapNotNull(::normalizeOrNull).bounded().toMutableList()
-        while (true) {
-            val serialized = encode(bounded).toString()
-            if (serialized.length <= MAX_SERIALIZED_CHARS) {
-                preferences.writeString(KEY_ITEMS, serialized)
-                return
+    internal fun replaceAllJson(input: JSONArray) {
+        val records = buildList {
+            for (index in 0 until input.length()) {
+                decode(input.optJSONObject(index) ?: continue)?.let(::add)
             }
-            check(bounded.isNotEmpty()) { "Agent workflow execution history storage limit exceeded" }
-            bounded.removeAt(0)
         }
+        database.replaceAll(records)
     }
 
-    private fun encode(items: List<AgentWorkflowExecutionRecord>): JSONArray = JSONArray().apply {
-        items.forEach { record ->
-            put(
-                JSONObject()
-                    .put("id", record.id)
-                    .put("workflow_id", record.workflowId)
-                    .put("workflow_name", record.workflowName)
-                    .put("source", record.source.name)
-                    .put("status", record.status.name)
-                    .put("started_at", record.startedAtMillis)
-                    .put("completed_at", record.completedAtMillis)
-                    .put("result_summary", record.resultSummary)
-            )
-        }
-    }
+    private fun encode(record: AgentWorkflowExecutionRecord): JSONObject =
+        JSONObject()
+            .put("id", record.id)
+            .put("workflow_id", record.workflowId)
+            .put("workflow_name", record.workflowName)
+            .put("source", record.source.name)
+            .put("status", record.status.name)
+            .put("started_at", record.startedAtMillis)
+            .put("completed_at", record.completedAtMillis)
+            .put("result_summary", record.resultSummary)
 
     private fun decode(json: JSONObject): AgentWorkflowExecutionRecord? {
         val source = enumOrNull<AgentWorkflowExecutionSource>(json.optString("source")) ?: return null
@@ -160,28 +143,32 @@ class AgentWorkflowExecutionHistoryStore(context: Context) {
         )
     }
 
-    private fun List<AgentWorkflowExecutionRecord>.bounded(): List<AgentWorkflowExecutionRecord> {
-        val byId = LinkedHashMap<String, AgentWorkflowExecutionRecord>()
-        sortedWith(OLDEST_FIRST).forEach { record -> byId[record.id] = record }
-        return byId.values.sortedWith(OLDEST_FIRST).takeLast(MAX_ITEMS)
-    }
-
     private inline fun <reified T : Enum<T>> enumOrNull(value: String): T? =
         runCatching { enumValueOf<T>(value) }.getOrNull()
 
-    private companion object {
-        const val PREFS = "signalasi_agent_workflow_execution_history"
-        const val KEY_ITEMS = "items"
-        const val MAX_ITEMS = 200
+    companion object {
         const val DEFAULT_RECENT_LIMIT = 20
-        const val MAX_SERIALIZED_CHARS = 512 * 1024
         const val MAX_IDENTIFIER_LENGTH = 128
         const val MAX_WORKFLOW_NAME_LENGTH = 80
         const val MAX_RESULT_SUMMARY_LENGTH = 2_000
 
-        val OLDEST_FIRST = compareBy<AgentWorkflowExecutionRecord> { it.startedAtMillis }
-            .thenBy { it.completedAtMillis }
-            .thenBy { it.id }
-        val NEWEST_FIRST = OLDEST_FIRST.reversed()
+        @Volatile
+        private var sharedDatabase: AgentWorkflowExecutionHistoryDatabase? = null
+
+        private fun defaultDatabase(context: Context): AgentWorkflowExecutionHistoryDatabase =
+            sharedDatabase ?: synchronized(this) {
+                sharedDatabase ?: AgentWorkflowExecutionHistoryDatabase(context).also {
+                    sharedDatabase = it
+                }
+            }
+
+        internal fun clearAndCloseDefault(context: Context) {
+            synchronized(this) {
+                val database = sharedDatabase ?: AgentWorkflowExecutionHistoryDatabase(context)
+                database.clear()
+                database.close()
+                sharedDatabase = null
+            }
+        }
     }
 }

@@ -119,7 +119,12 @@ object AgentPrivateDataInventory {
         item("workflows", "Saved workflows", "encrypted_prefs:signalasi_agent_workflows", backupPath = "agent.workflows"),
         item("workflow_schedules", "Workflow schedules", "encrypted_prefs:signalasi_agent_workflow_schedules", backupPath = "agent.workflow_schedules"),
         item("workflow_triggers", "Workflow triggers", "encrypted_prefs:signalasi_agent_workflow_triggers", backupPath = "agent.workflow_triggers"),
-        item("workflow_history", "Workflow execution history", "encrypted_prefs:signalasi_agent_workflow_execution_history", backupPath = "agent.workflow_execution_history"),
+        item(
+            "workflow_history",
+            "Workflow execution history",
+            "database:signalasi_agent_workflow_execution_history",
+            backupPath = "agent.workflow_execution_history"
+        ),
         item("safety", "Safety and execution policy", "shared_prefs:signalasi_agent_safety", backupPath = "agent.safety"),
         item(
             "custom_devices",

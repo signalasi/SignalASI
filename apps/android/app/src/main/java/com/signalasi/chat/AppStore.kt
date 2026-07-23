@@ -938,6 +938,7 @@ object AppStore {
         context.getSharedPreferences("signalasi_agent_workflow_schedules", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_workflow_triggers", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_workflow_execution_history", Context.MODE_PRIVATE).edit().clear().commit()
+        AgentWorkflowExecutionHistoryStore.clearAndCloseDefault(context)
         AgentConnectorResponseStore.clear(context)
         HomeAssistantSettingsStore.clear(context)
         CustomDeviceConnectorStore(context).clear()
