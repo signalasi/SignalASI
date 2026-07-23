@@ -827,6 +827,7 @@
     <string name="agent_task_status_accepted">Accepted</string>
     <string name="agent_task_status_queued">Queued</string>
     <string name="agent_task_status_starting">Starting</string>
+    <string name="agent_task_status_recovering">Recovering</string>
     <string name="agent_stale_connector_no_result">The Agent task stopped without returning a final response. Retry when the connection is available.</string>
     <string name="agent_task_status_running">Running</string>
     <string name="agent_task_status_running_elapsed">Running · %1$d s</string>
