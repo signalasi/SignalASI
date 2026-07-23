@@ -7,7 +7,6 @@ import org.json.JSONObject
 object AgentBackupData {
     private const val MEMORY_DATABASE = "signalasi_agent_memory_v2"
     private const val KNOWLEDGE_PREFS = "signalasi_agent_knowledge"
-    private const val TASK_PREFS = "signalasi_agent_tasks"
     private const val WORKFLOW_PREFS = "signalasi_agent_workflows"
     private const val SCHEDULE_PREFS = "signalasi_agent_workflow_schedules"
     private const val TRIGGER_PREFS = "signalasi_agent_workflow_triggers"
@@ -21,10 +20,10 @@ object AgentBackupData {
         val homeAssistant = HomeAssistantSettingsStore.load(context)
         val customDevices = CustomDeviceConnectorStore(context).exportJson()
         return JSONObject()
-            .put("version", 27)
+            .put("version", 28)
             .put("memory", readDatabaseArray(context, MEMORY_DATABASE, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS))
             .put("knowledge", readArray(context, KNOWLEDGE_PREFS, MAX_KNOWLEDGE_ITEMS, MAX_KNOWLEDGE_ITEM_CHARACTERS))
-            .put("tasks", if (includeSessionHistory) readArray(context, TASK_PREFS, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS) else JSONArray())
+            .put("tasks", if (includeSessionHistory) SQLiteAgentTaskStore(context).exportJson() else JSONArray())
             .put("transcript", if (includeSessionHistory) readAgentTranscriptArray(context) else JSONArray())
             .put("agent_conversations", if (includeSessionHistory) readAgentConversationArray(context) else JSONArray())
             .put(
@@ -109,8 +108,7 @@ object AgentBackupData {
             AgentEncryptedPreferences(context, KNOWLEDGE_PREFS).writeString(ITEMS_KEY, sanitized.toString())
         }
         payload.optJSONArray("tasks")?.let { input ->
-            val sanitized = sanitizeArray(input, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS)
-            AgentEncryptedPreferences(context, TASK_PREFS).writeString(ITEMS_KEY, sanitized.toString())
+            SQLiteAgentTaskStore(context).replaceAllJson(copyObjectArray(input))
         }
         payload.optJSONArray("transcript")?.let { input ->
             AgentTranscriptStore(context).restoreEntriesJson(copyObjectArray(input))
@@ -276,8 +274,6 @@ object AgentBackupData {
     private const val MAX_MEMORY_ITEM_CHARACTERS = 24_000
     private const val MAX_KNOWLEDGE_ITEMS = 500
     private const val MAX_KNOWLEDGE_ITEM_CHARACTERS = 20_000
-    private const val MAX_TASK_ITEMS = 200
-    private const val MAX_TASK_ITEM_CHARACTERS = 12_000
     private const val MAX_WORKFLOW_ITEMS = 100
     private const val MAX_WORKFLOW_ITEM_CHARACTERS = 4_000
     private const val MAX_SCHEDULE_ITEMS = 100

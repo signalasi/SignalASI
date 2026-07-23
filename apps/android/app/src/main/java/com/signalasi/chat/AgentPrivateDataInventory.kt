@@ -89,7 +89,7 @@ object AgentPrivateDataInventory {
         item(
             "tasks",
             "Task history",
-            "encrypted_prefs:signalasi_agent_tasks",
+            "database:signalasi_agent_tasks",
             backupPath = "agent.tasks",
             exportPolicy = AgentPrivateDataExportPolicy.OPTIONAL_SESSION_HISTORY
         ),

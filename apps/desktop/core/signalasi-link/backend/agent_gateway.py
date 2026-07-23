@@ -500,14 +500,14 @@ def _stateless_model_messages(
     )
     output_reserve = max(512, int(config.get("max_output_tokens") or 4_096))
     output_reserve = min(output_reserve, max(512, context_window // 2))
-    history = agent_task_manager.conversation_messages(
-        request.conversation_id,
-        limit=500,
-        source_prefix=None,
-    )
     store = conversation_summary_store()
     summary_key = f"model:{agent_id}:{request.conversation_id}"
     summary_state = store.state(summary_key)
+    history = agent_task_manager.conversation_messages(
+        request.conversation_id,
+        source_prefix=None,
+        after_cursor=summary_state.cursor,
+    )
     compiled = compile_context(
         task_history_messages(
             history,

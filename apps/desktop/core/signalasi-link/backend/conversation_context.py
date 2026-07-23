@@ -209,15 +209,15 @@ def compile_context(
     retained_groups = 0
     for key, items in reversed(groups):
         group_tokens = sum(_message_tokens(item) for item in items)
-        unresolved = (
-            any(item.role == "user" for item in items)
-            and not any(item.role == "assistant" for item in items)
-        )
-        must_keep = unresolved or retained_groups < policy.minimum_recent_groups
+        must_keep = retained_groups < policy.minimum_recent_groups
         if must_keep or retained_tokens + group_tokens <= recent_allowance:
             retained.add(key)
             retained_tokens += group_tokens
             retained_groups += 1
+            continue
+        # Durable cursors can only advance across a contiguous compacted prefix.
+        # Stopping here keeps the retained region as one complete recent suffix.
+        break
     if not retained and groups:
         retained.add(groups[-1][0])
 

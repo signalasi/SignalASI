@@ -686,7 +686,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     val state = mobileNativeAgent.snapshot()
                     val conversation = agentTranscriptStore.activeConversation()
                     val initialEntries = agentTranscriptStore.list(conversation.id)
-                    val tasks = SharedPreferencesAgentTaskStore(applicationContext).forSession(conversation.id)
+                    val tasks = SQLiteAgentTaskStore(applicationContext).forSession(conversation.id)
                     AgentTranscriptLifecyclePolicy.staleConnectorRecoveries(
                         entries = initialEntries,
                         tasks = tasks,
@@ -1542,7 +1542,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             taskId = taskId
         )
         if (taskId.isNotBlank()) {
-            val taskStore = SharedPreferencesAgentTaskStore(this)
+            val taskStore = SQLiteAgentTaskStore(this)
             val existingTask = taskStore.find(taskId)
             val outputFiles = buildList {
                 val files = envelope.optJSONArray("output_files") ?: org.json.JSONArray()
@@ -1558,7 +1558,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             val eventLine = "$eventTime · $targetName · $statusLabel"
             val executionLog = (existingTask?.executionLog.orEmpty() + eventLine)
                 .distinct()
-                .takeLast(60)
             taskStore.upsert(AgentTaskRecord(
                 taskId = taskId,
                 sessionId = conversationId,
@@ -3758,7 +3757,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (conversation.mergedIntoConversationId.isBlank()) {
             val taskIds = agentTranscriptStore.taskIds(conversation.id)
             SignalASIMqttClient.publishAgentConversationDelete(conversation.id, taskIds)
-            SharedPreferencesAgentTaskStore(this).delete(taskIds + conversation.id)
+            SQLiteAgentTaskStore(this).delete(taskIds + conversation.id)
         }
         agentTranscriptStore.deleteConversation(conversation.id)
     }
@@ -3919,7 +3918,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun showAgentConversationDetails(conversation: AgentConversation) {
         val metrics = agentTranscriptStore.metrics(conversation.id)
         val contextPreview = agentTranscriptStore.context(conversation.id)
-        val sessionTasks = SharedPreferencesAgentTaskStore(this).forSession(conversation.id)
+        val sessionTasks = SQLiteAgentTaskStore(this).forSession(conversation.id)
         showFeaturePage(getString(R.string.agent_session_details))
         setFeatureBackAction { showAgentSessionsPage() }
         featureContent.addView(featureHeroCard(

@@ -551,7 +551,7 @@ class AgentTranscriptStore(context: Context) {
         )
         saveEntries(mutation.entries)
         saveConversations(mutation.conversations)
-        SharedPreferencesAgentTaskStore(appContext).rebindSession(sourceConversationId, target.id)
+        SQLiteAgentTaskStore(appContext).rebindSession(sourceConversationId, target.id)
         AgentRunRecorder(appContext).rebindConversation(sourceConversationId, target.id)
         EncryptedAgentMemoryStore(appContext).rebindConversationScope(sourceConversationId, target.id)
         if (draftConversation?.id == sourceConversationId) {
