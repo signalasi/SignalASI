@@ -491,6 +491,26 @@ class AgentTranscriptStore(context: Context) {
         entryDatabase.listConversationPage(conversationId, beforeSequenceExclusive, pageSize)
 
     @Synchronized
+    internal fun entriesAfter(
+        conversationId: String,
+        afterSequenceExclusive: Long,
+        pageSize: Int = 100
+    ): AgentTranscriptDelta =
+        entryDatabase.listConversationAfter(conversationId, afterSequenceExclusive, pageSize)
+
+    @Synchronized
+    internal fun entriesForTurn(turnId: String): List<AgentTranscriptEntry> {
+        val cleanTurnId = turnId.trim()
+        return if (cleanTurnId.isBlank()) emptyList() else entryDatabase.listTurn(cleanTurnId)
+    }
+
+    @Synchronized
+    internal fun entriesForTask(taskId: String): List<AgentTranscriptEntry> {
+        val cleanTaskId = taskId.trim()
+        return if (cleanTaskId.isBlank()) emptyList() else entryDatabase.listTask(cleanTaskId)
+    }
+
+    @Synchronized
     fun conversationIdForTurn(turnId: String): String? {
         val cleanTurnId = turnId.trim()
         if (cleanTurnId.isBlank()) return null
