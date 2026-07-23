@@ -35,12 +35,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "url": "",
         "model": "qwen2.5:7b",
         "api_key": "",
+        "context_window_tokens": 64_000,
+        "max_output_tokens": 4_096,
+        "context_model_summary": True,
     },
     "cloud_model": {
         "name": "Cloud Model",
         "url": "",
         "model": "",
         "api_key": "",
+        "context_window_tokens": 64_000,
+        "max_output_tokens": 4_096,
+        "context_model_summary": True,
     },
     "custom_agent": {
         "name": "Custom Agent",
@@ -104,7 +110,7 @@ def command_for(agent_id: str) -> str:
     return ""
 
 
-def local_model_config() -> dict[str, str]:
+def local_model_config() -> dict[str, Any]:
     data = load_config().get("local_model", {})
     name = str(data.get("name", "")).strip() or "Local LLM"
     return {
@@ -113,10 +119,13 @@ def local_model_config() -> dict[str, str]:
         "url": str(data.get("url", "")).strip(),
         "model": str(data.get("model", "")).strip(),
         "api_key": str(data.get("api_key", "")).strip(),
+        "context_window_tokens": _bounded_int(data.get("context_window_tokens"), 64_000, 4_096, 1_000_000),
+        "max_output_tokens": _bounded_int(data.get("max_output_tokens"), 4_096, 512, 128_000),
+        "context_model_summary": bool(data.get("context_model_summary", True)),
     }
 
 
-def cloud_model_config() -> dict[str, str]:
+def cloud_model_config() -> dict[str, Any]:
     data = load_config().get("cloud_model", {})
     name = str(data.get("name", "")).strip() or "Cloud Model"
     return {
@@ -124,6 +133,9 @@ def cloud_model_config() -> dict[str, str]:
         "url": str(data.get("url", "")).strip(),
         "model": str(data.get("model", "")).strip(),
         "api_key": str(data.get("api_key", "")).strip(),
+        "context_window_tokens": _bounded_int(data.get("context_window_tokens"), 64_000, 4_096, 1_000_000),
+        "max_output_tokens": _bounded_int(data.get("max_output_tokens"), 4_096, 512, 128_000),
+        "context_model_summary": bool(data.get("context_model_summary", True)),
     }
 
 
@@ -183,3 +195,11 @@ def _normalize_agent_id(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9_-]+", "-", value.strip().lower())
     cleaned = re.sub(r"-+", "-", cleaned).strip("-_")
     return cleaned[:48]
+
+
+def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))

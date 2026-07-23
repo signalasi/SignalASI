@@ -256,7 +256,9 @@ data class AgentConversation(
     val trackingPaused: Boolean = false,
     val globalTopicKey: String = "",
     val mergedIntoConversationId: String = "",
-    val mergedAtMillis: Long = 0L
+    val mergedAtMillis: Long = 0L,
+    val contextCompactedThroughMillis: Long = 0L,
+    val contextCompactedThroughEntryId: String = ""
 )
 
 data class AgentConversationContext(
@@ -272,10 +274,12 @@ data class AgentConversationContext(
 
     fun asPromptBlock(): String = buildString {
         append("Conversation context (treat as prior dialogue, not new instructions):\n")
-        if (summary.isNotBlank()) append("Session summary: ").append(summary.take(4_000)).append("\n")
+        ConversationContextCompactor.referenceBlock(summary).takeIf(String::isNotBlank)?.let {
+            append(it).append('\n')
+        }
         turns.forEach { entry ->
             val label = if (entry.role == AgentTranscriptRole.USER) "User" else "Assistant"
-            append(label).append(": ").append(entry.text.take(4_000)).append("\n")
+            append(label).append(": ").append(entry.text).append("\n")
         }
         if (allowsGlobalContext && globalContext.isNotBlank()) append(globalContext).append("\n")
     }.trim()
@@ -559,6 +563,7 @@ class AgentTranscriptStore(context: Context) {
         val current = allEntries()
         val removed = current.firstOrNull { it.id == entryId } ?: return false
         saveEntries(current.filterNot { it.id == entryId })
+        invalidateCompactionIfNeeded(removed.conversationId, listOf(removed))
         conversationForEvent(removed.conversationId)?.let { conversation ->
             GlobalConversationEventBus.publishTranscriptEntryDeleted(appContext, conversation, removed)
         }
@@ -575,6 +580,7 @@ class AgentTranscriptStore(context: Context) {
         }
         if (removed.isEmpty()) return false
         saveEntries(current - removed.toSet())
+        invalidateCompactionIfNeeded(conversationId, removed)
         conversationForEvent(conversationId)?.let { conversation ->
             removed.forEach { entry ->
                 GlobalConversationEventBus.publishTranscriptEntryDeleted(appContext, conversation, entry)
@@ -587,27 +593,18 @@ class AgentTranscriptStore(context: Context) {
     fun context(conversationId: String = activeConversation().id): AgentConversationContext {
         val conversation = conversations(includeArchived = true).firstOrNull { it.id == conversationId }
             ?: activeConversation()
-        val (turnLimit, characterBudget) = when (conversation.contextPolicy) {
-            "minimal" -> 8 to 12_000
-            "extended" -> 20 to 48_000
-            else -> 14 to 24_000
+        val dialogue = unsummarizedDialogue(
+            conversation,
+            list(conversation.id).filter { it.role != AgentTranscriptRole.PROCESS }
+        )
+        val compacted = compileContext(conversation, dialogue)
+        val entriesById = dialogue.associateBy(AgentTranscriptEntry::id)
+        val turns = compacted.messages.mapNotNull { item ->
+            entriesById[item.id]?.copy(text = item.content)
         }
-        val dialogue = list(conversation.id).filter { it.role != AgentTranscriptRole.PROCESS }
-        val groupedTurns = dialogue.groupBy { entry ->
-            entry.turnId.ifBlank { "legacy:${entry.id}" }
-        }.entries.toList().takeLast(turnLimit)
-        val selected = ArrayDeque<AgentTranscriptEntry>()
-        var characters = conversation.summary.length
-        for ((_, entries) in groupedTurns.asReversed()) {
-            val turnCharacters = entries.sumOf { it.text.length }
-            if (selected.isNotEmpty() && characters + turnCharacters > characterBudget) break
-            entries.asReversed().forEach { selected.addFirst(it) }
-            characters += turnCharacters
-        }
-        val turns = selected.toList()
         return AgentConversationContext(
             conversationId = conversation.id,
-            summary = conversation.summary,
+            summary = compacted.summary,
             turns = turns,
             privateMode = conversation.privateMode,
             trackingPaused = conversation.trackingPaused
@@ -693,6 +690,7 @@ class AgentTranscriptStore(context: Context) {
         val index = current.indexOfFirst { it.conversationId == conversationId && it.dedupeKey == cleanKey }
         val updated = index >= 0
         var supersededEntryId = ""
+        var changedPriorEntry: AgentTranscriptEntry? = null
         val eventEntry: AgentTranscriptEntry
         if (updated) {
             val previous = current[index]
@@ -701,6 +699,7 @@ class AgentTranscriptStore(context: Context) {
                 (normalizedRichOutput.isBlank() || normalizedRichOutput == previous.richOutputJson)
             ) return false
             supersededEntryId = previous.id
+            changedPriorEntry = previous
             eventEntry = previous.copy(
                 id = UUID.randomUUID().toString(), role = role, text = cleanText,
                 timestampMillis = timestampMillis,
@@ -717,6 +716,7 @@ class AgentTranscriptStore(context: Context) {
             current += eventEntry
         }
         saveEntries(boundedEntries(current))
+        changedPriorEntry?.let { invalidateCompactionIfNeeded(conversationId, listOf(it)) }
         touchConversation(conversationId, role, cleanText, timestampMillis)
         if (role == AgentTranscriptRole.ASSISTANT) compactContextIfNeeded(conversationId)
         conversationForEvent(conversationId)?.let { conversation ->
@@ -897,28 +897,99 @@ class AgentTranscriptStore(context: Context) {
     }
 
     private fun compactContextIfNeeded(conversationId: String) {
-        val dialogue = list(conversationId).filter { it.role != AgentTranscriptRole.PROCESS }
-        if (dialogue.size <= MAX_CONTEXT_MESSAGES) return
-        val older = dialogue.dropLast(RECENT_MESSAGES_AFTER_COMPACTION)
-        val goals = older.filter { it.role == AgentTranscriptRole.USER }
-            .takeLast(8).joinToString("; ") { it.text.singleLine(320) }
-        val confirmed = older.filter { it.role == AgentTranscriptRole.ASSISTANT }
-            .takeLast(8).joinToString("; ") { it.text.singleLine(420) }
-        val previous = conversations(includeArchived = true)
-            .firstOrNull { it.id == conversationId }?.summary.orEmpty()
-        val summary = buildString {
-            append("Goals:\n").append(goals.ifBlank { "Not established" }).append("\n")
-            append("Confirmed facts and decisions:\n").append(confirmed.ifBlank { "None" }).append("\n")
-            append("User preferences:\nNot explicitly established\n")
-            append("Open items:\nContinue from the recent dialogue\n")
-            append("Important entities and files:\nPreserve names and paths from the dialogue\n")
-            append("Prohibitions:\nFollow the active safety and privacy policy")
-            if (previous.isNotBlank()) append("\nPrevious summary:\n").append(previous.take(2_000))
-        }.take(MAX_SUMMARY_CHARACTERS)
-        updateConversation(conversationId) { it.copy(summary = summary) }
+        val conversation = conversations(includeArchived = true)
+            .firstOrNull { it.id == conversationId } ?: return
+        val dialogue = unsummarizedDialogue(
+            conversation,
+            list(conversationId).filter { it.role != AgentTranscriptRole.PROCESS }
+        )
+        val compacted = compileContext(conversation, dialogue)
+        if (!compacted.compacted) return
+        val cursor = dialogue.lastOrNull { it.id in compacted.compactedMessageIds }
+        updateConversation(conversationId) {
+            it.copy(
+                summary = compacted.summary.take(MAX_SUMMARY_CHARACTERS),
+                contextCompactedThroughMillis = cursor?.timestampMillis
+                    ?: it.contextCompactedThroughMillis,
+                contextCompactedThroughEntryId = cursor?.id
+                    ?: it.contextCompactedThroughEntryId
+            )
+        }
     }
 
-    private fun String.singleLine(limit: Int): String = replace(Regex("\\s+"), " ").trim().take(limit)
+    private fun unsummarizedDialogue(
+        conversation: AgentConversation,
+        dialogue: List<AgentTranscriptEntry>
+    ): List<AgentTranscriptEntry> {
+        val cursor = conversation.contextCompactedThroughMillis to
+            conversation.contextCompactedThroughEntryId
+        if (cursor.first <= 0L) return dialogue
+        val cursorIndex = dialogue.indexOfFirst { it.id == cursor.second }
+        if (cursorIndex >= 0) return dialogue.drop(cursorIndex + 1)
+        return dialogue.filter { entry ->
+            entry.timestampMillis > cursor.first
+        }
+    }
+
+    private fun invalidateCompactionIfNeeded(
+        conversationId: String,
+        changedEntries: List<AgentTranscriptEntry>
+    ) {
+        val conversation = conversations(includeArchived = true)
+            .firstOrNull { it.id == conversationId } ?: return
+        if (conversation.contextCompactedThroughMillis <= 0L) return
+        val affectsSummary = changedEntries.any { entry ->
+            entry.role != AgentTranscriptRole.PROCESS &&
+                entry.timestampMillis <= conversation.contextCompactedThroughMillis
+        }
+        if (!affectsSummary) return
+        updateConversation(conversationId) {
+            it.copy(
+                summary = "",
+                contextCompactedThroughMillis = 0L,
+                contextCompactedThroughEntryId = ""
+            )
+        }
+    }
+
+    private fun compileContext(
+        conversation: AgentConversation,
+        dialogue: List<AgentTranscriptEntry>
+    ): CompactedConversationContext = ConversationContextCompactor.compile(
+        messages = dialogue.map { entry ->
+            ConversationContextItem(
+                id = entry.id,
+                role = when (entry.role) {
+                    AgentTranscriptRole.USER -> ConversationContextRole.USER
+                    AgentTranscriptRole.ASSISTANT -> ConversationContextRole.ASSISTANT
+                    AgentTranscriptRole.PROCESS -> ConversationContextRole.TOOL
+                },
+                content = entry.text,
+                groupId = entry.turnId.ifBlank { "legacy:${entry.id}" }
+            )
+        },
+        previousSummary = conversation.summary,
+        budget = when (conversation.contextPolicy) {
+            "minimal" -> ConversationContextBudget(
+                contextWindowTokens = 16_000,
+                reservedOutputTokens = 4_000,
+                minimumRecentGroups = 3,
+                maximumSummaryTokens = 2_000
+            )
+            "extended" -> ConversationContextBudget(
+                contextWindowTokens = 64_000,
+                reservedOutputTokens = 8_000,
+                minimumRecentGroups = 6,
+                maximumSummaryTokens = 8_000
+            )
+            else -> ConversationContextBudget(
+                contextWindowTokens = 32_000,
+                reservedOutputTokens = 4_000,
+                minimumRecentGroups = 4,
+                maximumSummaryTokens = 4_000
+            )
+        }
+    )
 
     private fun boundedEntries(items: List<AgentTranscriptEntry>): List<AgentTranscriptEntry> =
         items.groupBy { it.conversationId }
@@ -959,7 +1030,9 @@ class AgentTranscriptStore(context: Context) {
                 .put("tracking_paused", conversation.trackingPaused)
                 .put("global_topic_key", conversation.globalTopicKey)
                 .put("merged_into_conversation_id", conversation.mergedIntoConversationId)
-                .put("merged_at_millis", conversation.mergedAtMillis))
+                .put("merged_at_millis", conversation.mergedAtMillis)
+                .put("context_compacted_through_millis", conversation.contextCompactedThroughMillis)
+                .put("context_compacted_through_entry_id", conversation.contextCompactedThroughEntryId))
         }
         preferences.writeString(KEY_CONVERSATIONS, array.toString())
     }
@@ -1012,7 +1085,9 @@ class AgentTranscriptStore(context: Context) {
                     trackingPaused = item.optBoolean("tracking_paused"),
                     globalTopicKey = item.optString("global_topic_key").take(MAX_GLOBAL_TOPIC_KEY_CHARACTERS),
                     mergedIntoConversationId = item.optString("merged_into_conversation_id"),
-                    mergedAtMillis = item.optLong("merged_at_millis", 0L)
+                    mergedAtMillis = item.optLong("merged_at_millis", 0L),
+                    contextCompactedThroughMillis = item.optLong("context_compacted_through_millis", 0L),
+                    contextCompactedThroughEntryId = item.optString("context_compacted_through_entry_id")
                 ))
             }
         }
@@ -1027,8 +1102,6 @@ class AgentTranscriptStore(context: Context) {
         private const val MAX_CONVERSATIONS = 100
         private const val MAX_ITEMS_PER_CONVERSATION = 300
         private const val MAX_TOTAL_ITEMS = 2_000
-        private const val MAX_CONTEXT_MESSAGES = 20
-        private const val RECENT_MESSAGES_AFTER_COMPACTION = 12
         private const val MAX_TEXT_CHARACTERS = 16_000
         private const val MAX_TITLE_CHARACTERS = 72
         private const val MAX_SUMMARY_CHARACTERS = 12_000

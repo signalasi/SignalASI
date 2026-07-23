@@ -767,9 +767,9 @@
     <string name="agent_session_restore">Restore session</string>
     <string name="agent_toolbox_title">Agent tools</string>
     <string name="agent_session_context_policy">Context policy</string>
-    <string name="agent_session_context_minimal">Minimal · 6 messages</string>
-    <string name="agent_session_context_balanced">Balanced · 14 messages</string>
-    <string name="agent_session_context_extended">Extended · 20 messages</string>
+    <string name="agent_session_context_minimal">Minimal · 16K token window</string>
+    <string name="agent_session_context_balanced">Balanced · 32K token window</string>
+    <string name="agent_session_context_extended">Extended · 64K token window</string>
     <string name="agent_session_details">Session details</string>
     <string name="agent_session_turns">Turns</string>
     <string name="agent_session_tasks">Tasks</string>
