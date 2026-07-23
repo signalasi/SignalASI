@@ -13091,8 +13091,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val controlCenterPage = intent?.getStringExtra("signalasi_debug_control_center_page")?.trim().orEmpty()
         val scanPayload = intent?.getStringExtra("signalasi_debug_scan_payload")?.trim().orEmpty()
         val scanPayloadB64 = intent?.getStringExtra("signalasi_debug_scan_payload_b64")?.trim().orEmpty()
+        val autoConfirmScan = intent?.getBooleanExtra("signalasi_debug_auto_confirm_scan", false) == true
+        val incomingPayload = intent?.getStringExtra("signalasi_debug_incoming")?.trim().orEmpty()
+        val incomingPayloadB64 = intent?.getStringExtra("signalasi_debug_incoming_b64")?.trim().orEmpty()
+        DebugIntentExtras.consume { key -> intent?.removeExtra(key) }
         if (controlCenterThemeToken.isNotBlank()) {
-            intent?.removeExtra("signalasi_debug_control_center_theme")
             val isNight = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
                 Configuration.UI_MODE_NIGHT_YES
             getSharedPreferences("signalasi_debug", MODE_PRIVATE).edit()
@@ -13109,7 +13112,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             return
         }
         if (controlCenterPage.isNotBlank()) {
-            intent?.removeExtra("signalasi_debug_control_center_page")
             showMainTab(PAGE_SETTINGS)
             if (!controlCenterPage.equals("home", ignoreCase = true)) {
                 ControlCenterRoute.fromWireValue(controlCenterPage)?.let {
@@ -13119,7 +13121,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             return
         }
         if (homeAssistantTestUrl.isNotBlank()) {
-            intent?.removeExtra("signalasi_debug_home_assistant_url")
             HomeAssistantSettingsStore.save(
                 this,
                 HomeAssistantSettings(
@@ -13134,23 +13135,18 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             return
         }
         if (approveFriendId.isNotBlank()) {
-            intent?.removeExtra("signalasi_debug_approve_friend")
             AppStore.approveFriendRequestForSignalasiId(this, approveFriendId)
             refreshContactList()
             refreshDirectoryContacts()
             return
         }
         if (deleteContactId.isNotBlank()) {
-            intent?.removeExtra("signalasi_debug_delete_contact")
             AppStore.deleteContact(this, deleteContactId, deleteMessages = false)
             refreshContactList()
             refreshDirectoryContacts()
             return
         }
         if (renameContactId.isNotBlank() && renameContactName.isNotBlank()) {
-            intent?.removeExtra("signalasi_debug_rename_contact")
-            intent?.removeExtra("signalasi_debug_rename_name")
-            intent?.removeExtra("signalasi_debug_rename_name_b64")
             AppStore.renameContact(this, renameContactId, renameContactName)
             refreshContactList()
             refreshDirectoryContacts()
@@ -13160,40 +13156,33 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             return
         }
         if (scanPayloadB64.isNotBlank()) {
-            intent?.removeExtra("signalasi_debug_scan_payload_b64")
             val decoded = runCatching {
                 String(Base64.decode(scanPayloadB64, Base64.NO_WRAP), Charsets.UTF_8)
             }.getOrDefault("")
-            handleSecurityScan(decoded, intent?.getBooleanExtra("signalasi_debug_auto_confirm_scan", false) == true)
+            handleSecurityScan(decoded, autoConfirmScan)
             return
         }
         if (scanPayload.isNotBlank()) {
-            intent?.removeExtra("signalasi_debug_scan_payload")
-            handleSecurityScan(scanPayload, intent?.getBooleanExtra("signalasi_debug_auto_confirm_scan", false) == true)
+            handleSecurityScan(scanPayload, autoConfirmScan)
             return
         }
         if (backupRoundtripToken.isNotBlank()) {
-            intent?.removeExtra("signalasi_debug_backup_roundtrip")
             runDebugBackupRoundtrip(backupRoundtripToken)
             return
         }
         if (cloudModelsRoundtripToken.isNotBlank()) {
-            intent?.removeExtra("signalasi_debug_cloud_models_roundtrip")
             runDebugCloudModelsRoundtrip(cloudModelsRoundtripToken)
             return
         }
         if (voiceSettingsRoundtripToken.isNotBlank()) {
-            intent?.removeExtra("signalasi_debug_voice_settings_roundtrip")
             runDebugVoiceSettingsRoundtrip(voiceSettingsRoundtripToken)
             return
         }
         if (controlCenterRoundtripToken.isNotBlank()) {
-            intent?.removeExtra("signalasi_debug_control_center_roundtrip")
             runDebugControlCenterRoundtrip(controlCenterRoundtripToken)
             return
         }
         if (destroyAllData) {
-            intent?.removeExtra("signalasi_debug_destroy_all_data")
             AppStore.destroyAllPrivateData(this)
             messages.clear()
             summaries.clear()
@@ -13217,35 +13206,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         } else if (status) {
             """{"type":"connector_status","content":"debug connector status","connector_agents":[{"id":"codex","name":"Codex Agent","status":"ready","detail":"debug ready","setup":"Ready for live use","kind":"local-cli"},{"id":"claude","name":"Claude Code","status":"needs_setup","detail":"debug missing claude","setup":"Install Claude Code CLI","kind":"local-cli"},{"id":"local-llm","name":"Local LLM","status":"needs_setup","detail":"debug missing local model","setup":"Start Ollama or configure LM Studio","kind":"local-model"},{"id":"custom-agent","name":"Custom Agent","status":"needs_setup","detail":"debug missing custom command","setup":"Set a CLI or MCP wrapper command","kind":"custom-cli"},{"id":"research-agent","name":"Research Agent","status":"ready","detail":"debug dynamic connector","setup":"Ready for live use","kind":"custom-cli"}]}"""
         } else {
-            val encoded = intent?.getStringExtra("signalasi_debug_incoming_b64")?.trim().orEmpty()
-            if (encoded.isNotBlank()) {
-                String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8).trim()
+            if (incomingPayloadB64.isNotBlank()) {
+                String(Base64.decode(incomingPayloadB64, Base64.DEFAULT), Charsets.UTF_8).trim()
             } else {
-                intent?.getStringExtra("signalasi_debug_incoming")?.trim().orEmpty()
+                incomingPayload
             }
         }
         if (payload.isBlank()) {
-            intent?.removeExtra("signalasi_debug_open_agents")
-            intent?.removeExtra("signalasi_debug_open_contact")
-            intent?.removeExtra("signalasi_debug_open_contact_detail")
-            intent?.removeExtra("signalasi_debug_open_new_friends")
-            intent?.removeExtra("signalasi_debug_open_group")
-            intent?.removeExtra("signalasi_debug_open_create_group")
-            intent?.removeExtra("signalasi_debug_open_device")
-            intent?.removeExtra("signalasi_debug_open_automation")
-            intent?.removeExtra("signalasi_debug_open_local_model")
-            intent?.removeExtra("signalasi_debug_open_cloud_providers")
-            intent?.removeExtra("signalasi_debug_open_cloud_provider")
-            intent?.removeExtra("signalasi_debug_seed_cloud_provider")
-            intent?.removeExtra("signalasi_debug_open_cloud_switch_provider")
-            intent?.removeExtra("signalasi_debug_rename_contact")
-            intent?.removeExtra("signalasi_debug_rename_name")
-            intent?.removeExtra("signalasi_debug_rename_name_b64")
-            intent?.removeExtra("signalasi_debug_open_messages")
-            intent?.removeExtra("signalasi_debug_open_contacts")
-            intent?.removeExtra("signalasi_debug_open_voice")
-            intent?.removeExtra("signalasi_debug_open_language_settings")
-            intent?.removeExtra("signalasi_debug_open_recent_tasks")
             val seededCloudContact = if (seedCloudProvider.isNotBlank() || openCloudSwitchProvider.isNotBlank()) {
                 debugSeedCloudProvider(seedCloudProvider.ifBlank { openCloudSwitchProvider })
             } else {
@@ -13336,42 +13303,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             return
         }
-        intent?.removeExtra("signalasi_debug_revoke")
-        intent?.removeExtra("signalasi_debug_status")
-        intent?.removeExtra("signalasi_debug_pairing")
-        intent?.removeExtra("signalasi_debug_open_agents")
-        intent?.removeExtra("signalasi_debug_open_security")
-        intent?.removeExtra("signalasi_debug_open_voice")
-        intent?.removeExtra("signalasi_debug_open_voice_settings")
-        intent?.removeExtra("signalasi_debug_open_language_settings")
-        intent?.removeExtra("signalasi_debug_open_on_device_agent")
-        intent?.removeExtra("signalasi_debug_open_backup_export")
-        intent?.removeExtra("signalasi_debug_open_backup_import")
-        intent?.removeExtra("signalasi_debug_open_destroy_data")
-        intent?.removeExtra("signalasi_debug_destroy_all_data")
-        intent?.removeExtra("signalasi_debug_open_protocol_quality")
-        intent?.removeExtra("signalasi_debug_open_signal_link_protocol")
-        intent?.removeExtra("signalasi_debug_open_advanced_options")
-        intent?.removeExtra("signalasi_debug_open_recent_tasks")
-        intent?.removeExtra("signalasi_debug_open_contact")
-        intent?.removeExtra("signalasi_debug_open_contact_detail")
-        intent?.removeExtra("signalasi_debug_open_new_friends")
-        intent?.removeExtra("signalasi_debug_open_group")
-        intent?.removeExtra("signalasi_debug_open_create_group")
-        intent?.removeExtra("signalasi_debug_open_device")
-        intent?.removeExtra("signalasi_debug_open_automation")
-        intent?.removeExtra("signalasi_debug_open_local_model")
-        intent?.removeExtra("signalasi_debug_open_cloud_providers")
-        intent?.removeExtra("signalasi_debug_open_cloud_provider")
-        intent?.removeExtra("signalasi_debug_seed_cloud_provider")
-        intent?.removeExtra("signalasi_debug_open_cloud_switch_provider")
-        intent?.removeExtra("signalasi_debug_rename_contact")
-        intent?.removeExtra("signalasi_debug_rename_name")
-        intent?.removeExtra("signalasi_debug_rename_name_b64")
-        intent?.removeExtra("signalasi_debug_open_messages")
-        intent?.removeExtra("signalasi_debug_open_contacts")
-        intent?.removeExtra("signalasi_debug_incoming")
-        intent?.removeExtra("signalasi_debug_incoming_b64")
         Log.i("SignalASIDebug", "Processing debug incoming payload")
         if (openVoice) {
             showMainTab(PAGE_VOICE)
