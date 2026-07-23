@@ -578,6 +578,7 @@
     <string name="message_delivery_trace">投递轨迹</string>
     <string name="delivery_status_sending">发送中</string>
     <string name="delivery_status_requesting">请求中</string>
+    <string name="delivery_status_queued">已排队</string>
     <string name="delivery_status_sent">已发送</string>
     <string name="delivery_status_failed">失败</string>
     <string name="delivery_status_local_saved">本地保存</string>

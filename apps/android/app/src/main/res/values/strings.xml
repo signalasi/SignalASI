@@ -813,6 +813,7 @@
     <string name="message_delivery_trace">Delivery Trace</string>
     <string name="delivery_status_sending">Sending</string>
     <string name="delivery_status_requesting">Requesting</string>
+    <string name="delivery_status_queued">Queued</string>
     <string name="delivery_status_sent">Sent</string>
     <string name="delivery_status_failed">Failed</string>
     <string name="delivery_status_local_saved">Saved locally</string>
