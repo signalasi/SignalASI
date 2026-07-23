@@ -73,6 +73,16 @@ object SignalASILinkDeliveryStore {
     }
 
     @Synchronized
+    fun discardRoutes(context: Context, routes: SignalASILinkProtocol.Routes): Int {
+        val source = outboxArray(context)
+        val discardedTopics = setOf(routes.up, routes.down, routes.control, routes.pairing)
+        val kept = retainMessagesOutsideTopics(source, discardedTopics)
+        val removed = source.length() - kept.length()
+        if (removed > 0) writeArray(context, KEY_OUTBOX, kept)
+        return removed
+    }
+
+    @Synchronized
     fun pending(context: Context): List<PendingMessage> {
         val values = outboxArray(context)
         return buildList {
@@ -131,5 +141,15 @@ object SignalASILinkDeliveryStore {
 
     private fun writeArray(context: Context, key: String, value: JSONArray) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(key, value.toString()).commit()
+    }
+
+    internal fun retainMessagesOutsideTopics(source: JSONArray, discardedTopics: Set<String>): JSONArray {
+        if (discardedTopics.isEmpty()) return JSONArray(source.toString())
+        val kept = JSONArray()
+        for (index in 0 until source.length()) {
+            val item = source.optJSONObject(index) ?: continue
+            if (item.optString("topic") !in discardedTopics) kept.put(JSONObject(item.toString()))
+        }
+        return kept
     }
 }
