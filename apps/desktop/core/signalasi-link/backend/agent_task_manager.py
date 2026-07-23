@@ -510,14 +510,11 @@ class AgentTaskManager:
                 return None
             now = int(time.time() * 1000)
             task.status = "accepted"
-            task.started_at = 0
             task.updated_at = now
             task.completed_at = 0
             task.result = ""
             task.error = ""
             task.exit_code = None
-            task.thread_id = ""
-            task.turn_id = ""
             task.current_step = ""
             task.process = None
             task.cancel_requested = False

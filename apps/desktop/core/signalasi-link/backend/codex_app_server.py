@@ -142,6 +142,140 @@ class CodexAppServer:
         ).start()
         return run
 
+    def recover_task(
+        self,
+        task_id: str,
+        thread_id: str,
+        turn_id: str,
+        original_prompt: str,
+        elapsed_seconds: float = 0,
+    ) -> CodexRun:
+        """Reconnect to an existing Codex turn without replaying the prompt."""
+        clean_thread_id = str(thread_id or "").strip()
+        clean_turn_id = str(turn_id or "").strip()
+        if not clean_thread_id or not clean_turn_id:
+            raise RuntimeError(
+                "Cannot recover the original Codex turn because its thread or turn identity is missing"
+            )
+
+        self._ensure_started()
+        now = time.monotonic()
+        run = CodexRun(
+            task_id=task_id,
+            thread_id=clean_thread_id,
+            turn_id=clean_turn_id,
+            started_monotonic=now - max(0.0, float(elapsed_seconds or 0)),
+            last_event_monotonic=now,
+            prefers_chinese=self._contains_chinese(original_prompt),
+        )
+        with self._lock:
+            self._runs[task_id] = run
+            self._turn_tasks[clean_turn_id] = task_id
+
+        self.on_event(task_id, {
+            "thread_id": clean_thread_id,
+            "turn_id": clean_turn_id,
+            "status": "starting",
+            "current_step": "Reconnecting to Codex turn",
+        })
+        try:
+            response = self._request("thread/resume", {
+                "threadId": clean_thread_id,
+                "approvalPolicy": "never",
+                "sandbox": "workspace-write",
+            }, timeout=30)
+            if run.finished:
+                return run
+            thread = response.get("thread") or {}
+            turns = thread.get("turns") or []
+            if not turns:
+                response = self._request("thread/read", {
+                    "threadId": clean_thread_id,
+                    "includeTurns": True,
+                }, timeout=30)
+                if run.finished:
+                    return run
+                thread = response.get("thread") or thread
+                turns = thread.get("turns") or []
+            turn = next((
+                candidate for candidate in turns
+                if str(candidate.get("id") or "") == clean_turn_id
+            ), None)
+            if turn is None:
+                raise RuntimeError(
+                    "The original Codex turn is no longer available; the task was not replayed"
+                )
+            run.final_text = self._latest_agent_message(turn)
+            turn_status = str(turn.get("status") or "")
+            if turn_status == "completed":
+                if not run.final_text:
+                    raise RuntimeError(
+                        "The original Codex turn completed without a final response"
+                    )
+                run.finished = True
+                self._remove_turn_mapping(run)
+                self.on_event(task_id, {
+                    "thread_id": clean_thread_id,
+                    "turn_id": clean_turn_id,
+                    "status": "completed",
+                    "current_step": "",
+                    "result": run.final_text,
+                })
+                return run
+            if turn_status in {"failed", "interrupted"}:
+                run.finished = True
+                self._remove_turn_mapping(run)
+                reason = self._turn_error(turn)
+                result = (
+                    "Codex \u539f\u4efb\u52a1\u5df2\u4e2d\u65ad\uff0c\u672a\u91cd\u590d\u6267\u884c\u3002\u8bf7\u91cd\u65b0\u53d1\u9001\u4efb\u52a1\u3002"
+                    if run.prefers_chinese else
+                    "The original Codex turn ended before completion and was not replayed. Please send the task again."
+                )
+                self.on_event(task_id, {
+                    "thread_id": clean_thread_id,
+                    "turn_id": clean_turn_id,
+                    "status": "failed",
+                    "current_step": "",
+                    "result": result,
+                    "error": reason or f"Codex turn {turn_status}",
+                })
+                return run
+            if turn_status != "inProgress":
+                raise RuntimeError(
+                    f"The original Codex turn returned an unsupported status: {turn_status or 'unknown'}"
+                )
+
+            thread_status = thread.get("status") or {}
+            active_flags = (
+                thread_status.get("activeFlags") or []
+                if isinstance(thread_status, dict) else []
+            )
+            status = "running"
+            current_step = "Reconnected to Codex turn"
+            if "waitingOnApproval" in active_flags:
+                status = "waiting_approval"
+                current_step = "Waiting for approval"
+            elif "waitingOnUserInput" in active_flags:
+                status = "waiting_input"
+                current_step = "Waiting for user input"
+            self.on_event(task_id, {
+                "thread_id": clean_thread_id,
+                "turn_id": clean_turn_id,
+                "status": status,
+                "current_step": current_step,
+            })
+            threading.Thread(
+                target=self._watch_run,
+                args=(task_id,),
+                daemon=True,
+                name=f"codex-recover-watch-{task_id[:8]}",
+            ).start()
+            return run
+        except Exception:
+            run.finished = True
+            self._remove_turn_mapping(run)
+            raise
+
     def _watch_run(self, task_id: str) -> None:
         while True:
             time.sleep(1)
@@ -204,6 +338,25 @@ class CodexAppServer:
             "input": user_input,
             "model": model, "effort": "low",
         }, timeout=30)
+
+    @staticmethod
+    def _latest_agent_message(turn: dict) -> str:
+        for item in reversed(list(turn.get("items") or [])):
+            if item.get("type") == "agentMessage" and str(item.get("text") or "").strip():
+                return str(item["text"]).strip()
+        return ""
+
+    @staticmethod
+    def _turn_error(turn: dict) -> str:
+        error = turn.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or error.get("code") or "").strip()
+        return str(error or "").strip()
+
+    def _remove_turn_mapping(self, run: CodexRun) -> None:
+        with self._lock:
+            if self._turn_tasks.get(run.turn_id) == run.task_id:
+                self._turn_tasks.pop(run.turn_id, None)
 
     def _load_conversation_threads(self) -> dict[str, str]:
         try:

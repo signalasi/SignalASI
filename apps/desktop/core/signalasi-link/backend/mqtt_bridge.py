@@ -1199,7 +1199,7 @@ def on_connect(mqttc, userdata, flags, reason_code, properties=None):
         log.info(f"MQTT connected {BROKER}:{PORT}")
         _subscribe_all_routes(mqttc)
         recovered_tasks = agent_task_manager.drain_recovered()
-        replayed_count = 0
+        resumed_count = 0
         retained_count = 0
         for recovered_task in recovered_tasks:
             route_id = str(recovered_task.get("client_route_id") or "")
@@ -1219,7 +1219,7 @@ def on_connect(mqttc, userdata, flags, reason_code, properties=None):
                             recovery_trace,
                         )
                         _resume_recovered_remote_task(mqttc, recovered_task)
-                        replayed_count += 1
+                        resumed_count += 1
                     except Exception as exc:
                         agent_task_manager.retain_recovered(str(recovered_task.get("task_id") or ""))
                         retained_count += 1
@@ -1234,14 +1234,14 @@ def on_connect(mqttc, userdata, flags, reason_code, properties=None):
                         recovered_task,
                         [],
                     )
-                    replayed_count += 1
+                    resumed_count += 1
             else:
                 agent_task_manager.retain_recovered(str(recovered_task.get("task_id") or ""))
                 retained_count += 1
         if recovered_tasks:
             log.info(
-                "Recovered task status replay summary total=%s replayed=%s retained=%s",
-                len(recovered_tasks), replayed_count, retained_count,
+                "Recovered task summary total=%s resumed=%s retained=%s",
+                len(recovered_tasks), resumed_count, retained_count,
             )
         flush_pending_task_events(mqttc)
         flush_pending_task_results(mqttc)
@@ -1799,15 +1799,44 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         result_published = False
 
         def start_codex() -> None:
+            nonlocal result_published
             try:
                 executable = _find_codex_desktop_cli() or "codex"
-                from response_policy import compact_codex_turn_prompt
                 from task_workspace import task_workspace
-                from desktop_file_tools import try_execute_explicit_file_task
 
                 with codex_task_callbacks_lock:
                     codex_task_callbacks[task.task_id] = app_event
                 workspace = task_workspace(task.task_id, agent_id)
+                if payload.get("_recovered_task") is True:
+                    agent_task_manager.update(
+                        task.task_id, "starting", on_event=publish_event,
+                        current_step="Reconnecting to Codex turn",
+                    )
+                    server = _codex_server(executable, _agent_env(BASE_AGENTS["codex"]))
+                    server.warm()
+                    add_task_trace("codex_server_ready", f"pid={server.process.pid if server.process else 0}")
+                    started_at = int(task.started_at or task.created_at or 0)
+                    elapsed_seconds = (
+                        max(0.0, (time.time() * 1000 - started_at) / 1000)
+                        if started_at else 0.0
+                    )
+                    add_task_trace(
+                        "codex_turn_reconnect_started",
+                        f"thread={task.thread_id} turn={task.turn_id}",
+                    )
+                    server.recover_task(
+                        task_id=task.task_id,
+                        thread_id=task.thread_id,
+                        turn_id=task.turn_id,
+                        original_prompt=content,
+                        elapsed_seconds=elapsed_seconds,
+                    )
+                    add_task_trace("codex_turn_reconnected", task.turn_id)
+                    return
+
+                from response_policy import compact_codex_turn_prompt
+                from desktop_file_tools import try_execute_explicit_file_task
+
                 task_prompt = content_with_attachments(task.task_id, compact_codex_turn_prompt(content))
                 input_paths = sorted((workspace / "downloads" / "input").glob("*"))
                 image_paths = [
@@ -1850,7 +1879,32 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                 )
                 add_task_trace("codex_turn_submitted", task.task_id)
             except Exception as exc:
-                agent_task_manager.update(task.task_id, "failed", on_event=publish_event, error=str(exc)[:500])
+                error = str(exc)[:500]
+                recovered = payload.get("_recovered_task") is True
+                prefers_chinese = any(
+                    "\u4e00" <= character <= "\u9fff" for character in content
+                )
+                if recovered:
+                    result = (
+                        "Codex \u539f\u4efb\u52a1\u65e0\u6cd5\u91cd\u65b0\u8fde\u63a5\uff0c\u4e14\u672a\u91cd\u590d\u6267\u884c\u3002\u8bf7\u91cd\u65b0\u53d1\u9001\u4efb\u52a1\u3002"
+                        if prefers_chinese else
+                        "The original Codex task could not be reconnected and was not replayed. Please send it again."
+                    )
+                else:
+                    result = (
+                        "Codex \u672a\u80fd\u542f\u52a8\u8fd9\u6b21\u4efb\u52a1\uff0c\u8bf7\u91cd\u65b0\u53d1\u9001\u4e00\u6b21\u3002"
+                        if prefers_chinese else
+                        "Codex could not start this task. Please send it again."
+                    )
+                failed = agent_task_manager.update(
+                    task.task_id, "failed", on_event=publish_event,
+                    current_step="", result=result, error=error,
+                )
+                if failed is not None and not result_published and failed.result:
+                    result_published = True
+                    publish_result(failed.public())
+                with codex_task_callbacks_lock:
+                    codex_task_callbacks.pop(task.task_id, None)
 
         threading.Thread(target=start_codex, daemon=True).start()
         return
