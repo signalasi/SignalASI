@@ -1591,14 +1591,16 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
     def publish_result(task: dict) -> None:
         from rich_output import build_rich_output
         from response_policy import remove_unfulfilled_artifact_claims, sanitize_assistant_response
-        from task_workspace import task_workspace
+        from task_workspace import referenced_task_artifact_paths, task_workspace
         hidden_inputs = [
             str(path) for path in (
                 task_workspace(str(task.get("task_id") or ""), agent_id) / "downloads" / "input"
             ).glob("*")
         ]
+        raw_result = str(task.get("result") or "")
+        hidden_artifact_paths = [str(path) for path in referenced_task_artifact_paths(raw_result)]
         output_files = list(task.get("output_files") or [])
-        cleaned_reply = sanitize_assistant_response(str(task.get("result") or ""), hidden_inputs)
+        cleaned_reply = sanitize_assistant_response(raw_result, hidden_inputs + hidden_artifact_paths)
         cleaned_reply = remove_unfulfilled_artifact_claims(cleaned_reply, output_files)
         reply, rich_output = build_rich_output(
             cleaned_reply,
@@ -1628,7 +1630,6 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         }
         if rich_output:
             reply_payload["rich_output"] = rich_output
-        raw_result = str(task.get("result") or "")
         if requires_exact_content_transport(raw_result):
             reply_payload["exact_content_encoding"] = "base64-utf8"
             reply_payload["exact_content_b64"] = base64.b64encode(raw_result.encode("utf-8")).decode("ascii")
@@ -1656,6 +1657,12 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             event_status = str(event.get("status") or "running")
             add_task_trace(f"codex_{event_status}", event.get("current_step") or "")
             event_result = event.get("result")
+            if event_status == "completed" and str(event_result or "").strip():
+                from task_workspace import import_referenced_task_artifacts
+
+                imported = import_referenced_task_artifacts(task_id, str(event_result))
+                if imported:
+                    add_task_trace("referenced_artifacts_imported", len(imported))
             if event_status == "completed" and image_artifact_required:
                 from task_workspace import task_artifacts
                 generated_images = [

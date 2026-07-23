@@ -17,7 +17,7 @@ MAX_BLOCKS = 100
 MAX_TEXT = 32_000
 MAX_ROWS = 500
 MAX_COLUMNS = 24
-MAX_INLINE_ARTIFACT_BYTES = 300 * 1024
+MAX_INLINE_ARTIFACT_BYTES = 300_000
 MAX_INLINE_ARTIFACT_B64 = ((MAX_INLINE_ARTIFACT_BYTES + 2) // 3) * 4
 ALLOWED_TYPES = {
     "text", "heading", "quote", "list", "divider", "code", "json", "key_value",

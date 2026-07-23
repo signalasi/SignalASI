@@ -101,14 +101,20 @@ def sanitize_assistant_response(response: str, hidden_input_paths: list[str] | N
         if not path:
             continue
         name = re.sub(r"^\d{2}-", "", path.replace("\\", "/").rsplit("/", 1)[-1])
-        escaped = re.escape(path)
-        text = re.sub(rf"\[[^\]]+\]\({escaped}\)", name, text, flags=re.IGNORECASE)
-        text = text.replace(path, name)
         slash_path = path.replace("\\", "/")
-        if slash_path != path:
-            escaped_slash = re.escape(slash_path)
-            text = re.sub(rf"\[[^\]]+\]\({escaped_slash}\)", name, text, flags=re.IGNORECASE)
-            text = text.replace(slash_path, name)
+        variants = {path, slash_path}
+        if re.match(r"^[A-Za-z]:/", slash_path):
+            variants.update({f"/{slash_path}", f"file:///{slash_path}"})
+        for variant in sorted(variants, key=len, reverse=True):
+            escaped = re.escape(variant)
+            text = re.sub(
+                rf"!?\[([^\]]+)\]\(\s*<?{escaped}>?\s*\)",
+                lambda match: match.group(1),
+                text,
+                flags=re.IGNORECASE,
+            )
+            text = text.replace(f"<{variant}>", name)
+            text = text.replace(variant, name)
     return text[:32_000]
 
 
