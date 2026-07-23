@@ -1910,14 +1910,66 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         return
 
     if payload.get("_recovered_task") is True:
-        resumed = agent_task_manager.resume(
+        resumed = agent_task_manager.resume_external(
             str(payload.get("task_id") or ""),
-            runner=run_task,
-            on_event=publish_event,
-            on_result=publish_result,
+            publish_event,
         )
         if resumed is None:
             raise RuntimeError("Recovered Agent task is no longer resumable")
+        from agent_gateway import desktop_agent_provider
+
+        adapter_result = None
+        adapter_error = ""
+        try:
+            adapter_result = desktop_agent_provider().status(agent_id, resumed.task_id)
+        except Exception as exc:
+            adapter_error = str(exc)[:500]
+        adapter_state = str(getattr(adapter_result, "state", "") or "")
+        adapter_reply = str(getattr(adapter_result, "reply", "") or "").strip()
+        if adapter_state == "completed" and adapter_reply:
+            completed = agent_task_manager.update(
+                resumed.task_id,
+                "completed",
+                on_event=publish_event,
+                current_step="",
+                result=adapter_reply,
+            )
+            if completed is not None:
+                publish_result(completed.public())
+            return
+        if adapter_state == "cancelled":
+            agent_task_manager.update(
+                resumed.task_id,
+                "cancelled",
+                on_event=publish_event,
+                current_step="",
+            )
+            return
+
+        prefers_chinese = any(
+            "\u4e00" <= character <= "\u9fff" for character in content
+        )
+        result = (
+            "Desktop \u91cd\u542f\u524d\uff0c\u8fd9\u4e2a Agent \u4efb\u52a1\u672a\u4ea7\u751f\u53ef\u6062\u590d\u7684\u7ed3\u679c\uff0c\u539f\u8bf7\u6c42\u672a\u91cd\u590d\u6267\u884c\u3002\u8bf7\u91cd\u65b0\u53d1\u9001\u4efb\u52a1\u3002"
+            if prefers_chinese else
+            "This Agent task did not produce a recoverable result before Desktop restarted. "
+            "The original request was not repeated. Please send the task again."
+        )
+        error = (
+            str(getattr(adapter_result, "error", "") or "").strip()
+            or adapter_error
+            or f"Adapter Run is {adapter_state or 'missing'}"
+        )
+        failed = agent_task_manager.update(
+            resumed.task_id,
+            "failed",
+            on_event=publish_event,
+            current_step="",
+            result=result,
+            error=error[:500],
+        )
+        if failed is not None:
+            publish_result(failed.public())
     else:
         agent_task_manager.create(
             agent_id=agent_id,
