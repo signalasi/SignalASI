@@ -1029,7 +1029,10 @@ def requires_exact_content_transport(value: str) -> bool:
         candidate = raw
         if candidate.startswith("```"):
             candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.IGNORECASE)
-        schema = str((json.loads(candidate) or {}).get("schema") or "")
+        decoded = json.loads(candidate)
+        if not isinstance(decoded, dict):
+            return False
+        schema = str(decoded.get("schema") or "")
         return schema in PHONE_DEVELOPMENT_MANIFEST_SCHEMAS
     except (TypeError, ValueError, json.JSONDecodeError):
         return any(schema in raw for schema in PHONE_DEVELOPMENT_MANIFEST_SCHEMAS)
@@ -1152,14 +1155,27 @@ def on_connect(mqttc, userdata, flags, reason_code, properties=None):
         for recovered_task in recovered_tasks:
             route_id = str(recovered_task.get("client_route_id") or "")
             if route_id and get_client(route_id) is not None:
-                _publish_or_queue_task_event(
-                    mqttc,
-                    {"scheme": "signal", "_client_route_id": route_id},
-                    recovered_task,
-                    [],
-                )
-                replayed_count += 1
+                if str(recovered_task.get("status") or "") == "recovering":
+                    try:
+                        _resume_recovered_remote_task(mqttc, recovered_task)
+                        replayed_count += 1
+                    except Exception as exc:
+                        agent_task_manager.retain_recovered(str(recovered_task.get("task_id") or ""))
+                        retained_count += 1
+                        log.warning(
+                            "Recovered task resume deferred task_id=%s: %s",
+                            recovered_task.get("task_id"), exc,
+                        )
+                else:
+                    _publish_or_queue_task_event(
+                        mqttc,
+                        {"scheme": "signal", "_client_route_id": route_id},
+                        recovered_task,
+                        [],
+                    )
+                    replayed_count += 1
             else:
+                agent_task_manager.retain_recovered(str(recovered_task.get("task_id") or ""))
                 retained_count += 1
         if recovered_tasks:
             log.info(
@@ -1462,6 +1478,40 @@ def _requests_returned_image(prompt: str) -> bool:
     ))
 
 
+def _resume_recovered_remote_task(mqttc, task: dict) -> None:
+    task_id = str(task.get("task_id") or "").strip()
+    route_id = str(task.get("client_route_id") or "").strip()
+    prompt = str(task.get("prompt") or "").strip()
+    if not task_id or not route_id or not prompt:
+        raise ValueError("Recovered task is missing its task, route, or prompt identity")
+    from task_workspace import task_workspace
+
+    agent_id = str(task.get("agent_id") or "").strip()
+    input_root = task_workspace(task_id, agent_id) / "downloads" / "input"
+    attachments = [
+        {"name": path.name}
+        for path in sorted(input_root.glob("*"))
+        if path.is_file()
+    ][:12]
+    wire_payload = {
+        "scheme": "signal",
+        "_client_route_id": route_id,
+    }
+    payload = {
+        "type": "text",
+        "content": prompt,
+        "contact_id": str(task.get("contact_id") or agent_id),
+        "agent_id": agent_id,
+        "client_message_id": str(task.get("source_message_id") or ""),
+        "task_id": task_id,
+        "conversation_id": str(task.get("conversation_id") or ""),
+        "attachments": attachments,
+        "_recovered_task": True,
+    }
+    trace = [_trace_event("desktop_task_recovery_started", f"attempt={task.get('attempt', 2)}")]
+    _start_remote_agent_task(mqttc, wire_payload, payload, trace, prompt, "text")
+
+
 def _returned_image_artifact_contract(output_directory: Path) -> str:
     destination = str(output_directory.resolve())
     return (
@@ -1505,20 +1555,21 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
     def content_with_attachments(task_id: str, base_content: str | None = None) -> str:
         task_content = content if base_content is None else base_content
         attachments = payload.get("attachments") or []
-        if not isinstance(attachments, list) or not attachments:
-            return task_content
         from task_workspace import task_workspace
         attachment_root = task_workspace(task_id, agent_id) / "downloads" / "input"
         attachment_root.mkdir(parents=True, exist_ok=True)
-        materialized: list[str] = []
+        existing_files = [path for path in sorted(attachment_root.glob("*")) if path.is_file()]
+        existing_names = {path.name for path in existing_files}
+        materialized: list[str] = [str(path) for path in existing_files]
         metadata_only: list[str] = []
-        for index, attachment in enumerate(attachments[:10]):
+        for index, attachment in enumerate(attachments[:10] if isinstance(attachments, list) else []):
             if not isinstance(attachment, dict):
                 continue
             name = Path(str(attachment.get("name") or f"attachment-{index + 1}")).name[:180]
             encoded = str(attachment.get("data_b64") or "")
             if not encoded:
-                metadata_only.append(name)
+                if name not in existing_names:
+                    metadata_only.append(name)
                 continue
             try:
                 raw = base64.b64decode(encoded, validate=True)
@@ -1531,6 +1582,8 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             target = attachment_root / f"{index + 1:02d}-{name}"
             target.write_bytes(raw)
             materialized.append(str(target))
+        materialized = list(dict.fromkeys(materialized))
+        metadata_only = list(dict.fromkeys(metadata_only))
         if not materialized and not metadata_only:
             return task_content
         details = ["\n\nInput attachments available for this task:"]
@@ -1576,14 +1629,16 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
     def publish_result(task: dict) -> None:
         from rich_output import build_rich_output
         from response_policy import remove_unfulfilled_artifact_claims, sanitize_assistant_response
-        from task_workspace import task_workspace
+        from task_workspace import referenced_task_artifact_paths, task_workspace
         hidden_inputs = [
             str(path) for path in (
                 task_workspace(str(task.get("task_id") or ""), agent_id) / "downloads" / "input"
             ).glob("*")
         ]
+        raw_result = str(task.get("result") or "")
+        hidden_artifact_paths = [str(path) for path in referenced_task_artifact_paths(raw_result)]
         output_files = list(task.get("output_files") or [])
-        cleaned_reply = sanitize_assistant_response(str(task.get("result") or ""), hidden_inputs)
+        cleaned_reply = sanitize_assistant_response(raw_result, hidden_inputs + hidden_artifact_paths)
         cleaned_reply = remove_unfulfilled_artifact_claims(cleaned_reply, output_files)
         reply, rich_output = build_rich_output(
             cleaned_reply,
@@ -1614,7 +1669,6 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         }
         if rich_output:
             reply_payload["rich_output"] = rich_output
-        raw_result = str(task.get("result") or "")
         if requires_exact_content_transport(raw_result):
             reply_payload["exact_content_encoding"] = "base64-utf8"
             reply_payload["exact_content_b64"] = base64.b64encode(raw_result.encode("utf-8")).decode("ascii")
@@ -1624,13 +1678,18 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
 
     if agent_id == "codex":
         from agent_gateway import BASE_AGENTS, _agent_env, _find_codex_desktop_cli
-        task = agent_task_manager.create_external(
-            agent_id=agent_id, contact_id=contact_id, source_message_id=source_message_id,
-            prompt=content, on_event=publish_event, task_id=str(payload.get("task_id") or ""),
-            conversation_id=str(payload.get("conversation_id") or ""),
-            client_route_id=str(wire_payload.get("_client_route_id") or ""),
-            client_turn_id=str(payload.get("turn_id") or ""),
-        )
+        if payload.get("_recovered_task") is True:
+            task = agent_task_manager.resume_external(str(payload.get("task_id") or ""), publish_event)
+            if task is None:
+                raise RuntimeError("Recovered Codex task is no longer resumable")
+        else:
+            task = agent_task_manager.create_external(
+                agent_id=agent_id, contact_id=contact_id, source_message_id=source_message_id,
+                prompt=content, on_event=publish_event, task_id=str(payload.get("task_id") or ""),
+                conversation_id=str(payload.get("conversation_id") or ""),
+                client_route_id=str(wire_payload.get("_client_route_id") or ""),
+                client_turn_id=str(payload.get("turn_id") or ""),
+            )
         add_task_trace("desktop_task_created", task.task_id)
 
         def app_event(task_id: str, event: dict) -> None:
@@ -1638,6 +1697,12 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             event_status = str(event.get("status") or "running")
             add_task_trace(f"codex_{event_status}", event.get("current_step") or "")
             event_result = event.get("result")
+            if event_status == "completed" and str(event_result or "").strip():
+                from task_workspace import import_referenced_task_artifacts
+
+                imported = import_referenced_task_artifacts(task_id, str(event_result))
+                if imported:
+                    add_task_trace("referenced_artifacts_imported", len(imported))
             if event_status == "completed" and image_artifact_required:
                 from task_workspace import task_artifacts
                 generated_images = [
@@ -1730,19 +1795,29 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         threading.Thread(target=start_codex, daemon=True).start()
         return
 
-    agent_task_manager.create(
-        agent_id=agent_id,
-        contact_id=contact_id,
-        source_message_id=source_message_id,
-        prompt=content,
-        runner=run_task,
-        on_event=publish_event,
-        on_result=publish_result,
-        task_id=str(payload.get("task_id") or ""),
-        conversation_id=str(payload.get("conversation_id") or ""),
-        client_route_id=str(wire_payload.get("_client_route_id") or ""),
-        client_turn_id=str(payload.get("turn_id") or ""),
-    )
+    if payload.get("_recovered_task") is True:
+        resumed = agent_task_manager.resume(
+            str(payload.get("task_id") or ""),
+            runner=run_task,
+            on_event=publish_event,
+            on_result=publish_result,
+        )
+        if resumed is None:
+            raise RuntimeError("Recovered Agent task is no longer resumable")
+    else:
+        agent_task_manager.create(
+            agent_id=agent_id,
+            contact_id=contact_id,
+            source_message_id=source_message_id,
+            prompt=content,
+            runner=run_task,
+            on_event=publish_event,
+            on_result=publish_result,
+            task_id=str(payload.get("task_id") or ""),
+            conversation_id=str(payload.get("conversation_id") or ""),
+            client_route_id=str(wire_payload.get("_client_route_id") or ""),
+            client_turn_id=str(payload.get("turn_id") or ""),
+        )
 
 
 def _process_message(mqttc, userdata, msg):

@@ -14,6 +14,7 @@ from typing import Callable
 
 TASKS_PATH = Path.home() / ".signalasi" / "agent_tasks.json"
 TERMINAL_STATES = {"completed", "failed", "cancelled", "timed_out"}
+MAX_AUTOMATIC_RECOVERY_ATTEMPTS = 2
 EventCallback = Callable[[dict], None]
 
 
@@ -150,6 +151,26 @@ class AgentTaskManager:
             self._tasks[task.task_id] = task
             self._save_locked()
         self._emit(task, on_event)
+        return task
+
+    def resume_external(self, task_id: str, on_event: EventCallback) -> AgentTask | None:
+        task = self._prepare_recovery(task_id)
+        if task is not None:
+            self._emit(task, on_event)
+        return task
+
+    def resume(
+        self,
+        task_id: str,
+        runner: Callable[[AgentTask], str],
+        on_event: EventCallback,
+        on_result: EventCallback | None = None,
+    ) -> AgentTask | None:
+        task = self.resume_external(task_id, on_event)
+        if task is None:
+            return None
+        self._set_status(task, "queued", on_event)
+        threading.Thread(target=self._run, args=(task, runner, on_event, on_result), daemon=True).start()
         return task
 
     def update(
@@ -381,7 +402,46 @@ class AgentTaskManager:
             )[:max(1, min(limit, 500))]
             for task in candidates:
                 self._recovered_task_ids.discard(task.task_id)
-            return [task.public() for task in candidates]
+            return [task.public(include_prompt=True) for task in candidates]
+
+    def retain_recovered(self, task_id: str) -> None:
+        with self._lock:
+            if task_id in self._tasks:
+                self._recovered_task_ids.add(task_id)
+
+    def _prepare_recovery(self, task_id: str) -> AgentTask | None:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or task.status != "recovering":
+                return None
+            now = int(time.time() * 1000)
+            task.status = "accepted"
+            task.started_at = 0
+            task.updated_at = now
+            task.completed_at = 0
+            task.result = ""
+            task.error = ""
+            task.exit_code = None
+            task.thread_id = ""
+            task.turn_id = ""
+            task.current_step = ""
+            task.process = None
+            task.cancel_requested = False
+            task.status_seq += 1
+            task.events = [
+                *task.events[-99:],
+                {
+                    "event_id": str(uuid.uuid4()),
+                    "created_at": now,
+                    "kind": "recovery",
+                    "title": "Resuming after Desktop restart",
+                    "status": "running",
+                    "detail": f"Automatic recovery attempt {task.attempt}",
+                    "metadata": {"attempt": task.attempt},
+                },
+            ]
+            self._save_locked()
+        return task
 
     def _set_status(self, task: AgentTask, status: str, on_event: EventCallback | None) -> None:
         with self._lock:
@@ -445,12 +505,22 @@ class AgentTaskManager:
                 status = str(row.get("status") or "failed")
                 interrupted = status not in TERMINAL_STATES
                 if interrupted:
-                    status = "failed"
-                    row["error"] = "Desktop restarted while task was running"
                     recovered_at = int(time.time() * 1000)
-                    row["completed_at"] = recovered_at
                     row["updated_at"] = recovered_at
                     row["status_seq"] = int(row.get("status_seq") or 0) + 1
+                    previous_attempt = max(1, int(row.get("attempt") or 1))
+                    if previous_attempt >= MAX_AUTOMATIC_RECOVERY_ATTEMPTS:
+                        status = "failed"
+                        row["error"] = "Task recovery stopped after repeated Desktop restarts"
+                        row["completed_at"] = recovered_at
+                    else:
+                        status = "recovering"
+                        row["attempt"] = previous_attempt + 1
+                        row["completed_at"] = 0
+                        row["result"] = ""
+                        row["error"] = ""
+                        row["exit_code"] = None
+                        row["current_step"] = "Recovering after Desktop restart"
                 task = AgentTask(
                     task_id=str(row.get("task_id") or uuid.uuid4()),
                     agent_id=str(row.get("agent_id") or ""),

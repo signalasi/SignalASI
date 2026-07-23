@@ -50,6 +50,30 @@ class TaskWorkspaceTests(unittest.TestCase):
             self.assertFalse((directory / "logs").exists())
             self.assertEqual((directory / "outputs" / "result.txt").read_text(encoding="utf-8"), "keep")
 
+    def test_imports_artifact_referenced_from_an_earlier_task(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "SignalASIWorkspace"
+            with patch.dict(os.environ, {"SIGNALASI_WORKSPACE_ROOT": str(root)}):
+                earlier = task_workspace.task_workspace("earlier", "codex")
+                source = earlier / "outputs" / "marked.jpg"
+                source.write_bytes(b"image")
+                response = f"![Marked image](<{source.as_posix()}>)"
+                artifacts = task_workspace.import_referenced_task_artifacts("current", response)
+            self.assertEqual(["outputs/marked.jpg"], [item["relative_path"] for item in artifacts])
+            self.assertEqual(b"image", (root / "tasks" / "current" / "outputs" / "marked.jpg").read_bytes())
+
+    def test_rejects_referenced_file_outside_task_workspace(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "SignalASIWorkspace"
+            outside = Path(temporary) / "private.jpg"
+            outside.write_bytes(b"private")
+            with patch.dict(os.environ, {"SIGNALASI_WORKSPACE_ROOT": str(root)}):
+                artifacts = task_workspace.import_referenced_task_artifacts(
+                    "current",
+                    f"![Private](<{outside.as_posix()}>)",
+                )
+            self.assertEqual([], artifacts)
+
 
 if __name__ == "__main__":
     unittest.main()

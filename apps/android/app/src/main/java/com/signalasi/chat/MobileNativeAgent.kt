@@ -1710,9 +1710,12 @@ class MobileNativeAgent(
                 displayCommand.takeIf(String::isNotBlank)?.let { "; command=${it.take(200)}" }.orEmpty()
         )
         lastActionResult = executeAction(executionAction, currentScreen, userConfirmed)
+        val dispatchAwaitingResponse = lastActionResult?.metadata?.get("awaiting_response") == "true"
         recordAudit(
             AgentAuditEvent.TOOL_COMPLETED,
-            "action=${hardenedAction.id}; success=${lastActionResult?.success == true}; duration_ms=${System.currentTimeMillis() - toolStartedAt}; target=${hardenedAction.target.take(160)}"
+            "action=${hardenedAction.id}; kind=${hardenedAction.kind}; " +
+                "awaiting_response=$dispatchAwaitingResponse; success=${lastActionResult?.success == true}; " +
+                "duration_ms=${System.currentTimeMillis() - toolStartedAt}; target=${hardenedAction.target.take(160)}"
         )
         phase = AgentPhase.VERIFYING
         val observation = captureVerificationScreen(

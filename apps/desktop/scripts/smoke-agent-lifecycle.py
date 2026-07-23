@@ -124,10 +124,13 @@ with tempfile.TemporaryDirectory(prefix="signalasi-task-smoke-") as temporary_ho
         raise SystemExit("recovery task did not start")
     recovered_manager = lifecycle.AgentTaskManager()
     recovered = recovered_manager.get(interrupted_task.task_id)
-    if recovered is None or recovered.status != "failed" or "restarted" not in recovered.error:
-        raise SystemExit("Desktop restart did not recover a running task as failed")
-    if interrupted_task.task_id not in {row["task_id"] for row in recovered_manager.drain_recovered()}:
+    if recovered is None or recovered.status != "recovering" or recovered.attempt != 2:
+        raise SystemExit("Desktop restart did not queue the running task for bounded recovery")
+    recovered_rows = recovered_manager.drain_recovered()
+    if interrupted_task.task_id not in {row["task_id"] for row in recovered_rows}:
         raise SystemExit("recovered task was not queued for status replay")
+    if next(row for row in recovered_rows if row["task_id"] == interrupted_task.task_id).get("prompt") != "restart recovery smoke":
+        raise SystemExit("recovered task lost its original prompt")
     recovery_gate.set()
     recovery_deadline = time.time() + 5
     while time.time() < recovery_deadline and manager.get(interrupted_task.task_id).status not in lifecycle.TERMINAL_STATES:

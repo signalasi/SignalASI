@@ -52,8 +52,39 @@ class AgentTaskConversationTests(unittest.TestCase):
             recovered = restored.drain_recovered()
 
             self.assertEqual(["running-task"], [item["task_id"] for item in recovered])
-            self.assertEqual("failed", recovered[0]["status"])
+            self.assertEqual("recovering", recovered[0]["status"])
+            self.assertEqual("running", recovered[0]["prompt"])
+            self.assertEqual(2, recovered[0]["attempt"])
             self.assertEqual([], restored.drain_recovered())
+
+            events = []
+            resumed = restored.resume_external("running-task", events.append)
+            self.assertIsNotNone(resumed)
+            self.assertEqual("accepted", resumed.status)
+            restored.update("running-task", "completed", result="recovered")
+            self.assertEqual("recovered", restored.get("running-task").result)
+
+    def test_second_interruption_stops_automatic_recovery(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            agent_task_manager, "TASKS_PATH", Path(temporary) / "tasks.json"
+        ):
+            manager = agent_task_manager.AgentTaskManager()
+            manager.create_external(
+                "codex", "codex-contact", "3", "repeat", lambda _: None,
+                task_id="repeat-task", client_route_id="client-1",
+            )
+            manager.update("repeat-task", "running")
+            first_restart = agent_task_manager.AgentTaskManager()
+            first_restart.drain_recovered()
+            first_restart.resume_external("repeat-task", lambda _: None)
+            first_restart.update("repeat-task", "running")
+
+            second_restart = agent_task_manager.AgentTaskManager()
+            recovered = second_restart.drain_recovered()
+
+            self.assertEqual("failed", recovered[0]["status"])
+            self.assertIn("repeated Desktop restarts", recovered[0]["error"])
+            self.assertIsNone(second_restart.resume_external("repeat-task", lambda _: None))
 
     def test_client_turn_id_survives_codex_internal_turn_updates(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
