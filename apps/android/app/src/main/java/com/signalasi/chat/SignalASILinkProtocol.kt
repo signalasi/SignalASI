@@ -100,6 +100,7 @@ object SignalASILinkProtocol {
             routes = Routes(qr.getString("server_route_id"), newRouteId()),
             paired = false
         )
+        existing?.let { SignalASILinkDeliveryStore.discardRoutes(context, it.routes) }
         save(context, link)
         return link
     }
@@ -139,7 +140,11 @@ object SignalASILinkProtocol {
 
     @Synchronized
     fun removeServer(context: Context, desktopId: String) {
-        val remaining = allServerLinks(context).filterNot { it.desktopId == desktopId }
+        val links = allServerLinks(context)
+        links.firstOrNull { it.desktopId == desktopId }?.let {
+            SignalASILinkDeliveryStore.discardRoutes(context, it.routes)
+        }
+        val remaining = links.filterNot { it.desktopId == desktopId }
         write(context, remaining)
     }
 
