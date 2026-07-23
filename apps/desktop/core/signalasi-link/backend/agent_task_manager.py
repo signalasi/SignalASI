@@ -85,10 +85,13 @@ class AgentTask:
 
 
 class AgentTaskManager:
-    def __init__(self) -> None:
+    def __init__(self, heartbeat_interval_seconds: float = 5.0) -> None:
         self._lock = threading.RLock()
         self._tasks: dict[str, AgentTask] = {}
         self._recovered_task_ids: set[str] = set()
+        self._external_task_ids: set[str] = set()
+        self._external_heartbeat_stops: dict[str, threading.Event] = {}
+        self._heartbeat_interval_seconds = max(0.01, float(heartbeat_interval_seconds))
         self._load()
         if self._tasks:
             self._save_locked()
@@ -149,6 +152,7 @@ class AgentTaskManager:
             if task.task_id in self._tasks:
                 task.task_id = str(uuid.uuid4())
             self._tasks[task.task_id] = task
+            self._external_task_ids.add(task.task_id)
             self._save_locked()
         self._emit(task, on_event)
         return task
@@ -156,6 +160,8 @@ class AgentTaskManager:
     def resume_external(self, task_id: str, on_event: EventCallback) -> AgentTask | None:
         task = self._prepare_recovery(task_id)
         if task is not None:
+            with self._lock:
+                self._external_task_ids.add(task.task_id)
             self._emit(task, on_event)
         return task
 
@@ -166,9 +172,10 @@ class AgentTaskManager:
         on_event: EventCallback,
         on_result: EventCallback | None = None,
     ) -> AgentTask | None:
-        task = self.resume_external(task_id, on_event)
+        task = self._prepare_recovery(task_id)
         if task is None:
             return None
+        self._emit(task, on_event)
         self._set_status(task, "queued", on_event)
         threading.Thread(target=self._run, args=(task, runner, on_event, on_result), daemon=True).start()
         return task
@@ -207,6 +214,10 @@ class AgentTaskManager:
                 task.output_files = self._task_artifacts(task.task_id)
             if status in TERMINAL_STATES:
                 task.current_step = ""
+            if task.task_id in self._external_task_ids and status == "running":
+                self._ensure_external_heartbeat_locked(task, on_event)
+            elif status in TERMINAL_STATES or status == "interrupted":
+                self._stop_external_heartbeat_locked(task.task_id, forget_task=True)
             self._save_locked()
         self._emit(task, on_event)
         return task
@@ -283,7 +294,7 @@ class AgentTaskManager:
             task.process = None
 
     def _heartbeat(self, task: AgentTask, on_event: EventCallback, stop: threading.Event) -> None:
-        while not stop.wait(5):
+        while not stop.wait(self._heartbeat_interval_seconds):
             with self._lock:
                 if task.status != "running":
                     return
@@ -291,6 +302,60 @@ class AgentTaskManager:
                 task.status_seq += 1
                 self._save_locked()
             self._emit(task, on_event)
+
+    def _ensure_external_heartbeat_locked(
+        self,
+        task: AgentTask,
+        on_event: EventCallback | None,
+    ) -> None:
+        if on_event is None:
+            return
+        existing = self._external_heartbeat_stops.get(task.task_id)
+        if existing is not None and not existing.is_set():
+            return
+        stop = threading.Event()
+        self._external_heartbeat_stops[task.task_id] = stop
+        threading.Thread(
+            target=self._external_heartbeat,
+            args=(task.task_id, on_event, stop),
+            daemon=True,
+            name=f"signalasi-task-heartbeat-{task.task_id[:8]}",
+        ).start()
+
+    def _external_heartbeat(
+        self,
+        task_id: str,
+        on_event: EventCallback,
+        stop: threading.Event,
+    ) -> None:
+        try:
+            while not stop.wait(self._heartbeat_interval_seconds):
+                with self._lock:
+                    task = self._tasks.get(task_id)
+                    if (
+                        task is None
+                        or task_id not in self._external_task_ids
+                        or task.status in TERMINAL_STATES
+                        or task.status == "interrupted"
+                    ):
+                        return
+                    if task.status != "running":
+                        continue
+                    task.updated_at = int(time.time() * 1000)
+                    task.status_seq += 1
+                    self._save_locked()
+                self._emit(task, on_event)
+        finally:
+            with self._lock:
+                if self._external_heartbeat_stops.get(task_id) is stop:
+                    self._external_heartbeat_stops.pop(task_id, None)
+
+    def _stop_external_heartbeat_locked(self, task_id: str, *, forget_task: bool) -> None:
+        stop = self._external_heartbeat_stops.pop(task_id, None)
+        if stop is not None:
+            stop.set()
+        if forget_task:
+            self._external_task_ids.discard(task_id)
 
     @staticmethod
     def _looks_timed_out(result: str) -> bool:
@@ -392,6 +457,7 @@ class AgentTaskManager:
                 if task is not None and task.process is not None:
                     self._terminate(task.process)
                 self._recovered_task_ids.discard(task_id)
+                self._stop_external_heartbeat_locked(task_id, forget_task=True)
             self._save_locked()
         return deleted
 
@@ -468,6 +534,7 @@ class AgentTaskManager:
             task.error = error
             task.current_step = ""
             task.output_files = self._task_artifacts(task.task_id)
+            self._stop_external_heartbeat_locked(task.task_id, forget_task=True)
             self._save_locked()
         self._emit(task, on_event)
 

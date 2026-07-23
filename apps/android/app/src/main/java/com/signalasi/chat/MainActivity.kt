@@ -161,6 +161,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val MAX_AGENT_ATTACHMENT_BYTES = 20L * 1024L * 1024L
         private const val AGENT_REGISTRY_SYNC_INTERVAL_MILLIS = 5_000L
         private const val AGENT_STARTUP_MAINTENANCE_DELAY_MILLIS = 350L
+        private const val CONTROL_CENTER_HOME_CACHE_MILLIS = 30_000L
         private const val UI_PREFS = "signalasi_ui_preferences"
         private const val DEBUG_AGENT_PREFS = "signalasi_debug_agent"
         private const val HISTORY_PREFS = "signalasi_chat_history"
@@ -303,6 +304,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var meIdText: TextView
     private lateinit var meAvatar: ImageView
     private lateinit var controlCenterRenderer: ControlCenterRenderer
+    private val controlCenterHomeRenderCache = ControlCenterPageRenderCache()
+    private val controlCenterHomeRefreshPolicy =
+        ControlCenterHomeRefreshPolicy(CONTROL_CENTER_HOME_CACHE_MILLIS)
     private val controlCenterBackStack = ArrayDeque<ControlCenterDestination>()
     private var controlCenterDestination: ControlCenterDestination? = null
     private var renderingControlCenterDestination = false
@@ -1460,6 +1464,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "accepted" -> getString(R.string.agent_task_status_accepted)
             "queued" -> getString(R.string.agent_task_status_queued)
             "starting" -> getString(R.string.agent_task_status_starting)
+            "recovering" -> getString(R.string.agent_task_status_recovering)
             "running" -> getString(R.string.agent_task_status_running)
             "waiting_input" -> getString(R.string.agent_task_status_waiting_input)
             "waiting_approval" -> getString(R.string.agent_task_status_waiting_approval)
@@ -1509,7 +1514,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val turnId = envelopeTurnId.takeIf { it.isNotBlank() }
             ?: taskRuntime?.let(agentRuntimeTurnIds::get).orEmpty()
         if (turnId.isNotBlank() && status in setOf(
-                "accepted", "queued", "starting", "running", "waiting_input", "waiting_approval",
+                "accepted", "queued", "starting", "recovering", "running", "waiting_input", "waiting_approval",
                 "completed", "failed", "cancelled", "timed_out", "not_found"
             )
         ) {
@@ -1697,7 +1702,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ?: registrations.firstOrNull { it.agentId.endsWith(":$contactId") || contactId.endsWith(":${it.agentId}") }
             ?: return
         val endpointStatus = when (taskStatus) {
-            "accepted", "queued", "starting", "running", "waiting_input", "waiting_approval" -> AgentEndpointStatus.BUSY
+            "accepted", "queued", "starting", "recovering", "running", "waiting_input", "waiting_approval" -> AgentEndpointStatus.BUSY
             "timed_out" -> AgentEndpointStatus.DEGRADED
             "completed", "failed", "cancelled", "not_found" -> AgentEndpointStatus.IDLE
             else -> registration.status
@@ -5062,10 +5067,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
-    private fun refreshSettingsControlCenter() {
-        if (activeMainTab == PAGE_SETTINGS && featurePage.visibility != View.VISIBLE) {
-            renderControlCenterHome()
-        }
+    private fun refreshSettingsControlCenter(force: Boolean = false) {
+        val now = SystemClock.elapsedRealtime()
+        val visible = activeMainTab == PAGE_SETTINGS && featurePage.visibility != View.VISIBLE
+        if (!controlCenterHomeRefreshPolicy.shouldRefresh(visible, now, force)) return
+        renderControlCenterHome()
     }
 
     private fun renderControlCenterHome() {
@@ -5110,9 +5116,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             else -> ControlCenterTone.BLUE
         }
 
-        controlCenterRenderer.render(
-            content,
-            ControlCenterPageSpec(
+        val page = ControlCenterPageSpec(
                 hero = ControlCenterHeroSpec(
                     title = getString(R.string.settings_my_signalasi),
                     subtitle = getString(R.string.cc_product_subtitle),
@@ -5224,9 +5228,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         listOf(ccRouteRow(ControlCenterRoute.GENERAL, R.string.cc_general_title, R.string.cc_general_subtitle, R.drawable.ic_tab_settings, "", ControlCenterTone.NEUTRAL))
                     )
                 )
-            ),
-            ::handleControlCenterAction
         )
+        if (controlCenterHomeRenderCache.shouldRender(page, content.childCount > 0)) {
+            controlCenterRenderer.render(content, page, ::handleControlCenterAction)
+        }
+        controlCenterHomeRefreshPolicy.markRendered(SystemClock.elapsedRealtime())
     }
 
     private fun ccRouteRow(
@@ -5270,6 +5276,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             return
         }
+        controlCenterHomeRefreshPolicy.invalidate()
         when (actionId) {
             "global.toggle_enabled" -> updateGlobalAgentSettings { it.copy(enabled = !it.enabled) }
             "global.toggle_proactive" -> updateGlobalAgentSettings {
@@ -12763,7 +12770,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         mePage.visibility = if (tab == PAGE_SETTINGS) View.VISIBLE else View.GONE
         if (tab == PAGE_SETTINGS) refreshSettingsControlCenter()
         if (tab == PAGE_AGENT) refreshGlobalInsightIndicator()
-
     }
 
     private fun applyAgentBrandLogoTextScale() {
@@ -14035,6 +14041,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         "agent_replied" -> getString(R.string.delivery_trace_agent_replied)
         "agent_accepted" -> getString(R.string.agent_task_status_accepted)
         "agent_queued" -> getString(R.string.agent_task_status_queued)
+        "agent_recovering" -> getString(R.string.agent_task_status_recovering)
         "agent_running" -> getString(R.string.agent_task_status_running)
         "agent_waiting_input" -> getString(R.string.agent_task_status_waiting_input)
         "agent_completed" -> getString(R.string.agent_task_status_completed)
@@ -14450,7 +14457,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 showChatPage(contact)
             }
         })
-        if (message.taskId.isNotBlank() && message.taskStatus in setOf("accepted", "queued", "running", "waiting_input")) {
+        if (message.taskId.isNotBlank() && message.taskStatus in setOf("accepted", "queued", "recovering", "running", "waiting_input")) {
             featureContent.addView(featureRow(getString(R.string.agent_task_cancel_title), getString(R.string.agent_task_cancel_subtitle), R.drawable.ic_delete, getString(R.string.common_cancel)).apply {
                 setOnClickListener {
                     val sent = SignalASIMqttClient.publishAgentTaskCancel(
