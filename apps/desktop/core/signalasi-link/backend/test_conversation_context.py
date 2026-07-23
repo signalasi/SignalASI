@@ -173,6 +173,45 @@ class ConversationContextTest(unittest.TestCase):
         self.assertEqual((1_000, "task-1"), cursor)
         self.assertEqual(["new", "ready", "current"], [item.content for item in messages])
 
+    def test_compaction_uses_a_contiguous_prefix_for_durable_cursors(self):
+        messages = []
+        for index, size in enumerate((80, 1_200, 80, 80, 80)):
+            messages.extend(
+                (
+                    ContextMessage(
+                        "user",
+                        f"request {index} " + "context " * size,
+                        f"u{index}",
+                        f"task-{index}",
+                    ),
+                    ContextMessage(
+                        "assistant",
+                        f"result {index} " + "output " * size,
+                        f"a{index}",
+                        f"task-{index}",
+                    ),
+                )
+            )
+
+        result = compile_context(
+            messages,
+            budget=ContextBudget(
+                context_window_tokens=4_096,
+                reserved_output_tokens=1_024,
+                trigger_ratio=0.50,
+                target_ratio=0.30,
+                minimum_recent_groups=2,
+                maximum_summary_tokens=400,
+            ),
+        )
+
+        compacted = [
+            index for index in range(5)
+            if f"task-{index}" in result.compacted_group_ids
+        ]
+        self.assertTrue(result.compacted)
+        self.assertEqual(compacted, list(range(len(compacted))))
+
     def test_cjk_estimate_is_not_four_characters_per_token(self):
         self.assertGreater(estimate_tokens("\u4eca\u5929\u4e0a\u6d77\u5929\u6c14\u600e\u4e48\u6837"), estimate_tokens("abcdefghij"))
 

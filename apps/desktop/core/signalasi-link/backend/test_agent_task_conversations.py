@@ -11,7 +11,7 @@ import agent_task_manager
 class AgentTaskConversationTests(unittest.TestCase):
     def test_terminal_tasks_clear_stale_running_step(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
-            agent_task_manager, "TASKS_PATH", Path(temporary) / "tasks.json"
+            agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
         ):
             manager = agent_task_manager.AgentTaskManager()
             terminal = threading.Event()
@@ -39,7 +39,7 @@ class AgentTaskConversationTests(unittest.TestCase):
 
     def test_external_terminal_update_clears_current_step(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
-            agent_task_manager, "TASKS_PATH", Path(temporary) / "tasks.json"
+            agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
         ):
             manager = agent_task_manager.AgentTaskManager()
             manager.create_external(
@@ -59,7 +59,7 @@ class AgentTaskConversationTests(unittest.TestCase):
 
     def test_external_running_task_emits_heartbeats_until_terminal(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
-            agent_task_manager, "TASKS_PATH", Path(temporary) / "tasks.json"
+            agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
         ):
             events = []
             second_heartbeat = threading.Event()
@@ -92,7 +92,7 @@ class AgentTaskConversationTests(unittest.TestCase):
 
     def test_external_heartbeat_pauses_for_input_and_resumes_without_duplicate_threads(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
-            agent_task_manager, "TASKS_PATH", Path(temporary) / "tasks.json"
+            agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
         ):
             events = []
             manager = agent_task_manager.AgentTaskManager(heartbeat_interval_seconds=0.02)
@@ -125,7 +125,7 @@ class AgentTaskConversationTests(unittest.TestCase):
 
     def test_delete_conversation_removes_only_matching_tasks(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
-            agent_task_manager, "TASKS_PATH", Path(temporary) / "tasks.json"
+            agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
         ):
             manager = agent_task_manager.AgentTaskManager()
             first = manager.create_external(
@@ -150,7 +150,7 @@ class AgentTaskConversationTests(unittest.TestCase):
 
     def test_restart_replays_only_tasks_that_were_interrupted(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
-            agent_task_manager, "TASKS_PATH", Path(temporary) / "tasks.json"
+            agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
         ):
             manager = agent_task_manager.AgentTaskManager()
             manager.create_external(
@@ -182,7 +182,7 @@ class AgentTaskConversationTests(unittest.TestCase):
 
     def test_second_interruption_stops_automatic_recovery(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
-            agent_task_manager, "TASKS_PATH", Path(temporary) / "tasks.json"
+            agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
         ):
             manager = agent_task_manager.AgentTaskManager()
             manager.create_external(
@@ -204,7 +204,7 @@ class AgentTaskConversationTests(unittest.TestCase):
 
     def test_client_turn_id_survives_codex_internal_turn_updates(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
-            agent_task_manager, "TASKS_PATH", Path(temporary) / "tasks.json"
+            agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
         ):
             manager = agent_task_manager.AgentTaskManager()
             manager.create_external(

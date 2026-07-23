@@ -11,8 +11,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from agent_task_store import AgentTaskStore
 
-TASKS_PATH = Path.home() / ".signalasi" / "agent_tasks.json"
+
+TASKS_DB_PATH = Path.home() / ".signalasi" / "agent_tasks.sqlite3"
 TERMINAL_STATES = {"completed", "failed", "cancelled", "timed_out"}
 MAX_AUTOMATIC_RECOVERY_ATTEMPTS = 2
 EventCallback = Callable[[dict], None]
@@ -48,6 +50,11 @@ class AgentTask:
     attempt: int = 1
     process: subprocess.Popen | None = field(default=None, repr=False, compare=False)
     cancel_requested: bool = field(default=False, repr=False, compare=False)
+
+    def record(self) -> dict:
+        data = self.public(include_prompt=True)
+        data["events"] = list(self.events)
+        return data
 
     def public(self, include_prompt: bool = False) -> dict:
         data = {
@@ -85,16 +92,19 @@ class AgentTask:
 
 
 class AgentTaskManager:
-    def __init__(self, heartbeat_interval_seconds: float = 5.0) -> None:
+    def __init__(
+        self,
+        heartbeat_interval_seconds: float = 5.0,
+        state_path: Path | None = None,
+    ) -> None:
         self._lock = threading.RLock()
         self._tasks: dict[str, AgentTask] = {}
         self._recovered_task_ids: set[str] = set()
         self._external_task_ids: set[str] = set()
         self._external_heartbeat_stops: dict[str, threading.Event] = {}
         self._heartbeat_interval_seconds = max(0.01, float(heartbeat_interval_seconds))
+        self._store = AgentTaskStore(state_path or TASKS_DB_PATH)
         self._load()
-        if self._tasks:
-            self._save_locked()
 
     def create(
         self,
@@ -127,10 +137,10 @@ class AgentTaskManager:
             attempt=max(1, int(attempt or 1)),
         )
         with self._lock:
-            if task.task_id in self._tasks:
+            if task.task_id in self._tasks or self._store.get(task.task_id) is not None:
                 task.task_id = str(uuid.uuid4())
             self._tasks[task.task_id] = task
-            self._save_locked()
+            self._save_locked(task)
         self._emit(task, on_event)
         self._set_status(task, "queued", on_event)
         threading.Thread(target=self._run, args=(task, runner, on_event, on_result), daemon=True).start()
@@ -149,11 +159,11 @@ class AgentTaskManager:
             client_turn_id=client_turn_id,
         )
         with self._lock:
-            if task.task_id in self._tasks:
+            if task.task_id in self._tasks or self._store.get(task.task_id) is not None:
                 task.task_id = str(uuid.uuid4())
             self._tasks[task.task_id] = task
             self._external_task_ids.add(task.task_id)
-            self._save_locked()
+            self._save_locked(task)
         self._emit(task, on_event)
         return task
 
@@ -218,7 +228,7 @@ class AgentTaskManager:
                 self._ensure_external_heartbeat_locked(task, on_event)
             elif status in TERMINAL_STATES or status == "interrupted":
                 self._stop_external_heartbeat_locked(task.task_id, forget_task=True)
-            self._save_locked()
+            self._save_locked(task)
         self._emit(task, on_event)
         return task
 
@@ -252,11 +262,11 @@ class AgentTaskManager:
                     event["metadata"] = {"truncated": True}
             except Exception:
                 event["metadata"] = {}
-            task.events = [*task.events[-99:], event]
+            task.events.append(event)
             task.current_step = event["title"]
             task.updated_at = event["created_at"]
             task.status_seq += 1
-            self._save_locked()
+            self._save_locked(task)
         self._emit(task, on_event)
         return task
 
@@ -300,7 +310,7 @@ class AgentTaskManager:
                     return
                 task.updated_at = int(time.time() * 1000)
                 task.status_seq += 1
-                self._save_locked()
+                self._save_locked(task)
             self._emit(task, on_event)
 
     def _ensure_external_heartbeat_locked(
@@ -343,7 +353,7 @@ class AgentTaskManager:
                         continue
                     task.updated_at = int(time.time() * 1000)
                     task.status_seq += 1
-                    self._save_locked()
+                    self._save_locked(task)
                 self._emit(task, on_event)
         finally:
             with self._lock:
@@ -387,7 +397,7 @@ class AgentTaskManager:
             if task is not None:
                 task.exit_code = exit_code
                 task.updated_at = int(time.time() * 1000)
-                self._save_locked()
+                self._save_locked(task)
 
     def cancel(self, task_id: str, on_event: EventCallback | None = None) -> AgentTask | None:
         with self._lock:
@@ -411,45 +421,55 @@ class AgentTaskManager:
 
     def get(self, task_id: str) -> AgentTask | None:
         with self._lock:
-            return self._tasks.get(task_id)
+            task = self._tasks.get(task_id)
+            if task is not None:
+                return task
+            record = self._store.get(task_id)
+            if record is None:
+                return None
+            task = self._decode_task(record)
+            self._tasks[task.task_id] = task
+            return task
 
     def list(self, limit: int = 100, include_prompt: bool = False) -> list[dict]:
         with self._lock:
-            tasks = sorted(self._tasks.values(), key=lambda item: item.updated_at, reverse=True)
-            return [item.public(include_prompt=include_prompt) for item in tasks[:max(1, min(limit, 500))]]
+            records = self._store.list_recent(max(1, min(int(limit or 100), 500)))
+            return [
+                (
+                    self._tasks.get(str(record.get("task_id") or ""))
+                    or self._decode_task(record)
+                ).public(include_prompt=include_prompt)
+                for record in records
+            ]
 
     def conversation_messages(
         self,
         conversation_id: str,
-        limit: int = 12,
+        limit: int | None = None,
         source_prefix: str | None = "desktop:",
+        after_cursor: tuple[int, str] = (0, ""),
     ) -> list[dict]:
         clean_id = str(conversation_id or "").strip()
         if not clean_id:
             return []
         with self._lock:
-            tasks = sorted(
-                (
-                    task for task in self._tasks.values()
-                    if task.conversation_id == clean_id
-                    and (
-                        source_prefix is None
-                        or task.source_message_id.startswith(source_prefix)
-                    )
-                ),
-                key=lambda item: (item.created_at, item.task_id),
-            )[-max(1, min(limit, 500)):]
+            records = self._store.conversation(
+                clean_id,
+                source_prefix=source_prefix,
+                after_cursor=after_cursor,
+                limit=limit,
+            )
             return [
                 {
-                    "task_id": task.task_id,
-                    "prompt": task.prompt,
-                    "result": task.result,
-                    "status": task.status,
-                    "agent_id": task.agent_id,
-                    "created_at": task.created_at,
+                    "task_id": record.get("task_id"),
+                    "prompt": record.get("prompt"),
+                    "result": record.get("result"),
+                    "status": record.get("status"),
+                    "agent_id": record.get("agent_id"),
+                    "created_at": record.get("created_at"),
                 }
-                for task in tasks
-                if task.prompt
+                for record in records
+                if str(record.get("prompt") or "")
             ]
 
     def delete_conversation(self, conversation_id: str, task_ids: set[str] | None = None) -> list[str]:
@@ -458,17 +478,13 @@ class AgentTaskManager:
         if not clean_id and not allowed_ids:
             return []
         with self._lock:
-            deleted = [
-                task_id for task_id, task in self._tasks.items()
-                if (clean_id and task.conversation_id == clean_id) or task_id in allowed_ids
-            ]
+            deleted = self._store.delete_conversation(clean_id, allowed_ids)
             for task_id in deleted:
                 task = self._tasks.pop(task_id, None)
                 if task is not None and task.process is not None:
                     self._terminate(task.process)
                 self._recovered_task_ids.discard(task_id)
                 self._stop_external_heartbeat_locked(task_id, forget_task=True)
-            self._save_locked()
         return deleted
 
     def drain_recovered(self, limit: int = 100) -> list[dict]:
@@ -506,19 +522,16 @@ class AgentTaskManager:
             task.process = None
             task.cancel_requested = False
             task.status_seq += 1
-            task.events = [
-                *task.events[-99:],
-                {
-                    "event_id": str(uuid.uuid4()),
-                    "created_at": now,
-                    "kind": "recovery",
-                    "title": "Resuming after Desktop restart",
-                    "status": "running",
-                    "detail": f"Automatic recovery attempt {task.attempt}",
-                    "metadata": {"attempt": task.attempt},
-                },
-            ]
-            self._save_locked()
+            task.events.append({
+                "event_id": str(uuid.uuid4()),
+                "created_at": now,
+                "kind": "recovery",
+                "title": "Resuming after Desktop restart",
+                "status": "running",
+                "detail": f"Automatic recovery attempt {task.attempt}",
+                "metadata": {"attempt": task.attempt},
+            })
+            self._save_locked(task)
         return task
 
     def _set_status(self, task: AgentTask, status: str, on_event: EventCallback | None) -> None:
@@ -528,7 +541,7 @@ class AgentTaskManager:
             task.status = status
             task.updated_at = int(time.time() * 1000)
             task.status_seq += 1
-            self._save_locked()
+            self._save_locked(task)
         self._emit(task, on_event)
 
     def _finish(self, task: AgentTask, status: str, on_event: EventCallback | None, result: str = "", error: str = "") -> None:
@@ -545,7 +558,7 @@ class AgentTaskManager:
             task.current_step = ""
             task.output_files = self._task_artifacts(task.task_id)
             self._stop_external_heartbeat_locked(task.task_id, forget_task=True)
-            self._save_locked()
+            self._save_locked(task)
         self._emit(task, on_event)
 
     def _emit(self, task: AgentTask, on_event: EventCallback | None) -> None:
@@ -579,72 +592,63 @@ class AgentTaskManager:
                 pass
 
     def _load(self) -> None:
-        try:
-            rows = json.loads(TASKS_PATH.read_text(encoding="utf-8"))
-            for row in rows if isinstance(rows, list) else []:
-                status = str(row.get("status") or "failed")
-                interrupted = status not in TERMINAL_STATES
-                if interrupted:
-                    recovered_at = int(time.time() * 1000)
-                    row["updated_at"] = recovered_at
-                    row["status_seq"] = int(row.get("status_seq") or 0) + 1
-                    previous_attempt = max(1, int(row.get("attempt") or 1))
-                    if previous_attempt >= MAX_AUTOMATIC_RECOVERY_ATTEMPTS:
-                        status = "failed"
-                        row["error"] = "Task recovery stopped after repeated Desktop restarts"
-                        row["completed_at"] = recovered_at
-                        row["current_step"] = ""
-                    else:
-                        status = "recovering"
-                        row["attempt"] = previous_attempt + 1
-                        row["completed_at"] = 0
-                        row["result"] = ""
-                        row["error"] = ""
-                        row["exit_code"] = None
-                        row["current_step"] = "Recovering after Desktop restart"
-                task = AgentTask(
-                    task_id=str(row.get("task_id") or uuid.uuid4()),
-                    agent_id=str(row.get("agent_id") or ""),
-                    contact_id=str(row.get("contact_id") or ""),
-                    source_message_id=str(row.get("source_message_id") or ""),
-                    prompt=str(row.get("prompt") or ""),
-                    conversation_id=str(row.get("conversation_id") or ""),
-                    client_route_id=str(row.get("client_route_id") or ""),
-                    status=status,
-                    created_at=int(row.get("created_at") or 0),
-                    started_at=int(row.get("started_at") or 0),
-                    updated_at=int(row.get("updated_at") or 0),
-                    completed_at=int(row.get("completed_at") or 0),
-                    result=str(row.get("result") or ""),
-                    error=str(row.get("error") or ""),
-                    exit_code=row.get("exit_code"),
-                    status_seq=int(row.get("status_seq") or 0),
-                    thread_id=str(row.get("thread_id") or ""),
-                    turn_id=str(row.get("turn_id") or ""),
-                    client_turn_id=str(row.get("client_turn_id") or ""),
-                    delegate_agent_id=str(row.get("delegate_agent_id") or ""),
-                    current_step="" if status in TERMINAL_STATES else str(row.get("current_step") or ""),
-                    events=list(row.get("events") or [])[-100:],
-                    output_files=list(row.get("output_files") or [])[:100],
-                    attachments=[str(value) for value in list(row.get("attachments") or [])[:12]],
-                    retry_of=str(row.get("retry_of") or ""),
-                    attempt=max(1, int(row.get("attempt") or 1)),
-                )
-                self._tasks[task.task_id] = task
-                if interrupted:
-                    self._recovered_task_ids.add(task.task_id)
-        except Exception:
-            return
+        for row in self._store.recoverable(TERMINAL_STATES):
+            task = self._decode_task(row)
+            recovered_at = int(time.time() * 1000)
+            task.updated_at = recovered_at
+            task.status_seq += 1
+            previous_attempt = max(1, task.attempt)
+            if previous_attempt >= MAX_AUTOMATIC_RECOVERY_ATTEMPTS:
+                task.status = "failed"
+                task.error = "Task recovery stopped after repeated Desktop restarts"
+                task.completed_at = recovered_at
+                task.current_step = ""
+            else:
+                task.status = "recovering"
+                task.attempt = previous_attempt + 1
+                task.completed_at = 0
+                task.result = ""
+                task.error = ""
+                task.exit_code = None
+                task.current_step = "Recovering after Desktop restart"
+            self._tasks[task.task_id] = task
+            self._recovered_task_ids.add(task.task_id)
+            self._store.upsert(task.record())
 
-    def _save_locked(self) -> None:
-        try:
-            TASKS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            rows = [task.public(include_prompt=True) for task in sorted(self._tasks.values(), key=lambda item: item.updated_at)[-500:]]
-            temporary = TASKS_PATH.with_suffix(".tmp")
-            temporary.write_text(json.dumps(rows, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-            temporary.replace(TASKS_PATH)
-        except Exception:
-            pass
+    def _save_locked(self, task: AgentTask) -> None:
+        self._store.upsert(task.record())
+
+    @staticmethod
+    def _decode_task(row: dict) -> AgentTask:
+        status = str(row.get("status") or "failed")
+        return AgentTask(
+            task_id=str(row.get("task_id") or uuid.uuid4()),
+            agent_id=str(row.get("agent_id") or ""),
+            contact_id=str(row.get("contact_id") or ""),
+            source_message_id=str(row.get("source_message_id") or ""),
+            prompt=str(row.get("prompt") or ""),
+            conversation_id=str(row.get("conversation_id") or ""),
+            client_route_id=str(row.get("client_route_id") or ""),
+            status=status,
+            created_at=int(row.get("created_at") or 0),
+            started_at=int(row.get("started_at") or 0),
+            updated_at=int(row.get("updated_at") or 0),
+            completed_at=int(row.get("completed_at") or 0),
+            result=str(row.get("result") or ""),
+            error=str(row.get("error") or ""),
+            exit_code=row.get("exit_code"),
+            status_seq=int(row.get("status_seq") or 0),
+            thread_id=str(row.get("thread_id") or ""),
+            turn_id=str(row.get("turn_id") or ""),
+            client_turn_id=str(row.get("client_turn_id") or ""),
+            delegate_agent_id=str(row.get("delegate_agent_id") or ""),
+            current_step="" if status in TERMINAL_STATES else str(row.get("current_step") or ""),
+            events=list(row.get("events") or []),
+            output_files=list(row.get("output_files") or [])[:100],
+            attachments=[str(value) for value in list(row.get("attachments") or [])[:12]],
+            retry_of=str(row.get("retry_of") or ""),
+            attempt=max(1, int(row.get("attempt") or 1)),
+        )
 
     @staticmethod
     def _task_artifacts(task_id: str) -> list[dict]:
