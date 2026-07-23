@@ -921,6 +921,10 @@ object AppStore {
         context.getSharedPreferences("signalasi_agent_knowledge", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_knowledge_audit", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_tasks", Context.MODE_PRIVATE).edit().clear().commit()
+        SQLiteAgentTaskStore(context).apply {
+            clear()
+            closeDefault()
+        }
         context.getSharedPreferences(AgentTranscriptStore.PREFS, Context.MODE_PRIVATE).edit().clear().commit()
         AgentEncryptedDatabase(context, AgentTranscriptStore.PREFS).clear()
         AgentTranscriptEntryDatabase(context).clear()
