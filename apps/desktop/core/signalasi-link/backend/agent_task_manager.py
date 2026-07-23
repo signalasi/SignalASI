@@ -418,7 +418,12 @@ class AgentTaskManager:
             tasks = sorted(self._tasks.values(), key=lambda item: item.updated_at, reverse=True)
             return [item.public(include_prompt=include_prompt) for item in tasks[:max(1, min(limit, 500))]]
 
-    def conversation_messages(self, conversation_id: str, limit: int = 12) -> list[dict]:
+    def conversation_messages(
+        self,
+        conversation_id: str,
+        limit: int = 12,
+        source_prefix: str | None = "desktop:",
+    ) -> list[dict]:
         clean_id = str(conversation_id or "").strip()
         if not clean_id:
             return []
@@ -426,10 +431,14 @@ class AgentTaskManager:
             tasks = sorted(
                 (
                     task for task in self._tasks.values()
-                    if task.conversation_id == clean_id and task.source_message_id.startswith("desktop:")
+                    if task.conversation_id == clean_id
+                    and (
+                        source_prefix is None
+                        or task.source_message_id.startswith(source_prefix)
+                    )
                 ),
-                key=lambda item: item.created_at,
-            )[-max(1, min(limit, 40)):]
+                key=lambda item: (item.created_at, item.task_id),
+            )[-max(1, min(limit, 500)):]
             return [
                 {
                     "task_id": task.task_id,
@@ -437,6 +446,7 @@ class AgentTaskManager:
                     "result": task.result,
                     "status": task.status,
                     "agent_id": task.agent_id,
+                    "created_at": task.created_at,
                 }
                 for task in tasks
                 if task.prompt

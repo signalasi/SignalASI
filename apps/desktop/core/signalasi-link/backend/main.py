@@ -775,24 +775,46 @@ def _desktop_agent_for(prompt: str, requested: str = "auto") -> str:
 
 
 def _desktop_task_prompt(prompt: str, conversation_id: str, attachment_paths: list[str]) -> str:
-    history = agent_task_manager.conversation_messages(conversation_id, limit=8)
-    parts = [
+    from conversation_context import (
+        ContextBudget,
+        compacted_history_cursor,
+        compile_context,
+        conversation_summary_store,
+        render_prompt,
+        task_history_messages,
+    )
+
+    history = agent_task_manager.conversation_messages(conversation_id, limit=500)
+    summary_store = conversation_summary_store()
+    summary_key = f"desktop-task:{conversation_id}"
+    summary_state = summary_store.state(summary_key)
+    preamble = (
         "You are executing a task from SignalASI Desktop. Work directly, use the available local tools, "
         "verify the result, and return a concise final response with artifact paths when files are created."
-    ]
-    if history:
-        parts.append("Conversation context from this same SignalASI Desktop session:")
-        for item in history:
-            if item.get("status") != "completed" and str(item.get("prompt") or "").strip() == str(prompt or "").strip():
-                continue
-            parts.append(f"User: {item['prompt'][:4_000]}")
-            if item.get("result"):
-                parts.append(f"Assistant: {str(item['result'])[:8_000]}")
+    )
     if attachment_paths:
-        parts.append("Files attached to this task workspace:")
-        parts.extend(f"- {value}" for value in attachment_paths)
-    parts.append(f"Current user request:\n{str(prompt or '').strip()}")
-    return "\n\n".join(parts)
+        preamble += "\n\nFiles attached to this task workspace:\n" + "\n".join(
+            f"- {value}" for value in attachment_paths
+        )
+    compiled = compile_context(
+        task_history_messages(history, prompt, after_cursor=summary_state.cursor),
+        previous_summary=summary_state.summary,
+        fixed_prompt=preamble,
+        budget=ContextBudget(),
+    )
+    if compiled.compacted and compiled.summary:
+        cursor = compacted_history_cursor(
+            history,
+            compiled.compacted_group_ids,
+            summary_state.cursor,
+        )
+        summary_store.put(
+            summary_key,
+            compiled.summary,
+            through_created_at=cursor[0],
+            through_task_id=cursor[1],
+        )
+    return render_prompt(compiled, prompt, preamble=preamble)
 
 
 def _copy_desktop_attachments(task_id: str, values: list[str]) -> list[str]:
@@ -992,6 +1014,9 @@ def api_retry_desktop_task(task_id: str, request: Request):
 def api_delete_desktop_conversation(conversation_id: str, request: Request):
     require_loopback(request)
     deleted = agent_task_manager.delete_conversation(conversation_id)
+    from conversation_context import conversation_summary_store
+
+    conversation_summary_store().delete_conversation(conversation_id)
     return {"conversation_id": conversation_id, "deleted_task_ids": deleted}
 
 @app.get("/api/messages/{contact_id}")

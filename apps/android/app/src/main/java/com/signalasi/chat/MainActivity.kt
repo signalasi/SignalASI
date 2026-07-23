@@ -12914,7 +12914,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             val selectedModel = AppStore.selectedCloudModelContact(this, contact.id) ?: raw
             val contextTurns = (messages[contact.id] ?: currentMessages)
                 .filterNot { it.isSystem }
-                .takeLast(14)
                 .map { it.copy() }
             requestCloudModelReply(contact, selectedModel, contextTurns, msg.id)
             return
@@ -13184,6 +13183,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         if (destroyAllData) {
             AppStore.destroyAllPrivateData(this)
+            CloudConversationContextStore.clear(this)
             messages.clear()
             summaries.clear()
             directoryContacts.clear()
@@ -18772,6 +18772,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun destroyAllPrivateDataAndRestart() {
         AppStore.destroyAllPrivateData(this)
+        CloudConversationContextStore.clear(this)
         messages.clear()
         summaries.clear()
         directoryContacts.clear()
@@ -18906,6 +18907,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             setOnClickListener {
                 messages.remove(contact.id)
                 summaries.remove(contact.id)
+                CloudConversationContextStore.removeContact(this@MainActivity, contact.id)
                 saveChatHistory()
                 refreshContactList()
                 Toast.makeText(this@MainActivity, getString(R.string.delete_chat_toast), Toast.LENGTH_SHORT).show()
@@ -18937,6 +18939,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             setOnClickListener {
                 AppStore.deleteContact(this@MainActivity, contact.id, deleteMessages = false)
+                CloudConversationContextStore.removeContact(this@MainActivity, contact.id)
                 refreshDirectoryContacts()
                 Toast.makeText(this@MainActivity, getString(R.string.delete_contact_toast), Toast.LENGTH_LONG).show()
                 hideFeaturePage()
