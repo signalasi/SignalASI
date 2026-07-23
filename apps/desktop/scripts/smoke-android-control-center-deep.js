@@ -13,6 +13,7 @@ const homeAssistantPreferencesPath = "shared_prefs/signalasi_home_assistant.xml"
 const displayPreferencesPath = "shared_prefs/signalasi_display.xml";
 const safetyPreferencesPath = "shared_prefs/signalasi_agent_safety.xml";
 const plannerPreferencesPath = "shared_prefs/signalasi_agent_model_planner.xml";
+const uiCaptureRunId = `${Date.now().toString(36)}-${process.pid}`;
 
 const labels = {
   back: ["\u2039"],
@@ -25,6 +26,7 @@ const labels = {
   routing: ["Models & Resource Routing", "\u6a21\u578b\u4e0e\u8d44\u6e90\u8def\u7531"],
   memory: ["Memory & Personalization", "\u8bb0\u5fc6\u4e0e\u4e2a\u6027\u5316"],
   knowledge: ["Knowledge", "\u77e5\u8bc6\u5e93"],
+  capabilities: ["MCP & Skills", "MCP \u4e0e\u6280\u80fd"],
   skills: ["Skills", "\u6280\u80fd"],
   phone: ["Phone Capabilities", "\u624b\u673a\u80fd\u529b"],
   appTools: ["Apps & Tools", "\u5e94\u7528\u4e0e\u5de5\u5177"],
@@ -124,9 +126,11 @@ function uiNodes(xml) {
 }
 
 async function dumpUi(name) {
-  const remote = `/sdcard/signalasi-cc-deep-${name}.xml`;
+  const safeName = String(name || "screen").replace(/[^a-z0-9._-]+/gi, "-").slice(0, 96);
+  const remote = `/sdcard/signalasi-cc-deep-${uiCaptureRunId}-${safeName}.xml`;
   for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
+      adb(["shell", "rm", "-f", remote]);
       adb(["shell", "uiautomator", "dump", remote]);
       const xml = adb(["shell", "cat", remote]);
       if (xml.includes("<hierarchy")) return xml;
@@ -190,7 +194,6 @@ async function tapText(candidates, name, scroll = false, preferLast = false) {
       if (process.env.SIGNALASI_CC_TRACE === "1") {
         process.stdout.write(`[tap] ${name} text=${node.text || node["content-desc"] || ""} node=${node.bounds.join(",")} target=${target.bounds.join(",")} keyboard=${inputShown}\n`);
       }
-      await sleep(250);
       adb(["shell", "input", "tap", String(Math.round((left + right) / 2)), String(Math.round((top + bottom) / 2))]);
       await sleep(550);
       return;
@@ -209,6 +212,34 @@ async function expectText(candidates, name) {
     throw new Error(`Expected text not found: ${candidates.join(" / ")}`);
   }
   return xml;
+}
+
+async function openControlCenterChild(route, control, destination, name, scroll = true) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await openPage(route);
+    try {
+      await tapText(control, `${name}-tap-${attempt}`, scroll);
+      return await waitForText(destination, `${name}-ready-${attempt}`, 5);
+    } catch (error) {
+      lastError = error;
+      await sleep(200);
+    }
+  }
+  throw lastError || new Error(`Could not open child page: ${destination.join(" / ")}`);
+}
+
+async function waitForText(candidates, name, attempts = 16) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await expectText(candidates, `${name}-${attempt}`);
+    } catch (error) {
+      lastError = error;
+      await sleep(250);
+    }
+  }
+  throw lastError || new Error(`Expected text not found: ${candidates.join(" / ")}`);
 }
 
 async function expectNear(labelCandidates, expectedCandidates, name) {
@@ -238,9 +269,11 @@ async function openPage(page) {
     await sleep(180);
   }
   try { adb(["shell", "am", "force-stop", "com.google.android.documentsui"]); } catch (_) {}
-  adb(["shell", "am", "force-stop", packageName]);
+  const coldStart = process.env.SIGNALASI_CC_FORCE_COLD_START === "1"
+    || !adb(["shell", "pidof", packageName]).trim();
+  if (coldStart) adb(["shell", "am", "force-stop", packageName]);
   adb(["shell", "am", "start", "-W", "-n", activityName, "--es", "signalasi_debug_control_center_page", page]);
-  await sleep(750);
+  await sleep(coldStart ? 600 : 150);
   await dismissKeyboard();
 }
 
@@ -253,9 +286,11 @@ async function openDebugBoolean(extra) {
     await sleep(180);
   }
   try { adb(["shell", "am", "force-stop", "com.google.android.documentsui"]); } catch (_) {}
-  adb(["shell", "am", "force-stop", packageName]);
+  const coldStart = process.env.SIGNALASI_CC_FORCE_COLD_START === "1"
+    || !adb(["shell", "pidof", packageName]).trim();
+  if (coldStart) adb(["shell", "am", "force-stop", packageName]);
   adb(["shell", "am", "start", "-W", "-n", activityName, "--ez", extra, "true"]);
-  await sleep(750);
+  await sleep(coldStart ? 600 : 150);
   await dismissKeyboard();
 }
 
@@ -290,9 +325,10 @@ function visiblePackages(xml) {
 function ensureAppHealthy() {
   const pid = adb(["shell", "pidof", packageName]).trim();
   if (!pid) throw new Error("SignalASI process is not running");
-  const fatal = adb(["logcat", "-d", "-v", "brief", "AndroidRuntime:E", "*:S"]);
-  if (/FATAL EXCEPTION|Process: com\.signalasi\.chat.*has died/i.test(fatal)) {
-    throw new Error("AndroidRuntime reported a fatal exception");
+  const fatal = adb(["logcat", "-d", "-v", "threadtime", "AndroidRuntime:E", "*:S"]);
+  const appFatal = /FATAL EXCEPTION[\s\S]{0,2000}?Process:\s*com\.signalasi\.chat\b/i.exec(fatal);
+  if (appFatal) {
+    throw new Error(`SignalASI reported a fatal exception: ${appFatal[0].split("\n").slice(0, 3).join(" | ")}`);
   }
 }
 
@@ -429,6 +465,9 @@ async function headerBack(expected, name) {
 
 async function runCase(name, area, body) {
   const startedAt = Date.now();
+  try { adb(["shell", "am", "force-stop", "com.google.android.documentsui"]); } catch (_) {}
+  adb(["shell", "am", "force-stop", packageName]);
+  await sleep(180);
   adb(["logcat", "-c"]);
   try {
     await body();
@@ -453,7 +492,7 @@ async function main() {
         ["resource_routing", labels.routing],
         ["memory", labels.memory],
         ["knowledge", labels.knowledge],
-        ["skills", labels.skills],
+        ["mcp", labels.capabilities],
         ["tasks", ["Task Center", "\u4efb\u52a1\u4e2d\u5fc3"]],
         ["phone_capabilities", labels.phone],
         ["app_tools", labels.appTools],
@@ -502,7 +541,7 @@ async function main() {
           await expectText([temporary], "profile-temporary-input");
           await tapText(labels.save, "profile-save", true, true);
           await openPage("profile");
-          await expectText([temporary], "profile-persisted");
+          await waitForText([temporary], "profile-persisted");
         } finally {
           await openPage("profile");
           await tapText(["Nickname", "\u6635\u79f0"], "profile-restore-open");
@@ -672,7 +711,8 @@ async function main() {
       await expectSystemPackage("Knowledge import");
     }],
     ["skill-import-picker", "Skills", async () => {
-      await openPage("skills");
+      await openPage("mcp");
+      await tapText(labels.skills, "skills-tab");
       await tapText(["Install Local Skill", "\u5b89\u88c5\u672c\u5730\u6280\u80fd"], "skills-import", true);
       await expectSystemPackage("Skill import");
     }],
@@ -829,8 +869,12 @@ async function main() {
       const original = readAppFile(displayPreferencesPath);
       const preview = ["SignalASI can understand and act", "SignalASI \u80fd\u7406\u89e3\u5e76\u6267\u884c"];
       try {
-        await openPage("general");
-        await tapText(["Text Size", "\u6587\u5b57\u5927\u5c0f"], "text-size-open", true);
+        await openControlCenterChild(
+          "general",
+          ["Text Size", "\u6587\u5b57\u5927\u5c0f"],
+          preview,
+          "text-size-open"
+        );
         await selectTextScale(["Standard", "\u6807\u51c6"], "standard", "text-size-standard");
         const standardXml = await expectText(preview, "text-size-standard-preview");
         captureScreenshot("control-center-text-standard");
@@ -848,8 +892,12 @@ async function main() {
         }
         restartApp();
         await sleep(650);
-        await openPage("general");
-        await tapText(["Text Size", "\u6587\u5b57\u5927\u5c0f"], "text-size-reopen", true);
+        await openControlCenterChild(
+          "general",
+          ["Text Size", "\u6587\u5b57\u5927\u5c0f"],
+          preview,
+          "text-size-reopen"
+        );
         await expectNear(["Large", "\u5927"], ["Selected", "\u5df2\u9009\u62e9"], "text-size-persisted");
       } finally {
         adb(["shell", "am", "force-stop", packageName]);
@@ -879,9 +927,12 @@ async function main() {
       }
     }],
     ["routing-policy-exposes-all-intent-modes", "Routing", async () => {
-      await openPage("resource_routing");
-      await tapText(["Route by Task Type", "\u6309\u4efb\u52a1\u7c7b\u578b\u8def\u7531"], "routing-policy", true);
-      await expectText(["Balanced", "\u5747\u8861"], "routing-balanced");
+      await openControlCenterChild(
+        "resource_routing",
+        ["Route by Task Type", "\u6309\u4efb\u52a1\u7c7b\u578b\u8def\u7531"],
+        ["Balanced", "\u5747\u8861"],
+        "routing-policy"
+      );
       await scrollToText(["Fast", "\u5feb\u901f"], "routing-fast");
       await scrollToText(["Economy", "\u7701\u8d39\u7528"], "routing-economy");
       await scrollToText(["Highest quality", "\u6700\u9ad8\u8d28\u91cf"], "routing-quality");
