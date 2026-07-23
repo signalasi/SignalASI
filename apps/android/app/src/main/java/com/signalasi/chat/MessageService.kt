@@ -152,11 +152,13 @@ class MessageService : Service(), SignalASIMqttClient.Listener {
         val manager = getSystemService(ConnectivityManager::class.java)
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                SignalASIMqttClient.connectAfterNetworkAvailable(this@MessageService)
                 requestRecoveryCycle()
             }
 
             override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
                 if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+                    SignalASIMqttClient.connectAfterNetworkAvailable(this@MessageService)
                     requestRecoveryCycle()
                 }
             }

@@ -205,6 +205,8 @@ class AgentTaskManager:
             if status in TERMINAL_STATES or status == "interrupted":
                 task.completed_at = now
                 task.output_files = self._task_artifacts(task.task_id)
+            if status in TERMINAL_STATES:
+                task.current_step = ""
             self._save_locked()
         self._emit(task, on_event)
         return task
@@ -464,6 +466,7 @@ class AgentTaskManager:
             task.completed_at = now
             task.result = result
             task.error = error
+            task.current_step = ""
             task.output_files = self._task_artifacts(task.task_id)
             self._save_locked()
         self._emit(task, on_event)
@@ -513,6 +516,7 @@ class AgentTaskManager:
                         status = "failed"
                         row["error"] = "Task recovery stopped after repeated Desktop restarts"
                         row["completed_at"] = recovered_at
+                        row["current_step"] = ""
                     else:
                         status = "recovering"
                         row["attempt"] = previous_attempt + 1
@@ -542,7 +546,7 @@ class AgentTaskManager:
                     turn_id=str(row.get("turn_id") or ""),
                     client_turn_id=str(row.get("client_turn_id") or ""),
                     delegate_agent_id=str(row.get("delegate_agent_id") or ""),
-                    current_step=str(row.get("current_step") or ""),
+                    current_step="" if status in TERMINAL_STATES else str(row.get("current_step") or ""),
                     events=list(row.get("events") or [])[-100:],
                     output_files=list(row.get("output_files") or [])[:100],
                     attachments=[str(value) for value in list(row.get("attachments") or [])[:12]],
