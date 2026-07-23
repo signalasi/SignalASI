@@ -146,6 +146,13 @@ const androidStringsZh = fs.readFileSync(path.join(workspaceRoot, "android", "ap
 const androidStringsEn = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "res", "values", "strings.xml"), "utf8");
 const androidSourceRoot = path.join(workspaceRoot, "android", "app", "src", "main");
 
+if (!main.includes("width: 960") || !main.includes("height: 640")) {
+  throw new Error("Desktop window must default to 960 x 640");
+}
+if (main.includes("minWidth:") || main.includes("minHeight:")) {
+  throw new Error("Desktop window must not impose a minimum size");
+}
+
 for (const resource of ["colors.xml", "styles.xml"]) {
   const localizedResource = path.join(androidSourceRoot, "res", "values-zh-rCN", resource);
   if (fs.existsSync(localizedResource)) {

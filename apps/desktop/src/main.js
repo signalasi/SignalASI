@@ -30,10 +30,8 @@ if (!hasSingleInstanceLock) {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 960,
-    minHeight: 640,
+    width: 960,
+    height: 640,
     title: "SignalASI Desktop",
     icon: path.join(APP_ROOT, "assets", "signalasi-mark.png"),
     backgroundColor: "#f5f6f7",
