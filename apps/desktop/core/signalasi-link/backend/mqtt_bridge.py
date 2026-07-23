@@ -1435,6 +1435,30 @@ def _client_task_turn_id(task: dict) -> str:
     return str(task.get("client_turn_id") or task.get("turn_id") or "")
 
 
+def _task_control_matches(
+    task,
+    *,
+    client_route_id: str,
+    contact_id: str,
+    source_message_id: str,
+) -> bool:
+    expected_route_id = str(getattr(task, "client_route_id", "") or "").strip()
+    expected_contact_id = str(getattr(task, "contact_id", "") or "").strip()
+    expected_source_id = str(getattr(task, "source_message_id", "") or "").strip()
+    requested_route_id = str(client_route_id or "").strip()
+    requested_contact_id = str(contact_id or "").strip()
+    requested_source_id = str(source_message_id or "").strip()
+    return bool(
+        task is not None
+        and expected_route_id
+        and expected_contact_id
+        and expected_source_id
+        and requested_route_id == expected_route_id
+        and requested_contact_id == expected_contact_id
+        and requested_source_id == expected_source_id
+    )
+
+
 def _codex_terminal_result(content: str, status: str, result: object) -> str | None:
     if status == "cancelled":
         return ""
@@ -2084,10 +2108,13 @@ def _process_message(mqttc, userdata, msg):
         if msg_type == "agent_task_cancel":
             task_id = str(payload.get("task_id") or "").strip()
             existing_task = agent_task_manager.get(task_id)
-            task_matches = existing_task is not None and existing_task.contact_id == str(contact_id)
             source_message_id = str(payload.get("source_message_id") or "")
-            if task_matches and source_message_id and existing_task.source_message_id:
-                task_matches = source_message_id == existing_task.source_message_id
+            task_matches = _task_control_matches(
+                existing_task,
+                client_route_id=client_route_id,
+                contact_id=str(contact_id),
+                source_message_id=source_message_id,
+            )
             if task_matches and existing_task.agent_id == "codex" and codex_app_server is not None:
                 try:
                     codex_app_server.interrupt(task_id)
