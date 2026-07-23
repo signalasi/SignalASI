@@ -150,7 +150,7 @@ class MobileNativeAgent(
     private val recoveryController: AgentActionRecoveryController = AgentActionRecoveryController(),
     private val memoryStore: AgentMemoryStore = EncryptedAgentMemoryStore(context),
     private val knowledgeStore: AgentKnowledgeStore = SharedPreferencesAgentKnowledgeStore(context),
-    private val taskStore: AgentTaskStore = SharedPreferencesAgentTaskStore(context),
+    private val taskStore: AgentTaskStore = SQLiteAgentTaskStore(context),
     private val workflowStore: AgentWorkflowStore = SharedPreferencesAgentWorkflowStore(context),
     private val workflowScheduleStore: AgentWorkflowScheduleStore = AgentWorkflowScheduleStore(context),
     private val workflowTriggerStore: AgentWorkflowTriggerStore = AgentWorkflowTriggerStore(context),
