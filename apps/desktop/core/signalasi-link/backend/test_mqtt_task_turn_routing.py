@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import link_delivery
@@ -64,6 +65,58 @@ class MqttTaskTurnRoutingTests(unittest.TestCase):
         self.assertEqual(
             "Codex \u672a\u80fd\u5b8c\u6210\u8fd9\u6b21\u4efb\u52a1\uff0c\u8bf7\u91cd\u65b0\u53d1\u9001\u4e00\u6b21\u3002",
             mqtt_bridge._codex_terminal_result("\u8bf7\u6267\u884c\u4efb\u52a1", "timed_out", ""),
+        )
+
+    def test_task_control_requires_exact_paired_route_and_message(self):
+        task = SimpleNamespace(
+            client_route_id="client-a",
+            contact_id="codex",
+            source_message_id="42",
+        )
+
+        self.assertTrue(
+            mqtt_bridge._task_control_matches(
+                task,
+                client_route_id="client-a",
+                contact_id="codex",
+                source_message_id="42",
+            )
+        )
+        self.assertFalse(
+            mqtt_bridge._task_control_matches(
+                task,
+                client_route_id="client-b",
+                contact_id="codex",
+                source_message_id="42",
+            )
+        )
+
+    def test_task_control_rejects_missing_current_route_identity(self):
+        task = SimpleNamespace(
+            client_route_id="",
+            contact_id="codex",
+            source_message_id="42",
+        )
+
+        self.assertFalse(
+            mqtt_bridge._task_control_matches(
+                task,
+                client_route_id="client-a",
+                contact_id="codex",
+                source_message_id="42",
+            )
+        )
+        self.assertFalse(
+            mqtt_bridge._task_control_matches(
+                SimpleNamespace(
+                    client_route_id="client-a",
+                    contact_id="codex",
+                    source_message_id="42",
+                ),
+                client_route_id="client-a",
+                contact_id="codex",
+                source_message_id="",
+            )
         )
 
     def test_completed_result_is_queued_offline_and_flushed_after_reconnect(self):
