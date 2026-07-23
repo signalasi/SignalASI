@@ -30,9 +30,13 @@ from link_delivery import (
     complete_message,
     ensure_transport_epoch,
     mark_outbound_published,
+    outbound_status,
     pending_outbound,
+    pending_task_results as pending_persisted_task_results,
     previous_acknowledgement,
     queue_outbound,
+    queue_task_result,
+    remove_task_result,
 )
 from link_protocol import LinkTopics, PROTOCOL_NAME, PROTOCOL_VERSION, decrypt_pairing_claim, make_envelope, parse_topic, validate_envelope, valid_route_id
 from pairing_state import (
@@ -1008,8 +1012,6 @@ def warm_codex_app_server() -> None:
 phone_publish_lock = threading.RLock()
 pending_task_events: dict[str, tuple[dict, dict]] = {}
 pending_task_events_lock = threading.Lock()
-pending_task_results: dict[str, tuple[dict, dict]] = {}
-pending_task_results_lock = threading.Lock()
 task_event_publish_queue: queue.Queue[tuple[object, dict, dict, list[dict]] | None] = queue.Queue()
 task_event_publisher_started = threading.Event()
 task_event_publisher_lock = threading.Lock()
@@ -1243,9 +1245,9 @@ def on_connect(mqttc, userdata, flags, reason_code, properties=None):
                 "Recovered task summary total=%s resumed=%s retained=%s",
                 len(recovered_tasks), resumed_count, retained_count,
             )
+        flush_outbound_messages(mqttc)
         flush_pending_task_events(mqttc)
         flush_pending_task_results(mqttc)
-        flush_outbound_messages(mqttc)
         status = publish_connector_status(mqttc, reason="mqtt_connected")
         if not status.get("ok"):
             log.warning("Desktop recovery presence publish skipped: %s", status)
@@ -1435,6 +1437,30 @@ def _client_task_turn_id(task: dict) -> str:
     return str(task.get("client_turn_id") or task.get("turn_id") or "")
 
 
+def _task_control_matches(
+    task,
+    *,
+    client_route_id: str,
+    contact_id: str,
+    source_message_id: str,
+) -> bool:
+    expected_route_id = str(getattr(task, "client_route_id", "") or "").strip()
+    expected_contact_id = str(getattr(task, "contact_id", "") or "").strip()
+    expected_source_id = str(getattr(task, "source_message_id", "") or "").strip()
+    requested_route_id = str(client_route_id or "").strip()
+    requested_contact_id = str(contact_id or "").strip()
+    requested_source_id = str(source_message_id or "").strip()
+    return bool(
+        task is not None
+        and expected_route_id
+        and expected_contact_id
+        and expected_source_id
+        and requested_route_id == expected_route_id
+        and requested_contact_id == expected_contact_id
+        and requested_source_id == expected_source_id
+    )
+
+
 def _codex_terminal_result(content: str, status: str, result: object) -> str | None:
     if status == "cancelled":
         return ""
@@ -1511,32 +1537,61 @@ def flush_pending_task_events(mqttc) -> None:
 
 def _publish_or_queue_task_result(mqttc, wire_payload: dict, payload: dict) -> bool:
     task_id = str(payload.get("task_id") or "")
+    client_route_id = str(wire_payload.get("_client_route_id") or "")
+    if not task_id or not client_route_id:
+        log.error(
+            "Agent task result cannot be routed task_id=%s client_route_id=%s",
+            task_id,
+            client_route_id,
+        )
+        return False
+    persisted_payload = dict(payload)
+    persisted_payload.setdefault(
+        "message_id",
+        str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"{PROTOCOL_NAME}:task-result:{client_route_id}:{task_id}",
+        )),
+    )
+    queue_task_result(
+        task_id,
+        client_route_id,
+        dict(wire_payload),
+        persisted_payload,
+    )
     try:
         published = bool(
             mqttc is not None and mqttc.is_connected()
-            and _publish_phone_payload(mqttc, wire_payload, payload)
+            and _publish_phone_payload(mqttc, wire_payload, persisted_payload)
         )
     except Exception as exc:
         log.warning("Agent task result queued task_id=%s: %s", task_id, exc)
         published = False
-    with pending_task_results_lock:
-        if published:
-            pending_task_results.pop(task_id, None)
-        elif task_id:
-            pending_task_results[task_id] = (dict(wire_payload), dict(payload))
+    if published or outbound_status(client_route_id, persisted_payload["message_id"]):
+        remove_task_result(task_id)
     return published
 
 
 def flush_pending_task_results(mqttc) -> None:
-    with pending_task_results_lock:
-        queued = list(pending_task_results.items())
-    for task_id, (wire_payload, payload) in queued:
+    for pending in pending_persisted_task_results():
+        task_id = str(pending["task_id"])
+        client_route_id = str(pending["client_route_id"])
+        wire_payload = dict(pending["wire_payload"])
+        payload = dict(pending["payload"])
+        message_id = str(payload.get("message_id") or "")
+        if message_id and outbound_status(client_route_id, message_id):
+            remove_task_result(task_id)
+            continue
         try:
             if _publish_phone_payload(mqttc, wire_payload, payload):
-                with pending_task_results_lock:
-                    pending_task_results.pop(task_id, None)
+                remove_task_result(task_id)
+            elif message_id and outbound_status(client_route_id, message_id):
+                remove_task_result(task_id)
         except Exception as exc:
-            log.warning("Agent task result replay deferred task_id=%s: %s", task_id, exc)
+            if message_id and outbound_status(client_route_id, message_id):
+                remove_task_result(task_id)
+            else:
+                log.warning("Agent task result replay deferred task_id=%s: %s", task_id, exc)
 
 
 def _requests_returned_image(prompt: str) -> bool:
@@ -1910,14 +1965,66 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         return
 
     if payload.get("_recovered_task") is True:
-        resumed = agent_task_manager.resume(
+        resumed = agent_task_manager.resume_external(
             str(payload.get("task_id") or ""),
-            runner=run_task,
-            on_event=publish_event,
-            on_result=publish_result,
+            publish_event,
         )
         if resumed is None:
             raise RuntimeError("Recovered Agent task is no longer resumable")
+        from agent_gateway import desktop_agent_provider
+
+        adapter_result = None
+        adapter_error = ""
+        try:
+            adapter_result = desktop_agent_provider().status(agent_id, resumed.task_id)
+        except Exception as exc:
+            adapter_error = str(exc)[:500]
+        adapter_state = str(getattr(adapter_result, "state", "") or "")
+        adapter_reply = str(getattr(adapter_result, "reply", "") or "").strip()
+        if adapter_state == "completed" and adapter_reply:
+            completed = agent_task_manager.update(
+                resumed.task_id,
+                "completed",
+                on_event=publish_event,
+                current_step="",
+                result=adapter_reply,
+            )
+            if completed is not None:
+                publish_result(completed.public())
+            return
+        if adapter_state == "cancelled":
+            agent_task_manager.update(
+                resumed.task_id,
+                "cancelled",
+                on_event=publish_event,
+                current_step="",
+            )
+            return
+
+        prefers_chinese = any(
+            "\u4e00" <= character <= "\u9fff" for character in content
+        )
+        result = (
+            "Desktop \u91cd\u542f\u524d\uff0c\u8fd9\u4e2a Agent \u4efb\u52a1\u672a\u4ea7\u751f\u53ef\u6062\u590d\u7684\u7ed3\u679c\uff0c\u539f\u8bf7\u6c42\u672a\u91cd\u590d\u6267\u884c\u3002\u8bf7\u91cd\u65b0\u53d1\u9001\u4efb\u52a1\u3002"
+            if prefers_chinese else
+            "This Agent task did not produce a recoverable result before Desktop restarted. "
+            "The original request was not repeated. Please send the task again."
+        )
+        error = (
+            str(getattr(adapter_result, "error", "") or "").strip()
+            or adapter_error
+            or f"Adapter Run is {adapter_state or 'missing'}"
+        )
+        failed = agent_task_manager.update(
+            resumed.task_id,
+            "failed",
+            on_event=publish_event,
+            current_step="",
+            result=result,
+            error=error[:500],
+        )
+        if failed is not None:
+            publish_result(failed.public())
     else:
         agent_task_manager.create(
             agent_id=agent_id,
@@ -2084,10 +2191,13 @@ def _process_message(mqttc, userdata, msg):
         if msg_type == "agent_task_cancel":
             task_id = str(payload.get("task_id") or "").strip()
             existing_task = agent_task_manager.get(task_id)
-            task_matches = existing_task is not None and existing_task.contact_id == str(contact_id)
             source_message_id = str(payload.get("source_message_id") or "")
-            if task_matches and source_message_id and existing_task.source_message_id:
-                task_matches = source_message_id == existing_task.source_message_id
+            task_matches = _task_control_matches(
+                existing_task,
+                client_route_id=client_route_id,
+                contact_id=str(contact_id),
+                source_message_id=source_message_id,
+            )
             if task_matches and existing_task.agent_id == "codex" and codex_app_server is not None:
                 try:
                     codex_app_server.interrupt(task_id)

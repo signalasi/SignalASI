@@ -47,6 +47,23 @@ class AgentTranscriptPresentationPolicyTest {
     }
 
     @Test
+    fun processGroupKeepsStableRenderIdAsNewStepsArrive() {
+        val user = entry("user", AgentTranscriptRole.USER, "conversation", "turn", 10L)
+        val firstStep = entry("planning", AgentTranscriptRole.PROCESS, "conversation", "turn", 20L)
+        val nextStep = entry("running", AgentTranscriptRole.PROCESS, "conversation", "turn", 30L)
+
+        val initial = AgentTranscriptPresentationPolicy.collapseProcessGroups(
+            listOf(user, firstStep)
+        )
+        val updated = AgentTranscriptPresentationPolicy.collapseProcessGroups(
+            listOf(user, firstStep, nextStep)
+        )
+
+        assertEquals(initial[1].id, updated[1].id)
+        assertEquals("running", updated[1].text)
+    }
+
+    @Test
     fun classifiesProcessRowsForCodexStyleIcons() {
         assertEquals(
             AgentTranscriptPresentationPolicy.ProcessVisualKind.ANALYSIS,
