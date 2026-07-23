@@ -96,6 +96,15 @@ class MqttPhoneToolRoutingTests(unittest.TestCase):
         self.assertFalse(mqtt_bridge.requires_exact_content_transport("ordinary assistant reply"))
         self.assertEqual(source, json.loads(manifest)["files"][0]["content"])
 
+    def test_scalar_and_collection_json_replies_do_not_crash_transport_detection(self) -> None:
+        for reply in ("7319", "true", "false", "null", '"done"', "[]", '[{"result":"ok"}]'):
+            with self.subTest(reply=reply):
+                self.assertFalse(mqtt_bridge.requires_exact_content_transport(reply))
+
+    def test_malformed_manifest_fallback_remains_exact(self) -> None:
+        malformed = '{"schema":"signalasi.phone-development-manifest.v2"'
+        self.assertTrue(mqtt_bridge.requires_exact_content_transport(malformed))
+
     def tearDown(self) -> None:
         with mqtt_bridge.phone_tool_sessions_lock:
             mqtt_bridge.phone_tool_sessions.clear()

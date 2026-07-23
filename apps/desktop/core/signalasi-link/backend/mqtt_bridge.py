@@ -1027,7 +1027,10 @@ def requires_exact_content_transport(value: str) -> bool:
         candidate = raw
         if candidate.startswith("```"):
             candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.IGNORECASE)
-        schema = str((json.loads(candidate) or {}).get("schema") or "")
+        decoded = json.loads(candidate)
+        if not isinstance(decoded, dict):
+            return False
+        schema = str(decoded.get("schema") or "")
         return schema in PHONE_DEVELOPMENT_MANIFEST_SCHEMAS
     except (TypeError, ValueError, json.JSONDecodeError):
         return any(schema in raw for schema in PHONE_DEVELOPMENT_MANIFEST_SCHEMAS)
