@@ -160,6 +160,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val MAX_AGENT_ATTACHMENTS = 10
         private const val MAX_AGENT_ATTACHMENT_BYTES = 20L * 1024L * 1024L
         private const val AGENT_REGISTRY_SYNC_INTERVAL_MILLIS = 5_000L
+        private const val AGENT_STARTUP_MAINTENANCE_DELAY_MILLIS = 350L
         private const val UI_PREFS = "signalasi_ui_preferences"
         private const val DEBUG_AGENT_PREFS = "signalasi_debug_agent"
         private const val HISTORY_PREFS = "signalasi_chat_history"
@@ -316,6 +317,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val globalAgentRefreshInProgress = AtomicBoolean(false)
     private val globalAgentRefreshRequested = AtomicBoolean(false)
     private val agentTaskRecoveryInProgress = AtomicBoolean(false)
+    private val agentRegistrySyncInProgress = AtomicBoolean(false)
+    private val agentRegistrySyncRequested = AtomicBoolean(false)
+    private val agentRegistrySyncLock = Any()
     private val globalProactiveDeliveryListener = GlobalProactiveDeliveryListener {
         handler.post(::refreshGlobalAgentCognition)
     }
@@ -335,7 +339,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var agentRunEventStore: AgentRunEventStore
     private lateinit var agentHandoffStore: EncryptedAgentHandoffStore
     private lateinit var encryptedAgentRegistry: EncryptedAgentRegistry
-    private var lastAgentRegistrySyncAtMillis = 0L
+    @Volatile private var lastAgentRegistrySyncAtMillis = 0L
     private lateinit var agentMcpRegistry: AgentMcpRegistry
     private lateinit var agentMcpPackageRepository: AgentMcpPackageRepository
     private lateinit var agentRuntimePackCatalogManager: AgentRuntimePackCatalogManager
@@ -346,6 +350,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
     private val agentTaskLivenessListener = AgentTaskLivenessListener { signal ->
         handler.post { handleAgentTaskLivenessSignal(signal) }
+    }
+    private val agentStartupMaintenanceRunnable = Runnable {
+        if (!isFinishing && !isDestroyed) {
+            requestRecoverableAgentRunReconciliation(
+                reason = "startup",
+                refreshRegistry = true
+            )
+        }
     }
     private val agentVisualScreenListener = AgentVisualScreenListener { result ->
         runOnUiThread {
@@ -506,8 +518,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         agentRunEventStore = AgentRunEventStore(this)
         agentHandoffStore = EncryptedAgentHandoffStore(this)
         encryptedAgentRegistry = EncryptedAgentRegistry(this)
-        syncAgentRegistrySnapshot(force = true)
-        reconcileRecoverableAgentRuns()
         traceStartup("agent_registry")
         agentSkillRuntime = AgentSkillRuntime(
             store = EncryptedAgentSkillStore(this),
@@ -656,6 +666,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         requestAgentNotificationPermissionIfNeeded()
         traceStartup("first_render")
         scheduleAgentInitialHydration()
+        scheduleAgentStartupMaintenance()
 
         SignalASIMqttClient.addListener(this)
         SignalASIMqttClient.connect(this)
@@ -741,6 +752,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
+    private fun scheduleAgentStartupMaintenance() {
+        handler.removeCallbacks(agentStartupMaintenanceRunnable)
+        handler.postDelayed(
+            agentStartupMaintenanceRunnable,
+            AGENT_STARTUP_MAINTENANCE_DELAY_MILLIS
+        )
+    }
+
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -795,6 +814,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     override fun onDestroy() {
         handler.removeCallbacks(asrModelDownloadPoll)
+        handler.removeCallbacks(agentStartupMaintenanceRunnable)
         stopVoiceAssistant()
         voiceAssistantScope.cancel()
         microsoftTts.shutdown()
@@ -841,7 +861,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             null
         }
         traceResume("agent_session")
-        syncAgentRegistrySnapshot()
+        if (!initialResume) requestAgentRegistrySnapshotSync()
         traceResume("registry")
         val restoredAgentState = reloadedAgentState?.let { state ->
             if (state.runningTaskCount == 0 && ScreenPerceptionState.hasRecentVisualCapture()) {
@@ -1601,7 +1621,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         AgentResourceHealthStore(this).markAvailable("domain:$desktopId")
     }
 
-    private fun syncAgentRegistrySnapshot(force: Boolean = false) {
+    private fun syncAgentRegistrySnapshot(force: Boolean = false) = synchronized(agentRegistrySyncLock) {
         if (!::encryptedAgentRegistry.isInitialized || !::mobileNativeAgent.isInitialized) return
         val now = System.currentTimeMillis()
         if (!force && now - lastAgentRegistrySyncAtMillis < AGENT_REGISTRY_SYNC_INTERVAL_MILLIS) return
@@ -1623,6 +1643,27 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
         }
         lastAgentRegistrySyncAtMillis = now
+    }
+
+    private fun requestAgentRegistrySnapshotSync(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastAgentRegistrySyncAtMillis < AGENT_REGISTRY_SYNC_INTERVAL_MILLIS) return
+        agentRegistrySyncRequested.set(true)
+        if (!agentRegistrySyncInProgress.compareAndSet(false, true)) return
+        thread(name = "signalasi-agent-registry-sync") {
+            try {
+                do {
+                    agentRegistrySyncRequested.set(false)
+                    runCatching { syncAgentRegistrySnapshot(force = true) }
+                        .onFailure { Log.w("SignalASIStartup", "Agent registry sync failed", it) }
+                } while (agentRegistrySyncRequested.get())
+            } finally {
+                agentRegistrySyncInProgress.set(false)
+                if (agentRegistrySyncRequested.get()) {
+                    requestAgentRegistrySnapshotSync(force = true)
+                }
+            }
+        }
     }
 
     private fun agentRegistrationMetadataChanged(
@@ -1649,7 +1690,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun updateAgentRegistryTaskHeartbeat(contactId: String, taskStatus: String) {
         if (contactId.isBlank() || !::encryptedAgentRegistry.isInitialized) return
-        syncAgentRegistrySnapshot(force = true)
+        requestAgentRegistrySnapshotSync(force = true)
         val registrations = encryptedAgentRegistry.list()
         val registration = registrations.firstOrNull { it.agentId == contactId }
             ?: registrations.firstOrNull { it.deviceId == contactId }
@@ -1705,17 +1746,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 )
                 consumePendingAgentConnectorResponsesAsync()
                 if (workspace.status == AgentWorkspaceStatus.WAITING_RESPONSE &&
-                    workspace.agentId.isNotBlank() && workspace.agentId != "signalasi-mobile" &&
-                    agentTaskRecoveryInProgress.compareAndSet(false, true)
+                    workspace.agentId.isNotBlank() && workspace.agentId != "signalasi-mobile"
                 ) {
-                    thread(name = "signalasi-agent-stall-recovery") {
-                        try {
-                            runCatching { reconcileRecoverableAgentRuns() }
-                                .onFailure { Log.w("SignalASIAgent", "Stalled task recovery failed", it) }
-                        } finally {
-                            agentTaskRecoveryInProgress.set(false)
-                        }
-                    }
+                    requestRecoverableAgentRunReconciliation("stall")
                 }
             }
             AgentTaskLivenessSignalKind.RECOVERED -> {
@@ -1735,6 +1768,27 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         if (conversationId == agentTranscriptStore.activeConversation().id) {
             renderAgentTranscript(agentTranscriptStore.list(conversationId))
+        }
+    }
+
+    private fun requestRecoverableAgentRunReconciliation(
+        reason: String,
+        refreshRegistry: Boolean = false
+    ) {
+        if (!agentTaskRecoveryInProgress.compareAndSet(false, true)) return
+        thread(name = "signalasi-agent-run-recovery") {
+            val startedAt = SystemClock.elapsedRealtime()
+            try {
+                if (refreshRegistry) syncAgentRegistrySnapshot(force = true)
+                runCatching { reconcileRecoverableAgentRuns() }
+                    .onFailure { Log.w("SignalASIAgent", "Agent run recovery failed ($reason)", it) }
+            } finally {
+                agentTaskRecoveryInProgress.set(false)
+                Log.i(
+                    "SignalASIStartup",
+                    "agent_run_recovery reason=$reason total=${SystemClock.elapsedRealtime() - startedAt}ms"
+                )
+            }
         }
     }
 
@@ -14009,7 +14063,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (json?.optString("type") == "capability_manifest") {
             json.optJSONArray("connector_agents")?.let { agents ->
                 AppStore.updateConnectorAgentStatuses(this, agents)
-                syncAgentRegistrySnapshot(force = true)
+                requestAgentRegistrySnapshotSync(force = true)
                 refreshContactList()
                 refreshDirectoryContacts()
             }
@@ -14024,7 +14078,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 AppStore.deleteContact(this, "hermes", deleteMessages = false)
             }
             SignalASIMqttClient.forgetSecureChannel()
-            syncAgentRegistrySnapshot(force = true)
+            requestAgentRegistrySnapshotSync(force = true)
             refreshContactList()
             refreshDirectoryContacts()
             val content = json.optString("content")
@@ -14034,7 +14088,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (json?.optString("type") == "pairing_confirmed" || json?.optString("type") == "connector_status") {
             json.optJSONArray("connector_agents")?.let { agents ->
                 AppStore.updateConnectorAgentStatuses(this, agents)
-                syncAgentRegistrySnapshot(force = true)
+                requestAgentRegistrySnapshotSync(force = true)
                 refreshContactList()
                 refreshDirectoryContacts()
             }
