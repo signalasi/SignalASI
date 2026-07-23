@@ -112,6 +112,38 @@ data class ControlCenterPageSpec(
     val footer: String = ""
 )
 
+internal class ControlCenterPageRenderCache {
+    private var renderedPage: ControlCenterPageSpec? = null
+
+    fun shouldRender(page: ControlCenterPageSpec, hasContent: Boolean): Boolean {
+        if (hasContent && renderedPage == page) return false
+        renderedPage = page
+        return true
+    }
+}
+
+internal class ControlCenterHomeRefreshPolicy(private val maxAgeMillis: Long) {
+    private var dirty = true
+    private var renderedAt = 0L
+
+    fun invalidate() {
+        dirty = true
+    }
+
+    fun shouldRefresh(visible: Boolean, nowMillis: Long, force: Boolean = false): Boolean {
+        if (!visible) {
+            invalidate()
+            return false
+        }
+        return force || dirty || renderedAt <= 0L || nowMillis - renderedAt >= maxAgeMillis
+    }
+
+    fun markRendered(nowMillis: Long) {
+        dirty = false
+        renderedAt = nowMillis
+    }
+}
+
 class ControlCenterRenderer(private val context: Context) {
     fun render(
         content: LinearLayout,
