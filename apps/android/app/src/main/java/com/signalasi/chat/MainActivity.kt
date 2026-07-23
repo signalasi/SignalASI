@@ -437,7 +437,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private var androidTtsReady = false
     private lateinit var microsoftTts: MicrosoftEdgeTts
     private var lastDebugSendKey: String? = null
-    private var lastHistoryLoadedAt = 0L
+    @Volatile private var lastHistoryLoadedAt = 0L
     private var pendingAsrModelSelection: String? = null
     private val asrModelDownloadPoll = object : Runnable {
         override fun run() {
@@ -822,7 +822,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (::holdToTalkController.isInitialized) holdToTalkController.release()
         if (::agentHoldToTalkController.isInitialized) agentHoldToTalkController.release()
         stopRecording(send = false)
-        saveChatHistory(sync = true)
+        flushChatHistoryAsync()
         SignalASIMqttClient.removeListener(this)
         AgentTaskRuntime.removeLivenessListener(agentTaskLivenessListener)
         ScreenPerceptionState.removeVisualListener(agentVisualScreenListener)
@@ -909,7 +909,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         AgentConnectorResponseBus.removeListener(agentConnectorResponseListener)
         GlobalProactiveDeliveryBus.removeListener(globalProactiveDeliveryListener)
         ScreenPerceptionState.removeVisualListener(agentVisualScreenListener)
-        saveChatHistory(sync = true)
+        flushChatHistoryAsync()
         AppForegroundTracker.onActivityPaused()
         super.onPause()
     }
@@ -14586,21 +14586,21 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         return array
     }
 
-    private fun saveChatHistory(sync: Boolean = false) {
-        if (!sync) {
-            handler.removeCallbacks(historySaveRunnable)
-            handler.postDelayed(historySaveRunnable, 120L)
-            return
-        }
+    private fun saveChatHistory() {
         handler.removeCallbacks(historySaveRunnable)
-        persistChatHistorySnapshot(sync = true)
+        handler.postDelayed(historySaveRunnable, 120L)
+    }
+
+    private fun flushChatHistoryAsync() {
+        handler.removeCallbacks(historySaveRunnable)
+        persistChatHistorySnapshot()
     }
 
     private fun enqueueChatHistorySave() {
-        persistChatHistorySnapshot(sync = false)
+        persistChatHistorySnapshot()
     }
 
-    private fun persistChatHistorySnapshot(sync: Boolean) {
+    private fun persistChatHistorySnapshot() {
         val snapshot = messages.mapValues { (_, list) ->
             list.map { message ->
                 message.copy(deliveryTrace = message.deliveryTrace.toMutableList())
@@ -14630,10 +14630,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             ChatHistoryStore.mergeSnapshot(this, root)
             lastHistoryLoadedAt = ChatHistoryStore.updatedVersion(this)
-        }
-        if (sync) {
-            writeSnapshot()
-            return
         }
         runCatching {
             historyExecutor.execute {
