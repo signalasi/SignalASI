@@ -237,10 +237,7 @@ class AgentTeamProcessDeathDeviceTest {
     }
 
     private fun acceptanceChatMessageCount(context: Context): Int {
-        val raw = context.getSharedPreferences(CHAT_HISTORY_PREFERENCES, Context.MODE_PRIVATE)
-            .getString(CHAT_HISTORY_KEY, "{}")
-            .orEmpty()
-        val root = runCatching { JSONObject(raw) }.getOrElse { JSONObject() }
+        val root = ChatHistoryStore.readAll(context)
         return listOf(OBSERVER_CONTACT_ID, PRIMARY_CONTACT_ID)
             .sumOf { contactId -> root.optJSONArray(contactId)?.length() ?: 0 }
     }
@@ -257,13 +254,8 @@ class AgentTeamProcessDeathDeviceTest {
             contactId = AgentTeamDispatchIds.responseContactId(TEAM_ID),
             content = PRIMARY_OUTPUT
         ))
-        val preferences = context.getSharedPreferences(CHAT_HISTORY_PREFERENCES, Context.MODE_PRIVATE)
-        val root = runCatching {
-            JSONObject(preferences.getString(CHAT_HISTORY_KEY, "{}").orEmpty())
-        }.getOrElse { JSONObject() }
-        root.remove(OBSERVER_CONTACT_ID)
-        root.remove(PRIMARY_CONTACT_ID)
-        preferences.edit().putString(CHAT_HISTORY_KEY, root.toString()).commit()
+        ChatHistoryStore.deleteContact(context, OBSERVER_CONTACT_ID)
+        ChatHistoryStore.deleteContact(context, PRIMARY_CONTACT_ID)
     }
 
     private fun writeReport(context: Context, report: JSONObject) {
@@ -280,8 +272,6 @@ class AgentTeamProcessDeathDeviceTest {
         const val SEED_PID_KEY = "seed_pid"
         const val SEED_TIME_KEY = "seed_time"
         const val REPORT_FILENAME = "agent-team-process-death-report.json"
-        const val CHAT_HISTORY_PREFERENCES = "signalasi_chat_history"
-        const val CHAT_HISTORY_KEY = "messages"
         const val TEAM_ID = "acceptance-process-death-team"
         const val SUPERVISOR_RUN_ID = "acceptance-process-death-supervisor"
         const val CONVERSATION_ID = "acceptance-process-death-conversation"

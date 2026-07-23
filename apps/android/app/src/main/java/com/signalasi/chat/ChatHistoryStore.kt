@@ -15,12 +15,60 @@ data class StoredIncomingMessage(
 )
 
 object ChatHistoryStore {
-    private const val HISTORY_PREFS = "signalasi_chat_history"
-    private const val HISTORY_KEY = "messages"
-    private const val HISTORY_UPDATED_KEY = "updated_at"
-    private const val MAX_SAVED_MESSAGES_PER_CONTACT = 500
     private const val CONTACT_HERMES = "hermes"
     private const val CONTACT_SYSTEM = "system"
+
+    @Volatile
+    private var databaseInstance: ChatHistoryDatabase? = null
+
+    @Synchronized
+    fun reserveMessageId(context: Context): Long = database(context).reserveMessageId()
+
+    @Synchronized
+    fun readAll(context: Context): JSONObject = database(context).readAll()
+
+    @Synchronized
+    fun readContact(context: Context, contactId: String): JSONArray =
+        database(context).readContact(contactId)
+
+    @Synchronized
+    internal fun page(
+        context: Context,
+        contactId: String,
+        beforeSequenceExclusive: Long? = null,
+        pageSize: Int = 100
+    ): ChatHistoryPage = database(context).page(contactId, beforeSequenceExclusive, pageSize)
+
+    @Synchronized
+    fun updatedVersion(context: Context): Long = database(context).updatedVersion()
+
+    @Synchronized
+    fun mergeSnapshot(context: Context, root: JSONObject): Boolean =
+        database(context).mergeSnapshot(root)
+
+    @Synchronized
+    fun replaceAll(context: Context, root: JSONObject) {
+        database(context).replaceAll(root)
+    }
+
+    @Synchronized
+    fun deleteMessage(context: Context, messageId: Long): Boolean =
+        database(context).deleteMessage(messageId)
+
+    @Synchronized
+    fun deleteContact(context: Context, contactId: String): Int =
+        database(context).deleteContact(contactId)
+
+    @Synchronized
+    fun clear(context: Context) {
+        database(context).clear()
+    }
+
+    @Synchronized
+    fun close() {
+        databaseInstance?.close()
+        databaseInstance = null
+    }
 
     @Synchronized
     fun appendOutgoing(
@@ -34,19 +82,11 @@ object ChatHistoryStore {
         if (contactId.isBlank() || cleanContent.isBlank()) return 0L
         val appContext = context.applicationContext
         AppStore.ensureInitialized(appContext)
-        val prefs = appContext.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
-        val root = runCatching {
-            JSONObject(prefs.getString(HISTORY_KEY, null).orEmpty())
-        }.getOrElse { JSONObject() }
-        val nextId = maxMessageId(root) + 1L
-        val trace = JSONArray()
-        for (index in 0 until deliveryTrace.length()) {
-            deliveryTrace.optJSONObject(index)?.let { trace.put(it) }
-        }
+        val nextId = database(appContext).reserveMessageId()
+        val trace = copyArray(deliveryTrace)
         appendTrace(trace, "created", "agent_runtime")
-        val array = root.optJSONArray(contactId) ?: JSONArray()
         val timestamp = System.currentTimeMillis()
-        array.put(JSONObject()
+        val message = JSONObject()
             .put("id", nextId)
             .put("content", cleanContent)
             .put("isMine", true)
@@ -54,12 +94,12 @@ object ChatHistoryStore {
             .put("isSystem", false)
             .put("timestamp", timestamp)
             .put("deliveryStatus", deliveryStatus)
-            .put("deliveryTrace", trace))
-        root.put(contactId, trim(array))
-        prefs.edit()
-            .putString(HISTORY_KEY, root.toString())
-            .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis())
-            .apply()
+            .put("taskId", "")
+            .put("taskStatus", "")
+            .put("taskStatusSeq", 0L)
+            .put("remoteMessageId", "")
+            .put("deliveryTrace", trace)
+        check(database(appContext).upsert(message)) { "Outgoing chat message was not persisted" }
         val contactName = AppStore.contactById(appContext, contactId)
             ?.optString("name")
             .orEmpty()
@@ -90,24 +130,25 @@ object ChatHistoryStore {
         AppStore.ensureInitialized(appContext)
         val parsed = parseIncoming(appContext, payload)
         if (parsed.content.isBlank()) return null
-        if (parsed.contactId == CONTACT_HERMES) {
-            AppStore.markHermesVerified(appContext)
-        }
+        if (parsed.contactId == CONTACT_HERMES) AppStore.markHermesVerified(appContext)
         val incomingEnvelope = runCatching { JSONObject(payload) }.getOrNull()
         val deliveryTrace = parseDeliveryTrace(incomingEnvelope)
         appendTrace(deliveryTrace, "received", "background_service")
         appendTrace(deliveryTrace, "decrypted", "SignalASI Link")
         appendTrace(deliveryTrace, "persisted", "background_history")
 
-        val prefs = appContext.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
-        val root = runCatching {
-            JSONObject(prefs.getString(HISTORY_KEY, null).orEmpty())
-        }.getOrElse { JSONObject() }
-        val nextId = maxMessageId(root) + 1L
-        val array = root.optJSONArray(parsed.contactId) ?: JSONArray()
-        if (hasIncomingDuplicate(array, parsed)) return null
+        val history = database(appContext)
+        if (
+            history.hasIncomingDuplicate(
+                parsed.contactId,
+                parsed.remoteMessageId,
+                parsed.taskId,
+                parsed.content
+            )
+        ) return null
+        val nextId = history.reserveMessageId()
         val timestamp = System.currentTimeMillis()
-        array.put(JSONObject()
+        val message = JSONObject()
             .put("id", nextId)
             .put("content", parsed.content)
             .put("isMine", false)
@@ -116,14 +157,11 @@ object ChatHistoryStore {
             .put("timestamp", timestamp)
             .put("deliveryStatus", "")
             .put("taskId", parsed.taskId)
+            .put("taskStatus", "")
+            .put("taskStatusSeq", 0L)
             .put("remoteMessageId", parsed.remoteMessageId)
-            .put("deliveryTrace", deliveryTrace))
-        root.put(parsed.contactId, trim(array))
-        val persisted = prefs.edit()
-            .putString(HISTORY_KEY, root.toString())
-            .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis())
-            .commit()
-        if (!persisted) return null
+            .put("deliveryTrace", deliveryTrace)
+        if (!history.upsert(message)) return null
         if (parsed.contactId != CONTACT_SYSTEM) {
             GlobalConversationEventBus.publishChatMessage(
                 appContext,
@@ -151,13 +189,19 @@ object ChatHistoryStore {
             messageId,
             "notified",
             "system_notification",
-            context.getString(R.string.delivery_status_notified),
-            durable = true
+            context.getString(R.string.delivery_status_notified)
         )
     }
 
     @Synchronized
-    fun markOutgoingDelivery(context: Context, contactId: String, messageId: Long, stage: String, detail: String, status: String) {
+    fun markOutgoingDelivery(
+        context: Context,
+        contactId: String,
+        messageId: Long,
+        stage: String,
+        detail: String,
+        status: String
+    ) {
         markMessageTrace(context, contactId, messageId, stage, detail, status)
     }
 
@@ -183,15 +227,24 @@ object ChatHistoryStore {
             "timed_out" -> context.getString(R.string.agent_task_status_timed_out)
             else -> status
         }
-        val elapsedSeconds = payload.optLong("elapsed_ms", 0L) / 1000L
+        val elapsedSeconds = payload.optLong("elapsed_ms", 0L) / 1_000L
         val label = if (status == "running" && elapsedSeconds > 0L) {
             context.getString(R.string.agent_task_status_running_elapsed, elapsedSeconds)
         } else baseLabel
-        val trace = parseDeliveryTrace(payload)
-        if (trace.length() == 0) {
-            appendTrace(trace, "agent_$status", payload.optString("agent_id"))
+        val incomingTrace = parseDeliveryTrace(payload)
+        if (incomingTrace.length() == 0) {
+            appendTrace(incomingTrace, "agent_$status", payload.optString("agent_id"))
         }
-        mergeMessageTaskState(context, contactId, messageId, payload.optString("task_id"), status, statusSeq, label, trace)
+        mergeMessageTaskState(
+            context,
+            contactId,
+            messageId,
+            payload.optString("task_id"),
+            status,
+            statusSeq,
+            label,
+            incomingTrace
+        )
         GlobalConversationEventBus.publishTaskStatus(
             context,
             contactId,
@@ -214,28 +267,21 @@ object ChatHistoryStore {
         statusLabel: String,
         incomingTrace: JSONArray
     ) {
-        val prefs = context.applicationContext.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
-        val root = runCatching { JSONObject(prefs.getString(HISTORY_KEY, null).orEmpty()) }.getOrElse { JSONObject() }
-        val messages = root.optJSONArray(contactId) ?: return
-        for (index in 0 until messages.length()) {
-            val item = messages.optJSONObject(index) ?: continue
-            if (item.optLong("id", -1L) != messageId) continue
-            if (taskStatusSeq > 0L && taskStatusSeq < item.optLong("taskStatusSeq", 0L)) return
-            val trace = item.optJSONArray("deliveryTrace") ?: JSONArray()
-            for (traceIndex in 0 until incomingTrace.length()) {
-                val event = incomingTrace.optJSONObject(traceIndex) ?: continue
-                if (!hasTraceStage(trace, event.optString("stage"))) trace.put(event)
-            }
-            item.put("deliveryTrace", trace)
-                .put("deliveryStatus", statusLabel)
-                .put("taskId", taskId)
-                .put("taskStatus", taskStatus)
-                .put("taskStatusSeq", taskStatusSeq)
-            break
+        val history = database(context.applicationContext)
+        val message = history.findMessage(messageId) ?: return
+        if (message.optString("contactId") != contactId) return
+        if (taskStatusSeq > 0L && taskStatusSeq < message.optLong("taskStatusSeq", 0L)) return
+        val trace = message.optJSONArray("deliveryTrace") ?: JSONArray()
+        for (traceIndex in 0 until incomingTrace.length()) {
+            val event = incomingTrace.optJSONObject(traceIndex) ?: continue
+            if (!hasTraceStage(trace, event.optString("stage"))) trace.put(JSONObject(event.toString()))
         }
-        root.put(contactId, messages)
-        prefs.edit().putString(HISTORY_KEY, root.toString())
-            .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis()).apply()
+        message.put("deliveryTrace", trace)
+            .put("deliveryStatus", statusLabel)
+            .put("taskId", taskId)
+            .put("taskStatus", taskStatus)
+            .put("taskStatusSeq", taskStatusSeq)
+        history.upsert(message)
     }
 
     private fun markMessageTrace(
@@ -244,42 +290,24 @@ object ChatHistoryStore {
         messageId: Long,
         stage: String,
         detail: String,
-        status: String,
-        durable: Boolean = false
+        status: String
     ) {
         if (contactId.isBlank() || messageId <= 0L) return
-        val appContext = context.applicationContext
-        val prefs = appContext.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
-        val root = runCatching {
-            JSONObject(prefs.getString(HISTORY_KEY, null).orEmpty())
-        }.getOrElse { JSONObject() }
-        val array = root.optJSONArray(contactId) ?: return
+        val history = database(context.applicationContext)
+        val message = history.findMessage(messageId) ?: return
+        if (message.optString("contactId") != contactId) return
+        val trace = message.optJSONArray("deliveryTrace") ?: JSONArray()
         var changed = false
-        for (i in 0 until array.length()) {
-            val item = array.optJSONObject(i) ?: continue
-            if (item.optLong("id", -1L) != messageId) continue
-            val trace = item.optJSONArray("deliveryTrace") ?: JSONArray()
-            if (!hasTraceStage(trace, stage)) {
-                appendTrace(trace, stage, detail)
-                item.put("deliveryTrace", trace)
-                changed = true
-            }
-            if (item.optString("deliveryStatus") != status) {
-                item.put("deliveryStatus", status)
-                changed = true
-            }
-            break
+        if (!hasTraceStage(trace, stage)) {
+            appendTrace(trace, stage, detail)
+            message.put("deliveryTrace", trace)
+            changed = true
         }
-        if (!changed) return
-        root.put(contactId, array)
-        val editor = prefs.edit()
-            .putString(HISTORY_KEY, root.toString())
-            .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis())
-        if (durable) {
-            editor.commit()
-        } else {
-            editor.apply()
+        if (message.optString("deliveryStatus") != status) {
+            message.put("deliveryStatus", status)
+            changed = true
         }
+        if (changed) history.upsert(message)
     }
 
     private fun parseIncoming(context: Context, payload: String): StoredIncomingMessage {
@@ -340,7 +368,8 @@ object ChatHistoryStore {
                 val sender = json?.optString("sender", CONTACT_HERMES) ?: CONTACT_HERMES
                 val contactId = when {
                     sender == "system" -> CONTACT_SYSTEM
-                    else -> json?.optString("contact_id", CONTACT_HERMES)?.takeIf { it.isNotBlank() } ?: CONTACT_HERMES
+                    else -> json?.optString("contact_id", CONTACT_HERMES)?.takeIf { it.isNotBlank() }
+                        ?: CONTACT_HERMES
                 }
                 StoredIncomingMessage(
                     contactId,
@@ -351,21 +380,6 @@ object ChatHistoryStore {
                 )
             }
         }
-    }
-
-    private fun hasIncomingDuplicate(array: JSONArray, incoming: StoredIncomingMessage): Boolean {
-        for (index in 0 until array.length()) {
-            val item = array.optJSONObject(index) ?: continue
-            if (item.optBoolean("isMine")) continue
-            if (incoming.remoteMessageId.isNotBlank() &&
-                item.optString("remoteMessageId") == incoming.remoteMessageId
-            ) return true
-            if (incoming.taskId.isNotBlank() &&
-                item.optString("taskId") == incoming.taskId &&
-                item.optString("content") == incoming.content
-            ) return true
-        }
-        return false
     }
 
     private fun contactName(context: Context, contactId: String): String {
@@ -384,50 +398,41 @@ object ChatHistoryStore {
             }
     }
 
-    private fun maxMessageId(root: JSONObject): Long {
-        var max = 0L
-        val keys = root.keys()
-        while (keys.hasNext()) {
-            val array = root.optJSONArray(keys.next()) ?: continue
-            for (i in 0 until array.length()) {
-                max = maxOf(max, array.optJSONObject(i)?.optLong("id", 0L) ?: 0L)
-            }
-        }
-        return max
-    }
-
     private fun parseDeliveryTrace(json: JSONObject?): JSONArray {
         val source = json?.optJSONArray("delivery_trace") ?: json?.optJSONArray("deliveryTrace")
-        val trace = JSONArray()
-        if (source != null) {
-            for (i in 0 until source.length()) {
-                source.optJSONObject(i)?.let { trace.put(it) }
-            }
+        return copyArray(source ?: JSONArray())
+    }
+
+    private fun copyArray(source: JSONArray): JSONArray {
+        val copy = JSONArray()
+        for (index in 0 until source.length()) {
+            source.optJSONObject(index)?.let { copy.put(JSONObject(it.toString())) }
         }
-        return trace
+        return copy
     }
 
     private fun appendTrace(trace: JSONArray, stage: String, detail: String = "") {
-        trace.put(JSONObject()
-            .put("stage", stage)
-            .put("at", System.currentTimeMillis())
-            .put("detail", detail))
+        trace.put(
+            JSONObject()
+                .put("stage", stage)
+                .put("at", System.currentTimeMillis())
+                .put("detail", detail)
+        )
     }
 
     private fun hasTraceStage(trace: JSONArray, stage: String): Boolean {
-        for (i in 0 until trace.length()) {
-            if (trace.optJSONObject(i)?.optString("stage") == stage) return true
+        for (index in 0 until trace.length()) {
+            if (trace.optJSONObject(index)?.optString("stage") == stage) return true
         }
         return false
     }
 
-    private fun trim(array: JSONArray): JSONArray {
-        if (array.length() <= MAX_SAVED_MESSAGES_PER_CONTACT) return array
-        val trimmed = JSONArray()
-        val start = array.length() - MAX_SAVED_MESSAGES_PER_CONTACT
-        for (i in start until array.length()) {
-            trimmed.put(array.optJSONObject(i))
+    private fun database(context: Context): ChatHistoryDatabase {
+        databaseInstance?.let { return it }
+        return synchronized(this) {
+            databaseInstance ?: ChatHistoryDatabase(context.applicationContext).also {
+                databaseInstance = it
+            }
         }
-        return trimmed
     }
 }

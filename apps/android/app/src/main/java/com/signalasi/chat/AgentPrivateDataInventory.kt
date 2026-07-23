@@ -80,7 +80,7 @@ object AgentPrivateDataInventory {
         item(
             "chat_history",
             "Contact message history",
-            "shared_prefs:signalasi_chat_history",
+            "database:signalasi_chat_history",
             backupPath = "root.messages",
             exportPolicy = AgentPrivateDataExportPolicy.OPTIONAL_SESSION_HISTORY
         ),
