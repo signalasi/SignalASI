@@ -295,26 +295,19 @@ class AgentTeamPairedProcessDeathDeviceTest {
     }
 
     private fun removeAcceptanceHistory(context: Context) {
-        val preferences = context.getSharedPreferences(CHAT_HISTORY_PREFERENCES, Context.MODE_PRIVATE)
         val root = chatHistoryRoot(context)
         root.keys().asSequence().toList().forEach { contactId ->
             val source = root.optJSONArray(contactId) ?: JSONArray()
-            val kept = JSONArray()
             for (index in 0 until source.length()) {
                 val item = source.optJSONObject(index) ?: continue
-                if (!item.optString("content").contains(ACCEPTANCE_MARKER)) kept.put(item)
+                if (item.optString("content").contains(ACCEPTANCE_MARKER)) {
+                    ChatHistoryStore.deleteMessage(context, item.optLong("id"))
+                }
             }
-            root.put(contactId, kept)
         }
-        preferences.edit().putString(CHAT_HISTORY_KEY, root.toString()).commit()
     }
 
-    private fun chatHistoryRoot(context: Context): JSONObject {
-        val raw = context.getSharedPreferences(CHAT_HISTORY_PREFERENCES, Context.MODE_PRIVATE)
-            .getString(CHAT_HISTORY_KEY, "{}")
-            .orEmpty()
-        return runCatching { JSONObject(raw) }.getOrElse { JSONObject() }
-    }
+    private fun chatHistoryRoot(context: Context): JSONObject = ChatHistoryStore.readAll(context)
 
     private fun acceptancePreferences(context: Context) =
         context.getSharedPreferences(ACCEPTANCE_PREFERENCES, Context.MODE_PRIVATE)
@@ -357,8 +350,6 @@ class AgentTeamPairedProcessDeathDeviceTest {
         const val PRIMARY_SOURCE_MESSAGE_ID_KEY = "primary_source_message_id"
         const val SEED_PID_KEY = "seed_pid"
         const val SEED_TIME_KEY = "seed_time"
-        const val CHAT_HISTORY_PREFERENCES = "signalasi_chat_history"
-        const val CHAT_HISTORY_KEY = "messages"
         const val REPORT_FILENAME = "agent-team-paired-process-death-report.json"
         const val CONNECTION_TIMEOUT_MILLIS = 45_000L
         const val CONNECTOR_TIMEOUT_MILLIS = 60_000L

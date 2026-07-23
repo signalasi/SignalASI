@@ -20,7 +20,6 @@ object AppStore {
     @Volatile private var contactsCacheRaw = ""
     @Volatile private var contactsCacheById: Map<String, String> = emptyMap()
     private const val PREFS = "signalasi_app_store"
-    private const val HISTORY_PREFS = "signalasi_chat_history"
     private const val TRUST_PREFS = "signalasi_signal_trust"
     private const val SIGNAL_STORE_PREFS = "signalasi_signal_store"
     private const val KEY_CONTACTS = "contacts"
@@ -879,9 +878,7 @@ object AppStore {
             payload.put("friend_requests", friendRequests(context))
         }
         if (includeMessages) {
-            val rawMessages = context.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
-                .getString("messages", "{}")
-            payload.put("messages", JSONObject(rawMessages ?: "{}"))
+            payload.put("messages", ChatHistoryStore.readAll(context))
         }
         val encrypted = encryptBackup(payload.toString(), password)
         val backup = context.filesDir.resolve("backups").apply { mkdirs() }
@@ -904,10 +901,7 @@ object AppStore {
         }
         if (includeMessages) {
             payload.optJSONObject("messages")?.let {
-                context.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
-                    .edit()
-                    .putString("messages", it.toString())
-                    .apply()
+                ChatHistoryStore.replaceAll(context, it)
             }
         }
     }
@@ -918,7 +912,8 @@ object AppStore {
         contactsCacheById = emptyMap()
         AgentWorkflowScheduler.cancelAll(context)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().commit()
-        context.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
+        ChatHistoryStore.clear(context)
+        ChatHistoryStore.close()
         context.getSharedPreferences(TRUST_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences(SIGNAL_STORE_PREFS, Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_runtime", Context.MODE_PRIVATE).edit().clear().commit()
@@ -1480,10 +1475,7 @@ object AppStore {
             ?.optString("name")
             .orEmpty()
             .ifBlank { contactId }
-        val prefs = context.getSharedPreferences(HISTORY_PREFS, Context.MODE_PRIVATE)
-        val root = runCatching { JSONObject(prefs.getString("messages", "{}") ?: "{}") }.getOrDefault(JSONObject())
-        root.remove(contactId)
-        prefs.edit().putString("messages", root.toString()).apply()
+        ChatHistoryStore.deleteContact(context, contactId)
         GlobalConversationEventBus.publishContactHistoryCleared(context, contactId, contactName)
     }
 

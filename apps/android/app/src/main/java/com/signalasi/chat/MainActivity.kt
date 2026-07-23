@@ -164,10 +164,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val CONTROL_CENTER_HOME_CACHE_MILLIS = 30_000L
         private const val UI_PREFS = "signalasi_ui_preferences"
         private const val DEBUG_AGENT_PREFS = "signalasi_debug_agent"
-        private const val HISTORY_PREFS = "signalasi_chat_history"
-        private const val HISTORY_KEY = "messages"
-        private const val HISTORY_UPDATED_KEY = "updated_at"
-        private const val MAX_SAVED_MESSAGES_PER_CONTACT = 500
         private const val PAGE_VOICE = "page_voice"
         private const val PAGE_AGENT = "page_agent"
         private const val PAGE_MESSAGES = "page_messages"
@@ -388,7 +384,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val summaries = mutableMapOf<String, ContactSummary>()
     private var selectedContact: Contact? = null
     private var activeMainTab = PAGE_AGENT
-    private var nextMessageId = 1L
     private var recorder: MediaRecorder? = null
     private var recordingFile: File? = null
     private var recordingStartedAt = 0L
@@ -477,7 +472,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             return messages.getOrPut(id) { mutableListOf() }
         }
 
-    private fun newMessageId(): Long = nextMessageId++
+    private fun newMessageId(): Long = ChatHistoryStore.reserveMessageId(this)
 
     override fun attachBaseContext(newBase: Context) {
         val localized = AppLanguage.wrap(newBase)
@@ -13188,7 +13183,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             summaries.clear()
             directoryContacts.clear()
             currentMessages.clear()
-            nextMessageId = 1L
             loadChatHistory()
             refreshContactList()
             refreshDirectoryContacts()
@@ -13410,10 +13404,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     .put("detail", "debug")))
             val historyRoot = JSONObject()
             historyRoot.put(contactId, JSONArray().put(message))
-            getSharedPreferences(HISTORY_PREFS, MODE_PRIVATE).edit()
-                .putString(HISTORY_KEY, historyRoot.toString())
-                .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis())
-                .commit()
+            ChatHistoryStore.replaceAll(this, historyRoot)
 
             val backup = AppStore.exportBackup(
                 this,
@@ -13426,14 +13417,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 .putString("contacts", JSONArray().toString())
                 .putString("friend_requests", JSONArray().toString())
                 .commit()
-            getSharedPreferences(HISTORY_PREFS, MODE_PRIVATE).edit()
-                .putString(HISTORY_KEY, JSONObject().toString())
-                .putLong(HISTORY_UPDATED_KEY, System.currentTimeMillis())
-                .commit()
+            ChatHistoryStore.replaceAll(this, JSONObject())
 
             AppStore.importBackup(this, backup, password, includeMessages = true)
             val restoredContacts = AppStore.contacts(this).toString()
-            val restoredHistory = getSharedPreferences(HISTORY_PREFS, MODE_PRIVATE).getString(HISTORY_KEY, "{}").orEmpty()
+            val restoredHistory = ChatHistoryStore.readAll(this).toString()
             val contactRestored = restoredContacts.contains(contactToken) && restoredContacts.contains("Backup Smoke")
             val messageRestored = restoredHistory.contains(messageToken)
             backup.delete()
@@ -14065,7 +14053,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             contact,
             deliveryTrace = incomingTrace,
             taskId = json?.optString("task_id").orEmpty(),
-            taskStatus = json?.optString("task_status").orEmpty()
+            taskStatus = json?.optString("task_status").orEmpty(),
+            taskStatusSeq = json?.optLong("status_seq", 0L) ?: 0L,
+            remoteMessageId = json?.optString("message_id").orEmpty()
         )
     }
 
@@ -14324,7 +14314,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             stored.deliveryStatus = getString(R.string.delivery_status_read)
         }
         list.add(stored)
-        trimHistory(list)
         if (!stored.isSystem) {
             val summary = summaries.getOrPut(stored.contact.id) { ContactSummary() }
             summary.lastMessage = stored.content
@@ -14360,7 +14349,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (!removed.isSystem) {
             GlobalConversationEventBus.publishChatMessageDeleted(this, contactId, removed.id)
         }
-        saveChatHistory()
+        handler.removeCallbacks(historySaveRunnable)
+        historySaveSeq.incrementAndGet()
+        ChatHistoryStore.deleteMessage(this, removed.id)
         if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
             messageList.post {
                 messageAdapter?.notifyItemRemoved(position)
@@ -14421,10 +14412,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         featureContent.addView(featureRow(getString(R.string.message_delivery_trace), deliveryTraceText(message), R.drawable.ic_protocol_link, ""))
     }
 
-    private fun trimHistory(list: MutableList<ChatMessage>) {
-        while (list.size > MAX_SAVED_MESSAGES_PER_CONTACT) list.removeAt(0)
-    }
-
     private fun refreshVisibleMessages(contactId: String) {
         if (chatPage.visibility != View.VISIBLE || selectedContact?.id != contactId) return
         messageList.post {
@@ -14437,18 +14424,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     // ===== Chat History =====
     private fun loadChatHistory() {
-        val prefs = getSharedPreferences(HISTORY_PREFS, MODE_PRIVATE)
-        val raw = prefs.getString(HISTORY_KEY, null)
-        lastHistoryLoadedAt = prefs.getLong(HISTORY_UPDATED_KEY, 0L)
-        if (raw.isNullOrBlank()) {
+        val root = ChatHistoryStore.readAll(this)
+        lastHistoryLoadedAt = ChatHistoryStore.updatedVersion(this)
+        if (root.length() == 0) {
             seedWelcomeSystemNotification()
             return
         }
-        val root = runCatching { JSONObject(raw) }.getOrNull() ?: return
         messages.clear()
         summaries.clear()
-        var maxId = 0L
-        var removedTransientSystemEvents = false
+        val removedMessageIds = mutableListOf<Long>()
         val contactIds = mutableSetOf<String>()
         val keys = root.keys()
         while (keys.hasNext()) {
@@ -14463,13 +14447,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 val item = array.optJSONObject(i) ?: continue
                 val messageContact = contactById(item.optString("contactId", contactId)) ?: contact
                 val savedContent = item.optString("content")
-                if (contactId == CONTACT_SYSTEM.id && isLegacySystemChatStarter(savedContent)) continue
+                val savedId = item.optLong("id", 0L).takeIf { it > 0L } ?: newMessageId()
+                if (contactId == CONTACT_SYSTEM.id && isLegacySystemChatStarter(savedContent)) {
+                    removedMessageIds += savedId
+                    continue
+                }
                 if (contactId == CONTACT_SYSTEM.id && isTransientCloudSystemEvent(item)) {
-                    removedTransientSystemEvents = true
+                    removedMessageIds += savedId
                     continue
                 }
                 val message = ChatMessage(
-                    id = item.optLong("id", newMessageId()),
+                    id = savedId,
                     content = savedContent,
                     isMine = item.optBoolean("isMine"),
                     contact = messageContact,
@@ -14479,11 +14467,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     taskId = item.optString("taskId"),
                     taskStatus = item.optString("taskStatus"),
                     taskStatusSeq = item.optLong("taskStatusSeq", 0L),
+                    remoteMessageId = item.optString("remoteMessageId"),
                     deliveryTrace = parseDeliveryTrace(item.optJSONArray("deliveryTrace"))
                 )
                 if (message.content.isBlank()) continue
                 list.add(message)
-                maxId = maxOf(maxId, message.id)
             }
             if (list.isNotEmpty()) {
                 messages[contactId] = list
@@ -14495,13 +14483,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
             }
         }
-        nextMessageId = maxOf(nextMessageId, maxId + 1)
+        removedMessageIds.forEach { ChatHistoryStore.deleteMessage(this, it) }
         if (messages.isEmpty()) seedWelcomeSystemNotification()
-        else if (removedTransientSystemEvents) saveChatHistory()
     }
 
     private fun reloadChatHistoryIfChanged(force: Boolean = false) {
-        val updatedAt = getSharedPreferences(HISTORY_PREFS, MODE_PRIVATE).getLong(HISTORY_UPDATED_KEY, 0L)
+        val updatedAt = ChatHistoryStore.updatedVersion(this)
         if (!force && updatedAt <= lastHistoryLoadedAt) return
         val selectedId = selectedContact?.id
         loadChatHistory()
@@ -14616,7 +14603,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun persistChatHistorySnapshot(sync: Boolean) {
         val snapshot = messages.mapValues { (_, list) ->
-            list.takeLast(MAX_SAVED_MESSAGES_PER_CONTACT).map { message ->
+            list.map { message ->
                 message.copy(deliveryTrace = message.deliveryTrace.toMutableList())
             }
         }
@@ -14637,16 +14624,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         .put("taskId", message.taskId)
                         .put("taskStatus", message.taskStatus)
                         .put("taskStatusSeq", message.taskStatusSeq)
+                        .put("remoteMessageId", message.remoteMessageId)
                         .put("deliveryTrace", deliveryTraceJson(message.deliveryTrace)))
                 }
                 root.put(contactId, array)
             }
-            val updatedAt = System.currentTimeMillis()
-            getSharedPreferences(HISTORY_PREFS, MODE_PRIVATE).edit()
-                .putString(HISTORY_KEY, root.toString())
-                .putLong(HISTORY_UPDATED_KEY, updatedAt)
-                .apply()
-            lastHistoryLoadedAt = updatedAt
+            ChatHistoryStore.mergeSnapshot(this, root)
+            lastHistoryLoadedAt = ChatHistoryStore.updatedVersion(this)
         }
         if (sync) {
             writeSnapshot()
@@ -19315,7 +19299,8 @@ data class ChatMessage(
     val deliveryTrace: MutableList<DeliveryTraceEvent> = mutableListOf(),
     var taskId: String = "",
     var taskStatus: String = "",
-    var taskStatusSeq: Long = 0L
+    var taskStatusSeq: Long = 0L,
+    var remoteMessageId: String = ""
 )
 
 data class DeliveryTraceEvent(

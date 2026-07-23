@@ -543,7 +543,7 @@ for (const requiredText of [
   "signalasi_app_store",
   "signalasi_signal_trust",
   "signalasi_signal_store",
-  "HISTORY_UPDATED_KEY",
+  "ChatHistoryStore.updatedVersion",
   "reloadChatHistoryIfChanged",
   "android-background-message.xml",
   "BG_SERVICE_",
