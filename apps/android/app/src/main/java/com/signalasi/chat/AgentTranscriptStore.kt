@@ -299,11 +299,11 @@ data class AgentConversationMetrics(
 class AgentTranscriptStore(context: Context) {
     private val appContext = context.applicationContext
     private val preferences = AgentEncryptedDatabase(context.applicationContext, PREFS)
+    private val entryDatabase = AgentTranscriptEntryDatabase(context.applicationContext)
     private var draftConversation: AgentConversation? = null
 
     @Synchronized
     fun conversations(includeArchived: Boolean = false): List<AgentConversation> {
-        ensureConversation()
         prunePersistedEmptyConversations()
         return decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]"))
             .filter { includeArchived || it.status == AgentConversationStatus.ACTIVE }
@@ -356,7 +356,7 @@ class AgentTranscriptStore(context: Context) {
             globalTopicKey = globalTopicKey.trim().take(MAX_GLOBAL_TOPIC_KEY_CHARACTERS)
         )
         val all = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]"))
-        saveConversations((all + conversation).takeLast(MAX_CONVERSATIONS))
+        saveConversations(all + conversation)
         GlobalConversationEventBus.publishConversationCreated(appContext, conversation)
         return conversation
     }
@@ -468,8 +468,7 @@ class AgentTranscriptStore(context: Context) {
     fun deleteConversation(conversationId: String): Boolean {
         val all = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]"))
         val deletedConversation = all.firstOrNull { it.id == conversationId } ?: return false
-        val retainedEntries = allEntries().filterNot { it.conversationId == conversationId }
-        saveEntries(retainedEntries)
+        entryDatabase.deleteConversation(conversationId)
         saveConversations(all.filterNot { it.id == conversationId })
         if (preferences.readString(KEY_ACTIVE_CONVERSATION, "") == conversationId) {
             preferences.remove(KEY_ACTIVE_CONVERSATION)
@@ -481,29 +480,35 @@ class AgentTranscriptStore(context: Context) {
 
     @Synchronized
     fun list(conversationId: String = activeConversation().id): List<AgentTranscriptEntry> =
-        allEntries().filter { it.conversationId == conversationId }.takeLast(MAX_ITEMS_PER_CONVERSATION)
+        entryDatabase.listConversation(conversationId)
+
+    @Synchronized
+    internal fun page(
+        conversationId: String = activeConversation().id,
+        beforeSequenceExclusive: Long? = null,
+        pageSize: Int = 100
+    ): AgentTranscriptPage =
+        entryDatabase.listConversationPage(conversationId, beforeSequenceExclusive, pageSize)
 
     @Synchronized
     fun conversationIdForTurn(turnId: String): String? {
         val cleanTurnId = turnId.trim()
         if (cleanTurnId.isBlank()) return null
-        return allEntries().lastOrNull { it.turnId == cleanTurnId }?.conversationId
+        return entryDatabase.conversationIdForTurn(cleanTurnId)
     }
 
     @Synchronized
     fun conversationIdForTask(taskId: String): String? {
         val cleanTaskId = taskId.trim()
         if (cleanTaskId.isBlank()) return null
-        return allEntries().lastOrNull { it.taskId == cleanTaskId }?.conversationId
+        return entryDatabase.conversationIdForTask(cleanTaskId)
     }
 
     @Synchronized
     fun turnIdForTask(taskId: String): String? {
         val cleanTaskId = taskId.trim()
         if (cleanTaskId.isBlank()) return null
-        return allEntries().asReversed().firstOrNull {
-            it.taskId == cleanTaskId && it.turnId.isNotBlank()
-        }?.turnId
+        return entryDatabase.turnIdForTask(cleanTaskId)
     }
 
     @Synchronized
@@ -544,7 +549,7 @@ class AgentTranscriptStore(context: Context) {
             merged = false,
             failure = AgentConversationMergeFailure.TARGET_NOT_FOUND
         )
-        saveEntries(boundedEntries(mutation.entries))
+        saveEntries(mutation.entries)
         saveConversations(mutation.conversations)
         SharedPreferencesAgentTaskStore(appContext).rebindSession(sourceConversationId, target.id)
         AgentRunRecorder(appContext).rebindConversation(sourceConversationId, target.id)
@@ -560,9 +565,8 @@ class AgentTranscriptStore(context: Context) {
 
     @Synchronized
     fun deleteEntry(entryId: String): Boolean {
-        val current = allEntries()
-        val removed = current.firstOrNull { it.id == entryId } ?: return false
-        saveEntries(current.filterNot { it.id == entryId })
+        val removed = entryDatabase.findById(entryId) ?: return false
+        if (!entryDatabase.deleteById(entryId)) return false
         invalidateCompactionIfNeeded(removed.conversationId, listOf(removed))
         conversationForEvent(removed.conversationId)?.let { conversation ->
             GlobalConversationEventBus.publishTranscriptEntryDeleted(appContext, conversation, removed)
@@ -574,12 +578,11 @@ class AgentTranscriptStore(context: Context) {
     fun deleteByDedupeKey(conversationId: String, dedupeKey: String): Boolean {
         val cleanKey = dedupeKey.trim()
         if (cleanKey.isBlank()) return false
-        val current = allEntries()
-        val removed = current.filter {
+        val removed = entryDatabase.listConversation(conversationId).filter {
             it.conversationId == conversationId && it.dedupeKey == cleanKey
         }
         if (removed.isEmpty()) return false
-        saveEntries(current - removed.toSet())
+        entryDatabase.deleteEntries(removed.map(AgentTranscriptEntry::id))
         invalidateCompactionIfNeeded(conversationId, removed)
         conversationForEvent(conversationId)?.let { conversation ->
             removed.forEach { entry ->
@@ -649,20 +652,18 @@ class AgentTranscriptStore(context: Context) {
         taskId: String = "",
         richOutputJson: String = ""
     ): Boolean {
-        val cleanText = text.trim().take(MAX_TEXT_CHARACTERS)
+        val cleanText = text.trim()
         if (cleanText.isBlank()) return false
         persistDraftIfNeeded(conversationId)
         val cleanKey = dedupeKey.trim().take(MAX_DEDUPE_KEY_CHARACTERS)
-        val current = allEntries().toMutableList()
-        if (cleanKey.isNotBlank() && current.any { it.conversationId == conversationId && it.dedupeKey == cleanKey }) return false
+        if (cleanKey.isNotBlank() && entryDatabase.findByDedupeKey(conversationId, cleanKey) != null) return false
         val entry = AgentTranscriptEntry(
             id = UUID.randomUUID().toString(), role = role, text = cleanText,
             timestampMillis = timestampMillis, dedupeKey = cleanKey,
             conversationId = conversationId, turnId = turnId, taskId = taskId,
             richOutputJson = AgentRichContentCodec.normalize(richOutputJson)
         )
-        current += entry
-        saveEntries(boundedEntries(current))
+        check(entryDatabase.insert(entry)) { "Agent transcript entry write failed" }
         touchConversation(conversationId, role, cleanText, timestampMillis)
         if (role == AgentTranscriptRole.ASSISTANT) compactContextIfNeeded(conversationId)
         conversationForEvent(conversationId)?.let { conversation ->
@@ -682,18 +683,17 @@ class AgentTranscriptStore(context: Context) {
         taskId: String = "",
         richOutputJson: String = ""
     ): Boolean {
-        val cleanText = text.trim().take(MAX_TEXT_CHARACTERS)
+        val cleanText = text.trim()
         val cleanKey = dedupeKey.trim().take(MAX_DEDUPE_KEY_CHARACTERS)
         if (cleanText.isBlank() || cleanKey.isBlank()) return false
         persistDraftIfNeeded(conversationId)
-        val current = allEntries().toMutableList()
-        val index = current.indexOfFirst { it.conversationId == conversationId && it.dedupeKey == cleanKey }
-        val updated = index >= 0
+        val previous = entryDatabase.findByDedupeKey(conversationId, cleanKey)
+        val updated = previous != null
         var supersededEntryId = ""
         var changedPriorEntry: AgentTranscriptEntry? = null
         val eventEntry: AgentTranscriptEntry
         if (updated) {
-            val previous = current[index]
+            checkNotNull(previous)
             val normalizedRichOutput = AgentRichContentCodec.normalize(richOutputJson)
             if (previous.text == cleanText && previous.role == role &&
                 (normalizedRichOutput.isBlank() || normalizedRichOutput == previous.richOutputJson)
@@ -707,15 +707,18 @@ class AgentTranscriptStore(context: Context) {
                 taskId = taskId.ifBlank { previous.taskId },
                 richOutputJson = normalizedRichOutput.ifBlank { previous.richOutputJson }
             )
-            current[index] = eventEntry
         } else {
             eventEntry = AgentTranscriptEntry(
                 UUID.randomUUID().toString(), role, cleanText, timestampMillis, cleanKey,
                 conversationId, turnId, taskId, AgentRichContentCodec.normalize(richOutputJson)
             )
-            current += eventEntry
         }
-        saveEntries(boundedEntries(current))
+        val written = if (previous != null) {
+            entryDatabase.replace(previous.id, eventEntry)
+        } else {
+            entryDatabase.insert(eventEntry)
+        }
+        check(written) { "Agent transcript entry write failed" }
         changedPriorEntry?.let { invalidateCompactionIfNeeded(conversationId, listOf(it)) }
         touchConversation(conversationId, role, cleanText, timestampMillis)
         if (role == AgentTranscriptRole.ASSISTANT) compactContextIfNeeded(conversationId)
@@ -734,6 +737,20 @@ class AgentTranscriptStore(context: Context) {
     fun clear() {
         draftConversation = null
         preferences.clear()
+        entryDatabase.clear()
+    }
+
+    @Synchronized
+    internal fun exportEntriesJson(): JSONArray {
+        val output = JSONArray()
+        allEntries().forEach { entry -> output.put(entry.toJson()) }
+        return output
+    }
+
+    @Synchronized
+    internal fun restoreEntriesJson(input: JSONArray) {
+        val fallbackConversationId = preferences.readString(KEY_ACTIVE_CONVERSATION, "")
+        saveEntries(decodeEntries(input.toString(), fallbackConversationId))
     }
 
     @Synchronized
@@ -741,7 +758,7 @@ class AgentTranscriptStore(context: Context) {
         val current = allEntries()
         val removed = current.filter { it.text == text }
         if (removed.isEmpty()) return 0
-        saveEntries(current - removed.toSet())
+        entryDatabase.deleteEntries(removed.map(AgentTranscriptEntry::id))
         removed.groupBy(AgentTranscriptEntry::conversationId).forEach { (conversationId, entries) ->
             conversationForEvent(conversationId)?.let { conversation ->
                 entries.forEach { entry ->
@@ -755,30 +772,11 @@ class AgentTranscriptStore(context: Context) {
     @Synchronized
     fun removeObsoletePlannerProcessEntries(): Int {
         val current = allEntries()
-        val filtered = current.filterNot { entry ->
+        val removed = current.filter { entry ->
             AgentTranscriptLifecyclePolicy.isObsoletePlannerProcessEntry(entry.role, entry.dedupeKey)
         }
-        if (filtered.size != current.size) saveEntries(filtered)
-        return current.size - filtered.size
-    }
-
-    private fun ensureConversation() {
-        val existing = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]"))
-        if (existing.isNotEmpty()) return
-        val now = System.currentTimeMillis()
-        val legacyEntries = decodeEntries(preferences.readString(KEY_ITEMS, "[]"), "")
-        if (legacyEntries.isEmpty()) return
-        val conversation = AgentConversation(
-            id = UUID.randomUUID().toString(),
-            title = if (legacyEntries.isEmpty()) "New session" else "Previous Agent conversation",
-            createdAt = legacyEntries.minOfOrNull { it.timestampMillis } ?: now,
-            updatedAt = legacyEntries.maxOfOrNull { it.timestampMillis } ?: now
-        )
-        saveConversations(listOf(conversation))
-        preferences.writeString(KEY_ACTIVE_CONVERSATION, conversation.id)
-        if (legacyEntries.isNotEmpty()) {
-            saveEntries(legacyEntries.map { it.copy(conversationId = conversation.id) })
-        }
+        if (removed.isNotEmpty()) entryDatabase.deleteEntries(removed.map(AgentTranscriptEntry::id))
+        return removed.size
     }
 
     private fun persistDraftIfNeeded(conversationId: String) {
@@ -832,10 +830,7 @@ class AgentTranscriptStore(context: Context) {
     private fun prunePersistedEmptyConversations() {
         val all = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]"))
         if (all.isEmpty()) return
-        val conversationIdsWithContent = decodeEntries(
-            preferences.readString(KEY_ITEMS, "[]"),
-            preferences.readString(KEY_ACTIVE_CONVERSATION, "")
-        ).mapTo(mutableSetOf()) { it.conversationId }
+        val conversationIdsWithContent = entryDatabase.conversationIdsWithEntries()
         val retained = all.filter { it.id in conversationIdsWithContent }
         if (retained.size == all.size) return
         saveConversations(retained)
@@ -843,11 +838,7 @@ class AgentTranscriptStore(context: Context) {
         if (retained.none { it.id == activeId }) preferences.remove(KEY_ACTIVE_CONVERSATION)
     }
 
-    private fun allEntries(): List<AgentTranscriptEntry> {
-        ensureConversation()
-        val fallbackId = preferences.readString(KEY_ACTIVE_CONVERSATION, "")
-        return decodeEntries(preferences.readString(KEY_ITEMS, "[]"), fallbackId)
-    }
+    private fun allEntries(): List<AgentTranscriptEntry> = entryDatabase.listAll()
 
     private fun updateConversation(id: String, transform: (AgentConversation) -> AgentConversation): Boolean {
         val all = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]")).toMutableList()
@@ -965,7 +956,7 @@ class AgentTranscriptStore(context: Context) {
                     AgentTranscriptRole.PROCESS -> ConversationContextRole.TOOL
                 },
                 content = entry.text,
-                groupId = entry.turnId.ifBlank { "legacy:${entry.id}" }
+                groupId = entry.turnId.ifBlank { "entry:${entry.id}" }
             )
         },
         previousSummary = conversation.summary,
@@ -991,30 +982,27 @@ class AgentTranscriptStore(context: Context) {
         }
     )
 
-    private fun boundedEntries(items: List<AgentTranscriptEntry>): List<AgentTranscriptEntry> =
-        items.groupBy { it.conversationId }
-            .values.flatMap { it.takeLast(MAX_ITEMS_PER_CONVERSATION) }
-            .sortedBy { it.timestampMillis }
-            .takeLast(MAX_TOTAL_ITEMS)
-
     private fun saveEntries(items: List<AgentTranscriptEntry>) {
-        val array = JSONArray()
-        items.forEach { entry ->
-            array.put(JSONObject()
-                .put("id", entry.id).put("role", entry.role.name).put("text", entry.text)
-                .put("timestamp", entry.timestampMillis).put("dedupe_key", entry.dedupeKey)
-                .put("conversation_id", entry.conversationId).put("turn_id", entry.turnId)
-                .put("task_id", entry.taskId).put("rich_output", entry.richOutputJson)
-                .put("source_conversation_id", entry.sourceConversationId)
-                .put("source_conversation_title", entry.sourceConversationTitle)
-                .put("source_entry_id", entry.sourceEntryId))
-        }
-        preferences.writeString(KEY_ITEMS, array.toString())
+        entryDatabase.replaceAll(items)
     }
+
+    private fun AgentTranscriptEntry.toJson(): JSONObject = JSONObject()
+        .put("id", id)
+        .put("role", role.name)
+        .put("text", text)
+        .put("timestamp", timestampMillis)
+        .put("dedupe_key", dedupeKey)
+        .put("conversation_id", conversationId)
+        .put("turn_id", turnId)
+        .put("task_id", taskId)
+        .put("rich_output", richOutputJson)
+        .put("source_conversation_id", sourceConversationId)
+        .put("source_conversation_title", sourceConversationTitle)
+        .put("source_entry_id", sourceEntryId)
 
     private fun saveConversations(items: List<AgentConversation>) {
         val array = JSONArray()
-        items.takeLast(MAX_CONVERSATIONS).forEach { conversation ->
+        items.forEach { conversation ->
             array.put(JSONObject()
                 .put("id", conversation.id).put("title", conversation.title)
                 .put("created_at", conversation.createdAt).put("updated_at", conversation.updatedAt)
@@ -1042,7 +1030,7 @@ class AgentTranscriptStore(context: Context) {
         return buildList {
             for (index in 0 until array.length()) {
                 val item = array.optJSONObject(index) ?: continue
-                val text = item.optString("text").trim().take(MAX_TEXT_CHARACTERS)
+                val text = item.optString("text").trim()
                 if (text.isBlank()) continue
                 add(AgentTranscriptEntry(
                     id = item.optString("id").ifBlank { UUID.randomUUID().toString() },
@@ -1095,14 +1083,9 @@ class AgentTranscriptStore(context: Context) {
 
     companion object {
         const val PREFS = "signalasi_agent_transcript"
-        const val KEY_ITEMS = "items"
         const val KEY_CONVERSATIONS = "conversations"
         const val KEY_ACTIVE_CONVERSATION = "active_conversation"
         const val KEY_DRAFT_CONVERSATION = "draft_conversation"
-        private const val MAX_CONVERSATIONS = 100
-        private const val MAX_ITEMS_PER_CONVERSATION = 300
-        private const val MAX_TOTAL_ITEMS = 2_000
-        private const val MAX_TEXT_CHARACTERS = 16_000
         private const val MAX_TITLE_CHARACTERS = 72
         private const val MAX_SUMMARY_CHARACTERS = 12_000
         private const val MAX_DEDUPE_KEY_CHARACTERS = 240

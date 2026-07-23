@@ -4,6 +4,18 @@ SignalASI treats the stored transcript and the model input as separate data
 products. The complete transcript remains the source of truth; each model call
 receives a compiled context that fits that model's input budget.
 
+## Transcript persistence
+
+Agent transcript entries are stored as individually encrypted SQLite rows.
+There is no per-conversation message count, global message count, or
+conversation count that silently deletes older history. The store supports
+indexed lookup and cursor-based paging so retained history does not need to be
+loaded into the UI or a model request all at once.
+
+Backup and restore operate on the complete transcript. Explicit conversation
+deletion, reset, and user-configured future retention policies are the only
+supported ways to remove source history.
+
 ## Provider modes
 
 - Codex App Server is stateful. SignalASI sends only the current turn and keeps

@@ -97,6 +97,7 @@ object AgentPrivateDataInventory {
             "transcript",
             "Agent transcript",
             "database:signalasi_agent_transcript",
+            "database:signalasi_agent_transcript_entries",
             backupPath = "agent.transcript",
             exportPolicy = AgentPrivateDataExportPolicy.OPTIONAL_SESSION_HISTORY
         ),
