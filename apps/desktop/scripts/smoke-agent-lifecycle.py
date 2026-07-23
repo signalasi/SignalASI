@@ -20,7 +20,7 @@ with tempfile.TemporaryDirectory(prefix="signalasi-task-smoke-") as temporary_ho
 
     import agent_task_manager as lifecycle
 
-    lifecycle.TASKS_PATH = Path(temporary_home) / "agent_tasks.json"
+    lifecycle.TASKS_DB_PATH = Path(temporary_home) / "agent_tasks.sqlite3"
     manager = lifecycle.AgentTaskManager()
 
     events: list[dict] = []
@@ -157,7 +157,7 @@ with tempfile.TemporaryDirectory(prefix="signalasi-task-smoke-") as temporary_ho
     task_ids = {row["task_id"] for row in rows}
     if completed.task_id not in task_ids or cancelled.task_id not in task_ids:
         raise SystemExit("task registry list is incomplete")
-    if not lifecycle.TASKS_PATH.exists():
+    if not lifecycle.TASKS_DB_PATH.exists():
         raise SystemExit("task registry was not persisted")
 
 print("Remote Agent lifecycle smoke passed")

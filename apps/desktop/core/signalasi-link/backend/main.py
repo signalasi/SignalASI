@@ -785,10 +785,13 @@ def _desktop_task_prompt(prompt: str, conversation_id: str, attachment_paths: li
         task_history_messages,
     )
 
-    history = agent_task_manager.conversation_messages(conversation_id, limit=500)
     summary_store = conversation_summary_store()
     summary_key = f"desktop-task:{conversation_id}"
     summary_state = summary_store.state(summary_key)
+    history = agent_task_manager.conversation_messages(
+        conversation_id,
+        after_cursor=summary_state.cursor,
+    )
     preamble = (
         "You are executing a task from SignalASI Desktop. Work directly, use the available local tools, "
         "verify the result, and return a concise final response with artifact paths when files are created."

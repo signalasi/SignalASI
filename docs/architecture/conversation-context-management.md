@@ -6,15 +6,23 @@ receives a compiled context that fits that model's input budget.
 
 ## Transcript persistence
 
-Agent transcript entries are stored as individually encrypted SQLite rows.
-There is no per-conversation message count, global message count, or
-conversation count that silently deletes older history. The store supports
-indexed lookup and cursor-based paging so retained history does not need to be
-loaded into the UI or a model request all at once.
+Android Agent turns and ordinary contact messages are stored as individually
+encrypted SQLite rows. Desktop Agent tasks, results, and complete tool-event
+streams are stored as indexed SQLite records. There is no per-conversation
+message count, global message count, or conversation count that silently
+deletes older history.
+
+Storage, presentation, and model context have separate limits. A UI or API may
+request a bounded page, but that page size never becomes a retention policy.
+Indexed conversation cursors let a client read older history without loading
+the complete database into memory.
 
 Backup and restore operate on the complete transcript. Explicit conversation
 deletion, reset, and user-configured future retention policies are the only
 supported ways to remove source history.
+
+Development builds start with the current SQLite schema. They do not import or
+fall back to obsolete JSON task-history files.
 
 ## Provider modes
 
@@ -30,9 +38,10 @@ supported ways to remove source history.
 
 1. Resolve the model context window and reserve output tokens.
 2. Estimate input pressure with CJK-aware token estimates.
-3. Keep complete recent turn groups according to a token budget, not a message
-   count.
-4. Preserve unresolved user turns and pending tool blocks.
+3. Keep a contiguous suffix of complete recent turn groups according to a token
+   budget, not a message count.
+4. Preserve recent unresolved user turns and pending tool blocks verbatim;
+   older goals remain in the durable summary.
 5. Remove large historical tool payloads before removing dialogue.
 6. Compact the older prefix into a reference-only structured handoff.
 7. Refine that handoff with the configured model when available; use the local

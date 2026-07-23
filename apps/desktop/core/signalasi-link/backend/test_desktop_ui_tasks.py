@@ -22,7 +22,7 @@ def wait_for_terminal(manager, task_id: str, timeout: float = 3.0):
 
 
 def test_desktop_task_runs_async_and_reuses_conversation_context(tmp_path, monkeypatch):
-    monkeypatch.setattr(task_module, "TASKS_PATH", tmp_path / "tasks.json")
+    monkeypatch.setattr(task_module, "TASKS_DB_PATH", tmp_path / "tasks.sqlite3")
     manager = task_module.AgentTaskManager()
     monkeypatch.setattr(main, "agent_task_manager", manager)
     monkeypatch.setenv("SIGNALASI_WORKSPACE_ROOT", str(tmp_path / "workspace"))
@@ -94,7 +94,7 @@ def test_desktop_auto_uses_super_agent_and_explicit_agents_remain_direct(monkeyp
 
 
 def test_failed_attachment_task_retries_in_the_same_conversation(tmp_path, monkeypatch):
-    monkeypatch.setattr(task_module, "TASKS_PATH", tmp_path / "tasks.json")
+    monkeypatch.setattr(task_module, "TASKS_DB_PATH", tmp_path / "tasks.sqlite3")
     manager = task_module.AgentTaskManager()
     monkeypatch.setattr(main, "agent_task_manager", manager)
     monkeypatch.setenv("SIGNALASI_WORKSPACE_ROOT", str(tmp_path / "workspace"))
