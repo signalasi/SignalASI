@@ -52,4 +52,25 @@ class MqttPublishGuardTest {
         assertTrue(result.accepted)
         assertFalse(MqttPublishResult.FAILED.accepted)
     }
+
+    @Test
+    fun `connection retry backs off and caps at the longest delay`() {
+        val policy = MqttConnectionRetryPolicy(longArrayOf(2L, 5L, 10L))
+
+        assertEquals(2L, policy.nextDelayMillis())
+        assertEquals(5L, policy.nextDelayMillis())
+        assertEquals(10L, policy.nextDelayMillis())
+        assertEquals(10L, policy.nextDelayMillis())
+    }
+
+    @Test
+    fun `successful connection resets retry backoff`() {
+        val policy = MqttConnectionRetryPolicy(longArrayOf(2L, 5L))
+
+        assertEquals(2L, policy.nextDelayMillis())
+        assertEquals(5L, policy.nextDelayMillis())
+        policy.reset()
+
+        assertEquals(2L, policy.nextDelayMillis())
+    }
 }

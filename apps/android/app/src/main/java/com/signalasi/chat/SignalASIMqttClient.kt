@@ -35,6 +35,29 @@ internal object MqttOutboxDispatchPolicy {
         if (connected && published) MqttPublishResult.PUBLISHED else MqttPublishResult.QUEUED
 }
 
+internal class MqttConnectionRetryPolicy(
+    private val delaysMillis: LongArray = longArrayOf(2_000L, 5_000L, 10_000L, 20_000L, 30_000L)
+) {
+    init {
+        require(delaysMillis.isNotEmpty())
+        require(delaysMillis.all { it >= 0L })
+    }
+
+    private var attempt = 0
+
+    @Synchronized
+    fun nextDelayMillis(): Long {
+        val delay = delaysMillis[attempt.coerceAtMost(delaysMillis.lastIndex)]
+        attempt += 1
+        return delay
+    }
+
+    @Synchronized
+    fun reset() {
+        attempt = 0
+    }
+}
+
 object SignalASIMqttClient {
     private const val TAG = "SignalASILink"
     private const val SERVER_URI = "ssl://broker.emqx.io:8883"
@@ -50,7 +73,15 @@ object SignalASIMqttClient {
     )
 
     private val connecting = AtomicBoolean(false)
+    private val connectionRetryScheduled = AtomicBoolean(false)
     private val retryHandler = Handler(Looper.getMainLooper())
+    private val connectionRetryPolicy = MqttConnectionRetryPolicy()
+    private val connectionRetryRunnable = Runnable {
+        connectionRetryScheduled.set(false)
+        if (!connected) {
+            appContext?.let(::connect)
+        }
+    }
     private val retryRunnable = object : Runnable {
         override fun run() {
             if (connected) {
@@ -213,7 +244,11 @@ object SignalASIMqttClient {
         appContext = context.applicationContext
         SignalASICrypto.initialize(context.applicationContext)
         val current = client
-        if (current?.isConnected == true || !connecting.compareAndSet(false, true)) return
+        if (
+            current?.isConnected == true ||
+            connectionRetryScheduled.get() ||
+            !connecting.compareAndSet(false, true)
+        ) return
 
         val mqtt = current ?: MqttAsyncClient(
             SERVER_URI,
@@ -224,6 +259,8 @@ object SignalASIMqttClient {
             it.setCallback(object : MqttCallbackExtended {
                 override fun connectComplete(reconnect: Boolean, serverURI: String?) {
                     Log.i(TAG, "MQTT connectComplete reconnect=$reconnect")
+                    connecting.set(false)
+                    cancelConnectionRetry()
                     setConnected(true)
                     subscribe()
                     flushPendingPairingClaim()
@@ -233,8 +270,10 @@ object SignalASIMqttClient {
 
                 override fun connectionLost(cause: Throwable?) {
                     Log.w(TAG, "MQTT connection lost", cause)
+                    connecting.set(false)
                     setConnected(false)
                     retryHandler.removeCallbacks(retryRunnable)
+                    scheduleConnectionRetry("connection_lost_watchdog", 30_000L)
                 }
 
                 override fun messageArrived(topic: String?, message: MqttMessage?) {
@@ -259,10 +298,12 @@ object SignalASIMqttClient {
             connectionTimeout = 10
         }
 
-        mqtt.connect(options, context.applicationContext, object : IMqttActionListener {
+        retryHandler.removeCallbacks(connectionRetryRunnable)
+        val listener = object : IMqttActionListener {
             override fun onSuccess(asyncActionToken: IMqttToken?) {
                 Log.i(TAG, "MQTT connected")
                 connecting.set(false)
+                cancelConnectionRetry()
                 setConnected(true)
                 subscribe()
                 scheduleOutboxRetries()
@@ -280,11 +321,29 @@ object SignalASIMqttClient {
                 Log.e(TAG, "MQTT connect failed", exception)
                 connecting.set(false)
                 setConnected(false)
+                scheduleConnectionRetry("connect_failure")
             }
-        })
+        }
+        runCatching {
+            mqtt.connect(options, context.applicationContext, listener)
+        }.onFailure { exception ->
+            Log.e(TAG, "MQTT connect could not start", exception)
+            connecting.set(false)
+            setConnected(false)
+            scheduleConnectionRetry("connect_start_failure")
+        }
+    }
+
+    fun connectAfterNetworkAvailable(context: Context) {
+        retryHandler.removeCallbacks(connectionRetryRunnable)
+        connectionRetryScheduled.set(false)
+        connect(context)
     }
 
     fun reconnect(context: Context) {
+        retryHandler.removeCallbacks(connectionRetryRunnable)
+        connectionRetryScheduled.set(false)
+        connectionRetryPolicy.reset()
         connecting.set(false)
         setSecureReady(false)
         runCatching { client?.disconnectForcibly(0, 0) }
@@ -687,6 +746,21 @@ object SignalASIMqttClient {
     private fun scheduleOutboxRetries() {
         retryHandler.removeCallbacks(retryRunnable)
         retryHandler.postDelayed(retryRunnable, 3_000L)
+    }
+
+    private fun scheduleConnectionRetry(reason: String, delayOverrideMillis: Long? = null) {
+        if (connected) return
+        val delayMillis = delayOverrideMillis ?: connectionRetryPolicy.nextDelayMillis()
+        retryHandler.removeCallbacks(connectionRetryRunnable)
+        connectionRetryScheduled.set(true)
+        retryHandler.postDelayed(connectionRetryRunnable, delayMillis)
+        Log.i(TAG, "MQTT reconnect scheduled reason=$reason delay_ms=$delayMillis")
+    }
+
+    private fun cancelConnectionRetry() {
+        retryHandler.removeCallbacks(connectionRetryRunnable)
+        connectionRetryScheduled.set(false)
+        connectionRetryPolicy.reset()
     }
 
     private fun publishSafely(
