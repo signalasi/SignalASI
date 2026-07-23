@@ -161,6 +161,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val MAX_AGENT_ATTACHMENT_BYTES = 20L * 1024L * 1024L
         private const val AGENT_REGISTRY_SYNC_INTERVAL_MILLIS = 5_000L
         private const val AGENT_STARTUP_MAINTENANCE_DELAY_MILLIS = 350L
+        private const val CONTROL_CENTER_HOME_CACHE_MILLIS = 30_000L
         private const val UI_PREFS = "signalasi_ui_preferences"
         private const val DEBUG_AGENT_PREFS = "signalasi_debug_agent"
         private const val HISTORY_PREFS = "signalasi_chat_history"
@@ -303,6 +304,9 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private lateinit var meIdText: TextView
     private lateinit var meAvatar: ImageView
     private lateinit var controlCenterRenderer: ControlCenterRenderer
+    private val controlCenterHomeRenderCache = ControlCenterPageRenderCache()
+    private val controlCenterHomeRefreshPolicy =
+        ControlCenterHomeRefreshPolicy(CONTROL_CENTER_HOME_CACHE_MILLIS)
     private val controlCenterBackStack = ArrayDeque<ControlCenterDestination>()
     private var controlCenterDestination: ControlCenterDestination? = null
     private var renderingControlCenterDestination = false
@@ -5062,10 +5066,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
     }
 
-    private fun refreshSettingsControlCenter() {
-        if (activeMainTab == PAGE_SETTINGS && featurePage.visibility != View.VISIBLE) {
-            renderControlCenterHome()
-        }
+    private fun refreshSettingsControlCenter(force: Boolean = false) {
+        val now = SystemClock.elapsedRealtime()
+        val visible = activeMainTab == PAGE_SETTINGS && featurePage.visibility != View.VISIBLE
+        if (!controlCenterHomeRefreshPolicy.shouldRefresh(visible, now, force)) return
+        renderControlCenterHome()
     }
 
     private fun renderControlCenterHome() {
@@ -5110,9 +5115,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             else -> ControlCenterTone.BLUE
         }
 
-        controlCenterRenderer.render(
-            content,
-            ControlCenterPageSpec(
+        val page = ControlCenterPageSpec(
                 hero = ControlCenterHeroSpec(
                     title = getString(R.string.settings_my_signalasi),
                     subtitle = getString(R.string.cc_product_subtitle),
@@ -5224,9 +5227,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                         listOf(ccRouteRow(ControlCenterRoute.GENERAL, R.string.cc_general_title, R.string.cc_general_subtitle, R.drawable.ic_tab_settings, "", ControlCenterTone.NEUTRAL))
                     )
                 )
-            ),
-            ::handleControlCenterAction
         )
+        if (controlCenterHomeRenderCache.shouldRender(page, content.childCount > 0)) {
+            controlCenterRenderer.render(content, page, ::handleControlCenterAction)
+        }
+        controlCenterHomeRefreshPolicy.markRendered(SystemClock.elapsedRealtime())
     }
 
     private fun ccRouteRow(
@@ -5270,6 +5275,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
             return
         }
+        controlCenterHomeRefreshPolicy.invalidate()
         when (actionId) {
             "global.toggle_enabled" -> updateGlobalAgentSettings { it.copy(enabled = !it.enabled) }
             "global.toggle_proactive" -> updateGlobalAgentSettings {
@@ -12763,7 +12769,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         mePage.visibility = if (tab == PAGE_SETTINGS) View.VISIBLE else View.GONE
         if (tab == PAGE_SETTINGS) refreshSettingsControlCenter()
         if (tab == PAGE_AGENT) refreshGlobalInsightIndicator()
-
     }
 
     private fun applyAgentBrandLogoTextScale() {
