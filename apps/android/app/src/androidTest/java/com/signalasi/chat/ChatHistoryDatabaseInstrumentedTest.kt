@@ -80,6 +80,44 @@ class ChatHistoryDatabaseInstrumentedTest {
     }
 
     @Test
+    fun deleteBeforeDelayedInsertStillPreventsResurrection() {
+        val database = database()
+        val item = message(8L, "contact-delete", "queued write")
+
+        assertFalse(database.deleteMessage(8L))
+        assertFalse(database.upsert(item))
+        assertNull(database.findMessage(8L))
+        database.close()
+    }
+
+    @Test
+    fun deleteContactBlocksMessagesThatWereStillQueued() {
+        val database = database()
+        val item = message(9L, "contact-delete", "queued contact write")
+
+        assertEquals(0, database.deleteContact("contact-delete", listOf(9L)))
+        assertFalse(database.upsert(item))
+        assertEquals(0, database.readContact("contact-delete").length())
+        database.close()
+    }
+
+    @Test
+    fun upsertAllPersistsTheBatchWithOneVersionChange() {
+        val database = database()
+        val beforeVersion = database.updatedVersion()
+        val items = listOf(
+            message(21L, "contact-batch", "first"),
+            message(22L, "contact-batch", "second"),
+            message(23L, "contact-batch", "third")
+        )
+
+        assertTrue(database.upsertAll(items))
+        assertEquals(beforeVersion + 1L, database.updatedVersion())
+        assertEquals(3, database.readContact("contact-batch").length())
+        database.close()
+    }
+
+    @Test
     fun deletedContactCannotBeRestoredByStaleSnapshot() {
         val database = database()
         val first = message(11L, "contact-delete", "first")

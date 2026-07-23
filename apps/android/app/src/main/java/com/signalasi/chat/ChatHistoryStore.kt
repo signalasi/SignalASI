@@ -47,6 +47,10 @@ object ChatHistoryStore {
         database(context).mergeSnapshot(root)
 
     @Synchronized
+    fun upsertAll(context: Context, messages: Collection<JSONObject>): Boolean =
+        database(context).upsertAll(messages)
+
+    @Synchronized
     fun replaceAll(context: Context, root: JSONObject) {
         database(context).replaceAll(root)
     }
@@ -56,8 +60,11 @@ object ChatHistoryStore {
         database(context).deleteMessage(messageId)
 
     @Synchronized
-    fun deleteContact(context: Context, contactId: String): Int =
-        database(context).deleteContact(contactId)
+    fun deleteContact(
+        context: Context,
+        contactId: String,
+        pendingMessageIds: Collection<Long> = emptyList()
+    ): Int = database(context).deleteContact(contactId, pendingMessageIds)
 
     @Synchronized
     fun clear(context: Context) {

@@ -106,6 +106,24 @@ internal class ChatHistoryDatabase(
     }
 
     @Synchronized
+    fun upsertAll(messages: Collection<JSONObject>): Boolean {
+        if (messages.isEmpty()) return false
+        val db = writableDatabase
+        db.beginTransaction()
+        return try {
+            var changed = false
+            messages.forEach { message ->
+                changed = insertOrMerge(db, message) || changed
+            }
+            if (changed) incrementVersion(db)
+            db.setTransactionSuccessful()
+            changed
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    @Synchronized
     fun mergeSnapshot(root: JSONObject): Boolean {
         val db = writableDatabase
         db.beginTransaction()
@@ -280,8 +298,8 @@ internal class ChatHistoryDatabase(
         db.beginTransaction()
         return try {
             val deleted = db.delete(TABLE_MESSAGES, "message_id = ?", arrayOf(messageId.toString())) > 0
-            if (deleted) {
-                insertTombstone(db, messageId)
+            val tombstoned = insertTombstone(db, messageId)
+            if (deleted || tombstoned) {
                 incrementVersion(db)
             }
             db.setTransactionSuccessful()
@@ -292,11 +310,14 @@ internal class ChatHistoryDatabase(
     }
 
     @Synchronized
-    fun deleteContact(contactId: String): Int {
+    fun deleteContact(contactId: String, pendingMessageIds: Collection<Long> = emptyList()): Int {
         val db = writableDatabase
         db.beginTransaction()
         return try {
-            val messageIds = db.query(
+            val messageIds = linkedSetOf<Long>().apply {
+                addAll(pendingMessageIds.filter { it > 0L })
+            }
+            db.query(
                 TABLE_MESSAGES,
                 arrayOf("message_id"),
                 "contact_id = ?",
@@ -305,13 +326,14 @@ internal class ChatHistoryDatabase(
                 null,
                 null
             ).use { cursor ->
-                buildList {
-                    while (cursor.moveToNext()) add(cursor.getLong(0))
-                }
+                while (cursor.moveToNext()) messageIds.add(cursor.getLong(0))
             }
             val deleted = db.delete(TABLE_MESSAGES, "contact_id = ?", arrayOf(contactId))
-            if (deleted > 0) {
-                messageIds.forEach { insertTombstone(db, it) }
+            var tombstoned = false
+            messageIds.forEach { messageId ->
+                tombstoned = insertTombstone(db, messageId) || tombstoned
+            }
+            if (deleted > 0 || tombstoned) {
                 incrementVersion(db)
             }
             db.setTransactionSuccessful()
@@ -506,11 +528,14 @@ internal class ChatHistoryDatabase(
         ) { "Chat history metadata write failed" }
     }
 
-    private fun insertTombstone(db: SQLiteDatabase, messageId: Long) {
+    private fun insertTombstone(db: SQLiteDatabase, messageId: Long): Boolean {
         val values = ContentValues().apply { put("message_id", messageId) }
-        check(
-            db.insertWithOnConflict(TABLE_TOMBSTONES, null, values, SQLiteDatabase.CONFLICT_IGNORE) != -1L
-        ) { "Chat history deletion marker write failed" }
+        return db.insertWithOnConflict(
+            TABLE_TOMBSTONES,
+            null,
+            values,
+            SQLiteDatabase.CONFLICT_IGNORE
+        ) != -1L
     }
 
     private fun isTombstoned(db: SQLiteDatabase, messageId: Long): Boolean =
