@@ -3,13 +3,18 @@ package com.signalasi.chat
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import java.io.File
 
 class AgentQemuRuntimeEngineTest {
+    @get:Rule
+    val temporaryFolder = TemporaryFolder()
+
     @Test
     fun `launch plan keeps credentials off the command line and disables guest networking`() {
-        val root = File("build/runtime plan")
+        val root = temporaryFolder.newFolder("runtime plan")
         val spec = AgentRuntimeEngineLaunchSpec(
             engineFile = File(root, "libsignalasi_qemu.so"),
             baseImageFile = File(root, "linux-base.img"),
