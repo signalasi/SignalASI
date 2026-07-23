@@ -31,6 +31,17 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForAppFile(file, predicate, timeoutMs = 10_000) {
+  const startedAt = Date.now();
+  let value = "";
+  while (Date.now() - startedAt < timeoutMs) {
+    value = readAppFile(file);
+    if (predicate(value)) return value;
+    await sleep(250);
+  }
+  return value;
+}
+
 function readAppFile(file) {
   try {
     return adb(["shell", "run-as", packageName, "cat", file]);
@@ -105,9 +116,10 @@ async function main() {
       "signalasi_debug_service_payload_b64",
       Buffer.from(payload, "utf8").toString("base64")
     ]);
-    await sleep(2500);
-
-    const updatedHistory = readAppFile(historyPrefs);
+    const updatedHistory = await waitForAppFile(
+      historyPrefs,
+      (value) => value.includes(token) && value.includes("background_history") && value.includes("notified")
+    );
     if (!updatedHistory.includes(token)) {
       fail(`Background service did not persist incoming token ${token}`);
     }
