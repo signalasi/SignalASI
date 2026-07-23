@@ -235,10 +235,14 @@ if (!main.includes("function loadLocale") || !main.includes('ipcMain.handle("i18
   throw new Error("Desktop i18n must load locale JSON through preload IPC");
 }
 
-for (const requiredLocaleKey of ["Language", "Desktop Connector", "{done}/{total} setup steps complete", "Detecting"]) {
+for (const requiredLocaleKey of ["Language", "Desktop Connector", "{done}/{total} setup steps complete", "Detecting", "Super agent"]) {
   if (!localeZh[requiredLocaleKey]) {
     throw new Error(`Chinese desktop locale missing key: ${requiredLocaleKey}`);
   }
+}
+
+if (!html.includes('<div><strong>SignalASI</strong><span data-i18n="Super agent">Super agent</span></div>')) {
+  throw new Error("Desktop sidebar brand must use the localized Super agent subtitle");
 }
 
 if (Object.keys(localeEn).length !== 0) {
@@ -420,7 +424,7 @@ for (const requiredText of [
   "sendMobileTest",
   "syncMobileStatus",
   "Sync phone status",
-  "Desktop Agent",
+  "Super agent",
   "New task",
   "Mobile Gateway",
   "conversationStream",
