@@ -11,8 +11,87 @@ import java.security.MessageDigest
 internal data class AgentTranscriptPage(
     val entries: List<AgentTranscriptEntry>,
     val nextBeforeSequence: Long?,
+    val hasMore: Boolean,
+    val newestSequence: Long?
+)
+
+internal data class AgentTranscriptDelta(
+    val entries: List<AgentTranscriptEntry>,
+    val newestSequence: Long?,
     val hasMore: Boolean
 )
+
+internal class AgentTranscriptWindow {
+    var conversationId: String = ""
+        private set
+    var entries: List<AgentTranscriptEntry> = emptyList()
+        private set
+    var nextBeforeSequence: Long? = null
+        private set
+    var newestSequence: Long? = null
+        private set
+    var hasMore: Boolean = false
+        private set
+
+    fun reset(conversationId: String = "") {
+        this.conversationId = conversationId
+        entries = emptyList()
+        nextBeforeSequence = null
+        newestSequence = null
+        hasMore = false
+    }
+
+    fun replace(conversationId: String, page: AgentTranscriptPage) {
+        this.conversationId = conversationId
+        entries = page.entries.distinctBy(AgentTranscriptEntry::id)
+        nextBeforeSequence = page.nextBeforeSequence
+        newestSequence = page.newestSequence
+        hasMore = page.hasMore
+    }
+
+    fun appendNewer(conversationId: String, delta: AgentTranscriptDelta): Int {
+        if (this.conversationId != conversationId) {
+            reset(conversationId)
+        }
+        if (delta.entries.isEmpty()) {
+            newestSequence = delta.newestSequence ?: newestSequence
+            return 0
+        }
+        val incomingIds = delta.entries.mapTo(mutableSetOf(), AgentTranscriptEntry::id)
+        val incomingDedupeKeys = delta.entries.asSequence()
+            .map(AgentTranscriptEntry::dedupeKey)
+            .filter(String::isNotBlank)
+            .toSet()
+        val retained = entries.filterNot { entry ->
+            entry.id in incomingIds ||
+                (entry.dedupeKey.isNotBlank() && entry.dedupeKey in incomingDedupeKeys)
+        }
+        entries = retained + delta.entries
+        newestSequence = delta.newestSequence ?: newestSequence
+        return delta.entries.size
+    }
+
+    fun prependOlder(conversationId: String, page: AgentTranscriptPage): Int {
+        if (this.conversationId != conversationId || entries.isEmpty()) {
+            replace(conversationId, page)
+            return entries.size
+        }
+        val loadedIds = entries.mapTo(mutableSetOf(), AgentTranscriptEntry::id)
+        val older = page.entries.filterNot { it.id in loadedIds }
+        entries = older + entries
+        nextBeforeSequence = page.nextBeforeSequence
+        newestSequence = newestSequence ?: page.newestSequence
+        hasMore = page.hasMore
+        return older.size
+    }
+
+    fun remove(entryId: String): Boolean {
+        val retained = entries.filterNot { it.id == entryId }
+        if (retained.size == entries.size) return false
+        entries = retained
+        return true
+    }
+}
 
 internal class AgentTranscriptEntryDatabase(
     context: Context,
@@ -190,9 +269,66 @@ internal class AgentTranscriptEntryDatabase(
         return AgentTranscriptPage(
             entries = retained.asReversed().map { it.second },
             nextBeforeSequence = retained.lastOrNull()?.first?.takeIf { hasMore },
+            hasMore = hasMore,
+            newestSequence = retained.firstOrNull()?.first
+        )
+    }
+
+    @Synchronized
+    fun listConversationAfter(
+        conversationId: String,
+        afterSequenceExclusive: Long,
+        pageSize: Int = DEFAULT_PAGE_SIZE
+    ): AgentTranscriptDelta {
+        val safePageSize = pageSize.coerceIn(1, MAX_PAGE_SIZE)
+        val rows = readableDatabase.query(
+            TABLE_ENTRIES,
+            PAGE_COLUMNS,
+            "conversation_id = ? AND sequence > ?",
+            arrayOf(conversationId, afterSequenceExclusive.toString()),
+            null,
+            null,
+            "sequence ASC",
+            (safePageSize + 1).toString()
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(cursor.getLong(cursor.getColumnIndexOrThrow("sequence")) to decodeEntry(cursor))
+                }
+            }
+        }
+        val hasMore = rows.size > safePageSize
+        val retained = rows.take(safePageSize)
+        return AgentTranscriptDelta(
+            entries = retained.map { it.second },
+            newestSequence = retained.lastOrNull()?.first ?: afterSequenceExclusive,
             hasMore = hasMore
         )
     }
+
+    @Synchronized
+    fun listTurn(turnId: String): List<AgentTranscriptEntry> =
+        readableDatabase.query(
+            TABLE_ENTRIES,
+            PAYLOAD_COLUMNS,
+            "turn_id = ?",
+            arrayOf(turnId),
+            null,
+            null,
+            "sequence ASC"
+        ).use(::decodeEntries)
+
+    @Synchronized
+    fun listTask(taskId: String): List<AgentTranscriptEntry> =
+        readableDatabase.query(
+            TABLE_ENTRIES,
+            PAYLOAD_COLUMNS,
+            "task_id = ?",
+            arrayOf(taskId),
+            null,
+            null,
+            "sequence ASC"
+        ).use(::decodeEntries)
 
     @Synchronized
     fun findById(entryId: String): AgentTranscriptEntry? =

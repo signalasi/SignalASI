@@ -115,7 +115,12 @@ object AgentTranscriptPresentationPolicy {
         val representatives = linkedMapOf<String, AgentTranscriptEntry>()
         normalizedEntries.asSequence()
             .filter { it.role == AgentTranscriptRole.PROCESS }
-            .forEach { representatives[processGroupKey(it)] = it }
+            .forEach { process ->
+                val key = processGroupKey(process)
+                representatives[key] = representatives[key]
+                    ?.let { previous -> process.copy(id = previous.id) }
+                    ?: process
+            }
         val emitted = mutableSetOf<String>()
         return buildList {
             normalizedEntries.forEach { entry ->
@@ -499,6 +504,26 @@ class AgentTranscriptStore(context: Context) {
         pageSize: Int = 100
     ): AgentTranscriptPage =
         entryDatabase.listConversationPage(conversationId, beforeSequenceExclusive, pageSize)
+
+    @Synchronized
+    internal fun entriesAfter(
+        conversationId: String,
+        afterSequenceExclusive: Long,
+        pageSize: Int = 100
+    ): AgentTranscriptDelta =
+        entryDatabase.listConversationAfter(conversationId, afterSequenceExclusive, pageSize)
+
+    @Synchronized
+    internal fun entriesForTurn(turnId: String): List<AgentTranscriptEntry> {
+        val cleanTurnId = turnId.trim()
+        return if (cleanTurnId.isBlank()) emptyList() else entryDatabase.listTurn(cleanTurnId)
+    }
+
+    @Synchronized
+    internal fun entriesForTask(taskId: String): List<AgentTranscriptEntry> {
+        val cleanTaskId = taskId.trim()
+        return if (cleanTaskId.isBlank()) emptyList() else entryDatabase.listTask(cleanTaskId)
+    }
 
     @Synchronized
     fun conversationIdForTurn(turnId: String): String? {
