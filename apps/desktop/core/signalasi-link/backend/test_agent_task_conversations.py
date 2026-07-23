@@ -148,7 +148,7 @@ class AgentTaskConversationTests(unittest.TestCase):
             self.assertIsNone(manager.get("task-1"))
             self.assertIsNotNone(manager.get("task-2"))
 
-    def test_restart_replays_only_tasks_that_were_interrupted(self):
+    def test_restart_recovers_only_tasks_that_were_interrupted(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
             agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
         ):
@@ -163,6 +163,12 @@ class AgentTaskConversationTests(unittest.TestCase):
                 task_id="running-task", client_route_id="client-1",
             )
             manager.update("running-task", "running")
+            manager.update(
+                "running-task",
+                "running",
+                thread_id="thread-running",
+                turn_id="turn-running",
+            )
 
             restored = agent_task_manager.AgentTaskManager()
             recovered = restored.drain_recovered()
@@ -177,6 +183,8 @@ class AgentTaskConversationTests(unittest.TestCase):
             resumed = restored.resume_external("running-task", events.append)
             self.assertIsNotNone(resumed)
             self.assertEqual("accepted", resumed.status)
+            self.assertEqual("thread-running", resumed.thread_id)
+            self.assertEqual("turn-running", resumed.turn_id)
             restored.update("running-task", "completed", result="recovered")
             self.assertEqual("recovered", restored.get("running-task").result)
 

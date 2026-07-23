@@ -1,4 +1,5 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -119,6 +120,135 @@ class CodexConversationThreadTests(unittest.TestCase):
             self.assertEqual("localImage", turn["input"][1]["type"])
             self.assertEqual(str(image.resolve()), turn["input"][1]["path"])
             self.assertEqual("original", turn["input"][1]["detail"])
+
+    def test_recover_completed_turn_without_starting_a_duplicate_turn(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            codex_app_server,
+            "CONVERSATION_THREADS_PATH",
+            Path(temporary) / "threads.json",
+        ):
+            events = []
+            server = codex_app_server.CodexAppServer(
+                "codex",
+                {},
+                lambda task_id, event: events.append((task_id, event)),
+            )
+            server._ensure_started = lambda: None
+            calls = []
+
+            def request(method, params, timeout):
+                calls.append((method, params, timeout))
+                if method != "thread/resume":
+                    raise AssertionError(f"Unexpected recovery method: {method}")
+                return {
+                    "thread": {
+                        "id": "thread-recovered",
+                        "status": {"type": "idle"},
+                        "turns": [{
+                            "id": "turn-recovered",
+                            "status": "completed",
+                            "items": [{
+                                "id": "answer",
+                                "type": "agentMessage",
+                                "text": "Recovered final answer",
+                            }],
+                        }],
+                    }
+                }
+
+            server._request = request
+            run = server.recover_task(
+                task_id="task-recovered",
+                thread_id="thread-recovered",
+                turn_id="turn-recovered",
+                original_prompt="continue the work",
+            )
+
+            self.assertTrue(run.finished)
+            self.assertEqual("Recovered final answer", run.final_text)
+            self.assertEqual(["thread/resume"], [method for method, _, _ in calls])
+            self.assertEqual("completed", events[-1][1]["status"])
+            self.assertEqual("Recovered final answer", events[-1][1]["result"])
+
+    def test_recover_in_progress_turn_reconnects_without_replaying_prompt(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            codex_app_server,
+            "CONVERSATION_THREADS_PATH",
+            Path(temporary) / "threads.json",
+        ), patch.object(codex_app_server.threading, "Thread") as thread:
+            events = []
+            server = codex_app_server.CodexAppServer(
+                "codex",
+                {},
+                lambda task_id, event: events.append((task_id, event)),
+            )
+            server._ensure_started = lambda: None
+
+            def request(method, params, timeout):
+                self.assertEqual("thread/resume", method)
+                return {
+                    "thread": {
+                        "id": "thread-running",
+                        "status": {"type": "active", "activeFlags": []},
+                        "turns": [{
+                            "id": "turn-running",
+                            "status": "inProgress",
+                            "items": [],
+                        }],
+                    }
+                }
+
+            server._request = request
+            run = server.recover_task(
+                task_id="task-running",
+                thread_id="thread-running",
+                turn_id="turn-running",
+                original_prompt="\u7ee7\u7eed\u539f\u4efb\u52a1",
+                elapsed_seconds=42,
+            )
+
+            self.assertFalse(run.finished)
+            self.assertEqual("turn-running", run.turn_id)
+            self.assertEqual("task-running", server._turn_tasks["turn-running"])
+            self.assertGreaterEqual(time.monotonic() - run.started_monotonic, 41)
+            self.assertEqual("running", events[-1][1]["status"])
+            self.assertEqual("Reconnected to Codex turn", events[-1][1]["current_step"])
+            thread.assert_called_once()
+
+    def test_missing_original_turn_fails_without_replaying_prompt(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            codex_app_server,
+            "CONVERSATION_THREADS_PATH",
+            Path(temporary) / "threads.json",
+        ):
+            server = codex_app_server.CodexAppServer("codex", {}, lambda _task, _event: None)
+            server._ensure_started = lambda: None
+            calls = []
+
+            def request(method, params, timeout):
+                calls.append(method)
+                return {
+                    "thread": {
+                        "id": "thread-missing",
+                        "status": {"type": "idle"},
+                        "turns": [{
+                            "id": "different-turn",
+                            "status": "completed",
+                            "items": [],
+                        }],
+                    }
+                }
+
+            server._request = request
+            with self.assertRaisesRegex(RuntimeError, "original Codex turn"):
+                server.recover_task(
+                    task_id="task-missing",
+                    thread_id="thread-missing",
+                    turn_id="turn-missing",
+                    original_prompt="do not replay this",
+                )
+
+            self.assertEqual(["thread/resume"], calls)
 
 
 if __name__ == "__main__":
