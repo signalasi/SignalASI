@@ -658,6 +658,37 @@ for (const mojibake of ["\u95ba", "\u95c1", "\u95c2", "\u5a75", "\u7f02", "\u6fd
   }
 }
 
+for (const cloudSettingId of [
+  "cloudProvider",
+  "cloudDisplayName",
+  "cloudEndpoint",
+  "cloudModelId",
+  "cloudApiKey",
+  "cloudContextWindow",
+  "cloudOutputReserve",
+  "cloudModelSummary",
+  "saveCloudModelButton",
+  "testCloudModelButton"
+]) {
+  if (!html.includes(`id="${cloudSettingId}"`)) {
+    throw new Error(`Desktop cloud API setting is missing: ${cloudSettingId}`);
+  }
+}
+
+for (const cloudSettingContract of [
+  "CLOUD_PROVIDER_PRESETS",
+  "validateCloudModelSettings",
+  "saveCloudModelSettings",
+  "context_window_tokens",
+  "max_output_tokens",
+  "context_model_summary",
+  'testAgent("cloud-model"'
+]) {
+  if (!workspaceRenderer.includes(cloudSettingContract)) {
+    throw new Error(`Desktop cloud API behavior is missing: ${cloudSettingContract}`);
+  }
+}
+
 if (main.includes('id: "claude-code"')) {
   throw new Error("Claude contact id must be claude");
 }

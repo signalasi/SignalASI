@@ -197,6 +197,41 @@
         <div class="setting-row"><span><strong data-i18n="Backend">Backend</strong><small id="backendDetail" data-i18n="Checking">Checking</small></span><span id="backendBadge" class="state-badge pending" data-i18n="Checking">Checking</span></div>
       </div>
       <div class="settings-group">
+        <div class="settings-group-heading">
+          <h3 data-i18n="Cloud model API">Cloud model API</h3>
+          <span id="cloudModelBadge" class="state-badge pending" data-i18n="Not configured">Not configured</span>
+        </div>
+        <div class="cloud-settings-surface">
+          <div class="form-stack compact-forms">
+            <div class="cloud-settings-grid">
+              <label><span data-i18n="Provider">Provider</span><select id="cloudProvider">
+                <option value="openai">OpenAI</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="qwen">Qwen</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="custom" data-i18n="Custom">Custom</option>
+              </select></label>
+              <label><span data-i18n="Display name">Display name</span><input id="cloudDisplayName" maxlength="48" placeholder="Cloud Model"></label>
+            </div>
+            <label><span data-i18n="Endpoint URL">Endpoint URL</span><input id="cloudEndpoint" type="url" inputmode="url" maxlength="500" spellcheck="false" placeholder="https://api.openai.com/v1/chat/completions"></label>
+            <div class="cloud-settings-grid">
+              <label><span data-i18n="Model ID">Model ID</span><input id="cloudModelId" maxlength="160" spellcheck="false" placeholder="gpt-5.4-mini"></label>
+              <label><span data-i18n="API key">API key</span><input id="cloudApiKey" type="password" maxlength="500" autocomplete="off" spellcheck="false" placeholder="sk-..."></label>
+            </div>
+            <div class="cloud-settings-grid">
+              <label><span data-i18n="Context window">Context window</span><input id="cloudContextWindow" type="number" min="4096" max="1000000" step="1024" value="64000"></label>
+              <label><span data-i18n="Reserved output">Reserved output</span><input id="cloudOutputReserve" type="number" min="512" max="128000" step="512" value="4096"></label>
+            </div>
+            <label class="check-row"><input id="cloudModelSummary" type="checkbox" checked><span><strong data-i18n="Model-assisted context summary">Model-assisted context summary</strong><small data-i18n="Compact older context by token pressure; never by a fixed message count">Compact older context by token pressure; never by a fixed message count</small></span></label>
+            <p id="cloudModelTestResult" class="cloud-test-result" aria-live="polite" hidden></p>
+            <div class="cloud-settings-actions">
+              <button id="saveCloudModelButton" class="secondary-button" data-i18n="Save">Save</button>
+              <button id="testCloudModelButton" class="primary-button" data-i18n="Save and test">Save and test</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="settings-group">
         <h3 data-i18n="Agent commands">Agent commands</h3>
         <div class="form-stack compact-forms">
           <label><span>Hermes</span><input id="cmdHermes" spellcheck="false"></label>
