@@ -8,11 +8,18 @@ import shutil
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 
 BACKEND_DIR = Path(__file__).resolve().parent
 DEFAULT_WORKSPACE_ROOT = Path.home() / "SignalASIWorkspace"
 TASK_SUBDIRECTORIES = ("outputs", "scripts", "downloads", "screenshots", "logs", "temp")
+MAX_IMPORTED_ARTIFACT_BYTES = 64 * 1024 * 1024
+MARKDOWN_TARGET = re.compile(r"!?\[[^\]]*\]\(\s*<?([^>\r\n)]+)>?\s*\)")
+WINDOWS_ARTIFACT_PATH = re.compile(
+    r"/?[A-Za-z]:[\\/][^\r\n<>\"|?*]+?\.[A-Za-z0-9]{1,12}(?=$|[\s>)\],;\uFF0C\u3002])",
+    re.IGNORECASE,
+)
 
 
 def workspace_root() -> Path:
@@ -97,6 +104,64 @@ def task_artifacts(task_id: str, limit: int = 50) -> list[dict]:
             if len(artifacts) >= max(1, min(limit, 100)):
                 return artifacts
     return artifacts
+
+
+def referenced_task_artifact_paths(content: str, limit: int = 20) -> list[Path]:
+    """Resolve only existing files inside SignalASI-owned task output areas."""
+    text = str(content or "")
+    candidates = [match.group(1) for match in MARKDOWN_TARGET.finditer(text)]
+    candidates.extend(match.group(0) for match in WINDOWS_ARTIFACT_PATH.finditer(text))
+    tasks_root = (workspace_root() / "tasks").resolve()
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        value = unquote(str(raw or "").strip().strip("<>"))
+        if value.lower().startswith("file:"):
+            parsed = urlparse(value)
+            value = unquote(parsed.path or "")
+        if re.match(r"^/[A-Za-z]:[\\/]", value):
+            value = value[1:]
+        try:
+            source = Path(value).expanduser().resolve()
+            relative = source.relative_to(tasks_root)
+        except (OSError, ValueError):
+            continue
+        if len(relative.parts) < 3:
+            continue
+        category = relative.parts[1].lower()
+        if category not in {"outputs", "downloads", "screenshots"}:
+            continue
+        if category == "downloads" and len(relative.parts) > 2 and relative.parts[2].lower() == "input":
+            continue
+        if not source.is_file() or source.is_symlink() or source.stat().st_size > MAX_IMPORTED_ARTIFACT_BYTES:
+            continue
+        key = str(source).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(source)
+        if len(resolved) >= max(1, min(limit, 50)):
+            break
+    return resolved
+
+
+def import_referenced_task_artifacts(task_id: str, content: str, limit: int = 20) -> list[dict]:
+    """Copy referenced artifacts from an earlier turn into the current task."""
+    current_root = task_workspace(task_id).resolve()
+    output_root = (current_root / "outputs").resolve()
+    for source in referenced_task_artifact_paths(content, limit=limit):
+        if _is_within(source, current_root):
+            continue
+        target = output_root / source.name
+        serial = 2
+        while target.exists():
+            if target.is_file() and target.stat().st_size == source.stat().st_size:
+                break
+            target = output_root / f"{source.stem}-{serial}{source.suffix}"
+            serial += 1
+        if not target.exists():
+            shutil.copy2(source, target)
+    return task_artifacts(task_id)
 
 
 def _safe_component(value: str) -> str:

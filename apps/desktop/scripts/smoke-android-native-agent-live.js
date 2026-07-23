@@ -7,7 +7,6 @@ const root = path.resolve(__dirname, "..");
 const packageName = "com.signalasi.chat";
 const activityName = `${packageName}/.MainActivity`;
 const reportPath = path.join(root, "build", "reports", "android-native-agent-live.json");
-const fixturePath = path.join(root, "build", "reports", "signalasi-live-file.txt");
 const deviceFixturePath = "/storage/emulated/0/Download/signalasi-live-file.txt";
 const adb = createAdb(root, message => process.stderr.write(`${message}\n`));
 
@@ -43,9 +42,20 @@ const cases = [
     validate: text => /GB|MB|\u5b58\u50a8|\u7a7a\u95f4|storage/i.test(text),
   },
   {
-    id: "read_phone_file",
+    id: "raw_phone_path",
     prompt: `\u8bfb\u53d6 ${deviceFixturePath} \u5e76\u53ea\u544a\u8bc9\u6211\u6587\u4ef6\u4e2d\u7684\u9a8c\u8bc1\u7801\u3002`,
-    maxMs: 15_000,
+    maxMs: 5_000,
+    validate: text => /\u6388\u6743|\u9009\u62e9\u6587\u4ef6|grant access|select the file/i.test(text),
+  },
+  {
+    id: "authorized_phone_file",
+    prompt: "\u8bfb\u53d6\u9644\u4ef6\u5e76\u53ea\u544a\u8bc9\u6211\u6587\u4ef6\u4e2d\u7684\u9a8c\u8bc1\u7801\u3002",
+    maxMs: 60_000,
+    timeoutMs: 120_000,
+    attachment: {
+      name: "signalasi-live-file.txt",
+      content: "SignalASI live file verification code: 7319\n",
+    },
     validate: text => /7319/.test(text),
   },
   {
@@ -54,12 +64,6 @@ const cases = [
     maxMs: 30_000,
     validate: text => /\u4e0a\u6d77|Shanghai/i.test(text) && /\u2103|\u00b0|\u6e29\u5ea6|temperature/i.test(text),
     timeoutMs: 120_000,
-  },
-  {
-    id: "missing_file",
-    prompt: "\u8bfb\u53d6 /storage/emulated/0/Download/signalasi-file-that-does-not-exist.txt \u5e76\u544a\u8bc9\u6211\u7ed3\u679c\u3002",
-    maxMs: 10_000,
-    validate: text => /\u4e0d\u5b58\u5728|\u627e\u4e0d\u5230|not found|does not exist|unable to read/i.test(text),
   },
   {
     id: "phone_linux_python",
@@ -146,12 +150,20 @@ async function runCase(testCase, timeoutMs) {
   const token = `live_${testCase.id}_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
   const encoded = Buffer.from(testCase.prompt, "utf8").toString("base64");
   const started = Date.now();
-  adb([
+  const args = [
     "shell", "am", "start", "-n", activityName,
     "--es", "signalasi_debug_agent_goal_b64", encoded,
     "--es", "signalasi_debug_agent_token", token,
     "--ez", "signalasi_debug_agent_new_conversation", "true",
-  ]);
+  ];
+  if (testCase.attachment) {
+    args.push(
+      "--es", "signalasi_debug_agent_attachment_name", testCase.attachment.name,
+      "--es", "signalasi_debug_agent_attachment_b64",
+      Buffer.from(testCase.attachment.content, "utf8").toString("base64"),
+    );
+  }
+  adb(args);
   let snapshot = null;
   while (Date.now() - started < timeoutMs) {
     await sleep(250);
@@ -170,8 +182,6 @@ async function main() {
   const selected = selectedId ? cases.filter(item => item.id === selectedId) : cases;
   if (selected.length === 0) throw new Error(`Unknown case: ${selectedId}`);
   fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-  fs.writeFileSync(fixturePath, "SignalASI live file verification code: 7319\n", "utf8");
-  adb(["push", fixturePath, deviceFixturePath]);
   const records = [];
   for (const testCase of selected) {
     const timeoutMs = testCase.timeoutMs || Math.max(testCase.maxMs * 3, 45_000);

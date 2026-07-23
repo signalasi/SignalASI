@@ -79,6 +79,45 @@ class AgentTranscriptPresentationPolicyTest {
     }
 
     @Test
+    fun hidesOnlySuccessfulAsynchronousConnectorDispatchCompletion() {
+        assertFalse(
+            AgentTranscriptPresentationPolicy.shouldRenderToolCompletion(
+                AgentActionKind.CALL_CONNECTOR,
+                succeeded = true,
+                awaitingResponse = true
+            )
+        )
+        assertFalse(
+            AgentTranscriptPresentationPolicy.shouldRenderToolCompletion(
+                AgentActionKind.CALL_CONNECTOR,
+                succeeded = true,
+                awaitingResponse = null
+            )
+        )
+        assertTrue(
+            AgentTranscriptPresentationPolicy.shouldRenderToolCompletion(
+                AgentActionKind.CALL_CONNECTOR,
+                succeeded = true,
+                awaitingResponse = false
+            )
+        )
+        assertTrue(
+            AgentTranscriptPresentationPolicy.shouldRenderToolCompletion(
+                AgentActionKind.CALL_CONNECTOR,
+                succeeded = false,
+                awaitingResponse = true
+            )
+        )
+        assertTrue(
+            AgentTranscriptPresentationPolicy.shouldRenderToolCompletion(
+                AgentActionKind.CALL_NATIVE_TOOL,
+                succeeded = true,
+                awaitingResponse = false
+            )
+        )
+    }
+
+    @Test
     fun formatsEveryProcessingDurationInSeconds() {
         assertEquals("1s", AgentTranscriptPresentationPolicy.formatElapsedSeconds(0L))
         assertEquals("1s", AgentTranscriptPresentationPolicy.formatElapsedSeconds(999L))
