@@ -30,9 +30,13 @@ from link_delivery import (
     complete_message,
     ensure_transport_epoch,
     mark_outbound_published,
+    outbound_status,
     pending_outbound,
+    pending_task_results as pending_persisted_task_results,
     previous_acknowledgement,
     queue_outbound,
+    queue_task_result,
+    remove_task_result,
 )
 from link_protocol import LinkTopics, PROTOCOL_NAME, PROTOCOL_VERSION, decrypt_pairing_claim, make_envelope, parse_topic, validate_envelope, valid_route_id
 from pairing_state import (
@@ -1008,8 +1012,6 @@ def warm_codex_app_server() -> None:
 phone_publish_lock = threading.RLock()
 pending_task_events: dict[str, tuple[dict, dict]] = {}
 pending_task_events_lock = threading.Lock()
-pending_task_results: dict[str, tuple[dict, dict]] = {}
-pending_task_results_lock = threading.Lock()
 task_event_publish_queue: queue.Queue[tuple[object, dict, dict, list[dict]] | None] = queue.Queue()
 task_event_publisher_started = threading.Event()
 task_event_publisher_lock = threading.Lock()
@@ -1243,9 +1245,9 @@ def on_connect(mqttc, userdata, flags, reason_code, properties=None):
                 "Recovered task summary total=%s resumed=%s retained=%s",
                 len(recovered_tasks), resumed_count, retained_count,
             )
+        flush_outbound_messages(mqttc)
         flush_pending_task_events(mqttc)
         flush_pending_task_results(mqttc)
-        flush_outbound_messages(mqttc)
         status = publish_connector_status(mqttc, reason="mqtt_connected")
         if not status.get("ok"):
             log.warning("Desktop recovery presence publish skipped: %s", status)
@@ -1511,32 +1513,61 @@ def flush_pending_task_events(mqttc) -> None:
 
 def _publish_or_queue_task_result(mqttc, wire_payload: dict, payload: dict) -> bool:
     task_id = str(payload.get("task_id") or "")
+    client_route_id = str(wire_payload.get("_client_route_id") or "")
+    if not task_id or not client_route_id:
+        log.error(
+            "Agent task result cannot be routed task_id=%s client_route_id=%s",
+            task_id,
+            client_route_id,
+        )
+        return False
+    persisted_payload = dict(payload)
+    persisted_payload.setdefault(
+        "message_id",
+        str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"{PROTOCOL_NAME}:task-result:{client_route_id}:{task_id}",
+        )),
+    )
+    queue_task_result(
+        task_id,
+        client_route_id,
+        dict(wire_payload),
+        persisted_payload,
+    )
     try:
         published = bool(
             mqttc is not None and mqttc.is_connected()
-            and _publish_phone_payload(mqttc, wire_payload, payload)
+            and _publish_phone_payload(mqttc, wire_payload, persisted_payload)
         )
     except Exception as exc:
         log.warning("Agent task result queued task_id=%s: %s", task_id, exc)
         published = False
-    with pending_task_results_lock:
-        if published:
-            pending_task_results.pop(task_id, None)
-        elif task_id:
-            pending_task_results[task_id] = (dict(wire_payload), dict(payload))
+    if published or outbound_status(client_route_id, persisted_payload["message_id"]):
+        remove_task_result(task_id)
     return published
 
 
 def flush_pending_task_results(mqttc) -> None:
-    with pending_task_results_lock:
-        queued = list(pending_task_results.items())
-    for task_id, (wire_payload, payload) in queued:
+    for pending in pending_persisted_task_results():
+        task_id = str(pending["task_id"])
+        client_route_id = str(pending["client_route_id"])
+        wire_payload = dict(pending["wire_payload"])
+        payload = dict(pending["payload"])
+        message_id = str(payload.get("message_id") or "")
+        if message_id and outbound_status(client_route_id, message_id):
+            remove_task_result(task_id)
+            continue
         try:
             if _publish_phone_payload(mqttc, wire_payload, payload):
-                with pending_task_results_lock:
-                    pending_task_results.pop(task_id, None)
+                remove_task_result(task_id)
+            elif message_id and outbound_status(client_route_id, message_id):
+                remove_task_result(task_id)
         except Exception as exc:
-            log.warning("Agent task result replay deferred task_id=%s: %s", task_id, exc)
+            if message_id and outbound_status(client_route_id, message_id):
+                remove_task_result(task_id)
+            else:
+                log.warning("Agent task result replay deferred task_id=%s: %s", task_id, exc)
 
 
 def _requests_returned_image(prompt: str) -> bool:
