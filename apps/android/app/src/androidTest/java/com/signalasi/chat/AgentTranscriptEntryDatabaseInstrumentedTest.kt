@@ -21,7 +21,7 @@ class AgentTranscriptEntryDatabaseInstrumentedTest {
     }
 
     @Test
-    fun retainsAndPagesEveryEntryBeyondLegacyCountLimits() {
+    fun retainsAndPagesEveryEntryWithoutCountLimits() {
         val database = database()
         val expectedIds = (0 until 2_105).map { index -> "entry-$index" }
         expectedIds.forEachIndexed { index, id ->
@@ -50,7 +50,7 @@ class AgentTranscriptEntryDatabaseInstrumentedTest {
     }
 
     @Test
-    fun storesLongMessageContentEncryptedWithoutLegacyTruncation() {
+    fun storesLongMessageContentEncryptedWithoutTruncation() {
         val database = database()
         val marker = "private-transcript-marker"
         val text = "content ".repeat(4_000) + marker
@@ -69,6 +69,29 @@ class AgentTranscriptEntryDatabaseInstrumentedTest {
             cursor.getString(0)
         }
         assertFalse(encryptedPayload.contains(marker))
+        database.close()
+    }
+
+    @Test
+    fun readsOnlyEntriesAddedAfterTheVisibleWindowCursor() {
+        val database = database()
+        (0 until 5).forEach { index ->
+            assertTrue(database.insert(entry("entry-$index", "conversation-main", index.toLong())))
+        }
+        val initial = database.listConversationPage("conversation-main", pageSize = 2)
+        assertEquals(listOf("entry-3", "entry-4"), initial.entries.map(AgentTranscriptEntry::id))
+
+        assertTrue(database.insert(entry("entry-5", "conversation-main", 5L)))
+        assertTrue(database.insert(entry("entry-6", "conversation-main", 6L)))
+        val delta = database.listConversationAfter(
+            conversationId = "conversation-main",
+            afterSequenceExclusive = checkNotNull(initial.newestSequence),
+            pageSize = 10
+        )
+
+        assertEquals(listOf("entry-5", "entry-6"), delta.entries.map(AgentTranscriptEntry::id))
+        assertEquals(2, delta.entries.size)
+        assertFalse(delta.hasMore)
         database.close()
     }
 
