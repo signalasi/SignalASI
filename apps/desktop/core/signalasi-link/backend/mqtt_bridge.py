@@ -1105,6 +1105,55 @@ def _should_publish_task_status(status: str) -> bool:
     }
 
 
+TASK_PROGRESS_HEARTBEAT_INTERVAL_MS = 15_000
+
+
+class _TaskProgressEventGate:
+    """Throttle same-step progress while preserving live task heartbeats."""
+
+    def __init__(self, heartbeat_interval_ms: int = TASK_PROGRESS_HEARTBEAT_INTERVAL_MS) -> None:
+        self.heartbeat_interval_ms = max(1, int(heartbeat_interval_ms))
+        self._last_status = ""
+        self._last_step = ""
+        self._last_status_seq = 0
+        self._last_running_publish_at_ms: int | None = None
+        self._lock = threading.Lock()
+
+    def should_publish(self, task: dict, now_ms: int | None = None) -> bool:
+        status = str(task.get("status") or "").strip().lower()
+        step = str(task.get("current_step") or "").strip()
+        status_seq = int(task.get("status_seq") or 0)
+        observed_at_ms = int(time.monotonic() * 1000) if now_ms is None else int(now_ms)
+        with self._lock:
+            if (
+                status_seq > 0
+                and self._last_status_seq > 0
+                and status_seq <= self._last_status_seq
+            ):
+                return False
+            self._last_status_seq = max(self._last_status_seq, status_seq)
+            if not _should_publish_task_status(status):
+                self._last_status = status
+                self._last_step = step
+                return False
+            if status != "running":
+                self._last_status = status
+                self._last_step = step
+                return True
+            first_running_event = self._last_status != "running"
+            step_changed = self._last_status == "running" and step != self._last_step
+            heartbeat_due = (
+                self._last_running_publish_at_ms is not None
+                and observed_at_ms - self._last_running_publish_at_ms >= self.heartbeat_interval_ms
+            )
+            if not (first_running_event or step_changed or heartbeat_due):
+                return False
+            self._last_status = status
+            self._last_step = step
+            self._last_running_publish_at_ms = observed_at_ms
+            return True
+
+
 def _task_event_publish_loop() -> None:
     while True:
         item = task_event_publish_queue.get()
@@ -1592,21 +1641,14 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         details.append("Inspect the available files when they are relevant to the user's request.")
         return task_content + "\n".join(details)
 
-    def publish_event(task: dict) -> None:
-        nonlocal progress_event_published
-        status = str(task.get("status") or "").strip().lower()
-        # A successful task needs one live progress row. The final reply is the
-        # authoritative completion signal, so transport-only lifecycle events do
-        # not delay the useful answer or create a stack of status messages.
-        if not _should_publish_task_status(status):
-            return
-        if status == "running":
-            if progress_event_published:
-                return
-            progress_event_published = True
-        _enqueue_task_event(mqttc, wire_payload, task, task_trace_snapshot())
+    progress_event_gate = _TaskProgressEventGate()
 
-    progress_event_published = False
+    def publish_event(task: dict) -> None:
+        # Android merges these events into one task row by task_id/status_seq.
+        # Publish changed steps immediately and same-step liveness every 15 s.
+        if not progress_event_gate.should_publish(task):
+            return
+        _enqueue_task_event(mqttc, wire_payload, task, task_trace_snapshot())
 
     def run_task(task) -> str:
         log.info(f"Agent task running task_id={task.task_id} contact_id={contact_id} agent_id={agent_id}")

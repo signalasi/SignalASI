@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from codex_app_server import CodexAppServer
-from mqtt_bridge import _should_publish_task_status, _trace_metrics
+from mqtt_bridge import _TaskProgressEventGate, _should_publish_task_status, _trace_metrics
 
 
 class TaskLatencyTests(unittest.TestCase):
@@ -26,6 +26,70 @@ class TaskLatencyTests(unittest.TestCase):
         self.assertTrue(_should_publish_task_status("running"))
         self.assertFalse(_should_publish_task_status("completed"))
         self.assertTrue(_should_publish_task_status("failed"))
+
+    def test_running_progress_keeps_a_bounded_heartbeat(self):
+        gate = _TaskProgressEventGate(heartbeat_interval_ms=15_000)
+
+        self.assertTrue(gate.should_publish({
+            "status": "running", "status_seq": 1, "current_step": "Running Codex",
+        }, now_ms=1_000))
+        self.assertFalse(gate.should_publish({
+            "status": "running", "status_seq": 2, "current_step": "Running Codex",
+        }, now_ms=6_000))
+        self.assertFalse(gate.should_publish({
+            "status": "running", "status_seq": 3, "current_step": "Running Codex",
+        }, now_ms=15_999))
+        self.assertFalse(gate.should_publish({
+            "status": "running", "status_seq": 2, "current_step": "Running Codex",
+        }, now_ms=16_000))
+        self.assertTrue(gate.should_publish({
+            "status": "running", "status_seq": 4, "current_step": "Running Codex",
+        }, now_ms=16_000))
+
+    def test_running_step_change_publishes_without_waiting_for_heartbeat(self):
+        gate = _TaskProgressEventGate(heartbeat_interval_ms=15_000)
+
+        self.assertTrue(gate.should_publish({
+            "status": "running", "status_seq": 1, "current_step": "",
+        }, now_ms=1_000))
+        self.assertTrue(gate.should_publish({
+            "status": "running", "status_seq": 2, "current_step": "Reading files",
+        }, now_ms=1_100))
+        self.assertFalse(gate.should_publish({
+            "status": "running", "status_seq": 2, "current_step": "Reading files",
+        }, now_ms=20_000))
+
+    def test_terminal_failure_is_not_throttled(self):
+        gate = _TaskProgressEventGate(heartbeat_interval_ms=15_000)
+
+        self.assertTrue(gate.should_publish({
+            "status": "running", "status_seq": 1, "current_step": "Running Hermes",
+        }, now_ms=1_000))
+        self.assertTrue(gate.should_publish({
+            "status": "failed", "status_seq": 2, "current_step": "Running Hermes",
+        }, now_ms=1_100))
+        self.assertFalse(gate.should_publish({
+            "status": "completed", "status_seq": 3, "current_step": "",
+        }, now_ms=1_200))
+
+    def test_resumed_running_and_stale_events_are_ordered(self):
+        gate = _TaskProgressEventGate(heartbeat_interval_ms=15_000)
+
+        self.assertTrue(gate.should_publish({
+            "status": "running", "status_seq": 1, "current_step": "Calling tool",
+        }, now_ms=1_000))
+        self.assertTrue(gate.should_publish({
+            "status": "waiting_input", "status_seq": 2, "current_step": "Waiting for input",
+        }, now_ms=1_100))
+        self.assertTrue(gate.should_publish({
+            "status": "running", "status_seq": 3, "current_step": "Calling tool",
+        }, now_ms=1_200))
+        self.assertFalse(gate.should_publish({
+            "status": "completed", "status_seq": 4, "current_step": "",
+        }, now_ms=1_300))
+        self.assertFalse(gate.should_publish({
+            "status": "running", "status_seq": 3, "current_step": "Calling tool",
+        }, now_ms=20_000))
 
     def test_warm_initializes_without_creating_a_task(self):
         server = CodexAppServer("codex", {}, lambda _task_id, _event: None)
