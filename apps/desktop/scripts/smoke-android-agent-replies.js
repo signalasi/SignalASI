@@ -64,6 +64,16 @@ async function waitForWindowText(targetPath, remoteName, requiredText, attempts 
   return xml;
 }
 
+async function waitForAppFileText(file, requiredText, attempts = 40) {
+  let value = "";
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    value = readAppFile(file);
+    if (value.includes(requiredText)) return value;
+    await sleep(250);
+  }
+  return value;
+}
+
 function longReplyFor(agentName, token) {
   return [
     `${agentName} agent reply smoke.`,
@@ -90,7 +100,10 @@ async function verifyAgentReply(agent) {
 
   log(`injecting long ${agent.name} reply`);
   adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_incoming_b64", payloadB64]);
-  await sleep(1200);
+  const persistedBeforeOpen = await waitForAppFileText(historyPrefs, token);
+  if (!persistedBeforeOpen.includes(token)) {
+    fail(`${agent.name} reply was not persisted before opening its chat`);
+  }
 
   log(`opening ${agent.name} chat and verifying full reply tail`);
   adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_open_contact", agent.id]);
