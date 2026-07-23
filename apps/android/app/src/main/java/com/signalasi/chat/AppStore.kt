@@ -928,6 +928,7 @@ object AppStore {
         context.getSharedPreferences("signalasi_agent_tasks", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences(AgentTranscriptStore.PREFS, Context.MODE_PRIVATE).edit().clear().commit()
         AgentEncryptedDatabase(context, AgentTranscriptStore.PREFS).clear()
+        AgentTranscriptEntryDatabase(context).clear()
         context.getSharedPreferences("signalasi_ui_preferences", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("signalasi_agent_safety", Context.MODE_PRIVATE).edit().clear().commit()
         SharedPreferencesAgentConfirmationConsentStore(context).clear()
@@ -1492,4 +1493,3 @@ object AppStore {
     private fun String.b64d(): ByteArray =
         android.util.Base64.decode(this, android.util.Base64.DEFAULT)
 }
-

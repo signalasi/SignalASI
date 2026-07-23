@@ -22,7 +22,7 @@ object AgentBackupData {
         val homeAssistant = HomeAssistantSettingsStore.load(context)
         val customDevices = CustomDeviceConnectorStore(context).exportJson()
         return JSONObject()
-            .put("version", 26)
+            .put("version", 27)
             .put("memory", readDatabaseArray(context, MEMORY_DATABASE, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS))
             .put("knowledge", readArray(context, KNOWLEDGE_PREFS, MAX_KNOWLEDGE_ITEMS, MAX_KNOWLEDGE_ITEM_CHARACTERS))
             .put("tasks", if (includeSessionHistory) readArray(context, TASK_PREFS, MAX_TASK_ITEMS, MAX_TASK_ITEM_CHARACTERS) else JSONArray())
@@ -122,14 +122,11 @@ object AgentBackupData {
             AgentEncryptedPreferences(context, TASK_PREFS).writeString(ITEMS_KEY, sanitized.toString())
         }
         payload.optJSONArray("transcript")?.let { input ->
-            val sanitized = sanitizeArray(input, MAX_TRANSCRIPT_ITEMS, MAX_TRANSCRIPT_ITEM_CHARACTERS)
-            AgentEncryptedDatabase(context, TRANSCRIPT_PREFS)
-                .writeString(AgentTranscriptStore.KEY_ITEMS, sanitized.toString())
+            AgentTranscriptStore(context).restoreEntriesJson(copyObjectArray(input))
         }
         payload.optJSONArray("agent_conversations")?.let { input ->
-            val sanitized = sanitizeArray(input, 100, 20_000)
             AgentEncryptedDatabase(context, TRANSCRIPT_PREFS)
-                .writeString(AgentTranscriptStore.KEY_CONVERSATIONS, sanitized.toString())
+                .writeString(AgentTranscriptStore.KEY_CONVERSATIONS, copyObjectArray(input).toString())
         }
         payload.optString("active_agent_conversation").takeIf { it.isNotBlank() }?.let { activeId ->
             AgentEncryptedDatabase(context, TRANSCRIPT_PREFS)
@@ -263,17 +260,18 @@ object AgentBackupData {
     private fun readAgentConversationArray(context: Context): JSONArray {
         val raw = AgentEncryptedDatabase(context, TRANSCRIPT_PREFS)
             .readString(AgentTranscriptStore.KEY_CONVERSATIONS, "[]")
-        return sanitizeArray(runCatching { JSONArray(raw) }.getOrDefault(JSONArray()), 100, 20_000)
+        return copyObjectArray(runCatching { JSONArray(raw) }.getOrDefault(JSONArray()))
     }
 
-    private fun readAgentTranscriptArray(context: Context): JSONArray {
-        val raw = AgentEncryptedDatabase(context, TRANSCRIPT_PREFS)
-            .readString(AgentTranscriptStore.KEY_ITEMS, "[]")
-        return sanitizeArray(
-            runCatching { JSONArray(raw) }.getOrDefault(JSONArray()),
-            MAX_TRANSCRIPT_ITEMS,
-            MAX_TRANSCRIPT_ITEM_CHARACTERS
-        )
+    private fun readAgentTranscriptArray(context: Context): JSONArray =
+        AgentTranscriptStore(context).exportEntriesJson()
+
+    private fun copyObjectArray(input: JSONArray): JSONArray {
+        val output = JSONArray()
+        for (index in 0 until input.length()) {
+            input.optJSONObject(index)?.let(output::put)
+        }
+        return output
     }
 
     private fun sanitizeArray(input: JSONArray, maxItems: Int, maxItemCharacters: Int): JSONArray {
@@ -295,8 +293,6 @@ object AgentBackupData {
     private const val MAX_KNOWLEDGE_ITEM_CHARACTERS = 20_000
     private const val MAX_TASK_ITEMS = 200
     private const val MAX_TASK_ITEM_CHARACTERS = 12_000
-    private const val MAX_TRANSCRIPT_ITEMS = 300
-    private const val MAX_TRANSCRIPT_ITEM_CHARACTERS = 20_000
     private const val MAX_WORKFLOW_ITEMS = 100
     private const val MAX_WORKFLOW_ITEM_CHARACTERS = 4_000
     private const val MAX_SCHEDULE_ITEMS = 100
