@@ -115,7 +115,12 @@ object AgentTranscriptPresentationPolicy {
         val representatives = linkedMapOf<String, AgentTranscriptEntry>()
         normalizedEntries.asSequence()
             .filter { it.role == AgentTranscriptRole.PROCESS }
-            .forEach { representatives[processGroupKey(it)] = it }
+            .forEach { process ->
+                val key = processGroupKey(process)
+                representatives[key] = representatives[key]
+                    ?.let { previous -> process.copy(id = previous.id) }
+                    ?: process
+            }
         val emitted = mutableSetOf<String>()
         return buildList {
             normalizedEntries.forEach { entry ->
@@ -296,15 +301,24 @@ data class AgentConversationMetrics(
     val costMicros: Long
 )
 
+private data class AgentContextWindow(
+    val conversation: AgentConversation,
+    val dialogue: List<AgentTranscriptEntry>
+)
+
 class AgentTranscriptStore(context: Context) {
     private val appContext = context.applicationContext
     private val preferences = AgentEncryptedDatabase(context.applicationContext, PREFS)
     private val entryDatabase = AgentTranscriptEntryDatabase(context.applicationContext)
     private var draftConversation: AgentConversation? = null
+    private var emptyConversationsPruned = false
 
     @Synchronized
     fun conversations(includeArchived: Boolean = false): List<AgentConversation> {
-        prunePersistedEmptyConversations()
+        if (!emptyConversationsPruned) {
+            prunePersistedEmptyConversations()
+            emptyConversationsPruned = true
+        }
         return decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]"))
             .filter { includeArchived || it.status == AgentConversationStatus.ACTIVE }
             .sortedWith(compareByDescending<AgentConversation> { it.pinned }.thenByDescending { it.updatedAt })
@@ -357,6 +371,7 @@ class AgentTranscriptStore(context: Context) {
         )
         val all = decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]"))
         saveConversations(all + conversation)
+        emptyConversationsPruned = false
         GlobalConversationEventBus.publishConversationCreated(appContext, conversation)
         return conversation
     }
@@ -491,6 +506,26 @@ class AgentTranscriptStore(context: Context) {
         entryDatabase.listConversationPage(conversationId, beforeSequenceExclusive, pageSize)
 
     @Synchronized
+    internal fun entriesAfter(
+        conversationId: String,
+        afterSequenceExclusive: Long,
+        pageSize: Int = 100
+    ): AgentTranscriptDelta =
+        entryDatabase.listConversationAfter(conversationId, afterSequenceExclusive, pageSize)
+
+    @Synchronized
+    internal fun entriesForTurn(turnId: String): List<AgentTranscriptEntry> {
+        val cleanTurnId = turnId.trim()
+        return if (cleanTurnId.isBlank()) emptyList() else entryDatabase.listTurn(cleanTurnId)
+    }
+
+    @Synchronized
+    internal fun entriesForTask(taskId: String): List<AgentTranscriptEntry> {
+        val cleanTaskId = taskId.trim()
+        return if (cleanTaskId.isBlank()) emptyList() else entryDatabase.listTask(cleanTaskId)
+    }
+
+    @Synchronized
     fun conversationIdForTurn(turnId: String): String? {
         val cleanTurnId = turnId.trim()
         if (cleanTurnId.isBlank()) return null
@@ -567,6 +602,7 @@ class AgentTranscriptStore(context: Context) {
     fun deleteEntry(entryId: String): Boolean {
         val removed = entryDatabase.findById(entryId) ?: return false
         if (!entryDatabase.deleteById(entryId)) return false
+        emptyConversationsPruned = false
         invalidateCompactionIfNeeded(removed.conversationId, listOf(removed))
         conversationForEvent(removed.conversationId)?.let { conversation ->
             GlobalConversationEventBus.publishTranscriptEntryDeleted(appContext, conversation, removed)
@@ -578,16 +614,12 @@ class AgentTranscriptStore(context: Context) {
     fun deleteByDedupeKey(conversationId: String, dedupeKey: String): Boolean {
         val cleanKey = dedupeKey.trim()
         if (cleanKey.isBlank()) return false
-        val removed = entryDatabase.listConversation(conversationId).filter {
-            it.conversationId == conversationId && it.dedupeKey == cleanKey
-        }
-        if (removed.isEmpty()) return false
-        entryDatabase.deleteEntries(removed.map(AgentTranscriptEntry::id))
-        invalidateCompactionIfNeeded(conversationId, removed)
+        val removed = entryDatabase.findByDedupeKey(conversationId, cleanKey) ?: return false
+        if (!entryDatabase.deleteById(removed.id)) return false
+        emptyConversationsPruned = false
+        invalidateCompactionIfNeeded(conversationId, listOf(removed))
         conversationForEvent(conversationId)?.let { conversation ->
-            removed.forEach { entry ->
-                GlobalConversationEventBus.publishTranscriptEntryDeleted(appContext, conversation, entry)
-            }
+            GlobalConversationEventBus.publishTranscriptEntryDeleted(appContext, conversation, removed)
         }
         return true
     }
@@ -596,21 +628,18 @@ class AgentTranscriptStore(context: Context) {
     fun context(conversationId: String = activeConversation().id): AgentConversationContext {
         val conversation = conversations(includeArchived = true).firstOrNull { it.id == conversationId }
             ?: activeConversation()
-        val dialogue = unsummarizedDialogue(
-            conversation,
-            list(conversation.id).filter { it.role != AgentTranscriptRole.PROCESS }
-        )
-        val compacted = compileContext(conversation, dialogue)
-        val entriesById = dialogue.associateBy(AgentTranscriptEntry::id)
+        val window = unsummarizedDialogue(conversation)
+        val compacted = compileContext(window.conversation, window.dialogue)
+        val entriesById = window.dialogue.associateBy(AgentTranscriptEntry::id)
         val turns = compacted.messages.mapNotNull { item ->
             entriesById[item.id]?.copy(text = item.content)
         }
         return AgentConversationContext(
-            conversationId = conversation.id,
+            conversationId = window.conversation.id,
             summary = compacted.summary,
             turns = turns,
-            privateMode = conversation.privateMode,
-            trackingPaused = conversation.trackingPaused
+            privateMode = window.conversation.privateMode,
+            trackingPaused = window.conversation.trackingPaused
         )
     }
 
@@ -736,6 +765,7 @@ class AgentTranscriptStore(context: Context) {
 
     fun clear() {
         draftConversation = null
+        emptyConversationsPruned = false
         preferences.clear()
         entryDatabase.clear()
     }
@@ -751,6 +781,7 @@ class AgentTranscriptStore(context: Context) {
     internal fun restoreEntriesJson(input: JSONArray) {
         val fallbackConversationId = preferences.readString(KEY_ACTIVE_CONVERSATION, "")
         saveEntries(decodeEntries(input.toString(), fallbackConversationId))
+        emptyConversationsPruned = false
     }
 
     @Synchronized
@@ -759,6 +790,7 @@ class AgentTranscriptStore(context: Context) {
         val removed = current.filter { it.text == text }
         if (removed.isEmpty()) return 0
         entryDatabase.deleteEntries(removed.map(AgentTranscriptEntry::id))
+        emptyConversationsPruned = false
         removed.groupBy(AgentTranscriptEntry::conversationId).forEach { (conversationId, entries) ->
             conversationForEvent(conversationId)?.let { conversation ->
                 entries.forEach { entry ->
@@ -775,7 +807,10 @@ class AgentTranscriptStore(context: Context) {
         val removed = current.filter { entry ->
             AgentTranscriptLifecyclePolicy.isObsoletePlannerProcessEntry(entry.role, entry.dedupeKey)
         }
-        if (removed.isNotEmpty()) entryDatabase.deleteEntries(removed.map(AgentTranscriptEntry::id))
+        if (removed.isNotEmpty()) {
+            entryDatabase.deleteEntries(removed.map(AgentTranscriptEntry::id))
+            emptyConversationsPruned = false
+        }
         return removed.size
     }
 
@@ -857,16 +892,21 @@ class AgentTranscriptStore(context: Context) {
             ?: decodeConversations(preferences.readString(KEY_CONVERSATIONS, "[]")).firstOrNull { it.id == id }
 
     private fun touchConversation(id: String, role: AgentTranscriptRole, text: String, timestamp: Long) {
-        val currentMessages = list(id)
-        updateConversation(id) { conversation ->
-            val titledUserMessages = currentMessages.filter { entry ->
+        val current = conversationForEvent(id)
+        val firstTitledUserMessage = if (
+            role == AgentTranscriptRole.USER && current?.title == "New session"
+        ) {
+            entryDatabase.listConversation(id).firstOrNull { entry ->
                 entry.role == AgentTranscriptRole.USER &&
                     !entry.dedupeKey.startsWith("agent-voice-pending:")
             }
+        } else {
+            null
+        }
+        updateConversation(id) { conversation ->
             val autoTitle = role == AgentTranscriptRole.USER &&
                 conversation.title == "New session" &&
-                titledUserMessages.size == 1 &&
-                titledUserMessages.first().text == text
+                firstTitledUserMessage?.text == text
             conversation.copy(
                 title = if (autoTitle) conversationTitleFromUserText(text) else conversation.title,
                 updatedAt = timestamp
@@ -890,13 +930,10 @@ class AgentTranscriptStore(context: Context) {
     private fun compactContextIfNeeded(conversationId: String) {
         val conversation = conversations(includeArchived = true)
             .firstOrNull { it.id == conversationId } ?: return
-        val dialogue = unsummarizedDialogue(
-            conversation,
-            list(conversationId).filter { it.role != AgentTranscriptRole.PROCESS }
-        )
-        val compacted = compileContext(conversation, dialogue)
+        val window = unsummarizedDialogue(conversation)
+        val compacted = compileContext(window.conversation, window.dialogue)
         if (!compacted.compacted) return
-        val cursor = dialogue.lastOrNull { it.id in compacted.compactedMessageIds }
+        val cursor = window.dialogue.lastOrNull { it.id in compacted.compactedMessageIds }
         updateConversation(conversationId) {
             it.copy(
                 summary = compacted.summary.take(MAX_SUMMARY_CHARACTERS),
@@ -908,18 +945,41 @@ class AgentTranscriptStore(context: Context) {
         }
     }
 
-    private fun unsummarizedDialogue(
-        conversation: AgentConversation,
-        dialogue: List<AgentTranscriptEntry>
-    ): List<AgentTranscriptEntry> {
-        val cursor = conversation.contextCompactedThroughMillis to
-            conversation.contextCompactedThroughEntryId
-        if (cursor.first <= 0L) return dialogue
-        val cursorIndex = dialogue.indexOfFirst { it.id == cursor.second }
-        if (cursorIndex >= 0) return dialogue.drop(cursorIndex + 1)
-        return dialogue.filter { entry ->
-            entry.timestampMillis > cursor.first
+    private fun unsummarizedDialogue(conversation: AgentConversation): AgentContextWindow {
+        if (conversation.contextCompactedThroughMillis <= 0L) {
+            return AgentContextWindow(
+                conversation = conversation,
+                dialogue = entryDatabase.listConversation(conversation.id)
+                    .filter { it.role != AgentTranscriptRole.PROCESS }
+            )
         }
+        val recent = entryDatabase.listConversationAfterEntry(
+            conversationId = conversation.id,
+            entryId = conversation.contextCompactedThroughEntryId
+        )
+        if (recent != null) {
+            return AgentContextWindow(
+                conversation = conversation,
+                dialogue = recent.filter { it.role != AgentTranscriptRole.PROCESS }
+            )
+        }
+        val reset = conversation.copy(
+            summary = "",
+            contextCompactedThroughMillis = 0L,
+            contextCompactedThroughEntryId = ""
+        )
+        updateConversation(conversation.id) {
+            it.copy(
+                summary = "",
+                contextCompactedThroughMillis = 0L,
+                contextCompactedThroughEntryId = ""
+            )
+        }
+        return AgentContextWindow(
+            conversation = reset,
+            dialogue = entryDatabase.listConversation(conversation.id)
+                .filter { it.role != AgentTranscriptRole.PROCESS }
+        )
     }
 
     private fun invalidateCompactionIfNeeded(
