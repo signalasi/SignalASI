@@ -132,6 +132,7 @@ class LinkPairingIntegrationTests(unittest.TestCase):
             patch.object(mqtt_bridge, "_subscribe_all_routes"),
             patch.object(mqtt_bridge.agent_task_manager, "drain_recovered", return_value=[recovered]),
             patch.object(mqtt_bridge, "get_client", return_value={"client_route_id": "client-1"}),
+            patch.object(mqtt_bridge, "_publish_or_queue_task_event") as publish_recovery,
             patch.object(mqtt_bridge, "_resume_recovered_remote_task") as resume,
             patch.object(mqtt_bridge.agent_task_manager, "retain_recovered") as retain,
             patch.object(mqtt_bridge, "flush_pending_task_events"),
@@ -140,6 +141,11 @@ class LinkPairingIntegrationTests(unittest.TestCase):
         ):
             mqtt_bridge.on_connect(self.mqtt, None, None, 0)
 
+        publish_recovery.assert_called_once()
+        recovery_wire, recovery_task, recovery_trace = publish_recovery.call_args.args[1:]
+        self.assertEqual("client-1", recovery_wire["_client_route_id"])
+        self.assertIs(recovered, recovery_task)
+        self.assertEqual("desktop_task_recovery_started", recovery_trace[0]["stage"])
         resume.assert_called_once_with(self.mqtt, recovered)
         retain.assert_not_called()
 

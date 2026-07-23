@@ -172,6 +172,7 @@ object ChatHistoryStore {
         val baseLabel = when (status) {
             "accepted" -> context.getString(R.string.agent_task_status_accepted)
             "queued" -> context.getString(R.string.agent_task_status_queued)
+            "recovering" -> context.getString(R.string.agent_task_status_recovering)
             "running" -> context.getString(R.string.agent_task_status_running)
             "waiting_input" -> context.getString(R.string.agent_task_status_waiting_input)
             "completed" -> context.getString(R.string.agent_task_status_completed)

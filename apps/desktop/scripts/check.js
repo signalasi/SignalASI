@@ -241,8 +241,12 @@ for (const requiredLocaleKey of ["Language", "Desktop Connector", "{done}/{total
   }
 }
 
-if (!html.includes('<div><strong>SignalASI</strong><span data-i18n="Super agent">Super agent</span></div>')) {
+if (!html.includes('<div class="sidebar-brand-copy"><strong>SignalASI</strong><span data-i18n="Super agent">Super agent</span></div>')) {
   throw new Error("Desktop sidebar brand must use the localized Super agent subtitle");
+}
+
+if (!/\.sidebar-brand-copy\s*\{[^}]*align-items:\s*center;/s.test(styles)) {
+  throw new Error("Desktop sidebar brand title and subtitle must share a centered text axis");
 }
 
 if (Object.keys(localeEn).length !== 0) {

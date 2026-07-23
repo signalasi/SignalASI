@@ -1464,6 +1464,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             "accepted" -> getString(R.string.agent_task_status_accepted)
             "queued" -> getString(R.string.agent_task_status_queued)
             "starting" -> getString(R.string.agent_task_status_starting)
+            "recovering" -> getString(R.string.agent_task_status_recovering)
             "running" -> getString(R.string.agent_task_status_running)
             "waiting_input" -> getString(R.string.agent_task_status_waiting_input)
             "waiting_approval" -> getString(R.string.agent_task_status_waiting_approval)
@@ -1513,7 +1514,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val turnId = envelopeTurnId.takeIf { it.isNotBlank() }
             ?: taskRuntime?.let(agentRuntimeTurnIds::get).orEmpty()
         if (turnId.isNotBlank() && status in setOf(
-                "accepted", "queued", "starting", "running", "waiting_input", "waiting_approval",
+                "accepted", "queued", "starting", "recovering", "running", "waiting_input", "waiting_approval",
                 "completed", "failed", "cancelled", "timed_out", "not_found"
             )
         ) {
@@ -1701,7 +1702,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             ?: registrations.firstOrNull { it.agentId.endsWith(":$contactId") || contactId.endsWith(":${it.agentId}") }
             ?: return
         val endpointStatus = when (taskStatus) {
-            "accepted", "queued", "starting", "running", "waiting_input", "waiting_approval" -> AgentEndpointStatus.BUSY
+            "accepted", "queued", "starting", "recovering", "running", "waiting_input", "waiting_approval" -> AgentEndpointStatus.BUSY
             "timed_out" -> AgentEndpointStatus.DEGRADED
             "completed", "failed", "cancelled", "not_found" -> AgentEndpointStatus.IDLE
             else -> registration.status
@@ -14040,6 +14041,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         "agent_replied" -> getString(R.string.delivery_trace_agent_replied)
         "agent_accepted" -> getString(R.string.agent_task_status_accepted)
         "agent_queued" -> getString(R.string.agent_task_status_queued)
+        "agent_recovering" -> getString(R.string.agent_task_status_recovering)
         "agent_running" -> getString(R.string.agent_task_status_running)
         "agent_waiting_input" -> getString(R.string.agent_task_status_waiting_input)
         "agent_completed" -> getString(R.string.agent_task_status_completed)
@@ -14455,7 +14457,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 showChatPage(contact)
             }
         })
-        if (message.taskId.isNotBlank() && message.taskStatus in setOf("accepted", "queued", "running", "waiting_input")) {
+        if (message.taskId.isNotBlank() && message.taskStatus in setOf("accepted", "queued", "recovering", "running", "waiting_input")) {
             featureContent.addView(featureRow(getString(R.string.agent_task_cancel_title), getString(R.string.agent_task_cancel_subtitle), R.drawable.ic_delete, getString(R.string.common_cancel)).apply {
                 setOnClickListener {
                     val sent = SignalASIMqttClient.publishAgentTaskCancel(
