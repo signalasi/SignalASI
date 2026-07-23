@@ -160,6 +160,11 @@ class ResponsePolicyTest(unittest.TestCase):
         raw = f"Received [test.xlsx]({internal})."
         self.assertEqual("Received test.xlsx.", sanitize_assistant_response(raw, [internal]))
 
+    def test_sanitizer_hides_angle_wrapped_desktop_artifact_path(self):
+        internal = r"C:\Users\agent\SignalASIWorkspace\tasks\abc\outputs\01-marked.jpg"
+        raw = "Ready.\n\n![Marked image](</C:/Users/agent/SignalASIWorkspace/tasks/abc/outputs/01-marked.jpg>)"
+        self.assertEqual("Ready.\n\nMarked image", sanitize_assistant_response(raw, [internal]))
+
     def test_unfulfilled_artifact_claim_is_removed_without_output_file(self):
         response = "\u5df2\u786e\u8ba4\uff1a4 \u9053\u6b63\u786e\u3002\u6b63\u5728\u751f\u6210\u5e26\u7ea2\u7b14\u6279\u6ce8\u7684\u539f\u56fe\u7248\u672c\u3002"
         self.assertEqual(

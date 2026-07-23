@@ -19,10 +19,15 @@ object AgentFastLocalResponse {
         "deal with this",
         "do something with this"
     )
+    private val rawSharedStoragePath = Regex(
+        "(?:^|\\s)(/(?:storage/emulated/\\d+|storage/self/primary|sdcard|mnt/sdcard)/[^\\s]+)",
+        RegexOption.IGNORE_CASE
+    )
 
     fun reply(goal: String, context: AgentConversationContext): String? {
         val clean = goal.trim()
         if (clean.isBlank()) return null
+        sharedStorageAccessReply(clean)?.let { return it }
         arithmetic(clean)?.let { return it }
         val priorTurns = if (
             context.turns.lastOrNull()?.role == AgentTranscriptRole.USER &&
@@ -40,6 +45,21 @@ object AgentFastLocalResponse {
             normalized in vagueEnglish ->
                 "What should I work on? Send text, a file, or an image, or tell me whether to inspect, edit, summarize, or execute it."
             else -> null
+        }
+    }
+
+    private fun sharedStorageAccessReply(goal: String): String? {
+        if (rawSharedStoragePath.find(goal) == null) return null
+        val lower = goal.lowercase(Locale.US)
+        val requestsFileAccess = listOf(
+            "read", "open", "inspect", "view", "summarize", "analyze",
+            "\u8bfb\u53d6", "\u6253\u5f00", "\u67e5\u770b", "\u68c0\u67e5", "\u603b\u7ed3", "\u5206\u6790"
+        ).any(lower::contains)
+        if (!requestsFileAccess) return null
+        return if (goal.any { it in '\u3400'..'\u9fff' }) {
+            "Android \u4e0d\u5141\u8bb8 App \u76f4\u63a5\u8bfb\u53d6\u8fd9\u4e2a\u5171\u4eab\u5b58\u50a8\u8def\u5f84\u3002\u8bf7\u70b9\u8f93\u5165\u680f\u7684\u6587\u4ef6\u6309\u94ae\u91cd\u65b0\u9009\u62e9\u8be5\u6587\u4ef6\uff0c\u6388\u6743\u540e\u6211\u4f1a\u76f4\u63a5\u5904\u7406\u3002"
+        } else {
+            "Android does not let apps read this raw shared-storage path directly. Select the file again with the input bar's file button; after you grant access, I will process it directly."
         }
     }
 

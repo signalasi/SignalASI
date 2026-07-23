@@ -15,6 +15,7 @@ class AgentTaskConversationTests(unittest.TestCase):
             first = manager.create_external(
                 "codex", "codex-contact", "1", "first", lambda _: None,
                 task_id="task-1", conversation_id="conversation-1", client_route_id="client-1",
+                client_turn_id="phone-turn-1",
             )
             manager.create_external(
                 "hermes", "hermes-contact", "2", "second", lambda _: None,
@@ -22,9 +23,11 @@ class AgentTaskConversationTests(unittest.TestCase):
             )
             self.assertEqual(first.public()["conversation_id"], "conversation-1")
             self.assertEqual(first.public()["client_route_id"], "client-1")
+            self.assertEqual(first.public()["client_turn_id"], "phone-turn-1")
             restored = agent_task_manager.AgentTaskManager().get("task-1")
             self.assertIsNotNone(restored)
             self.assertEqual(restored.client_route_id, "client-1")
+            self.assertEqual(restored.client_turn_id, "phone-turn-1")
             self.assertEqual(manager.delete_conversation("conversation-1"), ["task-1"])
             self.assertIsNone(manager.get("task-1"))
             self.assertIsNotNone(manager.get("task-2"))
@@ -49,8 +52,55 @@ class AgentTaskConversationTests(unittest.TestCase):
             recovered = restored.drain_recovered()
 
             self.assertEqual(["running-task"], [item["task_id"] for item in recovered])
-            self.assertEqual("failed", recovered[0]["status"])
+            self.assertEqual("recovering", recovered[0]["status"])
+            self.assertEqual("running", recovered[0]["prompt"])
+            self.assertEqual(2, recovered[0]["attempt"])
             self.assertEqual([], restored.drain_recovered())
+
+            events = []
+            resumed = restored.resume_external("running-task", events.append)
+            self.assertIsNotNone(resumed)
+            self.assertEqual("accepted", resumed.status)
+            restored.update("running-task", "completed", result="recovered")
+            self.assertEqual("recovered", restored.get("running-task").result)
+
+    def test_second_interruption_stops_automatic_recovery(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            agent_task_manager, "TASKS_PATH", Path(temporary) / "tasks.json"
+        ):
+            manager = agent_task_manager.AgentTaskManager()
+            manager.create_external(
+                "codex", "codex-contact", "3", "repeat", lambda _: None,
+                task_id="repeat-task", client_route_id="client-1",
+            )
+            manager.update("repeat-task", "running")
+            first_restart = agent_task_manager.AgentTaskManager()
+            first_restart.drain_recovered()
+            first_restart.resume_external("repeat-task", lambda _: None)
+            first_restart.update("repeat-task", "running")
+
+            second_restart = agent_task_manager.AgentTaskManager()
+            recovered = second_restart.drain_recovered()
+
+            self.assertEqual("failed", recovered[0]["status"])
+            self.assertIn("repeated Desktop restarts", recovered[0]["error"])
+            self.assertIsNone(second_restart.resume_external("repeat-task", lambda _: None))
+
+    def test_client_turn_id_survives_codex_internal_turn_updates(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            agent_task_manager, "TASKS_PATH", Path(temporary) / "tasks.json"
+        ):
+            manager = agent_task_manager.AgentTaskManager()
+            manager.create_external(
+                "codex", "codex-contact", "1", "prompt", lambda _: None,
+                task_id="task-1", client_turn_id="phone-turn-1",
+            )
+
+            manager.update("task-1", "running", turn_id="codex-turn-1")
+            task = manager.get("task-1").public()
+
+            self.assertEqual(task["client_turn_id"], "phone-turn-1")
+            self.assertEqual(task["turn_id"], "codex-turn-1")
 
 
 if __name__ == "__main__":

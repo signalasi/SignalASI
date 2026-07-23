@@ -107,6 +107,11 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val turnId: String
     )
 
+    private data class DebugAgentAttachment(
+        val name: String,
+        val bytes: ByteArray
+    )
+
     private data class AgentInitialHydration(
         val state: AgentUiState,
         val conversation: AgentConversation,
@@ -10355,11 +10360,29 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 }
             )
             AgentAuditEvent.TOOL_COMPLETED -> {
+                val actionId = auditDetailValue(entry.detail, "action")
+                val actionKind = auditDetailValue(entry.detail, "kind")
+                    .takeIf(String::isNotBlank)
+                    ?.let { value -> runCatching { AgentActionKind.valueOf(value) }.getOrNull() }
+                    ?: state.plan?.actions?.firstOrNull { it.id == actionId }?.kind
+                val awaitingResponse = when (auditDetailValue(entry.detail, "awaiting_response")) {
+                    "true" -> true
+                    "false" -> false
+                    else -> null
+                }
                 val target = agentTraceTargetLabel(
                     auditDetailValue(entry.detail, "target").ifBlank { route }
                 )
                 val duration = auditDetailValue(entry.detail, "duration_ms").toLongOrNull() ?: 0L
                 val succeeded = auditDetailValue(entry.detail, "success") == "true"
+                if (!AgentTranscriptPresentationPolicy.shouldRenderToolCompletion(
+                        actionKind = actionKind,
+                        succeeded = succeeded,
+                        awaitingResponse = awaitingResponse
+                    )
+                ) {
+                    return null
+                }
                 getString(
                     if (succeeded) R.string.agent_trace_tool_completed else R.string.agent_trace_tool_failed,
                     target,
@@ -12919,13 +12942,27 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             val token = intent?.getStringExtra("signalasi_debug_agent_token")?.trim().orEmpty()
                 .ifBlank { UUID.randomUUID().toString() }
             val newConversation = intent?.getBooleanExtra("signalasi_debug_agent_new_conversation", true) != false
+            val attachmentName = intent?.getStringExtra("signalasi_debug_agent_attachment_name")?.trim().orEmpty()
+            val attachmentEncoded = intent?.getStringExtra("signalasi_debug_agent_attachment_b64")?.trim().orEmpty()
             intent?.removeExtra("signalasi_debug_agent_goal_b64")
             intent?.removeExtra("signalasi_debug_agent_token")
             intent?.removeExtra("signalasi_debug_agent_new_conversation")
+            intent?.removeExtra("signalasi_debug_agent_attachment_name")
+            intent?.removeExtra("signalasi_debug_agent_attachment_b64")
             val goal = runCatching {
                 String(Base64.decode(agentGoalEncoded, Base64.DEFAULT), Charsets.UTF_8)
             }.getOrDefault("").trim()
-            if (goal.isNotBlank()) scheduleDebugAgentGoal(token, goal, newConversation)
+            val attachment = if (attachmentName.isNotBlank() && attachmentEncoded.length <= 1_500_000) {
+                runCatching {
+                    DebugAgentAttachment(
+                        name = attachmentName.take(120),
+                        bytes = Base64.decode(attachmentEncoded, Base64.DEFAULT)
+                    )
+                }.getOrNull()?.takeIf { it.bytes.size <= 1_048_576 }
+            } else {
+                null
+            }
+            if (goal.isNotBlank()) scheduleDebugAgentGoal(token, goal, newConversation, attachment)
         }
         val contactId = intent?.getStringExtra("signalasi_debug_contact")?.trim().orEmpty()
         val content = intent?.getStringExtra("signalasi_debug_text")?.trim().orEmpty()
@@ -13697,7 +13734,12 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }, delayMs)
     }
 
-    private fun scheduleDebugAgentGoal(token: String, goal: String, newConversation: Boolean) {
+    private fun scheduleDebugAgentGoal(
+        token: String,
+        goal: String,
+        newConversation: Boolean,
+        attachment: DebugAgentAttachment? = null
+    ) {
         handler.postDelayed({
             if (newConversation) createAgentConversation()
             showMainTab(PAGE_AGENT)
@@ -13711,11 +13753,36 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     .put("complete", false)
                     .toString())
                 .commit()
+            attachment?.let { addDebugAgentAttachment(token, it) }
             agentGoalInput.setText(goal)
             agentGoalInput.setSelection(agentGoalInput.text?.length ?: 0)
             submitAgentGoal()
             scheduleDebugAgentSnapshot(token, conversationId, startedAt, attempt = 0)
         }, 250L)
+    }
+
+    private fun addDebugAgentAttachment(token: String, attachment: DebugAgentAttachment) {
+        val safeName = attachment.name
+            .replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_")
+            .trim('.', ' ')
+            .ifBlank { "attachment.txt" }
+        val directory = File(cacheDir, "debug-agent-inputs")
+        check(directory.mkdirs() || directory.isDirectory)
+        val file = File(directory, "${token.hashCode().toUInt()}-$safeName")
+        file.writeBytes(attachment.bytes)
+        agentInputAttachments.clear()
+        agentInputAttachments += AgentInputAttachment(
+            id = "debug-${UUID.randomUUID()}",
+            uri = Uri.fromFile(file),
+            displayName = safeName,
+            mimeType = when (safeName.substringAfterLast('.', "").lowercase(Locale.US)) {
+                "txt", "log", "md", "csv" -> "text/plain"
+                "json" -> "application/json"
+                else -> "application/octet-stream"
+            },
+            sizeBytes = attachment.bytes.size.toLong()
+        )
+        renderAgentInputAttachments()
     }
 
     private fun scheduleDebugAgentSnapshot(
