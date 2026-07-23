@@ -1206,6 +1206,18 @@ def on_connect(mqttc, userdata, flags, reason_code, properties=None):
             if route_id and get_client(route_id) is not None:
                 if str(recovered_task.get("status") or "") == "recovering":
                     try:
+                        recovery_trace = [
+                            _trace_event(
+                                "desktop_task_recovery_started",
+                                f"attempt={recovered_task.get('attempt', 2)}",
+                            )
+                        ]
+                        _publish_or_queue_task_event(
+                            mqttc,
+                            {"scheme": "signal", "_client_route_id": route_id},
+                            recovered_task,
+                            recovery_trace,
+                        )
                         _resume_recovered_remote_task(mqttc, recovered_task)
                         replayed_count += 1
                     except Exception as exc:
