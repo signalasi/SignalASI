@@ -9,7 +9,9 @@ from conversation_context import (
     compacted_history_cursor,
     compile_context,
     estimate_tokens,
+    is_context_overflow,
     reference_block,
+    retry_context_windows,
     task_history_messages,
 )
 
@@ -173,6 +175,14 @@ class ConversationContextTest(unittest.TestCase):
 
     def test_cjk_estimate_is_not_four_characters_per_token(self):
         self.assertGreater(estimate_tokens("\u4eca\u5929\u4e0a\u6d77\u5929\u6c14\u600e\u4e48\u6837"), estimate_tokens("abcdefghij"))
+
+    def test_context_overflow_retry_is_token_based_and_error_specific(self):
+        self.assertTrue(is_context_overflow(400, '{"code":"context_length_exceeded"}'))
+        self.assertTrue(is_context_overflow(413, "Request too large"))
+        self.assertFalse(is_context_overflow(401, "Too many tokens in the supplied credential"))
+        self.assertFalse(is_context_overflow(400, "Unknown model"))
+        self.assertEqual((64_000, 32_000, 16_000, 8_000), retry_context_windows(64_000))
+        self.assertEqual((8_192, 4_096), retry_context_windows(8_192))
 
 
 if __name__ == "__main__":

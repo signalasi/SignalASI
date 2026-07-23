@@ -4,12 +4,20 @@ from pathlib import Path
 from unittest.mock import patch
 
 import agent_gateway
+import agent_config
 import agent_task_manager
 import conversation_context
 from desktop_agent_adapters import AgentAdapterRequest
 
 
 class AgentContextCompactionTest(unittest.TestCase):
+    def test_context_summary_setting_accepts_typed_and_serialized_booleans(self):
+        self.assertTrue(agent_config._as_bool(True, False))
+        self.assertTrue(agent_config._as_bool("true", False))
+        self.assertFalse(agent_config._as_bool(False, True))
+        self.assertFalse(agent_config._as_bool("false", True))
+        self.assertFalse(agent_config._as_bool("", True))
+
     def test_stateless_cloud_model_uses_refined_summary_and_latest_request(self):
         history = []
         for index in range(24):
@@ -86,6 +94,49 @@ class AgentContextCompactionTest(unittest.TestCase):
 
         self.assertEqual("done", result)
         self.assertEqual(messages, captured["payload"]["messages"])
+
+    def test_cloud_model_recompiles_with_smaller_token_windows_after_overflow(self):
+        request = AgentAdapterRequest(
+            agent_id="cloud-model",
+            prompt="Keep the current request",
+            run_id="task-current",
+            conversation_id="conversation-overflow",
+        )
+        attempted_windows = []
+        post_attempts = 0
+
+        def fake_messages(_request, _agent_id, context_window_override=None):
+            attempted_windows.append(context_window_override)
+            return [{"role": "user", "content": f"window={context_window_override}"}]
+
+        def fake_post(_url, _payload, timeout, headers=None):
+            nonlocal post_attempts
+            post_attempts += 1
+            if post_attempts < 3:
+                raise agent_gateway.ModelHttpError(400, '{"code":"context_length_exceeded"}')
+            return {"choices": [{"message": {"content": "recovered"}}]}
+
+        with patch.object(
+            agent_gateway,
+            "cloud_model_config",
+            return_value={
+                "url": "https://example.invalid/v1/chat/completions",
+                "api_key": "secret",
+                "model": "test-model",
+                "context_window_tokens": 64_000,
+            },
+        ), patch.object(
+            agent_gateway,
+            "_stateless_model_messages",
+            side_effect=fake_messages,
+        ), patch.object(agent_gateway, "_post_json", side_effect=fake_post):
+            result = agent_gateway._ask_cloud_model_for_request(
+                request,
+                agent_gateway.all_agent_specs()["cloud-model"],
+            )
+
+        self.assertEqual("recovered", result)
+        self.assertEqual([64_000, 32_000, 16_000], attempted_windows)
 
 
 if __name__ == "__main__":

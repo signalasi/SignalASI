@@ -121,7 +121,7 @@ def local_model_config() -> dict[str, Any]:
         "api_key": str(data.get("api_key", "")).strip(),
         "context_window_tokens": _bounded_int(data.get("context_window_tokens"), 64_000, 4_096, 1_000_000),
         "max_output_tokens": _bounded_int(data.get("max_output_tokens"), 4_096, 512, 128_000),
-        "context_model_summary": bool(data.get("context_model_summary", True)),
+        "context_model_summary": _as_bool(data.get("context_model_summary"), True),
     }
 
 
@@ -135,7 +135,7 @@ def cloud_model_config() -> dict[str, Any]:
         "api_key": str(data.get("api_key", "")).strip(),
         "context_window_tokens": _bounded_int(data.get("context_window_tokens"), 64_000, 4_096, 1_000_000),
         "max_output_tokens": _bounded_int(data.get("max_output_tokens"), 4_096, 512, 128_000),
-        "context_model_summary": bool(data.get("context_model_summary", True)),
+        "context_model_summary": _as_bool(data.get("context_model_summary"), True),
     }
 
 
@@ -203,3 +203,16 @@ def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+def _as_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"", "0", "false", "no", "off"}:
+        return False
+    return default
