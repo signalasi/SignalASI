@@ -1008,6 +1008,8 @@ def warm_codex_app_server() -> None:
 phone_publish_lock = threading.RLock()
 pending_task_events: dict[str, tuple[dict, dict]] = {}
 pending_task_events_lock = threading.Lock()
+pending_task_results: dict[str, tuple[dict, dict]] = {}
+pending_task_results_lock = threading.Lock()
 task_event_publish_queue: queue.Queue[tuple[object, dict, dict, list[dict]] | None] = queue.Queue()
 task_event_publisher_started = threading.Event()
 task_event_publisher_lock = threading.Lock()
@@ -1165,6 +1167,7 @@ def on_connect(mqttc, userdata, flags, reason_code, properties=None):
                 len(recovered_tasks), replayed_count, retained_count,
             )
         flush_pending_task_events(mqttc)
+        flush_pending_task_results(mqttc)
         flush_outbound_messages(mqttc)
         status = publish_connector_status(mqttc, reason="mqtt_connected")
         if not status.get("ok"):
@@ -1351,6 +1354,10 @@ def _publish_phone_payload(mqttc, wire_payload: dict, reply_payload: dict) -> bo
         return info.rc == mqtt.MQTT_ERR_SUCCESS
 
 
+def _client_task_turn_id(task: dict) -> str:
+    return str(task.get("client_turn_id") or task.get("turn_id") or "")
+
+
 def _agent_task_payload(task: dict, trace: list[dict]) -> dict:
     status = str(task.get("status") or "")
     stage = f"agent_{status}"
@@ -1370,7 +1377,8 @@ def _agent_task_payload(task: dict, trace: list[dict]) -> dict:
         "status_seq": task.get("status_seq", 0),
         "process_id": task.get("process_id", 0),
         "thread_id": task.get("thread_id", ""),
-        "turn_id": task.get("turn_id", ""),
+        "turn_id": _client_task_turn_id(task),
+        "agent_turn_id": task.get("turn_id", ""),
         "current_step": task.get("current_step", ""),
         "error": task.get("error", ""),
         "output_files": task.get("output_files", []),
@@ -1410,6 +1418,36 @@ def flush_pending_task_events(mqttc) -> None:
                     pending_task_events.pop(task_id, None)
         except Exception as exc:
             log.warning(f"Agent task event replay deferred task_id={task_id}: {exc}")
+
+
+def _publish_or_queue_task_result(mqttc, wire_payload: dict, payload: dict) -> bool:
+    task_id = str(payload.get("task_id") or "")
+    try:
+        published = bool(
+            mqttc is not None and mqttc.is_connected()
+            and _publish_phone_payload(mqttc, wire_payload, payload)
+        )
+    except Exception as exc:
+        log.warning("Agent task result queued task_id=%s: %s", task_id, exc)
+        published = False
+    with pending_task_results_lock:
+        if published:
+            pending_task_results.pop(task_id, None)
+        elif task_id:
+            pending_task_results[task_id] = (dict(wire_payload), dict(payload))
+    return published
+
+
+def flush_pending_task_results(mqttc) -> None:
+    with pending_task_results_lock:
+        queued = list(pending_task_results.items())
+    for task_id, (wire_payload, payload) in queued:
+        try:
+            if _publish_phone_payload(mqttc, wire_payload, payload):
+                with pending_task_results_lock:
+                    pending_task_results.pop(task_id, None)
+        except Exception as exc:
+            log.warning("Agent task result replay deferred task_id=%s: %s", task_id, exc)
 
 
 def _requests_returned_image(prompt: str) -> bool:
@@ -1564,7 +1602,8 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             "connector_agents": mobile_connector_agents(str(wire_payload.get("_client_route_id") or "")),
             "source_message_id": source_message_id,
             "conversation_id": task.get("conversation_id", ""),
-            "turn_id": task.get("turn_id", ""),
+            "turn_id": _client_task_turn_id(task),
+            "agent_turn_id": task.get("turn_id", ""),
             "delivery_trace": _delivery_trace(
                 {"delivery_trace": task_trace_snapshot()},
                 _trace_event("agent_replied", f"{agent_id} chars={len(reply)}"),
@@ -1580,7 +1619,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             reply_payload["exact_content_encoding"] = "base64-utf8"
             reply_payload["exact_content_b64"] = base64.b64encode(raw_result.encode("utf-8")).decode("ascii")
         reply_payload["latency"] = _trace_metrics(reply_payload["delivery_trace"])
-        _publish_phone_payload(mqttc, wire_payload, reply_payload)
+        _publish_or_queue_task_result(mqttc, wire_payload, reply_payload)
         _log_task_latency(str(task.get("task_id") or ""), reply_payload["delivery_trace"])
 
     if agent_id == "codex":
@@ -1590,6 +1629,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             prompt=content, on_event=publish_event, task_id=str(payload.get("task_id") or ""),
             conversation_id=str(payload.get("conversation_id") or ""),
             client_route_id=str(wire_payload.get("_client_route_id") or ""),
+            client_turn_id=str(payload.get("turn_id") or ""),
         )
         add_task_trace("desktop_task_created", task.task_id)
 
@@ -1701,6 +1741,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         task_id=str(payload.get("task_id") or ""),
         conversation_id=str(payload.get("conversation_id") or ""),
         client_route_id=str(wire_payload.get("_client_route_id") or ""),
+        client_turn_id=str(payload.get("turn_id") or ""),
     )
 
 
@@ -2464,6 +2505,73 @@ def publish_agent_push_message(contact_id: str, content: str, source: str = "age
     if results and all(info.rc == mqtt.MQTT_ERR_SUCCESS for info in results):
         return api_ok("agent_push_published", contact_id=cleaned_contact_id, source=payload["source"], params=params)
     return api_error("publish_failed", "No target client or publish failed", contact_id=cleaned_contact_id, source=payload["source"], params=params)
+
+
+def _build_republished_task_result(task: dict, route_id: str) -> dict:
+    from rich_output import build_rich_output
+    from response_policy import remove_unfulfilled_artifact_claims, sanitize_assistant_response
+    from task_workspace import task_workspace
+
+    agent_id = str(task.get("agent_id") or "")
+    task_id = str(task.get("task_id") or "")
+    raw_result = str(task.get("result") or "")
+    hidden_inputs = [
+        str(path) for path in (
+            task_workspace(task_id, agent_id) / "downloads" / "input"
+        ).glob("*")
+    ]
+    output_files = list(task.get("output_files") or [])
+    cleaned_reply = sanitize_assistant_response(raw_result, hidden_inputs)
+    cleaned_reply = remove_unfulfilled_artifact_claims(cleaned_reply, output_files)
+    reply, rich_output = build_rich_output(cleaned_reply, output_files, task_id)
+    trace = _desktop_trace(
+        _trace_event("desktop_task_result_replay", task_id),
+        _trace_event("agent_replied", f"{agent_id} chars={len(reply)}"),
+    )
+    payload = {
+        "type": "text",
+        "content": reply,
+        "task_id": task_id,
+        "task_status": task.get("status", ""),
+        "contact_id": task.get("contact_id", ""),
+        "agent_id": agent_id,
+        "desktop_id": desktop_id(),
+        "desktop_name": desktop_name(),
+        "connector_agents": mobile_connector_agents(route_id),
+        "conversation_id": task.get("conversation_id", ""),
+        "turn_id": _client_task_turn_id(task),
+        "agent_turn_id": task.get("turn_id", ""),
+        "delivery_trace": trace,
+        "sender": "other",
+        "time": time.time(),
+        "recovery_replay": True,
+    }
+    if str(task.get("source_message_id") or "").strip():
+        payload["source_message_id"] = str(task["source_message_id"])
+    if rich_output:
+        payload["rich_output"] = rich_output
+    if requires_exact_content_transport(raw_result):
+        payload["exact_content_encoding"] = "base64-utf8"
+        payload["exact_content_b64"] = base64.b64encode(raw_result.encode("utf-8")).decode("ascii")
+    payload["latency"] = _trace_metrics(trace)
+    return payload
+
+
+def republish_agent_task_result(task_id: str) -> dict:
+    """Replay a completed task result to its paired phone relationship."""
+    task = agent_task_manager.get(str(task_id or "").strip())
+    if task is None:
+        return api_error("agent_task_not_found")
+    if task.status != "completed" or not task.result.strip():
+        return api_error("agent_task_not_completed", task_id=task.task_id)
+    route_id = str(task.client_route_id or "")
+    if not route_id or get_client(route_id) is None:
+        return api_error("client_route_unavailable", task_id=task.task_id)
+    payload = _build_republished_task_result(task.public(), route_id)
+    wire_payload = {"scheme": "signal", "_client_route_id": route_id}
+    if _publish_or_queue_task_result(client, wire_payload, payload):
+        return api_ok("agent_task_result_republished", task_id=task.task_id)
+    return api_ok("agent_task_result_queued", task_id=task.task_id, queued=True)
 
 
 def publish_agent_task_event(task: dict, client_route_id: str = "", broadcast: bool = False) -> bool:

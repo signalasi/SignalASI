@@ -37,6 +37,7 @@ class AgentTask:
     status_seq: int = 0
     thread_id: str = ""
     turn_id: str = ""
+    client_turn_id: str = ""
     delegate_agent_id: str = ""
     current_step: str = ""
     events: list[dict] = field(default_factory=list)
@@ -67,6 +68,7 @@ class AgentTask:
             "status_seq": self.status_seq,
             "thread_id": self.thread_id,
             "turn_id": self.turn_id,
+            "client_turn_id": self.client_turn_id,
             "delegate_agent_id": self.delegate_agent_id,
             "current_step": self.current_step,
             "events": self.events[-100:],
@@ -102,6 +104,7 @@ class AgentTaskManager:
         task_id: str = "",
         conversation_id: str = "",
         client_route_id: str = "",
+        client_turn_id: str = "",
         attachments: list[str] | None = None,
         retry_of: str = "",
         attempt: int = 1,
@@ -114,6 +117,7 @@ class AgentTaskManager:
             prompt=prompt,
             conversation_id=conversation_id,
             client_route_id=client_route_id,
+            client_turn_id=client_turn_id,
             attachments=[str(value) for value in (attachments or [])[:12]],
             retry_of=str(retry_of or ""),
             attempt=max(1, int(attempt or 1)),
@@ -131,13 +135,14 @@ class AgentTaskManager:
     def create_external(
         self, agent_id: str, contact_id: str, source_message_id: str, prompt: str,
         on_event: EventCallback, task_id: str = "", conversation_id: str = "",
-        client_route_id: str = "",
+        client_route_id: str = "", client_turn_id: str = "",
     ) -> AgentTask:
         task = AgentTask(
             task_id=task_id.strip() or str(uuid.uuid4()), agent_id=agent_id,
             contact_id=contact_id, source_message_id=source_message_id, prompt=prompt,
             conversation_id=conversation_id,
             client_route_id=client_route_id,
+            client_turn_id=client_turn_id,
         )
         with self._lock:
             if task.task_id in self._tasks:
@@ -465,6 +470,7 @@ class AgentTaskManager:
                     status_seq=int(row.get("status_seq") or 0),
                     thread_id=str(row.get("thread_id") or ""),
                     turn_id=str(row.get("turn_id") or ""),
+                    client_turn_id=str(row.get("client_turn_id") or ""),
                     delegate_agent_id=str(row.get("delegate_agent_id") or ""),
                     current_step=str(row.get("current_step") or ""),
                     events=list(row.get("events") or [])[-100:],

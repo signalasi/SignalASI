@@ -725,6 +725,16 @@ def api_get_agent_task(task_id: str):
         raise HTTPException(status_code=404, detail=api_error("agent_task_not_found"))
     return task.public()
 
+@app.post("/api/agent/tasks/{task_id}/republish")
+def api_republish_agent_task(task_id: str, request: Request):
+    require_loopback(request)
+    from mqtt_bridge import republish_agent_task_result
+
+    result = republish_agent_task_result(task_id)
+    if not result.get("ok") and result.get("error") == "agent_task_not_found":
+        raise HTTPException(status_code=404, detail=result)
+    return result
+
 @app.post("/api/agent/tasks/{task_id}/cancel")
 def api_cancel_agent_task(task_id: str, x_signalasi_token: str = Header(default="")):
     from push_auth import verify_agent_push_token
