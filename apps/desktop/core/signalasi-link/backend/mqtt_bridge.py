@@ -1435,6 +1435,18 @@ def _client_task_turn_id(task: dict) -> str:
     return str(task.get("client_turn_id") or task.get("turn_id") or "")
 
 
+def _codex_terminal_result(content: str, status: str, result: object) -> str | None:
+    if status == "cancelled":
+        return ""
+    if status in {"failed", "timed_out"} and not str(result or "").strip():
+        return (
+            "Codex \u672a\u80fd\u5b8c\u6210\u8fd9\u6b21\u4efb\u52a1\uff0c\u8bf7\u91cd\u65b0\u53d1\u9001\u4e00\u6b21\u3002"
+            if any("\u4e00" <= character <= "\u9fff" for character in content) else
+            "Codex could not complete this task. Please send it again."
+        )
+    return result if isinstance(result, str) else None
+
+
 def _agent_task_payload(task: dict, trace: list[dict]) -> dict:
     status = str(task.get("status") or "")
     stage = f"agent_{status}"
@@ -1750,7 +1762,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             nonlocal result_published
             event_status = str(event.get("status") or "running")
             add_task_trace(f"codex_{event_status}", event.get("current_step") or "")
-            event_result = event.get("result")
+            event_result = _codex_terminal_result(content, event_status, event.get("result"))
             if event_status == "completed" and str(event_result or "").strip():
                 from task_workspace import import_referenced_task_artifacts
 
@@ -1771,12 +1783,6 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                         "No annotated image was generated. Send it again and I will reply only after the image file exists."
                     )
                     event["error"] = "Requested image artifact was not generated"
-            if event_status in {"failed", "cancelled", "timed_out"} and not str(event_result or "").strip():
-                event_result = (
-                    "Codex \u672a\u80fd\u5b8c\u6210\u8fd9\u6b21\u4efb\u52a1\uff0c\u8bf7\u91cd\u65b0\u53d1\u9001\u4e00\u6b21\u3002"
-                    if any("\u4e00" <= character <= "\u9fff" for character in content) else
-                    "Codex could not complete this task. Please send it again."
-                )
             updated = agent_task_manager.update(
                 task_id, event_status, on_event=publish_event,
                 thread_id=event.get("thread_id"), turn_id=event.get("turn_id"),
@@ -1784,7 +1790,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                 error=event.get("error"),
             )
             if (
-                updated and not result_published and event_status in {"completed", "failed", "cancelled", "timed_out"}
+                updated and not result_published and event_status in {"completed", "failed", "timed_out"}
                 and updated.status == event_status and updated.result
             ):
                 result_published = True

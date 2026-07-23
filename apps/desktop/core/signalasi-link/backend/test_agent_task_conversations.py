@@ -1,5 +1,6 @@
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -55,6 +56,72 @@ class AgentTaskConversationTests(unittest.TestCase):
             settled = manager.get("external-task")
             self.assertEqual("completed", settled.status)
             self.assertEqual("", settled.current_step)
+
+    def test_external_running_task_emits_heartbeats_until_terminal(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            agent_task_manager, "TASKS_PATH", Path(temporary) / "tasks.json"
+        ):
+            events = []
+            second_heartbeat = threading.Event()
+
+            def capture(event):
+                events.append(dict(event))
+                if event["status"] == "running" and event["status_seq"] >= 3:
+                    second_heartbeat.set()
+
+            manager = agent_task_manager.AgentTaskManager(heartbeat_interval_seconds=0.02)
+            manager.create_external(
+                "codex", "codex-contact", "desktop:heartbeat", "external task",
+                capture, task_id="external-heartbeat",
+            )
+            manager.update("external-heartbeat", "running", on_event=capture, current_step="Running command")
+
+            self.assertTrue(second_heartbeat.wait(1))
+            running_events = [event for event in events if event["status"] == "running"]
+            self.assertGreaterEqual(len(running_events), 3)
+            self.assertEqual("Running command", running_events[-1]["current_step"])
+
+            completed = manager.update(
+                "external-heartbeat", "completed", on_event=capture, result="done"
+            )
+            terminal_seq = completed.status_seq
+            time.sleep(0.08)
+
+            self.assertEqual("completed", manager.get("external-heartbeat").status)
+            self.assertEqual(terminal_seq, manager.get("external-heartbeat").status_seq)
+
+    def test_external_heartbeat_pauses_for_input_and_resumes_without_duplicate_threads(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            agent_task_manager, "TASKS_PATH", Path(temporary) / "tasks.json"
+        ):
+            events = []
+            manager = agent_task_manager.AgentTaskManager(heartbeat_interval_seconds=0.02)
+            manager.create_external(
+                "codex", "codex-contact", "desktop:waiting", "external task",
+                events.append, task_id="external-waiting",
+            )
+            manager.update("external-waiting", "running", on_event=events.append)
+            time.sleep(0.05)
+
+            waiting = manager.update(
+                "external-waiting", "waiting_input", on_event=events.append,
+                current_step="Waiting for input",
+            )
+            waiting_seq = waiting.status_seq
+            time.sleep(0.06)
+            self.assertEqual(waiting_seq, manager.get("external-waiting").status_seq)
+
+            resumed = manager.update(
+                "external-waiting", "running", on_event=events.append,
+                current_step="Continuing",
+            )
+            resumed_seq = resumed.status_seq
+            deadline = time.time() + 1
+            while manager.get("external-waiting").status_seq <= resumed_seq and time.time() < deadline:
+                time.sleep(0.01)
+
+            self.assertGreater(manager.get("external-waiting").status_seq, resumed_seq)
+            manager.update("external-waiting", "cancelled", on_event=events.append)
 
     def test_delete_conversation_removes_only_matching_tasks(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
