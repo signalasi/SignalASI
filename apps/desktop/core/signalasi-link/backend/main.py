@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import uuid
+from typing import Any
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
@@ -285,8 +286,8 @@ def api_get_agent_config():
 
 class AgentConfigReq(BaseModel):
     commands: dict[str, str] = {}
-    local_model: dict[str, str] = {}
-    cloud_model: dict[str, str] = {}
+    local_model: dict[str, Any] = {}
+    cloud_model: dict[str, Any] = {}
     custom_agent: dict[str, str] = {}
     custom_agents: list[dict[str, str]] = []
 

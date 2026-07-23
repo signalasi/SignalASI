@@ -99,79 +99,77 @@ object CloudModelClient {
                 throw CancellationException("Model tool request cancelled")
             }
             withContext(Dispatchers.IO) {
-                val contextWindow = contact.optInt(
-                    "cloud_context_window_tokens",
-                    DEFAULT_CONTEXT_WINDOW_TOKENS
-                ).coerceIn(MIN_CONTEXT_WINDOW_TOKENS, MAX_CONTEXT_WINDOW_TOKENS)
-                val outputReserve = contact.optInt(
-                    "cloud_max_output_tokens",
-                    DEFAULT_OUTPUT_RESERVE_TOKENS
-                ).coerceIn(512, (contextWindow / 2).coerceAtLeast(512))
-                val compacted = AgentModelContextCompactor.compact(
-                    request.messages,
-                    ConversationContextBudget(
-                        contextWindowTokens = contextWindow,
-                        reservedOutputTokens = outputReserve
+                withContextOverflowRetry(contact) { contextWindow, _ ->
+                    val outputReserve = contact.optInt(
+                        "cloud_max_output_tokens",
+                        DEFAULT_OUTPUT_RESERVE_TOKENS
+                    ).coerceIn(512, (contextWindow / 2).coerceAtLeast(512))
+                    val compacted = AgentModelContextCompactor.compact(
+                        request.messages,
+                        ConversationContextBudget(
+                            contextWindowTokens = contextWindow,
+                            reservedOutputTokens = outputReserve
+                        )
                     )
-                )
-                if (compacted.compacted) {
-                    Log.i(
-                        TAG,
-                        "tool_context_compacted model=${contact.optString("cloud_model")} " +
-                            "before_tokens=${compacted.originalEstimatedTokens} " +
-                            "after_tokens=${compacted.compactedEstimatedTokens}"
-                    )
-                }
-                val conversation = protocol.encodeConversation(compacted.messages)
-                val body = JSONObject().put("model", contact.getString("cloud_model"))
-                copyJsonFields(conversation, body)
-                when (provider) {
-                    AgentModelToolProvider.OPENAI_COMPATIBLE -> {
-                        body.put("tools", protocol.encodeToolCatalog(catalog))
-                            .put("tool_choice", "auto")
-                            .put("stream", false)
+                    if (compacted.compacted) {
+                        Log.i(
+                            TAG,
+                            "tool_context_compacted model=${contact.optString("cloud_model")} " +
+                                "before_tokens=${compacted.originalEstimatedTokens} " +
+                                "after_tokens=${compacted.compactedEstimatedTokens}"
+                        )
                     }
-                    AgentModelToolProvider.ANTHROPIC -> {
-                        body.put("tools", protocol.encodeToolCatalog(catalog))
-                            .put("max_tokens", request.remainingTokens.coerceIn(256L, 4_000L))
+                    val conversation = protocol.encodeConversation(compacted.messages)
+                    val body = JSONObject().put("model", contact.getString("cloud_model"))
+                    copyJsonFields(conversation, body)
+                    when (provider) {
+                        AgentModelToolProvider.OPENAI_COMPATIBLE -> {
+                            body.put("tools", protocol.encodeToolCatalog(catalog))
+                                .put("tool_choice", "auto")
+                                .put("stream", false)
+                        }
+                        AgentModelToolProvider.ANTHROPIC -> {
+                            body.put("tools", protocol.encodeToolCatalog(catalog))
+                                .put("max_tokens", request.remainingTokens.coerceIn(256L, 4_000L))
+                        }
+                        AgentModelToolProvider.GEMINI -> {
+                            body.put("tools", protocol.encodeToolCatalog(catalog))
+                                .put(
+                                    "generationConfig",
+                                    JSONObject()
+                                        .put("temperature", 0.1)
+                                        .put("maxOutputTokens", request.remainingTokens.coerceIn(256L, 4_000L))
+                                )
+                        }
                     }
-                    AgentModelToolProvider.GEMINI -> {
-                        body.put("tools", protocol.encodeToolCatalog(catalog))
-                            .put(
-                                "generationConfig",
-                                JSONObject()
-                                    .put("temperature", 0.1)
-                                    .put("maxOutputTokens", request.remainingTokens.coerceIn(256L, 4_000L))
-                            )
+                    val endpoint = contact.getString("cloud_endpoint")
+                    val response = when (provider) {
+                        AgentModelToolProvider.OPENAI_COMPATIBLE -> postJson(
+                            endpoint,
+                            openAiHeaders(contact),
+                            body
+                        )
+                        AgentModelToolProvider.ANTHROPIC -> postJson(
+                            endpoint,
+                            mapOf(
+                                "x-api-key" to contact.getString("cloud_api_key"),
+                                "anthropic-version" to "2023-06-01",
+                                "anthropic-dangerous-direct-browser-access" to "true"
+                            ),
+                            body
+                        )
+                        AgentModelToolProvider.GEMINI -> {
+                            val separator = if (endpoint.contains("?")) "&" else "?"
+                            val url = endpoint + separator + "key=" +
+                                URLEncoder.encode(contact.getString("cloud_api_key"), "UTF-8")
+                            postJson(url, emptyMap(), body)
+                        }
                     }
-                }
-                val endpoint = contact.getString("cloud_endpoint")
-                val response = when (provider) {
-                    AgentModelToolProvider.OPENAI_COMPATIBLE -> postJson(
-                        endpoint,
-                        openAiHeaders(contact),
-                        body
-                    )
-                    AgentModelToolProvider.ANTHROPIC -> postJson(
-                        endpoint,
-                        mapOf(
-                            "x-api-key" to contact.getString("cloud_api_key"),
-                            "anthropic-version" to "2023-06-01",
-                            "anthropic-dangerous-direct-browser-access" to "true"
-                        ),
-                        body
-                    )
-                    AgentModelToolProvider.GEMINI -> {
-                        val separator = if (endpoint.contains("?")) "&" else "?"
-                        val url = endpoint + separator + "key=" +
-                            URLEncoder.encode(contact.getString("cloud_api_key"), "UTF-8")
-                        postJson(url, emptyMap(), body)
+                    if (request.cancellationToken.isCancellationRequested) {
+                        throw CancellationException("Model tool request cancelled")
                     }
+                    protocol.decodeResponse(response, catalog)
                 }
-                if (request.cancellationToken.isCancellationRequested) {
-                    throw CancellationException("Model tool request cancelled")
-                }
-                protocol.decodeResponse(response, catalog)
             }
         }
     }
@@ -202,6 +200,24 @@ object CloudModelClient {
         turns: List<ChatMessage>,
         systemPrompt: String,
         onToolEvent: ((CloudToolEvent) -> Unit)?
+    ): CloudModelResponse = withContextOverflowRetry(contact) { contextWindow, _ ->
+        sendOpenAiCompatibleAttempt(
+            context,
+            contact,
+            turns,
+            systemPrompt,
+            onToolEvent,
+            contextWindow
+        )
+    }
+
+    private fun sendOpenAiCompatibleAttempt(
+        context: Context,
+        contact: JSONObject,
+        turns: List<ChatMessage>,
+        systemPrompt: String,
+        onToolEvent: ((CloudToolEvent) -> Unit)?,
+        contextWindow: Int
     ): CloudModelResponse {
         val liveDataRequired = CloudWebGrounding.requiresLiveData(turns)
         val effectiveSystemPrompt = if (liveDataRequired) {
@@ -209,7 +225,13 @@ object CloudModelClient {
         } else {
             systemPrompt
         }
-        val compiled = compileCloudContext(context, contact, turns, effectiveSystemPrompt)
+        val compiled = compileCloudContext(
+            context,
+            contact,
+            turns,
+            effectiveSystemPrompt,
+            contextWindow
+        )
         logCompaction(contact, compiled)
         val messages = openAiMessages(compiled, effectiveSystemPrompt)
         val body = JSONObject()
@@ -279,8 +301,18 @@ object CloudModelClient {
         contact: JSONObject,
         turns: List<ChatMessage>,
         systemPrompt: String
+    ): CloudModelResponse = withContextOverflowRetry(contact) { contextWindow, _ ->
+        sendAnthropicAttempt(context, contact, turns, systemPrompt, contextWindow)
+    }
+
+    private fun sendAnthropicAttempt(
+        context: Context,
+        contact: JSONObject,
+        turns: List<ChatMessage>,
+        systemPrompt: String,
+        contextWindow: Int
     ): CloudModelResponse {
-        val compiled = compileCloudContext(context, contact, turns, systemPrompt)
+        val compiled = compileCloudContext(context, contact, turns, systemPrompt, contextWindow)
         logCompaction(contact, compiled)
         val body = JSONObject()
             .put("model", contact.getString("cloud_model"))
@@ -310,11 +342,21 @@ object CloudModelClient {
         contact: JSONObject,
         turns: List<ChatMessage>,
         systemPrompt: String
+    ): CloudModelResponse = withContextOverflowRetry(contact) { contextWindow, _ ->
+        sendGeminiAttempt(context, contact, turns, systemPrompt, contextWindow)
+    }
+
+    private fun sendGeminiAttempt(
+        context: Context,
+        contact: JSONObject,
+        turns: List<ChatMessage>,
+        systemPrompt: String,
+        contextWindow: Int
     ): CloudModelResponse {
         val endpoint = contact.getString("cloud_endpoint")
         val separator = if (endpoint.contains("?")) "&" else "?"
         val url = endpoint + separator + "key=" + URLEncoder.encode(contact.getString("cloud_api_key"), "UTF-8")
-        val compiled = compileCloudContext(context, contact, turns, systemPrompt)
+        val compiled = compileCloudContext(context, contact, turns, systemPrompt, contextWindow)
         logCompaction(contact, compiled)
         val body = JSONObject()
             .put("system_instruction", JSONObject().put("parts", JSONArray()
@@ -427,7 +469,8 @@ object CloudModelClient {
         context: Context,
         contact: JSONObject,
         turns: List<ChatMessage>,
-        systemPrompt: String
+        systemPrompt: String,
+        contextWindowOverride: Int? = null
     ): CompactedConversationContext {
         val contactId = contact.optString("id").ifBlank { contact.optString("signalasi_id") }
         val modelId = contact.optString("cloud_model")
@@ -457,8 +500,10 @@ object CloudModelClient {
                 groupId = activeGroup
             )
         }.toList()
-        val contextWindow = contact.optInt("cloud_context_window_tokens", DEFAULT_CONTEXT_WINDOW_TOKENS)
-            .coerceIn(MIN_CONTEXT_WINDOW_TOKENS, MAX_CONTEXT_WINDOW_TOKENS)
+        val contextWindow = (
+            contextWindowOverride
+                ?: contact.optInt("cloud_context_window_tokens", DEFAULT_CONTEXT_WINDOW_TOKENS)
+            ).coerceIn(MIN_RETRY_CONTEXT_WINDOW_TOKENS, MAX_CONTEXT_WINDOW_TOKENS)
         val outputReserve = contact.optInt("cloud_max_output_tokens", DEFAULT_OUTPUT_RESERVE_TOKENS)
             .coerceIn(512, (contextWindow / 2).coerceAtLeast(512))
         val locallyCompiled = ConversationContextCompactor.compile(
@@ -483,7 +528,8 @@ object CloudModelClient {
                     provisionalSummary = locallyCompiled.summary,
                     compactedMessages = locallyCompiled.compactedMessages,
                     maximumSummaryTokens = minOf(8_000, contextWindow / 8),
-                    outputReserve = outputReserve
+                    outputReserve = outputReserve,
+                    contextWindow = contextWindow
                 )
             )
         } else {
@@ -510,7 +556,8 @@ object CloudModelClient {
         provisionalSummary: String,
         compactedMessages: List<ConversationContextItem>,
         maximumSummaryTokens: Int,
-        outputReserve: Int
+        outputReserve: Int,
+        contextWindow: Int
     ): String {
         val transcript = buildString {
             if (provisionalSummary.isNotBlank()) {
@@ -530,8 +577,7 @@ object CloudModelClient {
         }
         val boundedTranscript = ConversationContextCompactor.fitTextToTokenBudget(
             transcript,
-            (contact.optInt("cloud_context_window_tokens", DEFAULT_CONTEXT_WINDOW_TOKENS) / 2)
-                .coerceAtLeast(2_048)
+            (contextWindow / 2).coerceAtLeast(2_048)
         )
         val maxOutputTokens = minOf(
             maximumSummaryTokens,
@@ -694,6 +740,34 @@ object CloudModelClient {
         return parts.joinToString("\n").trim()
     }
 
+    private fun <T> withContextOverflowRetry(
+        contact: JSONObject,
+        operation: (contextWindowTokens: Int, attempt: Int) -> T
+    ): T {
+        val configuredWindow = contact.optInt(
+            "cloud_context_window_tokens",
+            DEFAULT_CONTEXT_WINDOW_TOKENS
+        ).coerceIn(MIN_CONTEXT_WINDOW_TOKENS, MAX_CONTEXT_WINDOW_TOKENS)
+        val windows = CloudContextOverflowPolicy.retryWindows(configuredWindow)
+        var lastOverflow: CloudHttpException? = null
+        windows.forEachIndexed { attempt, contextWindow ->
+            try {
+                return operation(contextWindow, attempt)
+            } catch (error: CloudHttpException) {
+                val retryable = CloudContextOverflowPolicy.isContextOverflow(error)
+                if (!retryable || attempt == windows.lastIndex) throw error
+                lastOverflow = error
+                Log.w(
+                    TAG,
+                    "context_overflow_retry model=${contact.optString("cloud_model")} " +
+                        "attempt=${attempt + 1} next_window=${windows[attempt + 1]} " +
+                        "status=${error.statusCode}"
+                )
+            }
+        }
+        throw lastOverflow ?: IllegalStateException("Context retry ended without a result")
+    }
+
     private fun postJson(url: String, headers: Map<String, String>, body: JSONObject): String {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -710,7 +784,7 @@ object CloudModelClient {
             val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
             val response = stream?.let { BufferedReader(it.reader(Charsets.UTF_8)).use { reader -> reader.readText() } }.orEmpty()
             if (connection.responseCode !in 200..299) {
-                throw IllegalStateException("HTTP ${connection.responseCode}: ${response.take(500)}")
+                throw CloudHttpException(connection.responseCode, response)
             }
             return response
         } finally {
@@ -719,6 +793,7 @@ object CloudModelClient {
     }
 
     private const val MIN_CONTEXT_WINDOW_TOKENS = 8_192
+    private const val MIN_RETRY_CONTEXT_WINDOW_TOKENS = 4_096
     private const val DEFAULT_CONTEXT_WINDOW_TOKENS = 64_000
     private const val MAX_CONTEXT_WINDOW_TOKENS = 1_000_000
     private const val DEFAULT_OUTPUT_RESERVE_TOKENS = 4_096

@@ -35,6 +35,22 @@ _PREFERENCE_TERMS = (
     "prefer", "must", "never", "always", "constraint", "requirement", "decision",
     "\u504f\u597d", "\u5fc5\u987b", "\u4e0d\u8981", "\u6c38\u8fdc", "\u8981\u6c42", "\u51b3\u5b9a",
 )
+_CONTEXT_OVERFLOW_MARKERS = (
+    "context_length_exceeded",
+    "maximum context length",
+    "context window",
+    "too many tokens",
+    "token limit",
+    "prompt is too long",
+    "prompt too long",
+    "input is too long",
+    "input too long",
+    "input token count",
+    "exceeds the maximum number of tokens",
+    "exceeds maximum token",
+    "reduce the length of the messages",
+    "reduce your prompt",
+)
 
 
 @dataclass(frozen=True)
@@ -62,6 +78,33 @@ class ContextBudget:
     @property
     def input_budget_tokens(self) -> int:
         return max(2_048, self.context_window_tokens - self.reserved_output_tokens)
+
+
+def is_context_overflow(status_code: int, detail: str) -> bool:
+    if int(status_code or 0) not in {400, 413, 422}:
+        return False
+    normalized = str(detail or "").lower()
+    if any(marker in normalized for marker in _CONTEXT_OVERFLOW_MARKERS):
+        return True
+    return int(status_code or 0) == 413 and (
+        "request too large" in normalized or "payload too large" in normalized
+    )
+
+
+def retry_context_windows(
+    configured_window_tokens: int,
+    *,
+    minimum_window_tokens: int = 4_096,
+    maximum_attempts: int = 4,
+) -> tuple[int, ...]:
+    minimum = max(4_096, int(minimum_window_tokens or 4_096))
+    candidate = max(minimum, int(configured_window_tokens or minimum))
+    result: list[int] = []
+    for _ in range(max(1, int(maximum_attempts or 1))):
+        if candidate not in result:
+            result.append(candidate)
+        candidate = max(minimum, candidate // 2)
+    return tuple(result)
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,6 @@
 {
   "name": "signalasi-desktop",
-  "version": "0.1.57",
+  "version": "0.1.58",
   "description": "SignalASI Desktop super agent and trusted mobile gateway.",
   "license": "Apache-2.0",
   "main": "src/main.js",

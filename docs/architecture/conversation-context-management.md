@@ -28,6 +28,13 @@ receives a compiled context that fits that model's input budget.
 8. Persist the handoff with a transcript cursor so the same prefix is not
    summarized again.
 9. Put the latest user request last and let it override stale goals.
+10. If a provider explicitly rejects the request for context overflow,
+    recompile from the source transcript with a smaller token window and retry.
+    Authentication, model, and ordinary HTTP failures do not trigger this path.
+
+Overflow recovery tries progressively smaller token capacities and never drops
+a fixed number of messages. It is bounded to four total attempts, so a badly
+configured provider cannot create an unbounded retry loop.
 
 The compiler redacts credentials, embedded Base64 payloads, and long opaque
 values before generating a handoff. Exact paths, URLs, decisions, constraints,
