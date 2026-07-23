@@ -71,6 +71,7 @@ const preload = fs.readFileSync(path.join(root, "src/preload.js"), "utf8");
 const html = fs.readFileSync(path.join(root, "src/renderer/index.html"), "utf8");
 const renderer = fs.readFileSync(path.join(root, "src/renderer/renderer.js"), "utf8");
 const workspaceRenderer = fs.readFileSync(path.join(root, "src/renderer/workspace.js"), "utf8");
+const styles = fs.readFileSync(path.join(root, "src/renderer/styles.css"), "utf8");
 const localeZh = JSON.parse(fs.readFileSync(path.join(root, "src", "renderer", "locales", "zh-CN.json"), "utf8"));
 const localeEn = JSON.parse(fs.readFileSync(path.join(root, "src", "renderer", "locales", "en.json"), "utf8"));
 const packageJson = fs.readFileSync(path.join(root, "package.json"), "utf8");
@@ -146,6 +147,11 @@ const androidStringsZh = fs.readFileSync(path.join(workspaceRoot, "android", "ap
 const androidStringsEn = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "res", "values", "strings.xml"), "utf8");
 const androidSourceRoot = path.join(workspaceRoot, "android", "app", "src", "main");
 
+if (!styles.includes(".utility-drawer.open") ||
+    !styles.includes("box-shadow: none; pointer-events: none") ||
+    !styles.includes("pointer-events: auto")) {
+  throw new Error("Closed utility drawers must not cast a shadow or intercept pointer input");
+}
 if (!main.includes("width: 960") || !main.includes("height: 640")) {
   throw new Error("Desktop window must default to 960 x 640");
 }
