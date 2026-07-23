@@ -412,9 +412,9 @@
     <string name="agent_session_restore">恢复会话</string>
     <string name="agent_toolbox_title">Agent 工具</string>
     <string name="agent_session_context_policy">上下文策略</string>
-    <string name="agent_session_context_minimal">精简 · 6 条消息</string>
-    <string name="agent_session_context_balanced">平衡 · 14 条消息</string>
-    <string name="agent_session_context_extended">扩展 · 20 条消息</string>
+    <string name="agent_session_context_minimal">精简 · 16K Token 窗口</string>
+    <string name="agent_session_context_balanced">平衡 · 32K Token 窗口</string>
+    <string name="agent_session_context_extended">扩展 · 64K Token 窗口</string>
     <string name="agent_session_details">会话详情</string>
     <string name="agent_session_turns">对话轮次</string>
     <string name="agent_session_tasks">执行任务</string>

@@ -2067,6 +2067,8 @@ def _process_message(mqttc, userdata, msg):
             deleted_ids = agent_task_manager.delete_conversation(conversation_id, requested_ids)
             if codex_app_server is not None:
                 codex_app_server.delete_conversation(conversation_id)
+            from conversation_context import conversation_summary_store
+            conversation_summary_store().delete_conversation(conversation_id)
             from task_workspace import cleanup_task_temporary_files
             cleaned_ids = cleanup_task_temporary_files(deleted_ids or requested_ids)
             log.info(
