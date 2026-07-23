@@ -121,6 +121,50 @@ class LinkPairingIntegrationTests(unittest.TestCase):
         flush_messages.assert_called_once_with(self.mqtt)
         publish_status.assert_called_once_with(self.mqtt, reason="mqtt_connected")
 
+    def test_mqtt_reconnect_resumes_recoverable_task_for_its_paired_client(self):
+        recovered = {
+            "task_id": "task-1",
+            "status": "recovering",
+            "client_route_id": "client-1",
+            "prompt": "continue",
+        }
+        with (
+            patch.object(mqtt_bridge, "_subscribe_all_routes"),
+            patch.object(mqtt_bridge.agent_task_manager, "drain_recovered", return_value=[recovered]),
+            patch.object(mqtt_bridge, "get_client", return_value={"client_route_id": "client-1"}),
+            patch.object(mqtt_bridge, "_resume_recovered_remote_task") as resume,
+            patch.object(mqtt_bridge.agent_task_manager, "retain_recovered") as retain,
+            patch.object(mqtt_bridge, "flush_pending_task_events"),
+            patch.object(mqtt_bridge, "flush_outbound_messages"),
+            patch.object(mqtt_bridge, "publish_connector_status", return_value={"ok": True}),
+        ):
+            mqtt_bridge.on_connect(self.mqtt, None, None, 0)
+
+        resume.assert_called_once_with(self.mqtt, recovered)
+        retain.assert_not_called()
+
+    def test_mqtt_reconnect_retains_recovery_until_client_route_returns(self):
+        recovered = {
+            "task_id": "task-2",
+            "status": "recovering",
+            "client_route_id": "client-2",
+            "prompt": "continue later",
+        }
+        with (
+            patch.object(mqtt_bridge, "_subscribe_all_routes"),
+            patch.object(mqtt_bridge.agent_task_manager, "drain_recovered", return_value=[recovered]),
+            patch.object(mqtt_bridge, "get_client", return_value=None),
+            patch.object(mqtt_bridge, "_resume_recovered_remote_task") as resume,
+            patch.object(mqtt_bridge.agent_task_manager, "retain_recovered") as retain,
+            patch.object(mqtt_bridge, "flush_pending_task_events"),
+            patch.object(mqtt_bridge, "flush_outbound_messages"),
+            patch.object(mqtt_bridge, "publish_connector_status", return_value={"ok": True}),
+        ):
+            mqtt_bridge.on_connect(self.mqtt, None, None, 0)
+
+        resume.assert_not_called()
+        retain.assert_called_once_with("task-2")
+
     def test_delivery_ack_preserves_phone_source_message_id(self):
         ack = mqtt_bridge.accepted_delivery_ack_payload(
             {"source_message_id": "42"},
