@@ -36,9 +36,14 @@ function assertAndroidPersistentSessionConfig() {
     "stableClientId()",
     "signalasi-android-$identity",
     "SignalASICrypto.localIdentitySha256().take(16)",
-    "SignalASILinkProtocol.allServerLinks(appContext ?: return).forEach { subscribeLink(it) }",
-    "mqtt.subscribe(link.routes.down, MQTT_QOS)",
-    "mqtt.subscribe(link.routes.control, MQTT_QOS)"
+    "val generation = subscriptionRecoveryState.begin(links.size)",
+    "links.forEach { subscribeLink(mqtt, it, generation) }",
+    "arrayOf(link.routes.down, link.routes.control)",
+    "intArrayOf(MQTT_QOS, MQTT_QOS)",
+    "completeSubscriptionAttempt(generation, succeeded = true)",
+    "completeSubscriptionAttempt(generation, succeeded = false)",
+    "MqttSubscriptionAttemptOutcome.RETRY",
+    "scheduleSubscriptionRetry()"
   ];
   for (const marker of required) {
     if (!source.includes(marker)) {
