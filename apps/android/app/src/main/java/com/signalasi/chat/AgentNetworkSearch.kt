@@ -20,6 +20,8 @@ data class AgentNetworkSearchQuery(
     val includeAtCapacity: Boolean = false,
     val maximumCost: AgentResourceCost? = null,
     val maximumLatency: AgentResourceLatency? = null,
+    val minimumReputationScore: Int? = null,
+    val minimumReputationConfidence: Int = 40,
     val pageSize: Int = DEFAULT_PAGE_SIZE,
     val cursor: String = ""
 ) {
@@ -33,7 +35,8 @@ data class AgentNetworkSearchHit(
     val registration: AgentRegistration,
     val score: Int,
     val matchedCapabilities: Set<AgentCapability>,
-    val reasons: List<String>
+    val reasons: List<String>,
+    val reputation: AgentReputationSnapshot = AgentReputationSnapshot.neutral(registration.agentId)
 )
 
 data class AgentNetworkSearchPage(
@@ -51,7 +54,10 @@ data class AgentNetworkSearchPage(
  * identities remain first-class; this index only makes discovery and ranking
  * scalable enough for dynamic teams and large paired-device networks.
  */
-class AgentNetworkIndex(registrations: Collection<AgentRegistration> = emptyList()) {
+class AgentNetworkIndex(
+    registrations: Collection<AgentRegistration> = emptyList(),
+    private val reputation: AgentReputationSnapshotProvider = AgentReputationSnapshotProvider.NONE
+) {
     private val registrationsById = linkedMapOf<String, AgentRegistration>()
     private val idsByToken = mutableMapOf<String, MutableSet<String>>()
     private val idsByCapability = mutableMapOf<AgentCapability, MutableSet<String>>()
@@ -73,7 +79,7 @@ class AgentNetworkIndex(registrations: Collection<AgentRegistration> = emptyList
     fun size(): Int = registrationsById.size
 
     @Synchronized
-    fun revision(): Long = currentRevision
+    fun revision(): Long = effectiveRevision()
 
     @Synchronized
     fun get(agentId: String, nowMillis: Long = System.currentTimeMillis()): AgentRegistration? =
@@ -127,6 +133,7 @@ class AgentNetworkIndex(registrations: Collection<AgentRegistration> = emptyList
         val normalizedQuery = query.copy(
             pageSize = query.pageSize.coerceIn(1, AgentNetworkSearchQuery.MAX_PAGE_SIZE)
         )
+        val searchRevision = effectiveRevision()
         val queryId = normalizedQuery.fingerprint()
         val requirements = normalizedQuery.text
             .takeIf(String::isNotBlank)
@@ -138,9 +145,25 @@ class AgentNetworkIndex(registrations: Collection<AgentRegistration> = emptyList
         val ranked = candidateIds.asSequence()
             .mapNotNull(registrationsById::get)
             .map { it.withEffectiveNetworkStatus(nowMillis) }
-            .filter { it.matches(normalizedQuery, requirements) }
             .map { registration ->
-                registration.toSearchHit(normalizedQuery, requirements, preferredCapabilities, queryTokens, nowMillis)
+                registration to reputation.snapshot(
+                    agentId = registration.agentId,
+                    capabilities = normalizedQuery.requiredCapabilities + preferredCapabilities,
+                    nowMillis = nowMillis
+                )
+            }
+            .filter { (registration, profile) ->
+                registration.matches(normalizedQuery, requirements, profile)
+            }
+            .map { (registration, profile) ->
+                registration.toSearchHit(
+                    normalizedQuery,
+                    requirements,
+                    preferredCapabilities,
+                    queryTokens,
+                    profile,
+                    nowMillis
+                )
             }
             .sortedWith(
                 compareByDescending<AgentNetworkSearchHit> { it.score }
@@ -150,7 +173,7 @@ class AgentNetworkIndex(registrations: Collection<AgentRegistration> = emptyList
             .toList()
         val decodedCursor = normalizedQuery.cursor.decodeCursor()
         val cursorValid = decodedCursor != null &&
-            decodedCursor.revision == currentRevision &&
+            decodedCursor.revision == searchRevision &&
             decodedCursor.queryId == queryId
         val cursorIndex = if (cursorValid) {
             ranked.indexOfFirst { it.registration.agentId == decodedCursor?.lastAgentId }
@@ -162,13 +185,13 @@ class AgentNetworkIndex(registrations: Collection<AgentRegistration> = emptyList
         val endIndex = (startIndex + normalizedQuery.pageSize).coerceAtMost(ranked.size)
         val hits = if (startIndex < ranked.size) ranked.subList(startIndex, endIndex) else emptyList()
         val nextCursor = if (endIndex < ranked.size && hits.isNotEmpty()) {
-            AgentNetworkCursor(currentRevision, queryId, hits.last().registration.agentId).encode()
+            AgentNetworkCursor(searchRevision, queryId, hits.last().registration.agentId).encode()
         } else {
             ""
         }
         return AgentNetworkSearchPage(
             queryId = queryId,
-            revision = currentRevision,
+            revision = searchRevision,
             hits = hits,
             totalMatches = ranked.size,
             nextCursor = nextCursor,
@@ -215,6 +238,9 @@ class AgentNetworkIndex(registrations: Collection<AgentRegistration> = emptyList
         return candidates ?: registrationsById.keys.toSet()
     }
 
+    private fun effectiveRevision(): Long =
+        currentRevision * 1_000_003L + reputation.revision()
+
     private fun MutableSet<String>?.intersectWith(incoming: Set<String>): MutableSet<String> =
         this?.apply { retainAll(incoming) } ?: incoming.toMutableSet()
 
@@ -249,7 +275,8 @@ class AgentNetworkIndex(registrations: Collection<AgentRegistration> = emptyList
 
 private fun AgentRegistration.matches(
     query: AgentNetworkSearchQuery,
-    requirements: AgentTaskRequirements?
+    requirements: AgentTaskRequirements?,
+    reputation: AgentReputationSnapshot
 ): Boolean {
     if (agentId in query.excludedAgentIds) return false
     if (!capabilities.containsAll(query.requiredCapabilities)) return false
@@ -265,6 +292,11 @@ private fun AgentRegistration.matches(
     if (query.trustedOnly && trust == AgentResourceTrust.UNKNOWN) return false
     if (query.maximumCost != null && cost.ordinal > query.maximumCost.ordinal) return false
     if (query.maximumLatency != null && latency.ordinal > query.maximumLatency.ordinal) return false
+    val minimumReputation = query.minimumReputationScore?.coerceIn(0, 100)
+    if (minimumReputation != null &&
+        reputation.confidence >= query.minimumReputationConfidence.coerceIn(0, 100) &&
+        reputation.score < minimumReputation
+    ) return false
     if (requirements?.localOnly == true && location == AgentResourceLocation.CLOUD) return false
     if (query.routableOnly && status !in ROUTABLE_AGENT_NETWORK_STATES) return false
     if (query.routableOnly && !query.includeAtCapacity && !hasCapacity) return false
@@ -276,6 +308,7 @@ private fun AgentRegistration.toSearchHit(
     requirements: AgentTaskRequirements?,
     preferredCapabilities: Set<AgentCapability>,
     queryTokens: Set<String>,
+    reputation: AgentReputationSnapshot,
     nowMillis: Long
 ): AgentNetworkSearchHit {
     val reasons = mutableListOf<String>()
@@ -332,6 +365,7 @@ private fun AgentRegistration.toSearchHit(
     }
     score -= cost.ordinal * 35
     score -= latency.ordinal * 30
+    score += reputation.routingAdjustment
     when (requirements?.mode) {
         AgentRoutingMode.FAST -> if (latency <= AgentResourceLatency.FAST) score += 180
         AgentRoutingMode.ECONOMY -> if (cost <= AgentResourceCost.LOW) score += 180
@@ -358,11 +392,16 @@ private fun AgentRegistration.toSearchHit(
     reasons += "trust:${trust.name.lowercase(Locale.US)}"
     reasons += "latency:${latency.name.lowercase(Locale.US)}"
     reasons += "cost:${cost.name.lowercase(Locale.US)}"
+    if (reputation.confidence > 0) {
+        reasons += "reputation:${reputation.score}"
+        reasons += "reputation_confidence:${reputation.confidence}"
+    }
     return AgentNetworkSearchHit(
         registration = this,
         score = score,
         matchedCapabilities = matchedCapabilities,
-        reasons = reasons.distinct()
+        reasons = reasons.distinct(),
+        reputation = reputation
     )
 }
 
@@ -403,6 +442,8 @@ private fun AgentNetworkSearchQuery.fingerprint(): String {
         includeAtCapacity.toString(),
         maximumCost?.name.orEmpty(),
         maximumLatency?.name.orEmpty(),
+        minimumReputationScore?.coerceIn(0, 100)?.toString().orEmpty(),
+        minimumReputationConfidence.coerceIn(0, 100).toString(),
         pageSize.coerceIn(1, AgentNetworkSearchQuery.MAX_PAGE_SIZE).toString()
     ).joinToString("\u001f")
     return sha256(canonical).take(24)

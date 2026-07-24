@@ -153,6 +153,35 @@ object SignalASICrypto {
 
     fun localHermesId(): String = localSignalasiId()
 
+    @Synchronized
+    fun signLocalIdentity(payload: ByteArray): String {
+        ensureInitialized()
+        return b64e(store.identityKeyPair.privateKey.calculateSignature(payload))
+    }
+
+    @Synchronized
+    fun verifyIdentitySignature(
+        identityName: String,
+        expectedFingerprint: String,
+        payload: ByteArray,
+        signature: String,
+        deviceId: Int = DEFAULT_DEVICE_ID
+    ): Boolean {
+        ensureInitialized()
+        if (identityName.isBlank() || signature.isBlank()) return false
+        val identityKey = if (identityName == localSignalasiId()) {
+            store.identityKeyPair.publicKey
+        } else {
+            store.getIdentity(SignalProtocolAddress(identityName, deviceId))
+                ?: return false
+        }
+        val fingerprint = sha256Hex(identityKey.serialize())
+        if (!fingerprint.equals(expectedFingerprint, ignoreCase = true)) return false
+        return runCatching {
+            identityKey.publicKey.verifySignature(payload, b64d(signature))
+        }.getOrDefault(false)
+    }
+
     fun localSignalBundleJson(): JSONObject {
         ensureInitialized()
         return store.currentBundleJson(localSignalasiId(), DEFAULT_DEVICE_ID)

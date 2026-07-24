@@ -3011,6 +3011,14 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
     fun agentTeamSnapshot(supervisorRunId: String): AgentTeamExecutionSnapshot? =
         agentTeamController.snapshot(supervisorRunId)
 
+    fun agentReputation(
+        agentId: String,
+        capabilities: Set<AgentCapability> = emptySet()
+    ): AgentReputationSnapshot = agentTeamController.reputation(agentId, capabilities)
+
+    fun agentReputationReceipts(agentId: String = ""): List<AgentSignedExecutionReceipt> =
+        agentTeamController.reputationReceipts(agentId)
+
     fun agentTeamProgress(
         supervisorRunId: String,
         expanded: Boolean = false

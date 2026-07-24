@@ -156,6 +156,7 @@ class MobileNativeAgent(
     private val workflowTriggerStore: AgentWorkflowTriggerStore = AgentWorkflowTriggerStore(context),
     private val workflowExecutionHistoryStore: AgentWorkflowExecutionHistoryStore = AgentWorkflowExecutionHistoryStore(context),
     private val connectorRegistry: AgentConnectorRegistry = AppStoreAgentConnectorRegistry(context),
+    private val reputationLedger: AgentReputationLedger = AgentReputationLedger.encrypted(context),
     private val sessionStore: AgentSessionStore = SharedPreferencesAgentSessionStore(context),
     private val nativeToolEventSink: AgentNativeToolEventSink = AgentNativeToolEventSink.NONE
 ) {
@@ -244,6 +245,19 @@ class MobileNativeAgent(
     }
 
     fun agentRegistrySnapshot(): List<AgentRegistration> = connectorRegistry.registrations()
+
+    fun agentReputation(
+        agentId: String,
+        capabilities: Set<AgentCapability> = emptySet()
+    ): AgentReputationSnapshot = reputationLedger.snapshot(agentId, capabilities)
+
+    fun recordAgentExecutionReceipt(
+        receipt: AgentSignedExecutionReceipt
+    ): AgentReputationRecordResult = reputationLedger.record(receipt)
+
+    fun recordAgentVerification(
+        attestation: AgentSignedReputationAttestation
+    ): AgentReputationRecordResult = reputationLedger.record(attestation)
 
     fun startNewConversation(conversationId: String): AgentUiState {
         PhoneExecutionAuthority.requestCancellation(sessionId)
@@ -1513,7 +1527,8 @@ class MobileNativeAgent(
             plan = contextualPlan,
             targets = targets,
             enabled = modelPlannerSettings().multiAgentCoordination,
-            registrations = connectorRegistry.registrations()
+            registrations = connectorRegistry.registrations(),
+            reputation = reputationLedger
         )
         val safetyReview = safetyPolicy.review(draftPlan)
         currentPlan = draftPlan.withSafetyReview(safetyReview)
