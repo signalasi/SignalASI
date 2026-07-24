@@ -1189,6 +1189,14 @@
     <string name="agent_trace_tool_completed">%1$s 已完成 · %2$s</string>
     <string name="agent_trace_tool_failed">%1$s 需要修正 · %2$s</string>
     <string name="agent_trace_tool_result_ready">工具结果已准备</string>
+    <string name="agent_trace_remote_reasoning">正在分析请求</string>
+    <string name="agent_trace_remote_plan">正在更新计划</string>
+    <string name="agent_trace_remote_command">正在运行命令</string>
+    <string name="agent_trace_remote_file">正在更新文件</string>
+    <string name="agent_trace_remote_network">正在联网搜索</string>
+    <string name="agent_trace_remote_mcp">正在调用 MCP</string>
+    <string name="agent_trace_remote_provider">正在调用 %1$s</string>
+    <string name="agent_trace_remote_tool">正在运行工具</string>
     <string name="agent_trace_recovery_started">正在恢复中断的步骤</string>
     <string name="agent_trace_recovery_completed">恢复成功</string>
     <string name="agent_trace_recovery_manual">等待手动确认</string>

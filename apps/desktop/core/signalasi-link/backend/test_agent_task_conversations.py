@@ -57,6 +57,42 @@ class AgentTaskConversationTests(unittest.TestCase):
             self.assertEqual("completed", settled.status)
             self.assertEqual("", settled.current_step)
 
+    def test_active_for_conversation_returns_only_latest_matching_nonterminal_task(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
+        ):
+            manager = agent_task_manager.AgentTaskManager()
+            first = manager.create_external(
+                "codex", "codex-contact", "1", "first", lambda _: None,
+                task_id="task-1", conversation_id="conversation-1",
+            )
+            time.sleep(0.002)
+            second = manager.create_external(
+                "codex", "codex-contact", "2", "second", lambda _: None,
+                task_id="task-2", conversation_id="conversation-1",
+            )
+            manager.create_external(
+                "hermes", "hermes-contact", "3", "other agent", lambda _: None,
+                task_id="task-3", conversation_id="conversation-1",
+            )
+
+            active = manager.active_for_conversation(
+                "conversation-1",
+                agent_id="codex",
+                exclude_task_id="task-3",
+            )
+            self.assertEqual(second.task_id, active.task_id)
+
+            manager.update(second.task_id, "completed", result="done")
+            active = manager.active_for_conversation(
+                "conversation-1",
+                agent_id="codex",
+            )
+            self.assertEqual(first.task_id, active.task_id)
+
+            manager.update(first.task_id, "cancelled")
+            self.assertIsNone(manager.active_for_conversation("conversation-1", agent_id="codex"))
+
     def test_external_running_task_emits_heartbeats_until_terminal(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
             agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
@@ -89,6 +125,38 @@ class AgentTaskConversationTests(unittest.TestCase):
 
             self.assertEqual("completed", manager.get("external-heartbeat").status)
             self.assertEqual(terminal_seq, manager.get("external-heartbeat").status_seq)
+
+    def test_external_events_update_in_place_by_provider_event_id(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
+        ):
+            manager = agent_task_manager.AgentTaskManager()
+            manager.create_external(
+                "codex", "codex-contact", "desktop:event", "external task",
+                lambda _event: None, task_id="external-event",
+            )
+
+            manager.add_event(
+                "external-event",
+                "command",
+                "Running command",
+                event_id="codex:item-1",
+                status="running",
+                detail="python verify.py",
+            )
+            manager.add_event(
+                "external-event",
+                "command",
+                "Running command",
+                event_id="codex:item-1",
+                status="completed",
+                detail="python verify.py",
+            )
+
+            task = manager.get("external-event")
+            self.assertEqual(1, len(task.events))
+            self.assertEqual("completed", task.events[0]["status"])
+            self.assertEqual("python verify.py", task.events[0]["detail"])
 
     def test_external_heartbeat_pauses_for_input_and_resumes_without_duplicate_threads(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
@@ -250,6 +318,36 @@ class AgentTaskConversationTests(unittest.TestCase):
             self.assertEqual(manager.delete_conversation("conversation-1"), ["task-1"])
             self.assertIsNone(manager.get("task-1"))
             self.assertIsNotNone(manager.get("task-2"))
+
+    def test_same_client_conversation_id_is_isolated_by_paired_route(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
+        ):
+            manager = agent_task_manager.AgentTaskManager()
+            manager.create_external(
+                "codex", "codex-contact", "phone-a-message", "first", lambda _: None,
+                task_id="phone-a-task",
+                conversation_id="client:phone-a:shared-id",
+                client_conversation_id="shared-id",
+                client_route_id="phone-a",
+            )
+            manager.create_external(
+                "codex", "codex-contact", "phone-b-message", "second", lambda _: None,
+                task_id="phone-b-task",
+                conversation_id="client:phone-b:shared-id",
+                client_conversation_id="shared-id",
+                client_route_id="phone-b",
+            )
+
+            self.assertEqual(
+                ["phone-a-task"],
+                manager.delete_conversation("client:phone-a:shared-id"),
+            )
+            self.assertIsNone(manager.get("phone-a-task"))
+            self.assertEqual(
+                "shared-id",
+                manager.get("phone-b-task").client_conversation_id,
+            )
 
     def test_restart_recovers_only_tasks_that_were_interrupted(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(

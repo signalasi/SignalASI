@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -18,6 +19,8 @@ SUMMARY_INSTRUCTION = (
     "The latest user message is the active task and overrides stale goals or plans."
 )
 CURRENT_REQUEST_MARKER = "\nCurrent user request:\n"
+MOBILE_CONTEXT_HEADER = "[SIGNALASI_CONVERSATION_CONTEXT_V1]"
+MOBILE_CONTEXT_FOOTER = "[/SIGNALASI_CONVERSATION_CONTEXT_V1]"
 
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|passwd|"
@@ -113,6 +116,117 @@ class ContextMessage:
     content: str
     message_id: str = ""
     group_id: str = ""
+
+
+@dataclass(frozen=True)
+class MobileConversationContext:
+    conversation_id: str = ""
+    summary: str = ""
+    global_context: str = ""
+    messages: tuple[ContextMessage, ...] = ()
+    turn_ids: frozenset[str] = frozenset()
+    entry_ids: frozenset[str] = frozenset()
+    summary_digest: str = ""
+
+    @property
+    def reference_summary(self) -> str:
+        return "\n".join(
+            value
+            for value in (self.summary.strip(), self.global_context.strip())
+            if value
+        )
+
+    @property
+    def present(self) -> bool:
+        return bool(
+            self.conversation_id
+            or self.summary
+            or self.global_context
+            or self.messages
+        )
+
+    def delta(
+        self,
+        *,
+        synced_turn_ids: Iterable[str] = (),
+        synced_entry_ids: Iterable[str] = (),
+    ) -> tuple[ContextMessage, ...]:
+        known_turns = {str(value or "") for value in synced_turn_ids if str(value or "")}
+        known_entries = {str(value or "") for value in synced_entry_ids if str(value or "")}
+        return tuple(
+            item
+            for item in self.messages
+            if item.message_id not in known_entries
+            and item.group_id not in known_turns
+        )
+
+
+def embedded_mobile_context(prompt: str) -> MobileConversationContext:
+    value = str(prompt or "")
+    start = value.find(MOBILE_CONTEXT_HEADER)
+    if start < 0:
+        return MobileConversationContext()
+    start += len(MOBILE_CONTEXT_HEADER)
+    end = value.find(MOBILE_CONTEXT_FOOTER, start)
+    if end < 0:
+        return MobileConversationContext()
+    raw = value[start:end].strip()
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return MobileConversationContext()
+    if not isinstance(payload, dict):
+        return MobileConversationContext()
+    try:
+        version = int(payload.get("version") or 0)
+    except (TypeError, ValueError):
+        return MobileConversationContext()
+    if version != 1:
+        return MobileConversationContext()
+
+    messages: list[ContextMessage] = []
+    turn_ids: set[str] = set()
+    entry_ids: set[str] = set()
+    turns = payload.get("turns")
+    if isinstance(turns, list):
+        for index, item in enumerate(turns):
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = _sanitize(str(item.get("content") or ""), 32_000)
+            if not content:
+                continue
+            entry_id = str(item.get("entry_id") or "").strip()[:240]
+            turn_id = str(item.get("turn_id") or "").strip()[:240]
+            if entry_id:
+                entry_ids.add(entry_id)
+            if turn_id:
+                turn_ids.add(turn_id)
+            messages.append(
+                ContextMessage(
+                    role=role,
+                    content=content,
+                    message_id=entry_id or f"mobile:{index}",
+                    group_id=turn_id or entry_id or f"mobile:{index}",
+                )
+            )
+
+    summary = _sanitize(str(payload.get("summary") or ""), 32_000)
+    global_context = _sanitize(str(payload.get("global_context") or ""), 32_000)
+    summary_digest = hashlib.sha256(
+        "\n".join((summary, global_context)).encode("utf-8")
+    ).hexdigest() if summary or global_context else ""
+    return MobileConversationContext(
+        conversation_id=str(payload.get("conversation_id") or "").strip()[:240],
+        summary=summary,
+        global_context=global_context,
+        messages=tuple(messages),
+        turn_ids=frozenset(turn_ids),
+        entry_ids=frozenset(entry_ids),
+        summary_digest=summary_digest,
+    )
 
 
 @dataclass(frozen=True)
@@ -258,7 +372,8 @@ def task_history_messages(
         prompt = current_request(str(item.get("prompt") or ""))
         if not prompt:
             continue
-        group_id = task_id or f"history:{len(messages)}"
+        group_id = str(item.get("client_turn_id") or "").strip()
+        group_id = group_id or task_id or f"history:{len(messages)}"
         messages.append(ContextMessage("user", prompt, f"{group_id}:user", group_id))
         result = str(item.get("result") or "").strip()
         if result and str(item.get("status") or "") == "completed":
@@ -267,6 +382,32 @@ def task_history_messages(
     if current:
         messages.append(ContextMessage("user", current, "current:user", "current"))
     return messages
+
+
+def merge_context_messages(
+    *groups: Iterable[ContextMessage],
+) -> list[ContextMessage]:
+    result: list[ContextMessage] = []
+    seen_message_ids: set[tuple[str, str]] = set()
+    seen_turn_roles: set[tuple[str, str]] = set()
+    for group in groups:
+        for item in group:
+            role = str(item.role or "").strip().lower()
+            content = str(item.content or "").strip()
+            message_key = (role, str(item.message_id or "").strip())
+            turn_key = (role, str(item.group_id or "").strip())
+            if not role or not content:
+                continue
+            if message_key[1] and message_key in seen_message_ids:
+                continue
+            if turn_key[1] and turn_key in seen_turn_roles:
+                continue
+            if message_key[1]:
+                seen_message_ids.add(message_key)
+            if turn_key[1]:
+                seen_turn_roles.add(turn_key)
+            result.append(item)
+    return result
 
 
 def history_cursor(item: dict) -> tuple[int, str]:

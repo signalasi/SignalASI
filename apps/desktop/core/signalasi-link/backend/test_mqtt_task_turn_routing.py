@@ -40,6 +40,8 @@ class MqttTaskTurnRoutingTests(unittest.TestCase):
         task = {
             "task_id": "task-1",
             "status": "running",
+            "conversation_id": "client:phone-a:conversation-1",
+            "client_conversation_id": "conversation-1",
             "client_turn_id": "phone-turn-1",
             "turn_id": "codex-turn-1",
         }
@@ -54,6 +56,15 @@ class MqttTaskTurnRoutingTests(unittest.TestCase):
         )
         self.assertEqual("phone-turn-1", payload["turn_id"])
         self.assertEqual("codex-turn-1", payload["agent_turn_id"])
+        self.assertEqual("conversation-1", payload["conversation_id"])
+
+    def test_same_phone_conversation_id_is_isolated_between_pairings(self):
+        phone_a = mqtt_bridge._scoped_agent_conversation_id("phone-a", "conversation-1")
+        phone_b = mqtt_bridge._scoped_agent_conversation_id("phone-b", "conversation-1")
+
+        self.assertEqual("client:phone-a:conversation-1", phone_a)
+        self.assertEqual("client:phone-b:conversation-1", phone_b)
+        self.assertNotEqual(phone_a, phone_b)
 
     def test_task_without_client_turn_id_does_not_expose_internal_agent_turn(self):
         task = {"task_id": "task-1", "status": "completed", "turn_id": "codex-turn-1"}

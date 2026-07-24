@@ -72,6 +72,19 @@ class TaskLatencyTests(unittest.TestCase):
             "status": "completed", "status_seq": 3, "current_step": "",
         }, now_ms=1_200))
 
+    def test_steered_completion_is_published_even_though_normal_completion_is_hidden(self):
+        gate = _TaskProgressEventGate(heartbeat_interval_ms=15_000)
+
+        self.assertTrue(gate.should_publish({
+            "status": "running", "status_seq": 1, "current_step": "Adding instruction",
+        }, now_ms=1_000))
+        self.assertTrue(gate.should_publish({
+            "status": "completed",
+            "status_seq": 2,
+            "current_step": "",
+            "task_disposition": "steered",
+        }, now_ms=1_100))
+
     def test_resumed_running_and_stale_events_are_ordered(self):
         gate = _TaskProgressEventGate(heartbeat_interval_ms=15_000)
 

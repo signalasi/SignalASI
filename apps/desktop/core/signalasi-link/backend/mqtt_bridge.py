@@ -22,7 +22,7 @@ import paho.mqtt.client as mqtt
 from api_response import api_error, api_ok
 from agent_gateway import ask_agent_sync, connector_diagnostics, deliver_agent_sync
 from agent_task_manager import agent_task_manager
-from codex_app_server import CodexAppServer
+from codex_app_server import CodexAppServer, CodexConversationBusyError
 import phone_tool_broker as phone_tool
 from link_delivery import (
     acknowledge_outbound,
@@ -1133,6 +1133,7 @@ class _TaskProgressEventGate:
     def should_publish(self, task: dict, now_ms: int | None = None) -> bool:
         status = str(task.get("status") or "").strip().lower()
         step = str(task.get("current_step") or "").strip()
+        task_disposition = str(task.get("task_disposition") or "").strip().lower()
         status_seq = int(task.get("status_seq") or 0)
         observed_at_ms = int(time.monotonic() * 1000) if now_ms is None else int(now_ms)
         with self._lock:
@@ -1143,7 +1144,8 @@ class _TaskProgressEventGate:
             ):
                 return False
             self._last_status_seq = max(self._last_status_seq, status_seq)
-            if not _should_publish_task_status(status):
+            visible_steer_completion = status == "completed" and task_disposition == "steered"
+            if not visible_steer_completion and not _should_publish_task_status(status):
                 self._last_status = status
                 self._last_step = step
                 return False
@@ -1446,6 +1448,14 @@ def _client_task_turn_id(task: dict) -> str:
     return str(task.get("client_turn_id") or "")
 
 
+def _scoped_agent_conversation_id(client_route_id: str, conversation_id: str) -> str:
+    route = str(client_route_id or "").strip()
+    conversation = str(conversation_id or "").strip()
+    if not route or not conversation:
+        return conversation
+    return f"client:{route}:{conversation}"
+
+
 def _task_control_matches(
     task,
     *,
@@ -1499,7 +1509,8 @@ def _agent_task_payload(
         "contact_id": task.get("contact_id", ""),
         "agent_id": task.get("agent_id", ""),
         "source_message_id": task.get("source_message_id", ""),
-        "conversation_id": task.get("conversation_id", ""),
+        "conversation_id": task.get("client_conversation_id")
+        or task.get("conversation_id", ""),
         "created_at": task.get("created_at", 0),
         "started_at": task.get("started_at", 0),
         "updated_at": task.get("updated_at", 0),
@@ -1511,7 +1522,10 @@ def _agent_task_payload(
         "turn_id": _client_task_turn_id(task),
         "agent_turn_id": task.get("turn_id", ""),
         "current_step": task.get("current_step", ""),
+        "task_disposition": task.get("task_disposition", ""),
+        "merged_into_task_id": task.get("merged_into_task_id", ""),
         "error": task.get("error", ""),
+        "events": list(task.get("events") or [])[-32:],
         "output_files": task.get("output_files", []),
         "desktop_id": resolved_desktop_id,
         "desktop_name": resolved_desktop_name,
@@ -1674,7 +1688,13 @@ def _resume_recovered_remote_task(mqttc, task: dict) -> None:
         "agent_id": agent_id,
         "client_message_id": str(task.get("source_message_id") or ""),
         "task_id": task_id,
-        "conversation_id": str(task.get("conversation_id") or ""),
+        "conversation_id": str(
+            task.get("client_conversation_id")
+            or task.get("conversation_id")
+            or ""
+        ),
+        "_backend_conversation_id": str(task.get("conversation_id") or ""),
+        "turn_id": str(task.get("client_turn_id") or ""),
         "attachments": attachments,
         "_recovered_task": True,
     }
@@ -1698,6 +1718,11 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
     contact_id = str(payload.get("contact_id") or "hermes")
     agent_id = _agent_id_from_contact(contact_id, payload.get("agent_id"))
     source_message_id = str(payload.get("client_message_id") or payload.get("message_id") or "")
+    client_route_id = str(wire_payload.get("_client_route_id") or "")
+    client_conversation_id = str(payload.get("conversation_id") or "")
+    backend_conversation_id = str(payload.get("_backend_conversation_id") or "").strip() or (
+        _scoped_agent_conversation_id(client_route_id, client_conversation_id)
+    )
     task_trace = _delivery_trace(
         {"delivery_trace": trace},
         _trace_event("desktop_task_dispatch_started", agent_id),
@@ -1721,6 +1746,35 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
     def task_trace_snapshot() -> list[dict]:
         with task_trace_lock:
             return list(task_trace)
+
+    def mark_conversation_synced(
+        synced_agent_id: str,
+        completed_task,
+    ) -> None:
+        if completed_task is None:
+            return
+        from agent_conversation_sessions import agent_conversation_sessions
+        from conversation_context import embedded_mobile_context
+
+        mobile_context = embedded_mobile_context(content)
+        agent_conversation_sessions().mark_synced(
+            synced_agent_id,
+            backend_conversation_id,
+            through_created_at_millis=completed_task.created_at,
+            through_task_id=completed_task.task_id,
+            synced_turn_ids=tuple(
+                sorted(
+                    set(mobile_context.turn_ids)
+                    | (
+                        {completed_task.client_turn_id}
+                        if completed_task.client_turn_id
+                        else set()
+                    )
+                )
+            ),
+            synced_entry_ids=tuple(sorted(mobile_context.entry_ids)),
+            summary_digest=mobile_context.summary_digest,
+        )
 
     def content_with_attachments(task_id: str, base_content: str | None = None) -> str:
         task_content = content if base_content is None else base_content
@@ -1773,13 +1827,49 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
 
     def run_task(task) -> str:
         log.info(f"Agent task running task_id={task.task_id} contact_id={contact_id} agent_id={agent_id}")
-        delivery = deliver_agent_sync(
-            agent_id,
-            content_with_attachments(task.task_id),
-            task_id=task.task_id,
-            conversation_id=str(payload.get("conversation_id") or ""),
-            source_message_id=source_message_id,
-            return_path=_wire_down_topic(wire_payload),
+        from agent_gateway import all_agent_specs
+
+        selected_spec = all_agent_specs().get(agent_id)
+        provider_name = selected_spec.name if selected_spec is not None else agent_id
+        provider_event_id = f"provider:{task.task_id}"
+        provider_kind = "model" if agent_id in {"local-llm", "cloud-model"} else "agent"
+        agent_task_manager.add_event(
+            task.task_id,
+            provider_kind,
+            f"Calling {provider_name}",
+            event_id=provider_event_id,
+            status="running",
+            metadata={"provider": agent_id},
+            on_event=publish_event,
+        )
+        try:
+            delivery = deliver_agent_sync(
+                agent_id,
+                content_with_attachments(task.task_id),
+                task_id=task.task_id,
+                conversation_id=backend_conversation_id,
+                source_message_id=source_message_id,
+                return_path=_wire_down_topic(wire_payload),
+            )
+        except Exception:
+            agent_task_manager.add_event(
+                task.task_id,
+                provider_kind,
+                f"Calling {provider_name}",
+                event_id=provider_event_id,
+                status="failed",
+                metadata={"provider": agent_id},
+                on_event=publish_event,
+            )
+            raise
+        agent_task_manager.add_event(
+            task.task_id,
+            provider_kind,
+            f"Calling {provider_name}",
+            event_id=provider_event_id,
+            status="completed",
+            metadata={"provider": agent_id},
+            on_event=publish_event,
         )
         reply = str(delivery.get("reply") or "")
         if msg_type in {"audio", "voice"}:
@@ -1819,7 +1909,8 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             "desktop_name": desktop_name(),
             "connector_agents": mobile_connector_agents(str(wire_payload.get("_client_route_id") or "")),
             "source_message_id": source_message_id,
-            "conversation_id": task.get("conversation_id", ""),
+            "conversation_id": task.get("client_conversation_id")
+            or client_conversation_id,
             "turn_id": _client_task_turn_id(task),
             "agent_turn_id": task.get("turn_id", ""),
             "delivery_trace": _delivery_trace(
@@ -1841,6 +1932,8 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
 
     if agent_id == "codex":
         from agent_gateway import BASE_AGENTS, _agent_env, _find_codex_desktop_cli
+        codex_conversation_id = backend_conversation_id
+        active_conversation_task = None
         if payload.get("_recovered_task") is True:
             task = agent_task_manager.resume_external(str(payload.get("task_id") or ""), publish_event)
             if task is None:
@@ -1849,9 +1942,15 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             task = agent_task_manager.create_external(
                 agent_id=agent_id, contact_id=contact_id, source_message_id=source_message_id,
                 prompt=content, on_event=publish_event, task_id=str(payload.get("task_id") or ""),
-                conversation_id=str(payload.get("conversation_id") or ""),
-                client_route_id=str(wire_payload.get("_client_route_id") or ""),
+                conversation_id=codex_conversation_id,
+                client_conversation_id=client_conversation_id,
+                client_route_id=client_route_id,
                 client_turn_id=str(payload.get("turn_id") or ""),
+            )
+            active_conversation_task = agent_task_manager.active_for_conversation(
+                codex_conversation_id,
+                agent_id="codex",
+                exclude_task_id=task.task_id,
             )
         add_task_trace("desktop_task_created", task.task_id)
 
@@ -1859,7 +1958,36 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             nonlocal result_published
             event_status = str(event.get("status") or "running")
             add_task_trace(f"codex_{event_status}", event.get("current_step") or "")
+            event_kind = str(event.get("event_kind") or "").strip()
+            if event_kind:
+                event_title = str(event.get("event_title") or event.get("current_step") or "Codex step")
+                event_detail = str(event.get("event_detail") or "")
+                event_id = str(event.get("event_id") or "").strip()
+                if not event_id:
+                    digest = hashlib.sha256(
+                        "\u001f".join((event_kind, event_title, event_detail)).encode("utf-8")
+                    ).hexdigest()[:24]
+                    event_id = f"codex:{task_id}:{digest}"
+                agent_task_manager.add_event(
+                    task_id,
+                    event_kind,
+                    event_title,
+                    event_id=event_id,
+                    status=str(event.get("event_status") or "running"),
+                    detail=event_detail,
+                    metadata=dict(event.get("event_metadata") or {}),
+                    on_event=None,
+                )
             event_result = _codex_terminal_result(content, event_status, event.get("result"))
+            if event_status == "completed":
+                from agent_conversation_sessions import agent_conversation_sessions
+
+                sessions = agent_conversation_sessions()
+                thread_id = str(event.get("thread_id") or "")
+                if thread_id:
+                    sessions.put("codex", codex_conversation_id, thread_id)
+                completed_task = agent_task_manager.get(task_id)
+                mark_conversation_synced("codex", completed_task)
             if event_status == "completed" and str(event_result or "").strip():
                 from task_workspace import import_referenced_task_artifacts
 
@@ -1897,6 +2025,34 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
 
         def start_codex() -> None:
             nonlocal result_published
+
+            def complete_as_steered(steered_run) -> None:
+                add_task_trace(
+                    "codex_turn_steered",
+                    f"task={steered_run.task_id} thread={steered_run.thread_id} turn={steered_run.turn_id}",
+                )
+                completed = agent_task_manager.update(
+                    task.task_id,
+                    "completed",
+                    on_event=None,
+                    thread_id=steered_run.thread_id,
+                    turn_id=steered_run.turn_id,
+                    current_step="",
+                    result="",
+                )
+                if completed is not None:
+                    from agent_conversation_sessions import agent_conversation_sessions
+
+                    sessions = agent_conversation_sessions()
+                    sessions.put("codex", codex_conversation_id, steered_run.thread_id)
+                    mark_conversation_synced("codex", task)
+                    event = completed.public()
+                    event["task_disposition"] = "steered"
+                    event["merged_into_task_id"] = steered_run.task_id
+                    publish_event(event)
+                with codex_task_callbacks_lock:
+                    codex_task_callbacks.pop(task.task_id, None)
+
             try:
                 executable = _find_codex_desktop_cli() or "codex"
                 from task_workspace import task_workspace
@@ -1926,15 +2082,41 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                         thread_id=task.thread_id,
                         turn_id=task.turn_id,
                         original_prompt=content,
+                        conversation_id=codex_conversation_id,
                         elapsed_seconds=elapsed_seconds,
                     )
                     add_task_trace("codex_turn_reconnected", task.turn_id)
                     return
 
+                from agent_conversation_sessions import agent_conversation_sessions
+                from agent_gateway import _native_incremental_cli_prompt
                 from response_policy import compact_codex_turn_prompt
                 from desktop_file_tools import try_execute_explicit_file_task
 
-                task_prompt = content_with_attachments(task.task_id, compact_codex_turn_prompt(content))
+                sessions = agent_conversation_sessions()
+                session_binding = sessions.get("codex", codex_conversation_id)
+                compact_turn = compact_codex_turn_prompt(content)
+                full_turn = content_with_attachments(task.task_id, content)
+                if active_conversation_task is not None:
+                    selected_turn = compact_turn
+                elif session_binding.session_id:
+                    selected_turn = (
+                        _native_incremental_cli_prompt(
+                            BASE_AGENTS["codex"],
+                            content,
+                            task.task_id,
+                            codex_conversation_id,
+                            after_cursor=session_binding.cursor,
+                            synced_turn_ids=session_binding.synced_turn_ids,
+                            synced_entry_ids=session_binding.synced_entry_ids,
+                            summary_digest=session_binding.summary_digest,
+                        )
+                        or compact_turn
+                    )
+                else:
+                    selected_turn = content
+                task_prompt = content_with_attachments(task.task_id, selected_turn)
+                fresh_task_prompt = full_turn
                 input_paths = sorted((workspace / "downloads" / "input").glob("*"))
                 image_paths = [
                     str(path.resolve()) for path in input_paths
@@ -1942,10 +2124,35 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                 ]
                 if image_artifact_required:
                     task_prompt += _returned_image_artifact_contract(workspace / "outputs")
+                    fresh_task_prompt += _returned_image_artifact_contract(workspace / "outputs")
                 agent_task_manager.update(
-                    task.task_id, "running", on_event=publish_event,
+                    task.task_id,
+                    "running",
+                    on_event=None if active_conversation_task is not None else publish_event,
                     current_step="Preparing task",
                 )
+                server = None
+                if active_conversation_task is not None:
+                    server = _codex_server(executable, _agent_env(BASE_AGENTS["codex"]))
+                    server.warm()
+                    add_task_trace("codex_server_ready", f"pid={server.process.pid if server.process else 0}")
+                    add_task_trace("codex_turn_steer_started", active_conversation_task.task_id)
+                    steered_run = server.steer_task(
+                        active_conversation_task.task_id,
+                        task_prompt,
+                        image_paths=image_paths,
+                    )
+                    if steered_run is not None:
+                        complete_as_steered(steered_run)
+                        return
+                    add_task_trace("codex_turn_steer_raced_completion", active_conversation_task.task_id)
+                    server.wait_for_conversation_idle(codex_conversation_id, timeout_seconds=2.0)
+                    agent_task_manager.update(
+                        task.task_id,
+                        "running",
+                        on_event=publish_event,
+                        current_step="Preparing task",
+                    )
                 add_task_trace("desktop_file_tool_checked", f"inputs={len(input_paths)}")
                 try:
                     fast_result = try_execute_explicit_file_task(content, input_paths, workspace / "outputs")
@@ -1963,17 +2170,46 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                     with codex_task_callbacks_lock:
                         codex_task_callbacks.pop(task.task_id, None)
                     return
-                server = _codex_server(executable, _agent_env(BASE_AGENTS["codex"]))
-                server.warm()
-                add_task_trace("codex_server_ready", f"pid={server.process.pid if server.process else 0}")
+                if server is None:
+                    server = _codex_server(executable, _agent_env(BASE_AGENTS["codex"]))
+                    server.warm()
+                    add_task_trace("codex_server_ready", f"pid={server.process.pid if server.process else 0}")
                 add_task_trace("codex_turn_submit_started", executable)
-                server.start_task(
-                    task.task_id,
-                    task_prompt,
-                    str(workspace),
-                    conversation_id=str(payload.get("conversation_id") or ""),
-                    image_paths=image_paths,
-                )
+                try:
+                    started_run = server.start_task(
+                        task.task_id,
+                        task_prompt,
+                        str(workspace),
+                        conversation_id=codex_conversation_id,
+                        image_paths=image_paths,
+                        fresh_thread_prompt=fresh_task_prompt,
+                    )
+                    sessions.put("codex", codex_conversation_id, started_run.thread_id)
+                except CodexConversationBusyError as busy:
+                    add_task_trace("codex_turn_steer_retry", busy.active_task_id)
+                    steered_run = server.steer_task(
+                        busy.active_task_id,
+                        task_prompt,
+                        image_paths=image_paths,
+                    )
+                    if steered_run is None:
+                        if not server.wait_for_conversation_idle(
+                            codex_conversation_id,
+                            timeout_seconds=2.0,
+                        ):
+                            raise
+                        started_run = server.start_task(
+                            task.task_id,
+                            task_prompt,
+                            str(workspace),
+                            conversation_id=codex_conversation_id,
+                            image_paths=image_paths,
+                            fresh_thread_prompt=fresh_task_prompt,
+                        )
+                        sessions.put("codex", codex_conversation_id, started_run.thread_id)
+                    else:
+                        complete_as_steered(steered_run)
+                        return
                 add_task_trace("codex_turn_submitted", task.task_id)
             except Exception as exc:
                 error = str(exc)[:500]
@@ -2077,8 +2313,9 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             on_event=publish_event,
             on_result=publish_result,
             task_id=str(payload.get("task_id") or ""),
-            conversation_id=str(payload.get("conversation_id") or ""),
-            client_route_id=str(wire_payload.get("_client_route_id") or ""),
+            conversation_id=backend_conversation_id,
+            client_conversation_id=client_conversation_id,
+            client_route_id=client_route_id,
             client_turn_id=str(payload.get("turn_id") or ""),
         )
 
@@ -2265,14 +2502,28 @@ def _process_message(mqttc, userdata, msg):
             return
 
         if msg_type == "agent_conversation_delete":
-            conversation_id = str(payload.get("conversation_id") or "").strip()
+            client_conversation_id = str(payload.get("conversation_id") or "").strip()
+            conversation_id = _scoped_agent_conversation_id(
+                client_route_id,
+                client_conversation_id,
+            )
             requested_ids = {
                 str(value).strip() for value in (payload.get("task_ids") or [])
                 if str(value).strip()
             }
+            requested_ids = {
+                task_id
+                for task_id in requested_ids
+                if (
+                    (requested_task := agent_task_manager.get(task_id)) is not None
+                    and requested_task.client_route_id == client_route_id
+                )
+            }
             deleted_ids = agent_task_manager.delete_conversation(conversation_id, requested_ids)
             if codex_app_server is not None:
                 codex_app_server.delete_conversation(conversation_id)
+            from agent_conversation_sessions import agent_conversation_sessions
+            agent_conversation_sessions().delete_conversation(conversation_id)
             from conversation_context import conversation_summary_store
             conversation_summary_store().delete_conversation(conversation_id)
             from task_workspace import cleanup_task_temporary_files
@@ -2881,7 +3132,8 @@ def _build_republished_task_result(task: dict, route_id: str) -> dict:
         "desktop_id": desktop_id(),
         "desktop_name": desktop_name(),
         "connector_agents": mobile_connector_agents(route_id),
-        "conversation_id": task.get("conversation_id", ""),
+        "conversation_id": task.get("client_conversation_id")
+        or task.get("conversation_id", ""),
         "turn_id": _client_task_turn_id(task),
         "agent_turn_id": task.get("turn_id", ""),
         "delivery_trace": trace,

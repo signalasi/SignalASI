@@ -1457,6 +1457,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         markDesktopDomainAvailable(contactId)
         if (sourceMessageId in supersededConnectorSourceIds) return true
         val status = envelope.optString("task_status")
+        val taskDisposition = envelope.optString("task_disposition")
+        val isSteeredCompletion = status == "completed" && taskDisposition == "steered"
         val taskId = envelope.optString("task_id")
         updateAgentRegistryTaskHeartbeat(contactId, status)
         if (taskId in completedConnectorTaskIds && status !in setOf("completed", "failed", "cancelled", "timed_out")) {
@@ -1491,7 +1493,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             message.taskStatus = status
             message.taskStatusSeq = maxOf(message.taskStatusSeq, statusSeq)
         }
-        if (existingMessage != null) {
+        if (existingMessage != null && !isSteeredCompletion) {
             val eventTrace = incomingDeliveryTrace(envelope).apply {
                 add(newTraceEvent("phone_task_event_received", status))
             }
@@ -1508,16 +1510,45 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             envelopeConversationId,
             envelopeTurnId
         )
-        val nativeState = taskRuntime?.recordConnectorTaskStatus(
+        val taskStatusState = taskRuntime?.recordConnectorTaskStatus(
             sourceMessageId = sourceMessageId,
             contactId = contactId,
             taskId = taskId,
             taskStatus = status,
             statusSeq = statusSeq
         )
+        val nativeState = if (isSteeredCompletion) {
+            taskRuntime?.acceptConnectorSteered(
+                sourceMessageId = sourceMessageId,
+                contactId = contactId,
+                mergedIntoTaskId = envelope.optString("merged_into_task_id")
+            ) ?: taskStatusState
+        } else {
+            taskStatusState
+        }
+        if (isSteeredCompletion) {
+            activeAgentTasks.remove(sourceMessageId)
+            if (taskId.isNotBlank()) completedConnectorTaskIds.add(taskId)
+        }
         val targetName = contactById(contactId).name
         val turnId = envelopeTurnId.takeIf { it.isNotBlank() }
             ?: taskRuntime?.let(agentRuntimeTurnIds::get).orEmpty()
+        if (isSteeredCompletion) {
+            val conversationId = connectorConversationId(
+                envelopeConversationId,
+                taskRuntime,
+                turnId
+            )
+            if (nativeState != null && conversationId != null) {
+                renderAgentState(
+                    nativeState,
+                    conversationId,
+                    turnId,
+                    syncTranscript = false
+                )
+            }
+            return true
+        }
         if (turnId.isNotBlank() && status in setOf(
                 "accepted", "queued", "starting", "recovering", "running", "waiting_input", "waiting_approval",
                 "completed", "failed", "cancelled", "timed_out", "not_found"
@@ -1550,6 +1581,13 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             conversationId = conversationId,
             turnId = turnId,
             taskId = taskId
+        )
+        syncRemoteTaskEvents(
+            envelope = envelope,
+            conversationId = conversationId,
+            turnId = turnId,
+            taskId = taskId,
+            targetName = targetName
         )
         if (taskId.isNotBlank()) {
             val taskStore = SQLiteAgentTaskStore(this)
@@ -1619,6 +1657,65 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
         }
         return true
+    }
+
+    private fun syncRemoteTaskEvents(
+        envelope: JSONObject,
+        conversationId: String,
+        turnId: String,
+        taskId: String,
+        targetName: String
+    ) {
+        val events = envelope.optJSONArray("events") ?: return
+        for (index in 0 until events.length()) {
+            val event = events.optJSONObject(index) ?: continue
+            val eventId = event.optString("event_id").trim()
+            val kind = event.optString("kind").trim().lowercase(Locale.ROOT)
+            val title = event.optString("title").trim()
+            val detail = event.optString("detail").trim()
+            if (eventId.isBlank() || (title.isBlank() && detail.isBlank())) continue
+            val rendered = remoteTaskEventText(kind, title, detail, targetName)
+            if (rendered.isBlank()) continue
+            val contentKind = if (kind in setOf("reasoning", "plan")) {
+                "REASONING_SUMMARY"
+            } else {
+                kind.ifBlank { "TOOL" }.uppercase(Locale.ROOT)
+            }
+            agentTranscriptStore.upsert(
+                role = AgentTranscriptRole.PROCESS,
+                text = rendered,
+                dedupeKey = "connector-event:$taskId:$contentKind:$eventId",
+                timestampMillis = event.optLong(
+                    "updated_at",
+                    event.optLong("created_at", System.currentTimeMillis())
+                ),
+                conversationId = conversationId,
+                turnId = turnId,
+                taskId = taskId
+            )
+        }
+    }
+
+    private fun remoteTaskEventText(
+        kind: String,
+        title: String,
+        detail: String,
+        targetName: String
+    ): String {
+        val base = when (kind) {
+            "reasoning" -> getString(R.string.agent_trace_remote_reasoning)
+            "plan" -> getString(R.string.agent_trace_remote_plan)
+            "command" -> getString(R.string.agent_trace_remote_command)
+            "file" -> getString(R.string.agent_trace_remote_file)
+            "network" -> getString(R.string.agent_trace_remote_network)
+            "mcp" -> getString(R.string.agent_trace_remote_mcp)
+            "model", "agent" -> getString(
+                R.string.agent_trace_remote_provider,
+                targetName.ifBlank { title }
+            )
+            else -> getString(R.string.agent_trace_remote_tool)
+        }
+        return if (detail.isBlank()) base else "$base · $detail"
     }
 
     private fun markDesktopDomainAvailable(contactId: String) {
@@ -2545,7 +2642,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         forcedAction: AgentAction? = null
     ) {
         val routingStartedAt = SystemClock.elapsedRealtime()
-        val localConversationContext = agentTranscriptStore.context(conversationId)
+        val localConversationContext = agentTranscriptStore.context(
+            conversationId = conversationId,
+            excludeTurnId = turnId
+        )
         AgentFastLocalResponse.reply(goal, localConversationContext)?.let { response ->
             agentTranscriptStore.append(
                 AgentTranscriptRole.ASSISTANT,
