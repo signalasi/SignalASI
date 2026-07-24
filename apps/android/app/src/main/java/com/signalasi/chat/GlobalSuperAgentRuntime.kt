@@ -2986,6 +2986,26 @@ class GlobalSuperAgentRuntime private constructor(context: Context) {
         request: AgentRunRequest
     ): AgentTeamExecutionHandle = agentTeamController.start(definition, request)
 
+    fun prepareCrossTeamDelegation(
+        input: AgentCrossTeamDelegationInput,
+        destination: AgentTeamDefinition,
+        registrations: Collection<AgentRegistration>
+    ): AgentCrossTeamDelegationRecord =
+        agentTeamController.prepareDelegation(input, destination, registrations)
+
+    fun dispatchCrossTeamDelegation(
+        delegationId: String,
+        destination: AgentTeamDefinition,
+        registrations: Collection<AgentRegistration>
+    ): AgentCrossTeamDelegationDispatch =
+        agentTeamController.dispatchDelegation(delegationId, destination, registrations)
+
+    fun crossTeamDelegation(delegationId: String): AgentCrossTeamDelegationRecord? =
+        agentTeamController.delegation(delegationId)
+
+    fun crossTeamDelegations(): List<AgentCrossTeamDelegationRecord> =
+        agentTeamController.delegations()
+
     fun agentTeamSnapshots(): List<AgentTeamExecutionSnapshot> = agentTeamController.snapshots()
 
     fun agentTeamSnapshot(supervisorRunId: String): AgentTeamExecutionSnapshot? =

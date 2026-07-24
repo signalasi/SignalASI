@@ -687,6 +687,10 @@ class AgentProductionTeamController(
     limits: AgentSubagentLimits = AgentSubagentLimits(maxChildren = 12, maxConcurrency = 4)
 ) : Closeable {
     private val runtime = AgentTeamExecutionRuntime(store, limits)
+    private val crossTeamDelegations = AgentCrossTeamDelegationCoordinator(
+        firewall = AgentPersonalPolicyFirewall.encrypted(context),
+        store = EncryptedAgentCrossTeamDelegationStore(context)
+    )
     private val lateResponseListener = AgentLateManagedResponseListener(::applyLateResponse)
     private val completionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val watchedRuns = ConcurrentHashMap.newKeySet<String>()
@@ -695,6 +699,7 @@ class AgentProductionTeamController(
         runtime.recoverInterrupted()
         AgentLateManagedResponseBus.addListener(lateResponseListener)
         reconcileLateResponses()
+        reconcileDelegations()
         publishTerminalSnapshots()
     }
 
@@ -702,6 +707,43 @@ class AgentProductionTeamController(
         definition: AgentTeamDefinition,
         request: AgentRunRequest
     ): AgentTeamExecutionHandle = runtime.start(definition, request, worker).also(::watch)
+
+    fun prepareDelegation(
+        input: AgentCrossTeamDelegationInput,
+        destination: AgentTeamDefinition,
+        registrations: Collection<AgentRegistration>
+    ): AgentCrossTeamDelegationRecord =
+        crossTeamDelegations.prepare(input, destination, registrations)
+
+    fun dispatchDelegation(
+        delegationId: String,
+        destination: AgentTeamDefinition,
+        registrations: Collection<AgentRegistration>
+    ): AgentCrossTeamDelegationDispatch {
+        val admission = crossTeamDelegations.admit(delegationId, destination, registrations)
+        val launch = admission.launchSpec
+            ?: return AgentCrossTeamDelegationDispatch(admission.record, admission.decision)
+        return runCatching {
+            val handle = runtime.start(launch.definition, launch.request, worker)
+            val dispatched = crossTeamDelegations.markDispatched(
+                delegationId = delegationId,
+                destinationRunId = handle.supervisorRunId
+            )
+            watch(handle, delegationId)
+            AgentCrossTeamDelegationDispatch(dispatched, admission.decision, handle)
+        }.getOrElse { error ->
+            val failed = crossTeamDelegations.fail(
+                delegationId,
+                error.message ?: "Cross-team delegation could not start"
+            )
+            AgentCrossTeamDelegationDispatch(failed, admission.decision)
+        }
+    }
+
+    fun delegation(delegationId: String): AgentCrossTeamDelegationRecord? =
+        crossTeamDelegations.get(delegationId)
+
+    fun delegations(): List<AgentCrossTeamDelegationRecord> = crossTeamDelegations.list()
 
     fun snapshot(supervisorRunId: String): AgentTeamExecutionSnapshot? = runtime.snapshot(supervisorRunId)
 
@@ -719,10 +761,26 @@ class AgentProductionTeamController(
         return count
     }
 
+    fun reconcileDelegations(): Int {
+        var reconciled = 0
+        crossTeamDelegations.list()
+            .filter { it.state == AgentCrossTeamDelegationState.DISPATCHED }
+            .forEach { delegation ->
+                val snapshot = store.snapshot(delegation.destinationRunId) ?: return@forEach
+                if (snapshot.state.isTerminal) {
+                    runCatching {
+                        crossTeamDelegations.finish(delegation.envelope.delegationId, snapshot)
+                    }.onSuccess { reconciled += 1 }
+                }
+            }
+        return reconciled
+    }
+
     fun clear() {
         store.clear()
         managedResponses.clear()
         completionSink.clear()
+        crossTeamDelegations.clear()
     }
 
     override fun close() {
@@ -740,12 +798,35 @@ class AgentProductionTeamController(
         return applied
     }
 
-    private fun watch(handle: AgentTeamExecutionHandle) {
+    private fun watch(handle: AgentTeamExecutionHandle, delegationId: String = "") {
         if (!watchedRuns.add(handle.supervisorRunId)) return
         completionScope.launch {
             try {
                 runCatching { handle.await() }
-                store.snapshot(handle.supervisorRunId)?.let(completionSink::publish)
+                val snapshot = store.snapshot(handle.supervisorRunId)
+                snapshot?.let(completionSink::publish)
+                if (delegationId.isNotBlank()) {
+                    if (snapshot == null) {
+                        runCatching {
+                            crossTeamDelegations.fail(
+                                delegationId,
+                                "Destination team completed without a persistent snapshot"
+                            )
+                        }
+                    } else {
+                        runCatching {
+                            crossTeamDelegations.finish(delegationId, snapshot)
+                        }.recoverCatching { error ->
+                            val current = crossTeamDelegations.get(delegationId)
+                            if (current?.state?.terminal != true) {
+                                crossTeamDelegations.fail(
+                                    delegationId,
+                                    error.message ?: "Destination result could not be recorded"
+                                )
+                            }
+                        }
+                    }
+                }
             } finally {
                 watchedRuns.remove(handle.supervisorRunId)
             }
