@@ -24,7 +24,7 @@ class ChatHistoryDatabaseInstrumentedTest {
     }
 
     @Test
-    fun retainsAndPagesEveryMessageBeyondLegacyCountLimit() {
+    fun retainsAndPagesEveryMessageWithoutCountLimit() {
         val database = database()
         val expectedIds = (1L..1_205L).toList()
         expectedIds.forEach { id ->
@@ -118,6 +118,52 @@ class ChatHistoryDatabaseInstrumentedTest {
     }
 
     @Test
+    fun contactSummariesUseLatestVisibleMessageAndIndexedUnreadCounts() {
+        val database = database()
+        assertTrue(database.upsert(message(31L, "contact-a", "first incoming", isMine = false)))
+        assertTrue(
+            database.upsert(
+                message(32L, "contact-a", "read incoming", isMine = false, isRead = true)
+            )
+        )
+        assertTrue(
+            database.upsert(
+                message(33L, "contact-a", "internal status", isMine = false, isSystem = true)
+            )
+        )
+        assertTrue(database.upsert(message(34L, "contact-b", "outgoing", isMine = true)))
+
+        val summaries = database.readContactSummaries().associateBy { it.contactId }
+
+        assertEquals(setOf("contact-a", "contact-b"), summaries.keys)
+        assertEquals("read incoming", summaries.getValue("contact-a").lastMessage.getString("content"))
+        assertEquals(1, summaries.getValue("contact-a").unreadCount)
+        assertEquals("outgoing", summaries.getValue("contact-b").lastMessage.getString("content"))
+        assertEquals(0, summaries.getValue("contact-b").unreadCount)
+        database.close()
+    }
+
+    @Test
+    fun markContactReadUpdatesEveryIncomingMessageWithoutLoadingHistory() {
+        val database = database()
+        assertTrue(database.upsert(message(51L, "contact-read", "first", isMine = false)))
+        assertTrue(database.upsert(message(52L, "contact-read", "second", isMine = false)))
+        assertTrue(database.upsert(message(53L, "contact-read", "mine", isMine = true)))
+        val beforeVersion = database.updatedVersion()
+
+        assertEquals(2, database.markContactRead("contact-read", readAtMillis = 9_999L))
+
+        assertEquals(beforeVersion + 1L, database.updatedVersion())
+        assertEquals(0, database.readContactSummaries().single().unreadCount)
+        val stored = database.readContact("contact-read")
+        assertTrue(stored.getJSONObject(0).getBoolean("isRead"))
+        assertTrue(stored.getJSONObject(1).getBoolean("isRead"))
+        assertFalse(stored.getJSONObject(2).getBoolean("isRead"))
+        assertEquals(9_999L, stored.getJSONObject(0).getLong("readAt"))
+        database.close()
+    }
+
+    @Test
     fun deletedContactCannotBeRestoredByStaleSnapshot() {
         val database = database()
         val first = message(11L, "contact-delete", "first")
@@ -159,13 +205,22 @@ class ChatHistoryDatabaseInstrumentedTest {
         return ChatHistoryDatabase(context, name)
     }
 
-    private fun message(id: Long, contactId: String, content: String): JSONObject =
+    private fun message(
+        id: Long,
+        contactId: String,
+        content: String,
+        isMine: Boolean = id % 2L == 0L,
+        isSystem: Boolean = false,
+        isRead: Boolean = false
+    ): JSONObject =
         JSONObject()
             .put("id", id)
             .put("content", content)
-            .put("isMine", id % 2L == 0L)
+            .put("isMine", isMine)
             .put("contactId", contactId)
-            .put("isSystem", false)
+            .put("isSystem", isSystem)
+            .put("isRead", isRead)
+            .put("readAt", if (isRead) id else 0L)
             .put("timestamp", id)
             .put("deliveryStatus", "")
             .put("deliveryTrace", JSONArray())

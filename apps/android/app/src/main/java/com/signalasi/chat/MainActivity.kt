@@ -146,6 +146,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val MAX_VISIBLE_AGENT_PROCESS_STEPS = 20
         private const val INITIAL_VISIBLE_AGENT_TRANSCRIPT_ITEMS = 24
         private const val AGENT_TRANSCRIPT_PAGE_ITEMS = 24
+        private const val CHAT_HISTORY_PAGE_ITEMS = 100
+        private const val CHAT_HISTORY_PREFETCH_POSITION = 2
         private const val AGENT_PROCESS_TIMER_TICK_MS = 250L
         private const val UNROUTABLE_CONNECTOR_GRACE_MILLIS = 5L * 60L * 1_000L
         private const val GLOBAL_AGENT_FOREGROUND_RETRY_MILLIS = 5_000L
@@ -325,6 +327,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private val historyExecutor = Executors.newSingleThreadExecutor()
     private val cloudExecutor = Executors.newCachedThreadPool()
     private val pendingHistoryMessages = linkedMapOf<Long, JSONObject>()
+    private val loadedHistoryContacts = mutableSetOf<String>()
+    private val historyPageCursors = mutableMapOf<String, Long?>()
+    private val historyHasMore = mutableMapOf<String, Boolean>()
+    private val historyLoadsInFlight = mutableSetOf<String>()
     private val historySaveRunnable = Runnable { enqueuePendingChatHistorySave() }
     private lateinit var mobileNativeAgent: MobileNativeAgent
     private lateinit var agentTranscriptStore: AgentTranscriptStore
@@ -2028,7 +2034,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun showChatPage(contact: Contact) {
-        reloadChatHistoryIfChanged()
         selectedContact = contact
         val raw = AppStore.contactById(this, contact.id)
         val isCloud = raw?.optString("delivery_mode") == "cloud_api"
@@ -2049,7 +2054,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         chatAvatar.setImageResource(contactAvatarRes(contact))
         messageInput.clearFocus()
         hideKeyboard()
-        summaries[contact.id]?.unreadCount = 0
+        summaries.getOrPut(contact.id) { ContactSummary() }.unreadCount = 0
         markContactRead(contact.id)
         messageAdapter = MessageAdapter(currentMessages,
             onPlayVoiceMessage = { msgId -> playVoiceMessage(msgId) },
@@ -2061,16 +2066,17 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         mainPage.visibility = View.GONE
         featurePage.visibility = View.GONE
         chatPage.visibility = View.VISIBLE
-        messageList.post { scrollToBottom() }
-        handler.postDelayed({ scrollToBottom() }, 250L)
-        handler.postDelayed({ scrollToBottom() }, 700L)
+        loadLatestChatHistory(
+            contactId = contact.id,
+            force = !loadedHistoryContacts.contains(contact.id),
+            scrollAfterLoad = true
+        )
         refreshContactList()
     }
 
     private fun scrollToBottom() {
         val lastIndex = (messageList.adapter?.itemCount ?: currentMessages.size) - 1
         if (lastIndex >= 0) {
-            messageAdapter?.notifyDataSetChanged()
             (messageList.layoutManager as? LinearLayoutManager)
                 ?.scrollToPositionWithOffset(lastIndex, 0)
                 ?: messageList.scrollToPosition(lastIndex)
@@ -12865,6 +12871,15 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         messageList.apply {
             layoutManager = LinearLayoutManager(this@MainActivity).apply { stackFromEnd = true }
             adapter = messageAdapter
+            addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                    if (dy >= 0) return
+                    val layout = recyclerView.layoutManager as? LinearLayoutManager ?: return
+                    if (layout.findFirstVisibleItemPosition() <= CHAT_HISTORY_PREFETCH_POSITION) {
+                        selectedContact?.id?.let(::loadOlderChatHistory)
+                    }
+                }
+            })
         }
     }
 
@@ -13989,21 +14004,31 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
 
     private fun markContactRead(contactId: String) {
-        val list = messages[contactId] ?: return
+        val readAt = System.currentTimeMillis()
+        val list = messages[contactId].orEmpty()
         val changedMessages = mutableListOf<ChatMessage>()
         list.forEach { message ->
             if (!message.isMine && !message.isSystem && !hasTraceStage(message, "read")) {
-                message.deliveryTrace.add(newTraceEvent("read", "chat_opened"))
+                message.deliveryTrace.add(DeliveryTraceEvent("read", readAt, "chat_opened"))
                 message.deliveryStatus = getString(R.string.delivery_status_read)
                 changedMessages += message
             }
         }
-        if (changedMessages.isEmpty()) return
-        saveChatHistory(changedMessages)
-        if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
-            messageList.post {
-                if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
-                    messageAdapter?.notifyDataSetChanged()
+        if (changedMessages.isNotEmpty()) {
+            saveChatHistory(changedMessages)
+            if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
+                messageList.post {
+                    if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
+                        messageAdapter?.notifyDataSetChanged()
+                    }
+                }
+            }
+        }
+        runCatching {
+            historyExecutor.execute {
+                val changed = ChatHistoryStore.markContactRead(this, contactId, readAt)
+                if (changed > 0) {
+                    lastHistoryLoadedAt = maxOf(lastHistoryLoadedAt, ChatHistoryStore.updatedVersion(this))
                 }
             }
         }
@@ -14431,7 +14456,14 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             GlobalConversationEventBus.publishChatMessageDeleted(this, contactId, removed.id)
         }
         discardPendingChatHistory(listOf(removed.id))
-        ChatHistoryStore.deleteMessage(this, removed.id)
+        runCatching {
+            historyExecutor.execute {
+                ChatHistoryStore.deleteMessage(this, removed.id)
+                handler.post {
+                    if (!isDestroyed) loadChatOverview(force = true)
+                }
+            }
+        }
         if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
             messageList.post {
                 messageAdapter?.notifyItemRemoved(position)
@@ -14496,87 +14528,216 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (chatPage.visibility != View.VISIBLE || selectedContact?.id != contactId) return
         messageList.post {
             if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
+                val followLatest = isMessageListNearBottom()
                 messageAdapter?.notifyDataSetChanged()
-                scrollToBottom()
+                if (followLatest) scrollToBottom()
             }
         }
+    }
+
+    private fun isMessageListNearBottom(): Boolean {
+        val layout = messageList.layoutManager as? LinearLayoutManager ?: return true
+        val itemCount = messageAdapter?.itemCount ?: return true
+        if (itemCount <= 1) return true
+        return layout.findLastVisibleItemPosition() >= itemCount - 3
     }
 
     // ===== Chat History =====
     private fun loadChatHistory() {
-        val root = ChatHistoryStore.readAll(this)
-        lastHistoryLoadedAt = ChatHistoryStore.updatedVersion(this)
-        if (root.length() == 0) {
-            seedWelcomeSystemNotification()
-            return
-        }
         messages.clear()
-        summaries.clear()
-        val removedMessageIds = mutableListOf<Long>()
-        val contactIds = mutableSetOf<String>()
-        val keys = root.keys()
-        while (keys.hasNext()) {
-            val key = keys.next()
-            if (key.isNotBlank()) contactIds.add(key)
-        }
-        contactIds.forEach { contactId ->
-            val contact = contactById(contactId) ?: return@forEach
-            val array = root.optJSONArray(contactId) ?: return@forEach
-            val list = mutableListOf<ChatMessage>()
-            for (i in 0 until array.length()) {
-                val item = array.optJSONObject(i) ?: continue
-                val messageContact = contactById(item.optString("contactId", contactId)) ?: contact
-                val savedContent = item.optString("content")
-                val savedId = item.optLong("id", 0L).takeIf { it > 0L } ?: newMessageId()
-                if (contactId == CONTACT_SYSTEM.id && isLegacySystemChatStarter(savedContent)) {
-                    removedMessageIds += savedId
-                    continue
-                }
-                if (contactId == CONTACT_SYSTEM.id && isTransientCloudSystemEvent(item)) {
-                    removedMessageIds += savedId
-                    continue
-                }
-                val message = ChatMessage(
-                    id = savedId,
-                    content = savedContent,
-                    isMine = item.optBoolean("isMine"),
-                    contact = messageContact,
-                    isSystem = item.optBoolean("isSystem"),
-                    timestamp = item.optLong("timestamp", System.currentTimeMillis()),
-                    deliveryStatus = item.optString("deliveryStatus").takeIf { it.isNotBlank() },
-                    taskId = item.optString("taskId"),
-                    taskStatus = item.optString("taskStatus"),
-                    taskStatusSeq = item.optLong("taskStatusSeq", 0L),
-                    remoteMessageId = item.optString("remoteMessageId"),
-                    deliveryTrace = parseDeliveryTrace(item.optJSONArray("deliveryTrace"))
-                )
-                if (message.content.isBlank()) continue
-                list.add(message)
-            }
-            if (list.isNotEmpty()) {
-                messages[contactId] = list
-                list.lastOrNull { !it.isSystem }?.let { last ->
-                    val unread = list.count { message ->
-                        !message.isMine && !message.isSystem && !hasTraceStage(message, "read")
-                    }
-                    summaries[contactId] = ContactSummary(last.content, last.timestamp, unread)
-                }
-            }
-        }
-        removedMessageIds.forEach { ChatHistoryStore.deleteMessage(this, it) }
-        if (messages.isEmpty()) seedWelcomeSystemNotification()
+        loadedHistoryContacts.clear()
+        historyPageCursors.clear()
+        historyHasMore.clear()
+        historyLoadsInFlight.clear()
+        loadChatOverview(force = true)
     }
 
     private fun reloadChatHistoryIfChanged(force: Boolean = false) {
-        val updatedAt = ChatHistoryStore.updatedVersion(this)
-        if (!force && updatedAt <= lastHistoryLoadedAt) return
-        val selectedId = selectedContact?.id
-        loadChatHistory()
-        refreshContactList()
-        refreshDirectoryContacts()
-        selectedId?.let { contactId ->
-            refreshVisibleMessages(contactId)
+        loadChatOverview(force)
+    }
+
+    private fun loadChatOverview(force: Boolean) {
+        runCatching {
+            historyExecutor.execute {
+                runCatching {
+                    val updatedVersion = ChatHistoryStore.updatedVersion(this)
+                    if (!force && updatedVersion <= lastHistoryLoadedAt) return@execute
+                    val rows = ChatHistoryStore.contactSummaries(this)
+                    updatedVersion to rows
+                }.onSuccess { (updatedVersion, rows) ->
+                    handler.post {
+                        if (isDestroyed) return@post
+                        val storedContactIds = rows.mapTo(mutableSetOf()) { it.contactId }
+                        rows.forEach { row ->
+                            val message = storedChatMessage(row.contactId, row.lastMessage) ?: return@forEach
+                            val existing = summaries[row.contactId]
+                            if (existing == null || message.timestamp >= existing.lastAt) {
+                                summaries[row.contactId] = ContactSummary(
+                                    lastMessage = message.content,
+                                    lastAt = message.timestamp,
+                                    unreadCount = row.unreadCount
+                                )
+                            }
+                        }
+                        val liveContactIds = messages
+                            .filterValues { it.isNotEmpty() }
+                            .keys
+                        summaries.keys.toList().forEach { contactId ->
+                            if (contactId !in storedContactIds && contactId !in liveContactIds) {
+                                summaries.remove(contactId)
+                            }
+                        }
+                        lastHistoryLoadedAt = maxOf(lastHistoryLoadedAt, updatedVersion)
+                        if (
+                            rows.isEmpty() &&
+                            pendingHistoryMessages.isEmpty() &&
+                            messages.values.all { it.isEmpty() }
+                        ) {
+                            seedWelcomeSystemNotification()
+                        }
+                        refreshContactList()
+                        refreshDirectoryContacts()
+                        val selectedId = selectedContact?.id
+                        if (selectedId != null && chatPage.visibility == View.VISIBLE) {
+                            loadLatestChatHistory(selectedId, force = true, scrollAfterLoad = false)
+                        }
+                    }
+                }.onFailure { error ->
+                    Log.e("SignalASIHistory", "Could not load chat overview", error)
+                }
+            }
         }
+    }
+
+    private fun loadLatestChatHistory(
+        contactId: String,
+        force: Boolean,
+        scrollAfterLoad: Boolean
+    ) {
+        if (!force && contactId in loadedHistoryContacts) {
+            if (scrollAfterLoad) messageList.post(::scrollToBottom)
+            return
+        }
+        val loadKey = "latest:$contactId"
+        if (!historyLoadsInFlight.add(loadKey)) return
+        runCatching {
+            historyExecutor.execute {
+                runCatching {
+                    val page = ChatHistoryStore.page(
+                        this,
+                        contactId,
+                        pageSize = CHAT_HISTORY_PAGE_ITEMS
+                    )
+                    page to ChatHistoryStore.updatedVersion(this)
+                }.onSuccess { (page, updatedVersion) ->
+                    handler.post {
+                        historyLoadsInFlight.remove(loadKey)
+                        if (isDestroyed) return@post
+                        val list = messages.getOrPut(contactId) { mutableListOf() }
+                        val combined = linkedMapOf<Long, ChatMessage>()
+                        page.messages.mapNotNull { storedChatMessage(contactId, it) }
+                            .forEach { combined[it.id] = it }
+                        list.forEach { combined[it.id] = it }
+                        list.clear()
+                        list.addAll(
+                            combined.values.sortedWith(
+                                compareBy<ChatMessage> { it.timestamp }.thenBy { it.id }
+                            )
+                        )
+                        loadedHistoryContacts.add(contactId)
+                        historyPageCursors[contactId] = page.nextBeforeSequence
+                        historyHasMore[contactId] = page.hasMore
+                        lastHistoryLoadedAt = maxOf(lastHistoryLoadedAt, updatedVersion)
+                        if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
+                            messageAdapter?.notifyDataSetChanged()
+                            if (scrollAfterLoad) messageList.post(::scrollToBottom)
+                        }
+                    }
+                }.onFailure { error ->
+                    handler.post { historyLoadsInFlight.remove(loadKey) }
+                    Log.e("SignalASIHistory", "Could not load latest chat page", error)
+                }
+            }
+        }.onFailure {
+            historyLoadsInFlight.remove(loadKey)
+        }
+    }
+
+    private fun loadOlderChatHistory(contactId: String) {
+        if (historyHasMore[contactId] != true) return
+        val beforeSequence = historyPageCursors[contactId] ?: return
+        val loadKey = "older:$contactId"
+        if (!historyLoadsInFlight.add(loadKey)) return
+        runCatching {
+            historyExecutor.execute {
+                runCatching {
+                    ChatHistoryStore.page(
+                        this,
+                        contactId,
+                        beforeSequenceExclusive = beforeSequence,
+                        pageSize = CHAT_HISTORY_PAGE_ITEMS
+                    )
+                }.onSuccess { page ->
+                    handler.post {
+                        historyLoadsInFlight.remove(loadKey)
+                        if (isDestroyed) return@post
+                        val list = messages.getOrPut(contactId) { mutableListOf() }
+                        val existingIds = list.mapTo(mutableSetOf(), ChatMessage::id)
+                        val older = page.messages
+                            .mapNotNull { storedChatMessage(contactId, it) }
+                            .filter { existingIds.add(it.id) }
+                        historyPageCursors[contactId] = page.nextBeforeSequence
+                        historyHasMore[contactId] = page.hasMore
+                        if (older.isEmpty()) return@post
+                        val layout = messageList.layoutManager as? LinearLayoutManager
+                        val firstVisible = layout?.findFirstVisibleItemPosition() ?: 0
+                        val firstOffset = layout?.findViewByPosition(firstVisible)?.top ?: 0
+                        list.addAll(0, older)
+                        if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
+                            messageAdapter?.notifyItemRangeInserted(0, older.size)
+                            layout?.scrollToPositionWithOffset(firstVisible + older.size, firstOffset)
+                        }
+                    }
+                }.onFailure { error ->
+                    handler.post { historyLoadsInFlight.remove(loadKey) }
+                    Log.e("SignalASIHistory", "Could not load older chat page", error)
+                }
+            }
+        }.onFailure {
+            historyLoadsInFlight.remove(loadKey)
+        }
+    }
+
+    private fun storedChatMessage(contactId: String, item: JSONObject): ChatMessage? {
+        val contact = contactById(contactId) ?: return null
+        val savedId = item.optLong("id", 0L)
+        val savedContent = item.optString("content")
+        if (savedId <= 0L || savedContent.isBlank()) return null
+        val messageContact = contactById(item.optString("contactId", contactId)) ?: contact
+        val deliveryTrace = parseDeliveryTrace(item.optJSONArray("deliveryTrace"))
+        if (item.optBoolean("isRead") && deliveryTrace.none { it.stage == "read" }) {
+            deliveryTrace.add(
+                DeliveryTraceEvent(
+                    stage = "read",
+                    at = item.optLong("readAt", item.optLong("timestamp", System.currentTimeMillis())),
+                    detail = "chat_opened"
+                )
+            )
+        }
+        return ChatMessage(
+            id = savedId,
+            content = savedContent,
+            isMine = item.optBoolean("isMine"),
+            contact = messageContact,
+            isSystem = item.optBoolean("isSystem"),
+            timestamp = item.optLong("timestamp", System.currentTimeMillis()),
+            deliveryStatus = item.optString("deliveryStatus").takeIf { it.isNotBlank() },
+            taskId = item.optString("taskId"),
+            taskStatus = item.optString("taskStatus"),
+            taskStatusSeq = item.optLong("taskStatusSeq", 0L),
+            remoteMessageId = item.optString("remoteMessageId"),
+            deliveryTrace = deliveryTrace
+        )
     }
 
     private fun seedWelcomeSystemNotification() {
@@ -14602,22 +14763,6 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (summaries[CONTACT_SYSTEM.id]?.lastMessage.isNullOrBlank()) {
             summaries[CONTACT_SYSTEM.id] = ContactSummary(getString(R.string.system_welcome_title), now, 0)
         }
-    }
-
-    private fun isLegacySystemChatStarter(content: String): Boolean {
-        return content.contains(getString(R.string.legacy_chat_started_marker)) ||
-            content.contains(getString(R.string.legacy_chat_started_suffix)) ||
-            content.contains("\u5bf9\u8bdd\u5df2\u5f00\u59cb") ||
-            content.contains("\u7684\u5bf9\u8bdd\u5df2\u5f00\u59cb")
-    }
-
-    private fun isTransientCloudSystemEvent(item: JSONObject): Boolean {
-        val trace = item.optJSONArray("deliveryTrace") ?: return false
-        for (index in 0 until trace.length()) {
-            val stage = trace.optJSONObject(index)?.optString("stage").orEmpty()
-            if (stage == "cloud_voice_transcribed" || stage.startsWith("cloud_tool_")) return true
-        }
-        return false
     }
 
     private fun parseDeliveryTrace(array: JSONArray?): MutableList<DeliveryTraceEvent> {
@@ -14709,6 +14854,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             .put("isMine", message.isMine)
             .put("contactId", message.contact.id)
             .put("isSystem", message.isSystem)
+            .put("isRead", hasTraceStage(message, "read"))
+            .put("readAt", message.deliveryTrace.lastOrNull { it.stage == "read" }?.at ?: 0L)
             .put("timestamp", message.timestamp)
             .put("deliveryStatus", message.deliveryStatus ?: "")
             .put("taskId", message.taskId)
