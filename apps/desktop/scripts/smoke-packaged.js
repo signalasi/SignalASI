@@ -13,6 +13,8 @@ const backendMain = path.join(resources, "signalasi-link", "backend", "main.py")
 const packagedBackendInstanceLock = path.join(resources, "signalasi-link", "backend", "backend_instance_lock.py");
 const packagedTaskWorkspace = path.join(resources, "signalasi-link", "backend", "task_workspace.py");
 const packagedResponsePolicy = path.join(resources, "signalasi-link", "backend", "response_policy.py");
+const packagedAgentTaskStore = path.join(resources, "signalasi-link", "backend", "agent_task_store.py");
+const packagedConversationContext = path.join(resources, "signalasi-link", "backend", "conversation_context.py");
 const packagedBackendDir = path.dirname(backendMain);
 const packagedCustomAgent = path.join(packagedBackendDir, "custom_agent_stdio.py");
 const packagedDesktopAgentAdapters = path.join(packagedBackendDir, "desktop_agent_adapters.py");
@@ -142,6 +144,8 @@ async function main() {
   assertExists(packagedBackendInstanceLock, "Packaged backend instance lock");
   assertExists(packagedTaskWorkspace, "Packaged task workspace module");
   assertExists(packagedResponsePolicy, "Packaged response policy module");
+  assertExists(packagedAgentTaskStore, "Packaged Agent task store");
+  assertExists(packagedConversationContext, "Packaged conversation context");
   assertExists(packagedCustomAgent, "Packaged Custom Agent wrapper");
   assertExists(packagedDesktopAgentAdapters, "Packaged Desktop Agent adapters");
   assertExists(packagedDesktopControl, "Packaged Desktop control module");
@@ -161,7 +165,7 @@ async function main() {
   console.log("[packaged-smoke] checking bundled Python dependencies");
   const pythonCheck = spawn(
     bundledPython,
-    ["-c", "import cryptography, fastapi, multipart, uvicorn, paho.mqtt.client, sqlalchemy, pydantic, websockets, qrcode, backend_instance_lock, desktop_agent_adapters, desktop_control, desktop_native_tools, mqtt_bridge, phone_tool_broker, rich_output; print('ok')"],
+    ["-c", "import cryptography, fastapi, multipart, uvicorn, paho.mqtt.client, sqlalchemy, pydantic, websockets, qrcode, agent_task_store, backend_instance_lock, conversation_context, desktop_agent_adapters, desktop_control, desktop_native_tools, mqtt_bridge, phone_tool_broker, rich_output; print('ok')"],
     { cwd: packagedBackendDir, windowsHide: true }
   );
   await new Promise((resolve, reject) => {
