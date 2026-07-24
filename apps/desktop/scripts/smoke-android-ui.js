@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { createAdb } = require("./android-adb");
+const { probeChatHistory, requireProbeMatch } = require("./android-chat-history-probe");
 const { establishFreshSecurePairing } = require("./android-live-pairing");
 
 const root = path.resolve(__dirname, "..");
@@ -99,14 +100,6 @@ function dumpWindowTo(fileName, remoteName) {
 function readTrustStore() {
   try {
     return adb(["shell", "run-as", packageName, "cat", "shared_prefs/signalasi_signal_trust.xml"]);
-  } catch {
-    return "";
-  }
-}
-
-function readHistoryStore() {
-  try {
-    return adb(["shell", "run-as", packageName, "cat", "shared_prefs/signalasi_chat_history.xml"]);
   } catch {
     return "";
   }
@@ -262,17 +255,39 @@ async function runSmoke(onPairingStateTouched) {
       fail(`App store did not include ${text} after debug status sync`);
     }
   }
-  let historyStore = "";
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    historyStore = readHistoryStore();
-    if (historyStore.includes("deliveryTrace") && historyStore.includes("decrypted") && historyStore.includes("persisted")) break;
-    await sleep(500);
-  }
-  for (const text of ["deliveryTrace", "decrypted", "persisted"]) {
-    if (!historyStore.includes(text)) {
-      fail(`Chat history did not include delivery trace marker ${text}`);
-    }
-  }
+  const historyToken = `UI_DELIVERY_${Date.now()}`;
+  const historyPayload = Buffer.from(JSON.stringify({
+    sender: "hermes",
+    contact_id: "hermes",
+    content: historyToken
+  }), "utf8").toString("base64");
+  adb([
+    "shell",
+    "am",
+    "start",
+    "-n",
+    activityName,
+    "--es",
+    "signalasi_debug_incoming_b64",
+    historyPayload
+  ]);
+  const historyProbe = await probeChatHistory({
+    adb,
+    packageName,
+    activityName,
+    contactId: "hermes",
+    contentToken: historyToken,
+    requiredStages: ["received", "decrypted", "persisted"]
+  });
+  requireProbeMatch(historyProbe, "live QR delivery history");
+  await probeChatHistory({
+    adb,
+    packageName,
+    activityName,
+    contactId: "hermes",
+    contentToken: historyToken,
+    deleteMatches: true
+  });
   let pairedTrustStore = "";
   for (let attempt = 0; attempt < 8; attempt += 1) {
     pairedTrustStore = readTrustStore();

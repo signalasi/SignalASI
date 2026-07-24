@@ -9,7 +9,6 @@ const apkPath = path.join(androidDir, "app", "build", "outputs", "apk", "debug",
 const packageName = "com.signalasi.chat";
 const activityName = `${packageName}/.MainActivity`;
 const appStorePrefs = "shared_prefs/signalasi_app_store.xml";
-const historyPrefs = "shared_prefs/signalasi_chat_history.xml";
 const trustPrefs = "shared_prefs/signalasi_signal_trust.xml";
 const signalStorePrefs = "shared_prefs/signalasi_signal_store.xml";
 const debugPrefs = "shared_prefs/signalasi_debug.xml";
@@ -63,7 +62,7 @@ function prefString(xml, name, fallback = "") {
 }
 
 async function waitForRoundtrip(token) {
-  for (let attempt = 0; attempt < 12; attempt += 1) {
+  for (let attempt = 0; attempt < 42; attempt += 1) {
     await sleep(700);
     const xml = readAppFile(debugPrefs);
     const raw = prefString(xml, "backup_roundtrip_result", "");
@@ -87,7 +86,6 @@ async function main() {
   adb(["shell", "am", "force-stop", packageName]);
 
   const originalAppStore = readAppFile(appStorePrefs);
-  const originalHistory = readAppFile(historyPrefs);
   const originalTrust = readAppFile(trustPrefs);
   const originalSignalStore = readAppFile(signalStorePrefs);
   const originalDebug = readAppFile(debugPrefs);
@@ -108,7 +106,6 @@ async function main() {
     adb(["shell", "am", "force-stop", packageName]);
     log("restoring original app state");
     restoreAppFile(appStorePrefs, originalAppStore);
-    restoreAppFile(historyPrefs, originalHistory);
     restoreAppFile(trustPrefs, originalTrust);
     restoreAppFile(signalStorePrefs, originalSignalStore);
     restoreAppFile(debugPrefs, originalDebug);
