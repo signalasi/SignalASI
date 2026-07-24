@@ -180,11 +180,7 @@ object AgentHandoffLifecycle {
  * or recording the same transfer twice.
  */
 class EncryptedAgentHandoffStore(context: Context) {
-    private val database = AgentEncryptedDatabase(
-        context.applicationContext,
-        DATABASE,
-        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-    )
+    private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE)
 
     @Synchronized
     fun beginActive(request: AgentHandoffRequest, sourceMessageId: Long = 0L): AgentHandoffMutation {
@@ -265,7 +261,6 @@ class EncryptedAgentHandoffStore(context: Context) {
 
     companion object {
         private const val DATABASE = "signalasi_agent_handoffs_v1"
-        private const val UNUSED_LEGACY_PREFERENCES = "signalasi_agent_handoffs_v1_no_legacy"
         private const val KEY_RECORDS = "records"
         private const val MAX_RECORDS = 1_000
         private const val MAX_RESULT_CHARACTERS = 2_000
@@ -782,11 +777,7 @@ object AgentRunRecoveryPolicy {
 
 class EncryptedAgentRegistry(context: Context) {
     private val appContext = context.applicationContext
-    private val database = AgentEncryptedDatabase(
-        appContext,
-        DATABASE,
-        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-    )
+    private val database = AgentEncryptedDatabase(appContext, DATABASE)
 
     @Synchronized
     fun upsert(registration: AgentRegistration): AgentRegistration {
@@ -893,7 +884,6 @@ class EncryptedAgentRegistry(context: Context) {
 
     companion object {
         private const val DATABASE = "signalasi_agent_registry_v1"
-        private const val UNUSED_LEGACY_PREFERENCES = "signalasi_agent_registry_v1_no_legacy"
         private const val KEY_REGISTRY = "registrations"
         private const val MAX_AGENTS = 512
         private const val HEARTBEAT_TTL_MILLIS = 10 * 60_000L
@@ -903,11 +893,7 @@ class EncryptedAgentRegistry(context: Context) {
 }
 
 class AgentRunEventStore(context: Context) : AgentRunControlStore {
-    private val database = AgentEncryptedDatabase(
-        context.applicationContext,
-        DATABASE,
-        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-    )
+    private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE)
 
     @Synchronized
     fun append(event: AgentRunControlEvent): Boolean {
@@ -984,7 +970,6 @@ class AgentRunEventStore(context: Context) : AgentRunControlStore {
 
     companion object {
         private const val DATABASE = "signalasi_run_control_v1"
-        private const val UNUSED_LEGACY_PREFERENCES = "signalasi_run_control_v1_no_legacy"
         private const val KEY_RUN_IDS = "run_ids"
         private const val MAX_RUNS = 500
         private const val MAX_EVENTS_PER_RUN = 2_000

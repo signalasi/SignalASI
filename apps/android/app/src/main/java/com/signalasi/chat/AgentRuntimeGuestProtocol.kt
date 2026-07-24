@@ -682,11 +682,7 @@ class AgentRuntimeSessionKeyStore(context: Context) {
     @Synchronized
     fun getOrCreate(): ByteArray {
         cachedKey?.let { return it.copyOf() }
-        val database = AgentEncryptedDatabase(
-            appContext,
-            DATABASE,
-            legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-        )
+        val database = AgentEncryptedDatabase(appContext, DATABASE)
         val key = try {
             database.readString(KEY_SESSION, "")
                 .takeIf(String::isNotBlank)
@@ -704,7 +700,6 @@ class AgentRuntimeSessionKeyStore(context: Context) {
 
     companion object {
         private const val DATABASE = "signalasi_runtime_session_v1"
-        private const val UNUSED_LEGACY_PREFERENCES = "signalasi_runtime_session_v1_no_legacy"
         private const val KEY_SESSION = "guest_hmac_key"
         private const val KEY_BYTES = 32
     }

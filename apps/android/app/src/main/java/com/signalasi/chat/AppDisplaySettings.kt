@@ -8,7 +8,6 @@ import android.os.Build
 object AppDisplaySettings {
     private const val PREFS = "signalasi_display"
     private const val KEY_TEXT_SCALE = "text_scale"
-    private const val LEGACY_THEME_KEY = "theme"
 
     enum class TextScaleMode(val wireValue: String, val fixedScale: Float?) {
         SYSTEM("system", null),
@@ -26,9 +25,6 @@ object AppDisplaySettings {
 
     fun textScale(context: Context): TextScaleMode {
         val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (preferences.contains(LEGACY_THEME_KEY)) {
-            preferences.edit().remove(LEGACY_THEME_KEY).apply()
-        }
         return TextScaleMode.fromWireValue(preferences.getString(KEY_TEXT_SCALE, null))
     }
 

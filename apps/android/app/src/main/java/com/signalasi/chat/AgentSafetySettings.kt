@@ -23,13 +23,9 @@ class SharedPreferencesAgentSafetySettingsStore(context: Context) : AgentSafetyS
     private val appContext = context.applicationContext
     private val prefs = AgentEncryptedPreferences(appContext, PREFS)
 
-    override fun load(): AgentSafetySettings {
-        migrateLegacySettings()
-        return readStored()
-    }
+    override fun load(): AgentSafetySettings = readStored()
 
     override fun save(settings: AgentSafetySettings) {
-        migrateLegacySettings()
         val before = readStored()
         if (before == settings) return
         writeStored(settings)
@@ -72,37 +68,11 @@ class SharedPreferencesAgentSafetySettingsStore(context: Context) : AgentSafetyS
         )
     }
 
-    private fun migrateLegacySettings() {
-        if (prefs.contains(KEY_SETTINGS)) return
-        val legacy = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (!legacy.contains(KEY_PERMISSION_MODE) &&
-            !legacy.contains(KEY_HIGH_RISK_GUARD) &&
-            !legacy.contains(KEY_MEMORY_CAPTURE)
-        ) return
-        val settings = AgentSafetySettings(
-            permissionMode = enumOrDefault(
-                legacy.getString(KEY_PERMISSION_MODE, null).orEmpty(),
-                PermissionMode.ASK_BEFORE_ACTION
-            ),
-            highRiskGuard = legacy.getBoolean(KEY_HIGH_RISK_GUARD, true),
-            memoryCapture = legacy.getBoolean(KEY_MEMORY_CAPTURE, true)
-        )
-        writeStored(settings)
-        legacy.edit()
-            .remove(KEY_PERMISSION_MODE)
-            .remove(KEY_HIGH_RISK_GUARD)
-            .remove(KEY_MEMORY_CAPTURE)
-            .apply()
-    }
-
     private inline fun <reified T : Enum<T>> enumOrDefault(value: String, default: T): T =
         runCatching { enumValueOf<T>(value) }.getOrElse { default }
 
     private companion object {
         const val PREFS = "signalasi_agent_safety"
         const val KEY_SETTINGS = "settings"
-        const val KEY_PERMISSION_MODE = "permission_mode"
-        const val KEY_HIGH_RISK_GUARD = "high_risk_guard"
-        const val KEY_MEMORY_CAPTURE = "memory_capture"
     }
 }

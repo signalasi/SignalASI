@@ -28,19 +28,11 @@ data class HomeAssistantSettings(
 object HomeAssistantSettingsStore {
     private const val PREFS = "signalasi_home_assistant"
     private const val KEY_SETTINGS = "settings"
-    private const val KEY_ENABLED = "enabled"
-    private const val KEY_BASE_URL = "base_url"
-    private const val KEY_ACCESS_TOKEN = "access_token"
-    private const val KEY_DEFAULT_ENTITY_ID = "default_entity_id"
 
-    fun load(context: Context): HomeAssistantSettings {
-        migrateLegacySettings(context)
-        return readStored(context)
-    }
+    fun load(context: Context): HomeAssistantSettings = readStored(context)
 
     fun save(context: Context, settings: HomeAssistantSettings) {
         val appContext = context.applicationContext
-        migrateLegacySettings(appContext)
         val before = readStored(appContext)
         val after = settings.copy(
             baseUrl = settings.baseUrl.trim().trimEnd('/'),
@@ -97,32 +89,6 @@ object HomeAssistantSettingsStore {
 
     fun clear(context: Context) {
         AgentEncryptedPreferences(context, PREFS).clear()
-    }
-
-    private fun migrateLegacySettings(context: Context) {
-        val encrypted = AgentEncryptedPreferences(context, PREFS)
-        if (encrypted.contains(KEY_SETTINGS)) return
-        val legacy = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (!legacy.contains(KEY_ENABLED) &&
-            !legacy.contains(KEY_BASE_URL) &&
-            !legacy.contains(KEY_ACCESS_TOKEN) &&
-            !legacy.contains(KEY_DEFAULT_ENTITY_ID)
-        ) return
-        writeStored(
-            context,
-            HomeAssistantSettings(
-                enabled = legacy.getBoolean(KEY_ENABLED, false),
-                baseUrl = legacy.getString(KEY_BASE_URL, "") ?: "",
-                accessToken = legacy.getString(KEY_ACCESS_TOKEN, "") ?: "",
-                defaultEntityId = legacy.getString(KEY_DEFAULT_ENTITY_ID, "") ?: ""
-            )
-        )
-        legacy.edit()
-            .remove(KEY_ENABLED)
-            .remove(KEY_BASE_URL)
-            .remove(KEY_ACCESS_TOKEN)
-            .remove(KEY_DEFAULT_ENTITY_ID)
-            .apply()
     }
 }
 

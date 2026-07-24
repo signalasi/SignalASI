@@ -203,11 +203,7 @@ object AgentRuntimeEngineControllerRegistry {
 }
 
 private class AgentRuntimeLifecycleStore(context: Context) {
-    private val database = AgentEncryptedDatabase(
-        context.applicationContext,
-        DATABASE,
-        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-    )
+    private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE)
 
     @Synchronized
     fun load(): AgentRuntimeLifecycleSnapshot? = database.readString(KEY_SNAPSHOT, "")
@@ -242,7 +238,6 @@ private class AgentRuntimeLifecycleStore(context: Context) {
 
     companion object {
         private const val DATABASE = "signalasi_runtime_lifecycle_v1"
-        private const val UNUSED_LEGACY_PREFERENCES = "signalasi_runtime_lifecycle_v1_no_legacy"
         private const val KEY_SNAPSHOT = "snapshot"
     }
 }

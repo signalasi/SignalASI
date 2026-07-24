@@ -212,11 +212,7 @@ class InMemoryAgentTeamExecutionStore : AgentTeamExecutionStore {
 }
 
 class EncryptedAgentTeamExecutionStore(context: Context) : AgentTeamExecutionStore {
-    private val database = AgentEncryptedDatabase(
-        context.applicationContext,
-        DATABASE,
-        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-    )
+    private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE)
 
     @Synchronized
     override fun create(definition: AgentTeamDefinition, request: AgentRunRequest) {
@@ -321,7 +317,6 @@ class EncryptedAgentTeamExecutionStore(context: Context) : AgentTeamExecutionSto
 
     private companion object {
         const val DATABASE = "signalasi_agent_teams_v1"
-        const val UNUSED_LEGACY_PREFERENCES = "signalasi_agent_teams_v1_no_legacy"
         const val KEY_RECORDS = "records"
         const val MAX_RUNS = 200
     }

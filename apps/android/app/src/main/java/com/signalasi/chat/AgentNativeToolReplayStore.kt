@@ -37,11 +37,7 @@ class InMemoryAgentNativeToolReplayStore : AgentNativeToolReplayStore {
 }
 
 class EncryptedAgentNativeToolReplayStore(context: Context) : AgentNativeToolReplayStore {
-    private val database = AgentEncryptedDatabase(
-        context.applicationContext,
-        DATABASE,
-        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-    )
+    private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE)
 
     @Synchronized
     override fun get(key: AgentNativeToolReplayKey): AgentNativeToolResult? {
@@ -106,7 +102,6 @@ class EncryptedAgentNativeToolReplayStore(context: Context) : AgentNativeToolRep
 
     companion object {
         private const val DATABASE = "signalasi_native_tool_replay_v1"
-        private const val UNUSED_LEGACY_PREFERENCES = "signalasi_native_tool_replay_v1_no_legacy"
         private const val KEY_ENTRIES = "entries"
         private const val MAX_ENTRIES = 2_000
         private const val RETENTION_MILLIS = 30L * 24L * 60L * 60L * 1_000L

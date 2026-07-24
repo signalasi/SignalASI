@@ -67,11 +67,7 @@ fun AgentRuntimeExecutionReceipt.toEvidenceMap(): AgentNativeJsonObject = linked
 )
 
 class AgentRuntimeExecutionReceiptStore(context: Context) {
-    private val database = AgentEncryptedDatabase(
-        context.applicationContext,
-        DATABASE,
-        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-    )
+    private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE)
 
     @Synchronized
     fun begin(request: AgentRuntimeExecutionRequest, packVersions: Map<String, String>): AgentRuntimeExecutionReceipt {
@@ -241,7 +237,6 @@ class AgentRuntimeExecutionReceiptStore(context: Context) {
 
     companion object {
         private const val DATABASE = "signalasi_runtime_receipts_v1"
-        private const val UNUSED_LEGACY_PREFERENCES = "signalasi_runtime_receipts_v1_no_legacy"
         private const val KEY_RECEIPTS = "receipts"
         private const val MAX_RECEIPTS = 1_000
         private const val MAX_ARTIFACTS = 32
