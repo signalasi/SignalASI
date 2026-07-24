@@ -6,6 +6,7 @@ internal object DebugIntentExtras {
         "signalasi_debug_auto_confirm_scan",
         "signalasi_debug_backup_roundtrip",
         "signalasi_debug_cloud_models_roundtrip",
+        "signalasi_debug_chat_history_probe_b64",
         "signalasi_debug_control_center_page",
         "signalasi_debug_control_center_roundtrip",
         "signalasi_debug_control_center_theme",

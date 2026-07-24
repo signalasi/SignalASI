@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { createAdb } = require("./android-adb");
+const { probeChatHistory, requireProbeMatch } = require("./android-chat-history-probe");
 
 const root = path.resolve(__dirname, "..");
 const workspaceRoot = path.resolve(root, "..");
@@ -11,8 +12,7 @@ const activityName = `${packageName}/.MainActivity`;
 const outDir = path.join(root, "ui-smoke");
 const voiceDump = path.join(outDir, "android-voice-reply.xml");
 const chatDump = path.join(outDir, "android-voice-reply-chat.xml");
-const historyDump = path.join(outDir, "android-voice-reply-history.xml");
-const historyPrefs = "shared_prefs/signalasi_chat_history.xml";
+const historyDump = path.join(outDir, "android-voice-reply-history.json");
 const appStorePrefs = "shared_prefs/signalasi_app_store.xml";
 const trustPrefs = "shared_prefs/signalasi_signal_trust.xml";
 
@@ -111,10 +111,10 @@ async function main() {
   ].join(" ");
   log("installing debug APK");
   adb(["install", "-r", apkPath], { stdio: "inherit" });
+  adb(["shell", "pm", "grant", packageName, "android.permission.RECORD_AUDIO"]);
   adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"]);
   adb(["shell", "am", "force-stop", packageName]);
 
-  const originalHistory = readAppFile(historyPrefs);
   const originalAppStore = readAppFile(appStorePrefs);
   const originalTrust = readAppFile(trustPrefs);
 
@@ -160,20 +160,43 @@ async function main() {
     log("opening Hermes chat and verifying the same reply is persisted");
     adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_open_contact", targetContactId]);
     const chatXml = await waitForWindowText(chatDump, "signalasi-voice-reply-chat.xml", token, 12);
-    const history = readAppFile(historyPrefs);
-    fs.writeFileSync(historyDump, history);
+    const history = await probeChatHistory({
+      adb,
+      packageName,
+      activityName,
+      contactId: targetContactId,
+      contentToken: token,
+      requiredStages: [
+        "desktop_reply_publish_queued",
+        "desktop_reply_broker_ack",
+        "received",
+        "decrypted",
+        "persisted"
+      ]
+    });
+    fs.writeFileSync(historyDump, `${JSON.stringify(history, null, 2)}\n`);
     if (!chatXml.includes(token)) {
       fail(`Hermes chat did not show the complete reply tail ${token}. Dumps saved at ${chatDump} and ${historyDump}`);
     }
-    if (!history.includes(token) || !history.includes("desktop_reply_publish_queued") || !history.includes("desktop_reply_broker_ack")) {
-      fail(`Chat history did not persist the complete reply and delivery trace. Dump saved at ${historyDump}`);
-    }
+    requireProbeMatch(history, "voice reply history");
 
     log(`OK: voice reply panel and Hermes chat preserve full replies. Dumps: ${voiceDump}, ${chatDump}`);
   } finally {
+    const targetContactId = resolveHermesContactId();
+    try {
+      await probeChatHistory({
+        adb,
+        packageName,
+        activityName,
+        contactId: targetContactId,
+        contentToken: token,
+        deleteMatches: true
+      });
+    } catch {
+      // Preserve the original failure; smoke messages use unique tokens.
+    }
     adb(["shell", "am", "force-stop", packageName]);
     log("restoring original app state");
-    restoreAppFile(historyPrefs, originalHistory);
     restoreAppFile(appStorePrefs, originalAppStore);
     restoreAppFile(trustPrefs, originalTrust);
     adb(["shell", "am", "force-stop", packageName]);

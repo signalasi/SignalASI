@@ -132,6 +132,9 @@ const sidecarSettingsGradle = fs.readFileSync(path.join(sidecarDir, "settings.gr
 const androidMainActivity = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "MainActivity.kt"), "utf8");
 const androidMessageService = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "MessageService.kt"), "utf8");
 const androidChatHistoryStore = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "ChatHistoryStore.kt"), "utf8");
+const androidChatHistoryDatabase = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "ChatHistoryDatabase.kt"), "utf8");
+const androidDebugChatHistoryProbe = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "DebugChatHistoryProbe.kt"), "utf8");
+const androidChatHistoryProbeScript = fs.readFileSync(path.join(__dirname, "android-chat-history-probe.js"), "utf8");
 const androidSignalStore = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "AndroidPersistentSignalStore.kt"), "utf8");
 const androidForegroundTracker = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "AppForegroundTracker.kt"), "utf8");
 const androidAppStore = fs.readFileSync(path.join(workspaceRoot, "android", "app", "src", "main", "java", "com", "signalasi", "chat", "AppStore.kt"), "utf8");
@@ -539,7 +542,9 @@ for (const requiredText of [
   "ChatHistoryStore.appendIncoming",
   "ChatHistoryStore.markNotified",
   "AppForegroundTracker.isForeground",
-  "signalasi_chat_history",
+  "signalasi_chat_history.db",
+  "signalasi_debug_chat_history_probe_b64",
+  "encrypted_sqlite",
   "signalasi_app_store",
   "signalasi_signal_trust",
   "signalasi_signal_store",
@@ -647,8 +652,22 @@ for (const requiredText of [
   "taskStatusSeq",
   "smoke:agent-lifecycle"
 ]) {
-if (![main, preload, html, renderer, workspaceRenderer, packageJson, packager, androidAdb, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidContactTags, smokeAndroidLanguage, smokeAndroidCloudModels, smokeAndroidBackground, smokeAndroidAgentReplies, smokeAndroidBackup, smokeAndroidVoiceReply, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeAgentLifecycle, smokeVoiceStt, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendLinkProtocol, backendGateway, backendTaskManager, backendAgentConfig, backendPushAuth, backendSignalasiNotify, backendStt, androidMainActivity, androidMqtt, androidMessageService, androidChatHistoryStore, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
+if (![main, preload, html, renderer, workspaceRenderer, packageJson, packager, androidAdb, smoke, smokePairing, smokeUi, smokeAndroidUi, smokeAndroidFriends, smokeAndroidContactTags, smokeAndroidLanguage, smokeAndroidCloudModels, smokeAndroidBackground, smokeAndroidAgentReplies, smokeAndroidBackup, smokeAndroidVoiceReply, smokeAndroidReset, smokeMqttPersistence, smokeAgentPush, smokeAgentLifecycle, smokeVoiceStt, smokeE2e, smokePackaged, smokeLock, connectorStatus, statusDoc, backendMain, backendMqtt, backendPairing, backendLinkProtocol, backendGateway, backendTaskManager, backendAgentConfig, backendPushAuth, backendSignalasiNotify, backendStt, androidMainActivity, androidMqtt, androidMessageService, androidChatHistoryStore, androidChatHistoryDatabase, androidDebugChatHistoryProbe, androidChatHistoryProbeScript, androidSignalStore, androidForegroundTracker, androidAppStore].some((content) => content.includes(requiredText))) {
     throw new Error(`Missing desktop connector capability: ${requiredText}`);
+  }
+}
+
+for (const smokeSource of [
+  smokeAndroidUi,
+  smokeAndroidCloudModels,
+  smokeAndroidBackground,
+  smokeAndroidAgentReplies,
+  smokeAndroidBackup,
+  smokeAndroidVoiceReply,
+  smokeAndroidReset
+]) {
+  if (smokeSource.includes("signalasi_chat_history.xml")) {
+    throw new Error("Android smoke tests must not read the removed legacy chat history XML");
   }
 }
 
