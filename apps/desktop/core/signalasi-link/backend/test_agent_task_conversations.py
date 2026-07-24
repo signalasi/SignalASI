@@ -92,6 +92,55 @@ class AgentTaskConversationTests(unittest.TestCase):
 
             manager.update(first.task_id, "cancelled")
             self.assertIsNone(manager.active_for_conversation("conversation-1", agent_id="codex"))
+    def test_stable_progress_event_updates_in_place_and_remains_latest(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            agent_task_manager, "TASKS_DB_PATH", Path(temporary) / "tasks.sqlite3"
+        ):
+            events = []
+            manager = agent_task_manager.AgentTaskManager()
+            manager.create_external(
+                "codex",
+                "codex-contact",
+                "desktop:progress",
+                "inspect image",
+                events.append,
+                task_id="progress-task",
+            )
+
+            manager.add_event(
+                "progress-task",
+                "tool",
+                "Viewing image",
+                event_id="codex:image_view:image-1",
+                status="running",
+                metadata={"code": "image_view", "count": 1},
+                on_event=events.append,
+            )
+            manager.add_event(
+                "progress-task",
+                "narration",
+                "Checking answers",
+                event_id="codex:commentary:message-1",
+                detail="Checking answers against the worksheet.",
+                on_event=events.append,
+            )
+            updated = manager.add_event(
+                "progress-task",
+                "tool",
+                "Viewed image",
+                event_id="codex:image_view:image-1",
+                status="completed",
+                metadata={"code": "image_view", "count": 1},
+                on_event=events.append,
+            )
+
+            self.assertEqual("running", updated.status)
+            self.assertEqual(2, len(updated.events))
+            self.assertEqual("codex:image_view:image-1", updated.events[-1]["event_id"])
+            self.assertEqual("completed", updated.events[-1]["status"])
+            self.assertGreaterEqual(updated.events[-1]["updated_at"], updated.events[-1]["created_at"])
+            restored = agent_task_manager.AgentTaskManager().get("progress-task")
+            self.assertEqual("completed", restored.events[-1]["status"])
 
     def test_external_running_task_emits_heartbeats_until_terminal(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(

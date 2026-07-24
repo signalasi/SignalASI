@@ -201,7 +201,13 @@ object AgentTranscriptPresentationPolicy {
     }
 
     fun processSegments(entries: List<AgentTranscriptEntry>): List<ProcessSegment> = buildList {
-        entries.forEach { entry ->
+        val hasConnectorDetail = entries.any { it.dedupeKey.startsWith("connector-event:") }
+        val visibleEntries = if (hasConnectorDetail) {
+            entries.filterNot(::isGenericConnectorFallback)
+        } else {
+            entries
+        }
+        visibleEntries.forEach { entry ->
             val kind = processContentKind(entry)
             val previous = lastOrNull()
             if (previous?.kind == kind) {
@@ -210,6 +216,16 @@ object AgentTranscriptPresentationPolicy {
                 add(ProcessSegment(kind, listOf(entry)))
             }
         }
+    }
+
+    private fun isGenericConnectorFallback(entry: AgentTranscriptEntry): Boolean {
+        val text = entry.text.trim().lowercase()
+        if (text.startsWith("analyzed the request") || text.startsWith("\u5df2\u5206\u6790\u8bf7\u6c42")) {
+            return true
+        }
+        if (!entry.dedupeKey.contains(":TOOL_STARTED:")) return false
+        return text.startsWith("running codex") ||
+            text.startsWith("\u6b63\u5728\u8fd0\u884c codex")
     }
 
     fun isRedundantConnectorCompletion(entry: AgentTranscriptEntry): Boolean =

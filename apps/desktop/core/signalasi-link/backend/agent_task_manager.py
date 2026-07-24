@@ -281,40 +281,39 @@ class AgentTaskManager:
             if task is None or task.status in TERMINAL_STATES:
                 return task
             now = int(time.time() * 1000)
-            clean_event_id = str(event_id or "").strip()[:240]
-            existing = next(
-                (
-                    item
-                    for item in task.events
-                    if clean_event_id
-                    and str(item.get("event_id") or "") == clean_event_id
-                ),
-                None,
-            )
-            event = existing if existing is not None else {
-                "event_id": clean_event_id or str(uuid.uuid4()),
-                "created_at": now,
-            }
-            event.update({
+            stable_event_id = str(event_id or "").strip()[:200] or str(uuid.uuid4())
+            existing_index = next((
+                index for index, candidate in enumerate(task.events)
+                if str(candidate.get("event_id") or "") == stable_event_id
+            ), -1)
+            existing = task.events[existing_index] if existing_index >= 0 else None
+            event = {
+                "event_id": stable_event_id,
+                "created_at": int((existing or {}).get("created_at") or now),
+                "updated_at": now,
                 "kind": str(kind or "step")[:48],
                 "title": str(title or "Task step")[:240],
                 "status": str(status or "completed")[:32],
                 "detail": str(detail or "")[:4_000],
                 "metadata": {
-                    **dict(event.get("metadata") or {}),
+                    **dict((existing or {}).get("metadata") or {}),
                     **dict(metadata or {}),
                 },
-                "updated_at": now,
-            })
+            }
             try:
                 encoded = json.dumps(event["metadata"], ensure_ascii=False, separators=(",", ":"))
                 if len(encoded.encode("utf-8")) > 16_384:
                     event["metadata"] = {"truncated": True}
             except Exception:
                 event["metadata"] = {}
-            if existing is None:
-                task.events.append(event)
-                del task.events[:-MAX_TASK_EVENTS]
+            if existing_index >= 0:
+                task.events.pop(existing_index)
+            task.events.append(event)
+            del task.events[:-MAX_TASK_EVENTS]
+            if task.status in {"accepted", "queued", "starting", "recovering"}:
+                task.status = "running"
+                if not task.started_at:
+                    task.started_at = now
             task.current_step = event["title"]
             task.updated_at = now
             task.status_seq += 1

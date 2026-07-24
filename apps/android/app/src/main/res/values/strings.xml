@@ -1271,6 +1271,25 @@
     <string name="agent_trace_processed_details">Show processing details</string>
     <string name="agent_trace_tool_group_count">Ran %1$d tool steps</string>
     <string name="agent_trace_tool_group_details">Show tool details</string>
+    <string name="agent_trace_connector_progress_running">Running: %1$s%2$s</string>
+    <string name="agent_trace_connector_progress_completed">Completed: %1$s%2$s</string>
+    <string name="agent_trace_connector_progress_failed">Failed: %1$s%2$s</string>
+    <string name="agent_trace_connector_operation_web_search">web search</string>
+    <string name="agent_trace_connector_operation_command">command</string>
+    <string name="agent_trace_connector_operation_file_change">file update</string>
+    <string name="agent_trace_connector_operation_mcp">MCP tool</string>
+    <string name="agent_trace_connector_operation_tool">tool call</string>
+    <string name="agent_trace_connector_operation_image_generation">image generation</string>
+    <string name="agent_trace_connector_operation_collaboration">Agent coordination</string>
+    <string name="agent_trace_connector_operation_context_compaction">context compaction</string>
+    <plurals name="agent_trace_connector_images_viewing">
+        <item quantity="one">Viewing %1$d image</item>
+        <item quantity="other">Viewing %1$d images</item>
+    </plurals>
+    <plurals name="agent_trace_connector_images_viewed">
+        <item quantity="one">Viewed %1$d image</item>
+        <item quantity="other">Viewed %1$d images</item>
+    </plurals>
     <string name="agent_trace_phone_linux_command">Phone Linux: %1$s</string>
     <string name="agent_trace_phone_development_repair">Verification failed; returning the evidence to the model for revision</string>
     <string name="agent_trace_phone_linux">Phone Linux</string>

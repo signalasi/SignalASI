@@ -53,6 +53,130 @@ class CodexConversationThreadTests(unittest.TestCase):
         self.assertEqual("", reasoning["event_detail"])
         self.assertNotIn("private internal reasoning", str(reasoning))
 
+    @staticmethod
+    def _event_server():
+        events = []
+        server = codex_app_server.CodexAppServer(
+            "codex",
+            {},
+            lambda task_id, event: events.append((task_id, event)),
+        )
+        run = codex_app_server.CodexRun(
+            task_id="task-visible",
+            thread_id="thread-visible",
+            turn_id="turn-visible",
+        )
+        server._runs[run.task_id] = run
+        server._turn_tasks[run.turn_id] = run.task_id
+        return server, run, events
+
+    def test_visible_codex_progress_preserves_commentary_reasoning_and_image_events(self):
+        server, run, events = self._event_server()
+
+        server._handle_event({
+            "method": "item/completed",
+            "params": {
+                "threadId": run.thread_id,
+                "turnId": run.turn_id,
+                "item": {
+                    "id": "commentary-1",
+                    "type": "agentMessage",
+                    "phase": "commentary",
+                    "text": "I will inspect each answer and flag uncertain regions.",
+                },
+            },
+        })
+        server._handle_event({
+            "method": "item/completed",
+            "params": {
+                "threadId": run.thread_id,
+                "turnId": run.turn_id,
+                "item": {
+                    "id": "reasoning-1",
+                    "type": "reasoning",
+                    "summary": ["Comparing the written answers with the worksheet prompts."],
+                    "content": ["private reasoning must not be forwarded"],
+                },
+            },
+        })
+        for method in ("item/started", "item/completed"):
+            server._handle_event({
+                "method": method,
+                "params": {
+                    "threadId": run.thread_id,
+                    "turnId": run.turn_id,
+                    "item": {"id": "image-1", "type": "imageView", "path": "homework.jpg"},
+                },
+            })
+        server._handle_event({
+            "method": "item/completed",
+            "params": {
+                "threadId": run.thread_id,
+                "turnId": run.turn_id,
+                "item": {
+                    "id": "answer-1",
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": "The worksheet is mostly correct.",
+                },
+            },
+        })
+        server._handle_event({
+            "method": "turn/completed",
+            "params": {
+                "threadId": run.thread_id,
+                "turnId": run.turn_id,
+                "turn": {"id": run.turn_id, "status": "completed"},
+            },
+        })
+
+        progress = [event["progress_event"] for _, event in events if "progress_event" in event]
+        self.assertEqual(
+            ["commentary", "reasoning_summary", "image_view", "image_view"],
+            [event["code"] for event in progress],
+        )
+        self.assertEqual(["running", "completed"], [event["status"] for event in progress[-2:]])
+        self.assertNotIn("private reasoning", " ".join(event["detail"] for event in progress))
+        self.assertEqual("completed", events[-1][1]["status"])
+        self.assertEqual("The worksheet is mostly correct.", events[-1][1]["result"])
+
+    def test_reasoning_summary_delta_is_used_without_forwarding_reasoning_text_delta(self):
+        server, run, events = self._event_server()
+
+        server._handle_event({
+            "method": "item/reasoning/summaryTextDelta",
+            "params": {
+                "threadId": run.thread_id,
+                "turnId": run.turn_id,
+                "itemId": "reasoning-2",
+                "summaryIndex": 0,
+                "delta": "Checking the visible worksheet fields.",
+            },
+        })
+        server._handle_event({
+            "method": "item/reasoning/textDelta",
+            "params": {
+                "threadId": run.thread_id,
+                "turnId": run.turn_id,
+                "itemId": "reasoning-2",
+                "contentIndex": 0,
+                "delta": "hidden chain of thought",
+            },
+        })
+        server._handle_event({
+            "method": "item/completed",
+            "params": {
+                "threadId": run.thread_id,
+                "turnId": run.turn_id,
+                "item": {"id": "reasoning-2", "type": "reasoning", "summary": [], "content": []},
+            },
+        })
+
+        progress = [event["progress_event"] for _, event in events if "progress_event" in event]
+        self.assertEqual(1, len(progress))
+        self.assertEqual("Checking the visible worksheet fields.", progress[0]["detail"])
+        self.assertNotIn("hidden chain", progress[0]["detail"])
+
     def test_same_conversation_reuses_thread(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
             codex_app_server,
@@ -84,34 +208,7 @@ class CodexConversationThreadTests(unittest.TestCase):
             self.assertTrue(server.delete_conversation("conversation-1"))
             self.assertNotIn(server._conversation_key("conversation-1"), server._conversation_threads)
 
-    def test_failed_turn_start_does_not_leave_a_phantom_active_run(self):
-        with tempfile.TemporaryDirectory() as temporary, patch.object(
-            codex_app_server,
-            "CONVERSATION_THREADS_PATH",
-            Path(temporary) / "threads.json",
-        ):
-            server = codex_app_server.CodexAppServer("codex", {}, lambda _task, _event: None)
-            server._ensure_started = lambda: None
-
-            def request(method, _params, timeout):
-                del timeout
-                if method == "thread/start":
-                    return {"thread": {"id": "thread-1"}}
-                raise RuntimeError("turn failed before it started")
-
-            server._request = request
-            with self.assertRaisesRegex(RuntimeError, "turn failed"):
-                server.start_task(
-                    "task-failed",
-                    "first",
-                    temporary,
-                    conversation_id="conversation-1",
-                )
-
-            self.assertNotIn("task-failed", server._runs)
-            self.assertEqual("", server.active_task_id("conversation-1"))
-
-    def test_overlapping_tasks_are_steered_without_creating_a_branch(self):
+    def test_overlapping_tasks_use_independent_threads(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
             codex_app_server,
             "CONVERSATION_THREADS_PATH",
@@ -120,73 +217,6 @@ class CodexConversationThreadTests(unittest.TestCase):
             server = codex_app_server.CodexAppServer("codex", {}, lambda _task, _event: None)
             server._ensure_started = lambda: None
             thread_count = 0
-            calls = []
-
-            def request(method, params, timeout):
-                nonlocal thread_count
-                calls.append((method, params, timeout))
-                if method == "thread/start":
-                    thread_count += 1
-                    return {"thread": {"id": f"thread-{thread_count}"}}
-                if method == "turn/steer":
-                    return {"turn": {"id": params["expectedTurnId"]}}
-                return {"turn": {"id": f"turn-{thread_count}"}}
-
-            server._request = request
-            first = server.start_task("task-1", "first", temporary, conversation_id="conversation-1")
-            with self.assertRaises(codex_app_server.CodexConversationBusyError) as raised:
-                server.start_task("task-2", "second", temporary, conversation_id="conversation-1")
-            steered = server.steer_task(raised.exception.active_task_id, "be exact")
-
-            self.assertIs(first, steered)
-            self.assertEqual("thread-1", first.thread_id)
-            self.assertEqual("thread-1", server._conversation_threads[server._conversation_key("conversation-1")])
-            self.assertEqual(1, thread_count)
-            self.assertEqual(1, thread.call_count)
-            steer = next(params for method, params, _ in calls if method == "turn/steer")
-            self.assertEqual("thread-1", steer["threadId"])
-            self.assertEqual(first.turn_id, steer["expectedTurnId"])
-            self.assertIn("be exact", steer["input"][0]["text"])
-            self.assertNotIn(codex_app_server.CODEX_TASK_POLICY, steer["input"][0]["text"])
-
-    def test_steered_follow_up_can_add_a_native_image(self):
-        with tempfile.TemporaryDirectory() as temporary, patch.object(
-            codex_app_server,
-            "CONVERSATION_THREADS_PATH",
-            Path(temporary) / "threads.json",
-        ), patch.object(codex_app_server.threading, "Thread"):
-            image = Path(temporary) / "detail.png"
-            image.write_bytes(b"image")
-            server = codex_app_server.CodexAppServer("codex", {}, lambda _task, _event: None)
-            server._ensure_started = lambda: None
-            calls = []
-
-            def request(method, params, timeout):
-                calls.append((method, params, timeout))
-                if method == "thread/start":
-                    return {"thread": {"id": "thread-image"}}
-                if method == "turn/start":
-                    return {"turn": {"id": "turn-image"}}
-                return {"turn": {"id": params["expectedTurnId"]}}
-
-            server._request = request
-            server.start_task("task-image", "grade this", temporary, conversation_id="conversation-image")
-            server.steer_task("task-image", "check this detail", image_paths=[str(image)])
-
-            steer = next(params for method, params, _ in calls if method == "turn/steer")
-            self.assertEqual("localImage", steer["input"][1]["type"])
-            self.assertEqual(str(image.resolve()), steer["input"][1]["path"])
-            self.assertEqual("original", steer["input"][1]["detail"])
-
-    def test_different_conversations_can_run_on_independent_threads(self):
-        with tempfile.TemporaryDirectory() as temporary, patch.object(
-            codex_app_server,
-            "CONVERSATION_THREADS_PATH",
-            Path(temporary) / "threads.json",
-        ), patch.object(codex_app_server.threading, "Thread"):
-            server = codex_app_server.CodexAppServer("codex", {}, lambda _task, _event: None)
-            server._ensure_started = lambda: None
-            thread_count = 0
 
             def request(method, params, timeout):
                 nonlocal thread_count
@@ -197,42 +227,13 @@ class CodexConversationThreadTests(unittest.TestCase):
 
             server._request = request
             first = server.start_task("task-1", "first", temporary, conversation_id="conversation-1")
-            second = server.start_task("task-2", "second", temporary, conversation_id="conversation-2")
+            second = server.start_task("task-2", "second", temporary, conversation_id="conversation-1")
 
             self.assertEqual("thread-1", first.thread_id)
             self.assertEqual("thread-2", second.thread_id)
+            self.assertEqual("thread-2", server._conversation_threads[server._conversation_key("conversation-1")])
             self.assertEqual(2, thread_count)
-
-    def test_follow_up_reuses_the_same_thread_when_turn_finishes_during_steer(self):
-        with tempfile.TemporaryDirectory() as temporary, patch.object(
-            codex_app_server,
-            "CONVERSATION_THREADS_PATH",
-            Path(temporary) / "threads.json",
-        ), patch.object(codex_app_server.threading, "Thread"):
-            server = codex_app_server.CodexAppServer("codex", {}, lambda _task, _event: None)
-            server._ensure_started = lambda: None
-            thread_count = 0
-            turn_count = 0
-
-            def request(method, params, timeout):
-                nonlocal thread_count, turn_count
-                if method == "thread/start":
-                    thread_count += 1
-                    return {"thread": {"id": f"thread-{thread_count}"}}
-                if method == "turn/steer":
-                    raise RuntimeError("expectedTurnId is not active")
-                turn_count += 1
-                return {"turn": {"id": f"turn-{turn_count}"}}
-
-            server._request = request
-            first = server.start_task("task-1", "first", temporary, conversation_id="conversation-1")
-            self.assertIsNone(server.steer_task(first.task_id, "follow up"))
-            first.finished = True
-            second = server.start_task("task-2", "follow up", temporary, conversation_id="conversation-1")
-
-            self.assertEqual("thread-1", second.thread_id)
-            self.assertEqual(1, thread_count)
-            self.assertEqual(2, turn_count)
+            self.assertEqual(2, thread.call_count)
 
     def test_missing_persisted_thread_is_recreated(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(

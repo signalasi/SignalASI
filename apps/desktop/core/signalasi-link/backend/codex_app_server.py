@@ -35,21 +35,19 @@ CODEX_MAX_TASK_SECONDS = max(
     CODEX_STALL_TIMEOUT_SECONDS,
     int(os.environ.get("SIGNALASI_CODEX_MAX_TASK_SECONDS", "900")),
 )
-
-
-class CodexConversationBusyError(RuntimeError):
-    def __init__(self, active_task_id: str) -> None:
-        super().__init__(f"Codex conversation already has an active task: {active_task_id}")
-        self.active_task_id = active_task_id
+MAX_VISIBLE_PROGRESS_TEXT = 2_000
+MAX_VISIBLE_TOOL_DETAIL = 500
 
 
 @dataclass
 class CodexRun:
     task_id: str
-    conversation_id: str = ""
     thread_id: str = ""
     turn_id: str = ""
     final_text: str = ""
+    last_agent_text: str = ""
+    agent_message_deltas: dict[str, str] = field(default_factory=dict)
+    reasoning_summary_deltas: dict[str, dict[int, str]] = field(default_factory=dict)
     pending_requests: dict[int, dict] = field(default_factory=dict)
     started_monotonic: float = field(default_factory=time.monotonic)
     last_event_monotonic: float = field(default_factory=time.monotonic)
@@ -95,7 +93,6 @@ class CodexAppServer:
         model: str = "gpt-5.6-sol",
         conversation_id: str = "",
         image_paths: list[str] | None = None,
-        fresh_thread_prompt: str = "",
     ) -> CodexRun:
         self._ensure_started()
         local_images = [
@@ -103,54 +100,41 @@ class CodexAppServer:
             for path in (image_paths or [])
             if str(path or "").strip() and os.path.isfile(path)
         ][:10]
-        clean_conversation_id = str(conversation_id or "").strip()
-        run = CodexRun(
-            task_id=task_id,
-            conversation_id=clean_conversation_id,
-            prefers_chinese=self._contains_chinese(prompt),
-        )
-        reused_thread = False
-        try:
-            with self._lock:
-                active_run = self._active_run_locked(clean_conversation_id, exclude_task_id=task_id)
-                if active_run is not None:
-                    raise CodexConversationBusyError(active_run.task_id)
-                self._runs[task_id] = run
-                conversation_key = self._conversation_key(clean_conversation_id)
-                run.thread_id = self._conversation_threads.get(conversation_key, "") if conversation_key else ""
-                reused_thread = bool(run.thread_id)
-                if not run.thread_id:
-                    run.thread_id = self._start_thread(cwd, model, clean_conversation_id)
-        except Exception:
-            self._discard_run(run)
-            raise
+        run = CodexRun(task_id=task_id, prefers_chinese=self._contains_chinese(prompt))
+        with self._lock:
+            self._runs[task_id] = run
+            conversation_key = self._conversation_key(conversation_id)
+            run.thread_id = self._conversation_threads.get(conversation_key, "") if conversation_key else ""
+            thread_is_busy = bool(run.thread_id) and any(
+                existing.task_id != task_id and existing.thread_id == run.thread_id and not existing.finished
+                for existing in self._runs.values()
+            )
+            if not run.thread_id or thread_is_busy:
+                # Codex App Server accepts one active turn per thread. A concurrent
+                # mobile request gets a fresh branch; its compact phone context keeps
+                # the conversation useful without waiting behind a stalled turn.
+                run.thread_id = self._start_thread(cwd, model, conversation_id)
         if not run.thread_id:
-            self._discard_run(run)
+            run.finished = True
             raise RuntimeError("Codex App Server did not return a thread id")
         self.on_event(task_id, {"status": "starting", "thread_id": run.thread_id, "current_step": "Starting Codex turn"})
-        turn_prompt = prompt if reused_thread else (fresh_thread_prompt or prompt)
         try:
-            try:
-                response = self._start_turn(run.thread_id, turn_prompt, model, local_images)
-            except RuntimeError as exc:
-                if not run.thread_id or "thread not found" not in str(exc).lower():
-                    raise
-                if conversation_id:
-                    self._conversation_threads.pop(conversation_key, None)
-                    self._save_conversation_threads()
-                run.thread_id = self._start_thread(cwd, model, clean_conversation_id)
-                self.on_event(task_id, {
-                    "status": "starting", "thread_id": run.thread_id,
-                    "current_step": "Starting a fresh Codex thread",
-                })
-                response = self._start_turn(
-                    run.thread_id,
-                    fresh_thread_prompt or prompt,
-                    model,
-                    local_images,
-                )
+            response = self._start_turn(run.thread_id, prompt, model, local_images)
+        except RuntimeError as exc:
+            if not run.thread_id or "thread not found" not in str(exc).lower():
+                run.finished = True
+                raise
+            if conversation_id:
+                self._conversation_threads.pop(conversation_key, None)
+                self._save_conversation_threads()
+            run.thread_id = self._start_thread(cwd, model, conversation_id)
+            self.on_event(task_id, {
+                "status": "starting", "thread_id": run.thread_id,
+                "current_step": "Starting a fresh Codex thread",
+            })
+            response = self._start_turn(run.thread_id, prompt, model, local_images)
         except Exception:
-            self._discard_run(run)
+            run.finished = True
             raise
         run.turn_id = str((response.get("turn") or {}).get("id") or "")
         if run.turn_id:
@@ -169,7 +153,6 @@ class CodexAppServer:
         thread_id: str,
         turn_id: str,
         original_prompt: str,
-        conversation_id: str = "",
         elapsed_seconds: float = 0,
     ) -> CodexRun:
         """Reconnect to an existing Codex turn without replaying the prompt."""
@@ -184,7 +167,6 @@ class CodexAppServer:
         now = time.monotonic()
         run = CodexRun(
             task_id=task_id,
-            conversation_id=str(conversation_id or "").strip(),
             thread_id=clean_thread_id,
             turn_id=clean_turn_id,
             started_monotonic=now - max(0.0, float(elapsed_seconds or 0)),
@@ -346,118 +328,21 @@ class CodexAppServer:
         value = str(conversation_id or "").strip()
         return f"{CONVERSATION_THREAD_VERSION}:{value}" if value else ""
 
-    def _active_run_locked(
-        self,
-        conversation_id: str,
-        *,
-        exclude_task_id: str = "",
-    ) -> CodexRun | None:
-        clean_conversation_id = str(conversation_id or "").strip()
-        if not clean_conversation_id:
-            return None
-        mapped_thread_id = self._conversation_threads.get(
-            self._conversation_key(clean_conversation_id),
-            "",
-        )
-        candidates = [
-            run for run in self._runs.values()
-            if run.task_id != exclude_task_id and not run.finished and (
-                run.conversation_id == clean_conversation_id
-                or (mapped_thread_id and run.thread_id == mapped_thread_id)
-            )
-        ]
-        return max(candidates, key=lambda item: item.started_monotonic, default=None)
-
-    def active_task_id(self, conversation_id: str, exclude_task_id: str = "") -> str:
-        with self._lock:
-            run = self._active_run_locked(conversation_id, exclude_task_id=exclude_task_id)
-            return run.task_id if run is not None else ""
-
-    def wait_for_conversation_idle(
-        self,
-        conversation_id: str,
-        timeout_seconds: float = 2.0,
-    ) -> bool:
-        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
-        while True:
-            if not self.active_task_id(conversation_id):
-                return True
-            if time.monotonic() >= deadline:
-                return False
-            time.sleep(0.02)
-
-    def steer_task(
-        self,
-        task_id: str,
-        prompt: str,
-        image_paths: list[str] | None = None,
-        wait_for_turn_seconds: float = 15.0,
-    ) -> CodexRun | None:
-        """Add user guidance to an active turn without creating a parallel thread."""
-        self._ensure_started()
-        deadline = time.monotonic() + max(0.0, float(wait_for_turn_seconds))
-        run: CodexRun | None = None
-        while True:
-            with self._lock:
-                run = self._runs.get(str(task_id or "").strip())
-                if run is not None and run.finished:
-                    return None
-                if run is not None and run.turn_id:
-                    break
-            if time.monotonic() >= deadline:
-                return None
-            time.sleep(0.02)
-
-        local_images = [
-            os.path.abspath(path)
-            for path in (image_paths or [])
-            if str(path or "").strip() and os.path.isfile(path)
-        ][:10]
-        follow_up = (
-            "Apply this latest user instruction to the task already in progress. "
-            "Do not treat it as a separate request:\n"
-            f"{str(prompt or '').strip()}"
-        )
-        try:
-            self._request("turn/steer", {
-                "threadId": run.thread_id,
-                "expectedTurnId": run.turn_id,
-                "input": self._user_input(follow_up, local_images, include_task_policy=False),
-            }, timeout=30)
-        except RuntimeError as exc:
-            if self._is_not_steerable_error(exc):
-                return None
-            raise
-        run.last_event_monotonic = time.monotonic()
-        return run
-
     def _start_turn(self, thread_id: str, prompt: str, model: str, image_paths: list[str] | None = None) -> dict:
-        return self._request("turn/start", {
-            "threadId": thread_id,
-            "input": self._user_input(prompt, image_paths, include_task_policy=True),
-            "model": model, "effort": "low",
-        }, timeout=30)
-
-    @staticmethod
-    def _user_input(
-        prompt: str,
-        image_paths: list[str] | None,
-        *,
-        include_task_policy: bool,
-    ) -> list[dict]:
         from response_policy import apply_response_policy
         styled_prompt = apply_response_policy(prompt)
-        text = styled_prompt.rstrip()
-        if include_task_policy:
-            text = f"{text}\n\n{CODEX_TASK_POLICY}"
         user_input = [
-            {"type": "text", "text": text, "text_elements": []}
+            {"type": "text", "text": f"{styled_prompt.rstrip()}\n\n{CODEX_TASK_POLICY}", "text_elements": []}
         ]
         user_input.extend(
             {"type": "localImage", "path": path, "detail": "original"}
             for path in (image_paths or [])
         )
-        return user_input
+        return self._request("turn/start", {
+            "threadId": thread_id,
+            "input": user_input,
+            "model": model, "effort": "low",
+        }, timeout=30)
 
     @staticmethod
     def _latest_agent_message(turn: dict) -> str:
@@ -477,14 +362,6 @@ class CodexAppServer:
         with self._lock:
             if self._turn_tasks.get(run.turn_id) == run.task_id:
                 self._turn_tasks.pop(run.turn_id, None)
-
-    def _discard_run(self, run: CodexRun) -> None:
-        run.finished = True
-        with self._lock:
-            if self._turn_tasks.get(run.turn_id) == run.task_id:
-                self._turn_tasks.pop(run.turn_id, None)
-            if self._runs.get(run.task_id) is run:
-                self._runs.pop(run.task_id, None)
 
     def _load_conversation_threads(self) -> dict[str, str]:
         try:
@@ -635,36 +512,88 @@ class CodexAppServer:
                 run.turn_id = turn_id
                 self._turn_tasks[turn_id] = task_id
             self.on_event(task_id, {**common, "turn_id": run.turn_id, "status": "running", "current_step": "Codex is working"})
+        elif method == "item/agentMessage/delta":
+            item_id = str(params.get("itemId") or "")
+            if item_id:
+                run.agent_message_deltas[item_id] = (
+                    run.agent_message_deltas.get(item_id, "") + str(params.get("delta") or "")
+                )[:MAX_VISIBLE_PROGRESS_TEXT]
+        elif method == "item/reasoning/summaryTextDelta":
+            item_id = str(params.get("itemId") or "")
+            if item_id:
+                summary_index = max(0, int(params.get("summaryIndex") or 0))
+                summaries = run.reasoning_summary_deltas.setdefault(item_id, {})
+                summaries[summary_index] = (
+                    summaries.get(summary_index, "") + str(params.get("delta") or "")
+                )[:MAX_VISIBLE_PROGRESS_TEXT]
         elif method == "item/started":
-            item = params.get("item") or {}
-            self.on_event(
+            self._emit_item_progress(
                 task_id,
-                {
-                    **common,
-                    "status": "running",
-                    "current_step": self._item_label(item),
-                    **self._item_event(item, "running"),
-                },
+                common,
+                params.get("item") or {},
+                completed=False,
             )
         elif method == "item/completed":
             item = params.get("item") or {}
-            if item.get("type") == "agentMessage" and item.get("text"):
-                run.final_text = str(item["text"])
-            event = self._item_event(item, "completed")
-            if event:
-                self.on_event(
-                    task_id,
-                    {
+            item_type = str(item.get("type") or "")
+            item_id = str(item.get("id") or params.get("itemId") or "")
+            if item_type == "agentMessage":
+                text = self._clean_visible_text(
+                    item.get("text") or run.agent_message_deltas.pop(item_id, "")
+                )
+                phase = str(item.get("phase") or "")
+                if text:
+                    run.last_agent_text = text
+                    if phase == "commentary":
+                        self._emit_progress(
+                            task_id,
+                            common,
+                            self._narration_progress(item_id, text, "commentary"),
+                        )
+                    else:
+                        run.final_text = text
+            elif item_type == "reasoning":
+                summary = self._reasoning_summary(run, item_id, item)
+                if summary:
+                    self._emit_progress(
+                        task_id,
+                        common,
+                        self._narration_progress(item_id, summary, "reasoning_summary"),
+                    )
+                legacy_event = self._item_event(item, "completed")
+                if legacy_event:
+                    self.on_event(task_id, {
                         **common,
                         "status": "running",
                         "current_step": self._item_label(item, completed=True),
-                        **event,
-                    },
-                )
+                        **legacy_event,
+                    })
+            elif item_type == "plan":
+                text = self._clean_visible_text(item.get("text"))
+                if text:
+                    self._emit_progress(
+                        task_id,
+                        common,
+                        self._narration_progress(item_id, text, "plan"),
+                    )
+                legacy_event = self._item_event(item, "completed")
+                if legacy_event:
+                    self.on_event(task_id, {
+                        **common,
+                        "status": "running",
+                        "current_step": self._item_label(item, completed=True),
+                        **legacy_event,
+                    })
+            else:
+                self._emit_item_progress(task_id, common, item, completed=True)
         elif method == "turn/completed":
             status = str((params.get("turn") or {}).get("status") or "completed")
             mapped = {"completed": "completed", "failed": "failed", "interrupted": "cancelled"}.get(status, status)
+            if not run.final_text:
+                run.final_text = run.last_agent_text
             run.finished = True
+            run.agent_message_deltas.clear()
+            run.reasoning_summary_deltas.clear()
             if turn_id:
                 self._turn_tasks.pop(turn_id, None)
             self.on_event(task_id, {**common, "status": mapped, "current_step": "", "result": run.final_text})
@@ -677,6 +606,41 @@ class CodexAppServer:
                     self.on_event(task_id, {**common, "status": "waiting_approval", "current_step": "Waiting for approval"})
                 elif "waitingOnUserInput" in detail:
                     self.on_event(task_id, {**common, "status": "waiting_input", "current_step": "Waiting for user input"})
+
+    def _emit_progress(self, task_id: str, common: dict, progress: dict) -> None:
+        self.on_event(task_id, {
+            **common,
+            "status": "running",
+            "current_step": str(progress.get("title") or "Codex is working"),
+            "progress_event": progress,
+        })
+
+    def _emit_item_progress(
+        self,
+        task_id: str,
+        common: dict,
+        item: dict,
+        *,
+        completed: bool,
+    ) -> None:
+        progress = self._tool_progress_event(item, completed=completed)
+        legacy_event = self._item_event(
+            item,
+            "completed" if completed else "running",
+        )
+        if not progress and not legacy_event:
+            return
+        self.on_event(task_id, {
+            **common,
+            "status": "running",
+            "current_step": (
+                str(progress.get("title") or "")
+                if progress
+                else self._item_label(item, completed=completed)
+            ),
+            **({"progress_event": progress} if progress else {}),
+            **legacy_event,
+        })
 
     @staticmethod
     def _item_label(item: dict, completed: bool = False) -> str:
@@ -736,9 +700,122 @@ class CodexAppServer:
                     if isinstance(value, dict)
                 ]
                 return ", ".join(value for value in paths if value)[:1_000]
-        # Reasoning internals are deliberately not forwarded. The visible title
-        # communicates progress without exposing hidden chain-of-thought.
+        # Reasoning internals are deliberately not forwarded.
         return ""
+
+    @classmethod
+    def _narration_progress(cls, item_id: str, text: str, code: str) -> dict:
+        clean = cls._clean_visible_text(text)
+        return {
+            "event_id": cls._progress_event_id(item_id, code),
+            "kind": "narration",
+            "code": code,
+            "title": clean.splitlines()[0][:240],
+            "status": "completed",
+            "detail": clean,
+            "metadata": {"source": "codex_app_server"},
+        }
+
+    @classmethod
+    def _tool_progress_event(cls, item: dict, completed: bool) -> dict | None:
+        item_type = str(item.get("type") or "")
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            return None
+        status = "completed" if completed else "running"
+        raw_status = str(item.get("status") or "").lower()
+        if completed and ("fail" in raw_status or raw_status == "declined"):
+            status = "failed"
+
+        code = ""
+        started_title = ""
+        completed_title = ""
+        detail = ""
+        metadata: dict[str, object] = {"source": "codex_app_server", "item_type": item_type}
+        if item_type == "commandExecution":
+            code, started_title, completed_title = "command", "Running command", "Ran command"
+            detail = cls._clean_visible_text(item.get("command"))
+        elif item_type == "fileChange":
+            code, started_title, completed_title = "file_change", "Updating files", "Updated files"
+            metadata["count"] = len(item.get("changes") or [])
+        elif item_type == "mcpToolCall":
+            code, started_title, completed_title = "mcp_tool", "Calling MCP tool", "Called MCP tool"
+            detail = ".".join(filter(None, (
+                str(item.get("server") or "").strip(),
+                str(item.get("tool") or "").strip(),
+            )))
+        elif item_type == "dynamicToolCall":
+            code, started_title, completed_title = "dynamic_tool", "Calling tool", "Called tool"
+            detail = ".".join(filter(None, (
+                str(item.get("namespace") or "").strip(),
+                str(item.get("tool") or "").strip(),
+            )))
+        elif item_type == "webSearch":
+            code, started_title, completed_title = "web_search", "Searching the web", "Searched the web"
+            action = item.get("action") if isinstance(item.get("action"), dict) else {}
+            queries = action.get("queries") if isinstance(action.get("queries"), list) else []
+            detail = cls._clean_visible_text(
+                item.get("query") or action.get("query") or (queries[0] if queries else "")
+            )
+        elif item_type == "imageView":
+            code, started_title, completed_title = "image_view", "Viewing image", "Viewed image"
+            metadata["count"] = 1
+        elif item_type == "imageGeneration":
+            code, started_title, completed_title = "image_generation", "Generating image", "Generated image"
+        elif item_type in {"collabAgentToolCall", "subAgentActivity"}:
+            code, started_title, completed_title = (
+                "agent_collaboration",
+                "Coordinating Agents",
+                "Coordinated Agents",
+            )
+            detail = cls._clean_visible_text(item.get("tool") or item.get("kind"))
+        elif item_type == "contextCompaction":
+            code, started_title, completed_title = (
+                "context_compaction",
+                "Compacting context",
+                "Compacted context",
+            )
+        else:
+            return None
+
+        title = completed_title if completed else started_title
+        if status == "failed":
+            title = f"{completed_title} with an error"
+        metadata["code"] = code
+        return {
+            "event_id": cls._progress_event_id(item_id, code),
+            "kind": "tool",
+            "code": code,
+            "title": title,
+            "status": status,
+            "detail": detail[:MAX_VISIBLE_TOOL_DETAIL],
+            "metadata": metadata,
+        }
+
+    @classmethod
+    def _reasoning_summary(cls, run: CodexRun, item_id: str, item: dict) -> str:
+        raw_summary = item.get("summary") if isinstance(item.get("summary"), list) else []
+        summaries = [cls._clean_visible_text(value) for value in raw_summary]
+        summaries = [value for value in summaries if value]
+        if not summaries:
+            buffered = run.reasoning_summary_deltas.get(item_id, {})
+            summaries = [
+                cls._clean_visible_text(buffered[index])
+                for index in sorted(buffered)
+                if cls._clean_visible_text(buffered[index])
+            ]
+        run.reasoning_summary_deltas.pop(item_id, None)
+        return "\n\n".join(summaries)[:MAX_VISIBLE_PROGRESS_TEXT]
+
+    @staticmethod
+    def _progress_event_id(item_id: str, code: str) -> str:
+        clean_item = str(item_id or "").strip()[:160]
+        return f"codex:{code}:{clean_item}" if clean_item else f"codex:{code}"
+
+    @staticmethod
+    def _clean_visible_text(value: object) -> str:
+        text = str(value or "").replace("\x00", "").strip()
+        return text[:MAX_VISIBLE_PROGRESS_TEXT]
 
     @staticmethod
     def _request_label(method: str) -> str:
@@ -747,19 +824,6 @@ class CodexAppServer:
     @staticmethod
     def _contains_chinese(value: str) -> bool:
         return any("\u4e00" <= character <= "\u9fff" for character in str(value or ""))
-
-    @staticmethod
-    def _is_not_steerable_error(error: Exception) -> bool:
-        normalized = str(error or "").lower()
-        return any(marker in normalized for marker in (
-            "expectedturnid",
-            "expected turn",
-            "no active turn",
-            "not active",
-            "not in progress",
-            "turn not found",
-            "thread is idle",
-        ))
 
     def _drain_stderr(self) -> None:
         process = self.process

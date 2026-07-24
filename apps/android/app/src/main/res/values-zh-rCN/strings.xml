@@ -1180,6 +1180,23 @@
     <string name="agent_trace_processing">处理中 %1$s %2$s</string>
     <string name="agent_trace_tool_group_count">运行了 %1$d 个工具步骤</string>
     <string name="agent_trace_tool_group_details">查看工具详情</string>
+    <string name="agent_trace_connector_progress_running">正在执行：%1$s%2$s</string>
+    <string name="agent_trace_connector_progress_completed">已完成：%1$s%2$s</string>
+    <string name="agent_trace_connector_progress_failed">执行失败：%1$s%2$s</string>
+    <string name="agent_trace_connector_operation_web_search">搜索网页</string>
+    <string name="agent_trace_connector_operation_command">运行命令</string>
+    <string name="agent_trace_connector_operation_file_change">更新文件</string>
+    <string name="agent_trace_connector_operation_mcp">调用 MCP 工具</string>
+    <string name="agent_trace_connector_operation_tool">调用工具</string>
+    <string name="agent_trace_connector_operation_image_generation">生成图像</string>
+    <string name="agent_trace_connector_operation_collaboration">协调 Agent</string>
+    <string name="agent_trace_connector_operation_context_compaction">压缩上下文</string>
+    <plurals name="agent_trace_connector_images_viewing">
+        <item quantity="other">正在查看 %1$d 张图像</item>
+    </plurals>
+    <plurals name="agent_trace_connector_images_viewed">
+        <item quantity="other">已查看 %1$d 张图像</item>
+    </plurals>
     <string name="agent_trace_phone_linux_command">本机 Linux: %1$s</string>
     <string name="agent_trace_phone_development_repair">验证失败，正在将证据交回模型修正</string>
     <string name="agent_trace_phone_linux">手机本地 Linux</string>
