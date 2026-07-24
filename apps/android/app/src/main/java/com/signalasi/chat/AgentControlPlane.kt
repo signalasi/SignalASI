@@ -629,6 +629,11 @@ class AgentAdapterDirectory {
         return (localRegistrations() + remote).distinctBy { it.agentId }.sortedBy { it.displayName }
     }
 
+    suspend fun searchAgents(
+        query: AgentNetworkSearchQuery,
+        nowMillis: Long = System.currentTimeMillis()
+    ): AgentNetworkSearchPage = AgentNetworkIndex(registrations()).search(query, nowMillis)
+
     fun localRegistrations(): List<AgentRegistration> = adapters.values
         .map(AgentAdapter::registration)
         .sortedBy(AgentRegistration::displayName)
@@ -778,27 +783,28 @@ object AgentRunRecoveryPolicy {
 class EncryptedAgentRegistry(context: Context) {
     private val appContext = context.applicationContext
     private val database = AgentEncryptedDatabase(appContext, DATABASE)
+    private val index = AgentNetworkIndex(loadRegistrations())
+
+    init {
+        appContext.deleteDatabase(LEGACY_DATABASE)
+    }
 
     @Synchronized
     fun upsert(registration: AgentRegistration): AgentRegistration {
         require(registration.agentId.isNotBlank()) { "Agent id must not be blank" }
         require(registration.installationId.isNotBlank()) { "Installation id must not be blank" }
         require(registration.deviceId.isNotBlank()) { "Device id must not be blank" }
-        val existingRecords = list()
-        val records = existingRecords.toMutableList()
-        val index = records.indexOfFirst { it.agentId == registration.agentId }
-        val existing = records.getOrNull(index)
+        val existing = index.get(registration.agentId)
         val stable = registration.copy(
             installationId = existing?.installationId ?: registration.installationId,
             deviceId = existing?.deviceId ?: registration.deviceId,
             updatedAtMillis = System.currentTimeMillis()
         )
-        if (index >= 0) records[index] = stable else records += stable
-        val after = records.takeLast(MAX_AGENTS)
-        save(after)
+        database.writeString(agentNetworkStorageKey(stable.agentId), stable.toJson().toString())
+        index.upsert(stable)
         GlobalConversationEventBus.publishCapabilityEvents(
             appContext,
-            GlobalCapabilityObservationExtractor.agentMutations(existingRecords, after)
+            GlobalCapabilityObservationExtractor.agentMutations(listOfNotNull(existing), listOf(stable))
         )
         return stable
     }
@@ -811,35 +817,35 @@ class EncryptedAgentRegistry(context: Context) {
         capabilitiesHash: String = "",
         timestampMillis: Long = System.currentTimeMillis()
     ): AgentRegistration? {
-        val existingRecords = list()
-        val records = existingRecords.toMutableList()
-        val index = records.indexOfFirst { it.agentId == agentId }
-        if (index < 0) return null
-        records[index] = records[index].copy(
+        val existing = index.get(agentId) ?: return null
+        val updated = existing.copy(
             status = status,
             activeRuns = activeRuns.coerceAtLeast(0),
-            capabilitiesHash = capabilitiesHash.ifBlank { records[index].capabilitiesHash },
+            capabilitiesHash = capabilitiesHash.ifBlank { existing.capabilitiesHash },
             lastHeartbeatMillis = timestampMillis,
             updatedAtMillis = timestampMillis
         )
-        save(records)
+        database.writeString(agentNetworkStorageKey(agentId), updated.toJson().toString())
+        index.upsert(updated)
         GlobalConversationEventBus.publishCapabilityEvents(
             appContext,
-            GlobalCapabilityObservationExtractor.agentMutations(existingRecords, records, timestampMillis)
+            GlobalCapabilityObservationExtractor.agentMutations(listOf(existing), listOf(updated), timestampMillis)
         )
-        return records[index]
+        return updated
     }
 
     @Synchronized
-    fun list(nowMillis: Long = System.currentTimeMillis()): List<AgentRegistration> = decode(
-        database.readString(KEY_REGISTRY, "[]")
-    ).map { registration ->
-        if (registration.location != AgentResourceLocation.PHONE &&
-            registration.lastHeartbeatMillis > 0L &&
-            nowMillis - registration.lastHeartbeatMillis > HEARTBEAT_TTL_MILLIS &&
-            registration.status !in TERMINAL_OFFLINE_STATES
-        ) registration.copy(status = AgentEndpointStatus.UNREACHABLE) else registration
-    }
+    fun list(nowMillis: Long = System.currentTimeMillis()): List<AgentRegistration> = index.snapshot(nowMillis)
+
+    @Synchronized
+    fun get(agentId: String, nowMillis: Long = System.currentTimeMillis()): AgentRegistration? =
+        index.get(agentId, nowMillis)
+
+    @Synchronized
+    fun search(
+        query: AgentNetworkSearchQuery,
+        nowMillis: Long = System.currentTimeMillis()
+    ): AgentNetworkSearchPage = index.search(query, nowMillis)
 
     @Synchronized
     fun routable(
@@ -853,42 +859,38 @@ class EncryptedAgentRegistry(context: Context) {
 
     @Synchronized
     fun remove(agentId: String): Boolean {
-        val existingRecords = list()
-        val records = existingRecords.toMutableList()
-        val removed = records.removeAll { it.agentId == agentId }
-        if (removed) {
-            save(records)
+        val existing = index.remove(agentId)
+        if (existing != null) {
+            database.remove(agentNetworkStorageKey(agentId))
             GlobalConversationEventBus.publishCapabilityEvents(
                 appContext,
-                GlobalCapabilityObservationExtractor.agentMutations(existingRecords, records)
+                GlobalCapabilityObservationExtractor.agentMutations(listOf(existing), emptyList())
             )
         }
-        return removed
+        return existing != null
     }
 
     @Synchronized
-    fun clear() = database.clear()
-
-    private fun save(records: List<AgentRegistration>) {
-        val array = JSONArray()
-        records.forEach { array.put(it.toJson()) }
-        database.writeString(KEY_REGISTRY, array.toString())
+    fun clear() {
+        database.clear()
+        index.clear()
     }
 
-    private fun decode(raw: String): List<AgentRegistration> = runCatching {
-        val array = JSONArray(raw)
-        buildList {
-            for (index in 0 until array.length()) array.optJSONObject(index)?.toRegistration()?.let(::add)
-        }
-    }.getOrDefault(emptyList())
+    private fun loadRegistrations(): List<AgentRegistration> = database.keys(AGENT_KEY_PREFIX).mapNotNull { key ->
+        runCatching {
+            JSONObject(database.readString(key, "{}")).toRegistration()
+        }.getOrNull()
+    }
 
     companion object {
-        private const val DATABASE = "signalasi_agent_registry_v1"
-        private const val KEY_REGISTRY = "registrations"
-        private const val MAX_AGENTS = 512
-        private const val HEARTBEAT_TTL_MILLIS = 10 * 60_000L
-        private val ROUTABLE_STATES = setOf(AgentEndpointStatus.ONLINE, AgentEndpointStatus.IDLE, AgentEndpointStatus.BUSY)
-        private val TERMINAL_OFFLINE_STATES = setOf(AgentEndpointStatus.OFFLINE, AgentEndpointStatus.UNREACHABLE)
+        private const val DATABASE = "signalasi_agent_registry_v2"
+        private const val LEGACY_DATABASE = "signalasi_agent_registry_v1.db"
+        private const val AGENT_KEY_PREFIX = "agent:"
+        private val ROUTABLE_STATES = setOf(
+            AgentEndpointStatus.ONLINE,
+            AgentEndpointStatus.IDLE,
+            AgentEndpointStatus.BUSY
+        )
     }
 }
 

@@ -98,6 +98,25 @@ class AgentEncryptedDatabase(
         return false
     }
 
+    @Synchronized
+    fun keys(prefix: String = ""): List<String> {
+        val selection = if (prefix.isBlank()) null else "substr(storage_key, 1, ?) = ?"
+        val selectionArgs = if (prefix.isBlank()) null else arrayOf(prefix.length.toString(), prefix)
+        readableDatabase.query(
+            "encrypted_values",
+            arrayOf("storage_key"),
+            selection,
+            selectionArgs,
+            null,
+            null,
+            "storage_key ASC"
+        ).use { cursor ->
+            return buildList {
+                while (cursor.moveToNext()) add(cursor.getString(0))
+            }
+        }
+    }
+
     private fun associatedData(key: String): ByteArray =
         "database:$databaseName:$key".toByteArray(Charsets.UTF_8)
 }

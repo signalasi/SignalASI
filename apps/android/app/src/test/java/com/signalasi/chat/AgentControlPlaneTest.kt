@@ -325,6 +325,28 @@ class AgentControlPlaneTest {
     }
 
     @Test
+    fun adapterDirectorySearchesNamedAgentsAcrossTheConnectedNetwork() = runBlocking {
+        val codex = testRegistration()
+        val hermes = testRegistration().copy(
+            agentId = "hermes",
+            installationId = "hermes-installation",
+            displayName = "Hermes",
+            capabilities = setOf(AgentCapability.CHAT, AgentCapability.RESEARCH, AgentCapability.LIVE_DATA)
+        )
+        val directory = AgentAdapterDirectory().apply {
+            register(TransportBackedAgentAdapter(codex, FakeAgentTransport(codex, codex.protocol)))
+            register(TransportBackedAgentAdapter(hermes, FakeAgentTransport(hermes, hermes.protocol)))
+        }
+
+        val result = directory.searchAgents(
+            AgentNetworkSearchQuery(text = "Codex", routableOnly = false)
+        )
+
+        assertEquals("codex", result.hits.single().registration.agentId)
+        assertEquals("Codex", result.hits.single().registration.displayName)
+    }
+
+    @Test
     fun recoveryPolicyReconnectsOnlyDurableDesktopRuns() {
         val event = AgentRunControlEvent(
             conversationId = "conversation",
