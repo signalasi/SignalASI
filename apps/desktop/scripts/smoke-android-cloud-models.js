@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const { createAdb } = require("./android-adb");
+const { probeChatHistory, waitForChatHistory, requireProbeMatch } = require("./android-chat-history-probe");
 
 const root = path.resolve(__dirname, "..");
 const workspaceRoot = path.resolve(root, "..");
@@ -10,15 +11,13 @@ const apkPath = path.join(androidDir, "app", "build", "outputs", "apk", "debug",
 const packageName = "com.signalasi.chat";
 const activityName = `${packageName}/.MainActivity`;
 const appStorePrefs = "shared_prefs/signalasi_app_store.xml";
-const oldAppStorePrefs = "shared_prefs/hermes_app_store.xml";
-const historyPrefs = "shared_prefs/signalasi_chat_history.xml";
 const debugPrefs = "shared_prefs/signalasi_debug.xml";
 const outDir = path.join(root, "ui-smoke");
 const debugDump = path.join(outDir, "android-cloud-models-debug.xml");
 const storeDump = path.join(outDir, "android-cloud-models-app-store.xml");
 const chatDump = path.join(outDir, "android-cloud-models-chat.xml");
 const directCallDump = path.join(outDir, "android-cloud-models-direct-call.xml");
-const directHistoryDump = path.join(outDir, "android-cloud-models-direct-history.xml");
+const directHistoryDump = path.join(outDir, "android-cloud-models-direct-history.json");
 
 function log(message) {
   console.log(`[android-cloud-models-smoke] ${message}`);
@@ -181,15 +180,6 @@ function startFakeOpenAiServer(replyToken, promptToken) {
   });
 }
 
-async function waitForHistoryToken(token, attempts = 18) {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    await sleep(800);
-    const history = readAppFile(historyPrefs);
-    if (history.includes(token)) return history;
-  }
-  return readAppFile(historyPrefs);
-}
-
 async function main() {
   if (!fs.existsSync(apkPath)) {
     fail(`Android debug APK missing. Build it first: ${apkPath}`);
@@ -198,6 +188,7 @@ async function main() {
   const token = `CLOUD_${Date.now()}`;
   const promptToken = `CLOUD_API_PROMPT_${Date.now()}`;
   const replyToken = `CLOUD_API_REPLY_${Date.now()}`;
+  const fakeApiKey = `sk-regression-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   let fakeServer;
 
   log("installing debug APK");
@@ -206,15 +197,11 @@ async function main() {
   adb(["shell", "am", "force-stop", packageName]);
 
   const originalAppStore = readAppFile(appStorePrefs);
-  const originalOldAppStore = readAppFile(oldAppStorePrefs);
-  const originalHistory = readAppFile(historyPrefs);
   const originalDebug = readAppFile(debugPrefs);
 
   try {
     log("resetting app store snapshot for isolated cloud model flow");
     restoreAppFile(appStorePrefs, "");
-    restoreAppFile(oldAppStorePrefs, "");
-    restoreAppFile(historyPrefs, "");
     restoreAppFile(debugPrefs, "");
     adb(["shell", "am", "force-stop", packageName]);
 
@@ -268,30 +255,47 @@ async function main() {
     adb(["reverse", `tcp:${fakeServer.port}`, `tcp:${fakeServer.port}`]);
     const fakeEndpoint = `http://127.0.0.1:${fakeServer.port}/v1/chat/completions`;
     deepseek.cloud_endpoint = fakeEndpoint;
-    deepseek.cloud_api_key = "smoke-key";
+    deepseek.cloud_api_key = fakeApiKey;
     deepseek.cloud_api_style = "openai";
     deepseek.cloud_model = "deepseek-v4-flash";
     deepseek.selected_cloud_model = "deepseek-v4-flash";
     for (const model of deepseek.cloud_models || []) {
       model.endpoint = fakeEndpoint;
-      model.api_key = "smoke-key";
+      model.api_key = fakeApiKey;
       model.api_style = "openai";
     }
     restoreAppFile(appStorePrefs, appStoreXml(store.contacts));
-    restoreAppFile(historyPrefs, "");
     adb(["shell", "am", "force-stop", packageName]);
     adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_open_contact", "cloud:deepseek"]);
     await sleep(2500);
     adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_contact", "cloud:deepseek", "--es", "signalasi_debug_text", promptToken]);
-    const directHistory = await waitForHistoryToken(replyToken);
-    fs.writeFileSync(directHistoryDump, directHistory || "");
+    const outgoingHistory = await waitForChatHistory({
+      adb,
+      packageName,
+      activityName,
+      contactId: "cloud:deepseek",
+      contentToken: promptToken,
+      requiredStages: ["cloud_request", "cloud_reply"]
+    }, 20_000);
+    const replyHistory = await waitForChatHistory({
+      adb,
+      packageName,
+      activityName,
+      contactId: "cloud:deepseek",
+      contentToken: replyToken,
+      requiredStages: ["cloud_reply_received"]
+    }, 20_000);
+    fs.writeFileSync(
+      directHistoryDump,
+      `${JSON.stringify({ outgoing: outgoingHistory, reply: replyHistory }, null, 2)}\n`
+    );
     await sleep(700);
     const directXml = dumpWindowTo(directCallDump, "signalasi-cloud-models-direct-call.xml");
     const request = fakeServer.requests.find((entry) => entry.url === "/v1/chat/completions");
     if (!request) {
       fail(`Android did not call the fake cloud model API. Dump saved at ${directHistoryDump}`);
     }
-    if (request.method !== "POST" || request.authorization !== "Bearer smoke-key") {
+    if (request.method !== "POST" || request.authorization !== `Bearer ${fakeApiKey}`) {
       fail(`Android cloud model API request used unexpected method or auth: ${JSON.stringify(request)}`);
     }
     if (request.body.model !== "deepseek-v4-flash") {
@@ -300,9 +304,8 @@ async function main() {
     if (!JSON.stringify(request.body.messages || []).includes(promptToken)) {
       fail(`Android cloud model API request did not include prompt token ${promptToken}: ${JSON.stringify(request.body)}`);
     }
-    if (!directHistory.includes(replyToken) || !directHistory.includes("cloud_request") || !directHistory.includes("cloud_reply")) {
-      fail(`Direct cloud model reply or delivery trace was not persisted. Dumps saved at ${directHistoryDump} and ${directCallDump}`);
-    }
+    requireProbeMatch(outgoingHistory, "direct cloud request history");
+    requireProbeMatch(replyHistory, "direct cloud reply history");
     if (!directXml.includes(replyToken)) {
       fail(`Direct cloud model reply was not visible in chat. Dump saved at ${directCallDump}`);
     }
@@ -313,11 +316,23 @@ async function main() {
       adb(["reverse", "--remove", `tcp:${fakeServer.port}`]);
       await new Promise((resolve) => fakeServer.server.close(resolve));
     }
+    for (const contentToken of [promptToken, replyToken]) {
+      try {
+        await probeChatHistory({
+          adb,
+          packageName,
+          activityName,
+          contactId: "cloud:deepseek",
+          contentToken,
+          deleteMatches: true
+        });
+      } catch {
+        // Preserve the original failure; direct-cloud smoke tokens are unique.
+      }
+    }
     adb(["shell", "am", "force-stop", packageName]);
     log("restoring original app state");
     restoreAppFile(appStorePrefs, originalAppStore);
-    restoreAppFile(oldAppStorePrefs, originalOldAppStore);
-    restoreAppFile(historyPrefs, originalHistory);
     restoreAppFile(debugPrefs, originalDebug);
     adb(["shell", "am", "force-stop", packageName]);
   }

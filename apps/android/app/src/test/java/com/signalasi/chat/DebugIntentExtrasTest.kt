@@ -29,7 +29,8 @@ class DebugIntentExtrasTest {
                     "signalasi_debug_open_contact_detail",
                     "signalasi_debug_open_cloud_provider",
                     "signalasi_debug_control_center_page",
-                    "signalasi_debug_incoming_b64"
+                    "signalasi_debug_incoming_b64",
+                    "signalasi_debug_chat_history_probe_b64"
                 )
             )
         )

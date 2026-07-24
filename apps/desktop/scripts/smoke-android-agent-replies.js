@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { createAdb } = require("./android-adb");
+const { probeChatHistory, requireProbeMatch } = require("./android-chat-history-probe");
 
 const root = path.resolve(__dirname, "..");
 const workspaceRoot = path.resolve(root, "..");
@@ -9,7 +10,6 @@ const apkPath = path.join(androidDir, "app", "build", "outputs", "apk", "debug",
 const packageName = "com.signalasi.chat";
 const activityName = `${packageName}/.MainActivity`;
 const outDir = path.join(root, "ui-smoke");
-const historyPrefs = "shared_prefs/signalasi_chat_history.xml";
 const appStorePrefs = "shared_prefs/signalasi_app_store.xml";
 const trustPrefs = "shared_prefs/signalasi_signal_trust.xml";
 const agents = [
@@ -64,16 +64,6 @@ async function waitForWindowText(targetPath, remoteName, requiredText, attempts 
   return xml;
 }
 
-async function waitForAppFileText(file, requiredText, attempts = 40) {
-  let value = "";
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    value = readAppFile(file);
-    if (value.includes(requiredText)) return value;
-    await sleep(250);
-  }
-  return value;
-}
-
 function longReplyFor(agentName, token) {
   return [
     `${agentName} agent reply smoke.`,
@@ -98,24 +88,46 @@ async function verifyAgentReply(agent) {
   }), "utf8").toString("base64");
   const dumpPath = path.join(outDir, `android-agent-reply-${agent.id}.xml`);
 
-  log(`injecting long ${agent.name} reply`);
-  adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_incoming_b64", payloadB64]);
-  const persistedBeforeOpen = await waitForAppFileText(historyPrefs, token);
-  if (!persistedBeforeOpen.includes(token)) {
-    fail(`${agent.name} reply was not persisted before opening its chat`);
-  }
+  try {
+    log(`injecting long ${agent.name} reply`);
+    adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_incoming_b64", payloadB64]);
+    const persisted = await probeChatHistory({
+      adb,
+      packageName,
+      activityName,
+      contactId: agent.id,
+      contentToken: token,
+      requiredStages: [
+        "desktop_reply_publish_queued",
+        "desktop_reply_broker_ack",
+        "received",
+        "decrypted",
+        "persisted"
+      ]
+    });
+    requireProbeMatch(persisted, `${agent.name} reply history`);
 
-  log(`opening ${agent.name} chat and verifying full reply tail`);
-  adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_open_contact", agent.id]);
-  const xml = await waitForWindowText(dumpPath, `signalasi-agent-reply-${agent.id}.xml`, token);
-  const history = readAppFile(historyPrefs);
-  const historyDump = path.join(outDir, `android-agent-reply-${agent.id}-history.xml`);
-  fs.writeFileSync(historyDump, history);
-  if (!xml.includes(token)) {
-    fail(`${agent.name} chat did not show the complete reply tail ${token}. Dumps saved at ${dumpPath} and ${historyDump}`);
-  }
-  if (!history.includes(token) || !history.includes("desktop_reply_publish_queued") || !history.includes("desktop_reply_broker_ack")) {
-    fail(`${agent.name} history did not persist the complete reply and delivery trace. Dump saved at ${historyDump}`);
+    log(`opening ${agent.name} chat and verifying full reply tail`);
+    adb(["shell", "am", "start", "-n", activityName, "--es", "signalasi_debug_open_contact", agent.id]);
+    const xml = await waitForWindowText(dumpPath, `signalasi-agent-reply-${agent.id}.xml`, token);
+    const historyDump = path.join(outDir, `android-agent-reply-${agent.id}-history.json`);
+    fs.writeFileSync(historyDump, `${JSON.stringify(persisted, null, 2)}\n`);
+    if (!xml.includes(token)) {
+      fail(`${agent.name} chat did not show the complete reply tail ${token}. Dumps saved at ${dumpPath} and ${historyDump}`);
+    }
+  } finally {
+    try {
+      await probeChatHistory({
+        adb,
+        packageName,
+        activityName,
+        contactId: agent.id,
+        contentToken: token,
+        deleteMatches: true
+      });
+    } catch {
+      // Preserve the verification failure; smoke messages use unique tokens.
+    }
   }
 }
 
@@ -130,7 +142,6 @@ async function main() {
   adb(["shell", "input", "keyevent", "KEYCODE_WAKEUP"]);
   adb(["shell", "am", "force-stop", packageName]);
 
-  const originalHistory = readAppFile(historyPrefs);
   const originalAppStore = readAppFile(appStorePrefs);
   const originalTrust = readAppFile(trustPrefs);
 
@@ -164,7 +175,6 @@ async function main() {
   } finally {
     adb(["shell", "am", "force-stop", packageName]);
     log("restoring original app state");
-    restoreAppFile(historyPrefs, originalHistory);
     restoreAppFile(appStorePrefs, originalAppStore);
     restoreAppFile(trustPrefs, originalTrust);
     adb(["shell", "am", "force-stop", packageName]);

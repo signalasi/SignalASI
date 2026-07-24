@@ -13174,6 +13174,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         val backupRoundtripToken = intent?.getStringExtra("signalasi_debug_backup_roundtrip")?.trim().orEmpty()
         val cloudModelsRoundtripToken = intent?.getStringExtra("signalasi_debug_cloud_models_roundtrip")?.trim().orEmpty()
+        val chatHistoryProbeEncoded = intent?.getStringExtra("signalasi_debug_chat_history_probe_b64")?.trim().orEmpty()
         val voiceSettingsRoundtripToken = intent?.getStringExtra("signalasi_debug_voice_settings_roundtrip")?.trim().orEmpty()
         val controlCenterRoundtripToken = intent?.getStringExtra("signalasi_debug_control_center_roundtrip")?.trim().orEmpty()
         val controlCenterThemeToken = intent?.getStringExtra("signalasi_debug_control_center_theme")?.trim().orEmpty()
@@ -13262,6 +13263,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         }
         if (cloudModelsRoundtripToken.isNotBlank()) {
             runDebugCloudModelsRoundtrip(cloudModelsRoundtripToken)
+            return
+        }
+        if (chatHistoryProbeEncoded.isNotBlank()) {
+            runDebugChatHistoryProbe(chatHistoryProbeEncoded)
             return
         }
         if (voiceSettingsRoundtripToken.isNotBlank()) {
@@ -13472,76 +13477,114 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     private fun runDebugBackupRoundtrip(token: String) {
         if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
         val prefs = getSharedPreferences("signalasi_debug", MODE_PRIVATE)
-        val password = "SignalASIBackupSmoke2026"
-        val contactToken = "backup-smoke-${token.lowercase(Locale.US).replace(Regex("[^a-z0-9_-]+"), "-")}"
-        val messageToken = "BACKUP_ROUNDTRIP_MESSAGE_$token"
-        runCatching {
-            val contact = AppStore.addCloudModelContact(
-                this,
-                displayName = "Backup Smoke Model",
-                provider = "Backup Smoke",
-                modelId = contactToken,
-                endpoint = "http://127.0.0.1:9/v1/chat/completions",
-                apiKey = "backup-smoke-key",
-                apiStyle = "openai"
-            )
-            val contactId = contact.optString("id")
-            val message = JSONObject()
-                .put("id", System.currentTimeMillis())
-                .put("content", messageToken)
-                .put("isMine", false)
-                .put("contactId", contactId)
-                .put("isSystem", false)
-                .put("timestamp", System.currentTimeMillis())
-                .put("deliveryStatus", "")
-                .put("deliveryTrace", JSONArray().put(JSONObject()
-                    .put("stage", "backup_roundtrip_seed")
-                    .put("at", System.currentTimeMillis())
-                    .put("detail", "debug")))
-            val historyRoot = JSONObject()
-            historyRoot.put(contactId, JSONArray().put(message))
-            ChatHistoryStore.replaceAll(this, historyRoot)
+        historyExecutor.execute {
+            val originalHistory = ChatHistoryStore.readAll(this)
+            val password = "SignalASIBackupSmoke2026"
+            val contactToken = "backup-smoke-${token.lowercase(Locale.US).replace(Regex("[^a-z0-9_-]+"), "-")}"
+            val messageToken = "BACKUP_ROUNDTRIP_MESSAGE_$token"
+            runCatching {
+                val contact = AppStore.addCloudModelContact(
+                    this,
+                    displayName = "Backup Smoke Model",
+                    provider = "Backup Smoke",
+                    modelId = contactToken,
+                    endpoint = "http://127.0.0.1:9/v1/chat/completions",
+                    apiKey = "backup-smoke-key",
+                    apiStyle = "openai"
+                )
+                val contactId = contact.optString("id")
+                val message = JSONObject()
+                    .put("id", System.currentTimeMillis())
+                    .put("content", messageToken)
+                    .put("isMine", false)
+                    .put("contactId", contactId)
+                    .put("isSystem", false)
+                    .put("timestamp", System.currentTimeMillis())
+                    .put("deliveryStatus", "")
+                    .put("deliveryTrace", JSONArray().put(JSONObject()
+                        .put("stage", "backup_roundtrip_seed")
+                        .put("at", System.currentTimeMillis())
+                        .put("detail", "debug")))
+                val historyRoot = JSONObject()
+                historyRoot.put(contactId, JSONArray().put(message))
+                ChatHistoryStore.replaceAll(this, historyRoot)
 
-            val backup = AppStore.exportBackup(
-                this,
-                password = password,
-                includeContacts = true,
-                includeMessages = true
-            )
-            val backupText = backup.readText(Charsets.UTF_8)
-            getSharedPreferences("signalasi_app_store", MODE_PRIVATE).edit()
-                .putString("contacts", JSONArray().toString())
-                .putString("friend_requests", JSONArray().toString())
-                .commit()
-            ChatHistoryStore.replaceAll(this, JSONObject())
+                val backup = AppStore.exportBackup(
+                    this,
+                    password = password,
+                    includeContacts = true,
+                    includeMessages = true
+                )
+                val backupText = backup.readText(Charsets.UTF_8)
+                getSharedPreferences("signalasi_app_store", MODE_PRIVATE).edit()
+                    .putString("contacts", JSONArray().toString())
+                    .putString("friend_requests", JSONArray().toString())
+                    .commit()
+                ChatHistoryStore.replaceAll(this, JSONObject())
 
-            AppStore.importBackup(this, backup, password, includeMessages = true)
-            val restoredContacts = AppStore.contacts(this).toString()
-            val restoredHistory = ChatHistoryStore.readAll(this).toString()
-            val contactRestored = restoredContacts.contains(contactToken) && restoredContacts.contains("Backup Smoke")
-            val messageRestored = restoredHistory.contains(messageToken)
-            backup.delete()
-            val ok = backupText.contains("\"type\":\"signalasi_backup\"") && contactRestored && messageRestored
-            prefs.edit()
-                .putString("backup_roundtrip_result", JSONObject()
-                    .put("ok", ok)
-                    .put("token", token)
-                    .put("contact_id", contactId)
-                    .put("contact_restored", contactRestored)
-                    .put("message_restored", messageRestored)
-                    .put("encrypted_backup", backupText.contains("\"cipher\":\"aes-256-gcm\""))
-                    .toString())
-                .commit()
-            loadChatHistory()
-            refreshContactList()
-            refreshDirectoryContacts()
-        }.getOrElse { error ->
-            prefs.edit()
-                .putString("backup_roundtrip_result", JSONObject()
-                    .put("ok", false)
-                    .put("token", token)
+                AppStore.importBackup(this, backup, password, includeMessages = true)
+                val restoredContacts = AppStore.contacts(this).toString()
+                val restoredHistory = ChatHistoryStore.readAll(this).toString()
+                val contactRestored = restoredContacts.contains(contactToken) && restoredContacts.contains("Backup Smoke")
+                val messageRestored = restoredHistory.contains(messageToken)
+                backup.delete()
+                val ok = backupText.contains("\"type\":\"signalasi_backup\"") && contactRestored && messageRestored
+                prefs.edit()
+                    .putString("backup_roundtrip_result", JSONObject()
+                        .put("ok", ok)
+                        .put("token", token)
+                        .put("contact_id", contactId)
+                        .put("contact_restored", contactRestored)
+                        .put("message_restored", messageRestored)
+                        .put("encrypted_backup", backupText.contains("\"cipher\":\"aes-256-gcm\""))
+                        .toString())
+                    .commit()
+            }.getOrElse { error ->
+                prefs.edit()
+                    .putString("backup_roundtrip_result", JSONObject()
+                        .put("ok", false)
+                        .put("token", token)
+                        .put("error", error.message ?: error.javaClass.simpleName)
+                        .toString())
+                    .commit()
+            }
+            runCatching {
+                ChatHistoryStore.replaceAll(this, originalHistory)
+            }.onFailure { error ->
+                prefs.edit()
+                    .putString("backup_roundtrip_result", JSONObject()
+                        .put("ok", false)
+                        .put("token", token)
+                        .put("error", "history_restore_failed:${error.message ?: error.javaClass.simpleName}")
+                        .toString())
+                    .commit()
+            }
+            handler.post {
+                loadChatHistory()
+                refreshContactList()
+                refreshDirectoryContacts()
+            }
+        }
+    }
+
+    private fun runDebugChatHistoryProbe(encodedRequest: String) {
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
+        val prefs = getSharedPreferences("signalasi_debug", MODE_PRIVATE)
+        historyExecutor.execute {
+            var requestId = ""
+            val result = runCatching {
+                val decoded = String(Base64.decode(encodedRequest, Base64.DEFAULT), Charsets.UTF_8)
+                val request = JSONObject(decoded)
+                requestId = request.optString("request_id")
+                DebugChatHistoryProbe.run(this, request)
+            }.getOrElse { error ->
+                JSONObject()
+                    .put("request_id", requestId)
+                    .put("storage", "encrypted_sqlite")
                     .put("error", error.message ?: error.javaClass.simpleName)
-                    .toString())
+            }
+            prefs.edit()
+                .putString("chat_history_probe_result", result.toString())
                 .commit()
         }
     }
