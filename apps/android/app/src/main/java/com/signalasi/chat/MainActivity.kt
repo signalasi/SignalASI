@@ -160,6 +160,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         private const val CAPABILITY_KIND_SKILL = "skill"
         private const val MAX_AGENT_ATTACHMENTS = 10
         private const val MAX_AGENT_ATTACHMENT_BYTES = 20L * 1024L * 1024L
+        private const val MAX_CONNECTOR_PROGRESS_TEXT_CHARACTERS = 2_000
+        private const val MAX_CONNECTOR_PROGRESS_DETAIL_CHARACTERS = 240
         private const val AGENT_REGISTRY_SYNC_INTERVAL_MILLIS = 5_000L
         private const val AGENT_STARTUP_MAINTENANCE_DELAY_MILLIS = 350L
         private const val CONTROL_CENTER_HOME_CACHE_MILLIS = 30_000L
@@ -1536,6 +1538,32 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             taskRuntime,
             turnId
         ) ?: return true
+        envelope.optJSONObject("progress_event")?.let { progress ->
+            val eventId = progress.optString("event_id").trim()
+            val progressText = connectorProgressText(progress)
+            if (eventId.isNotBlank() && progressText.isNotBlank()) {
+                val narration = progress.optString("kind") == "narration"
+                agentTranscriptStore.upsert(
+                    AgentTranscriptRole.PROCESS,
+                    progressText,
+                    dedupeKey = buildString {
+                        append("connector-event:")
+                        append(taskId)
+                        append(':')
+                        append(if (narration) "REASONING_SUMMARY" else "TOOL_EVENT")
+                        append(':')
+                        append(eventId)
+                    },
+                    timestampMillis = progress.optLong(
+                        "updated_at",
+                        progress.optLong("created_at", envelope.optLong("updated_at", System.currentTimeMillis()))
+                    ),
+                    conversationId = conversationId,
+                    turnId = turnId,
+                    taskId = taskId
+                )
+            }
+        }
         // A task can gain a Codex turn id after it starts. Keep one stable key so
         // accepted, running steps, and completion update one process row in place.
         val connectorProcessKey = "connector-task:$taskId"
@@ -1619,6 +1647,61 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             }
         }
         return true
+    }
+
+    private fun connectorProgressText(progress: JSONObject): String {
+        val kind = progress.optString("kind")
+        val code = progress.optString("code").ifBlank {
+            progress.optJSONObject("metadata")?.optString("code").orEmpty()
+        }
+        val detail = progress.optString("detail").trim()
+        val title = progress.optString("title").trim()
+        if (kind == "narration" || code in setOf("commentary", "reasoning_summary", "plan")) {
+            return detail.ifBlank { title }.take(MAX_CONNECTOR_PROGRESS_TEXT_CHARACTERS)
+        }
+        val status = progress.optString("status").ifBlank { "completed" }
+        val metadata = progress.optJSONObject("metadata")
+        val count = metadata?.optInt("count", 1)?.coerceAtLeast(1) ?: 1
+        if (code == "image_view") {
+            return resources.getQuantityString(
+                if (status == "running") {
+                    R.plurals.agent_trace_connector_images_viewing
+                } else {
+                    R.plurals.agent_trace_connector_images_viewed
+                },
+                count,
+                count
+            )
+        }
+        val operation = getString(when (code) {
+            "web_search" -> R.string.agent_trace_connector_operation_web_search
+            "command" -> R.string.agent_trace_connector_operation_command
+            "file_change" -> R.string.agent_trace_connector_operation_file_change
+            "mcp_tool" -> R.string.agent_trace_connector_operation_mcp
+            "dynamic_tool" -> R.string.agent_trace_connector_operation_tool
+            "image_generation" -> R.string.agent_trace_connector_operation_image_generation
+            "agent_collaboration" -> R.string.agent_trace_connector_operation_collaboration
+            "context_compaction" -> R.string.agent_trace_connector_operation_context_compaction
+            else -> return title.take(MAX_CONNECTOR_PROGRESS_TEXT_CHARACTERS)
+        })
+        val suffix = detail
+            .lineSequence()
+            .firstOrNull()
+            .orEmpty()
+            .trim()
+            .take(MAX_CONNECTOR_PROGRESS_DETAIL_CHARACTERS)
+            .takeIf(String::isNotBlank)
+            ?.let { " · $it" }
+            .orEmpty()
+        return getString(
+            when (status) {
+                "running" -> R.string.agent_trace_connector_progress_running
+                "failed" -> R.string.agent_trace_connector_progress_failed
+                else -> R.string.agent_trace_connector_progress_completed
+            },
+            operation,
+            suffix
+        )
     }
 
     private fun markDesktopDomainAvailable(contactId: String) {

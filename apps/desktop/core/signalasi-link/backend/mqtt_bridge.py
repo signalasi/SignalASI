@@ -1127,12 +1127,20 @@ class _TaskProgressEventGate:
         self._last_status = ""
         self._last_step = ""
         self._last_status_seq = 0
+        self._last_progress_signature: tuple = ()
         self._last_running_publish_at_ms: int | None = None
         self._lock = threading.Lock()
 
     def should_publish(self, task: dict, now_ms: int | None = None) -> bool:
         status = str(task.get("status") or "").strip().lower()
         step = str(task.get("current_step") or "").strip()
+        events = task.get("events") if isinstance(task.get("events"), list) else []
+        latest_event = events[-1] if events and isinstance(events[-1], dict) else {}
+        progress_signature = (
+            str(latest_event.get("event_id") or ""),
+            str(latest_event.get("status") or ""),
+            int(latest_event.get("updated_at") or latest_event.get("created_at") or 0),
+        )
         status_seq = int(task.get("status_seq") or 0)
         observed_at_ms = int(time.monotonic() * 1000) if now_ms is None else int(now_ms)
         with self._lock:
@@ -1146,21 +1154,27 @@ class _TaskProgressEventGate:
             if not _should_publish_task_status(status):
                 self._last_status = status
                 self._last_step = step
+                self._last_progress_signature = progress_signature
                 return False
             if status != "running":
                 self._last_status = status
                 self._last_step = step
+                self._last_progress_signature = progress_signature
                 return True
             first_running_event = self._last_status != "running"
             step_changed = self._last_status == "running" and step != self._last_step
+            progress_changed = (
+                bool(progress_signature[0]) and progress_signature != self._last_progress_signature
+            )
             heartbeat_due = (
                 self._last_running_publish_at_ms is not None
                 and observed_at_ms - self._last_running_publish_at_ms >= self.heartbeat_interval_ms
             )
-            if not (first_running_event or step_changed or heartbeat_due):
+            if not (first_running_event or step_changed or progress_changed or heartbeat_due):
                 return False
             self._last_status = status
             self._last_step = step
+            self._last_progress_signature = progress_signature
             self._last_running_publish_at_ms = observed_at_ms
             return True
 
@@ -1492,6 +1506,8 @@ def _agent_task_payload(
 ) -> dict:
     status = str(task.get("status") or "")
     stage = f"agent_{status}"
+    events = task.get("events") if isinstance(task.get("events"), list) else []
+    progress_event = events[-1] if events and isinstance(events[-1], dict) else {}
     return {
         "type": "agent_task_event",
         "task_id": task.get("task_id", ""),
@@ -1511,6 +1527,7 @@ def _agent_task_payload(
         "turn_id": _client_task_turn_id(task),
         "agent_turn_id": task.get("turn_id", ""),
         "current_step": task.get("current_step", ""),
+        "progress_event": progress_event,
         "error": task.get("error", ""),
         "output_files": task.get("output_files", []),
         "desktop_id": resolved_desktop_id,
@@ -1880,12 +1897,25 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                         "No annotated image was generated. Send it again and I will reply only after the image file exists."
                     )
                     event["error"] = "Requested image artifact was not generated"
-            updated = agent_task_manager.update(
-                task_id, event_status, on_event=publish_event,
-                thread_id=event.get("thread_id"), turn_id=event.get("turn_id"),
-                current_step=event.get("current_step"), result=event_result,
-                error=event.get("error"),
-            )
+            progress = event.get("progress_event")
+            if event_status == "running" and isinstance(progress, dict):
+                updated = agent_task_manager.add_event(
+                    task_id=task_id,
+                    event_id=str(progress.get("event_id") or ""),
+                    kind=str(progress.get("kind") or "step"),
+                    title=str(progress.get("title") or event.get("current_step") or "Codex is working"),
+                    status=str(progress.get("status") or "completed"),
+                    detail=str(progress.get("detail") or ""),
+                    metadata=progress.get("metadata") if isinstance(progress.get("metadata"), dict) else {},
+                    on_event=publish_event,
+                )
+            else:
+                updated = agent_task_manager.update(
+                    task_id, event_status, on_event=publish_event,
+                    thread_id=event.get("thread_id"), turn_id=event.get("turn_id"),
+                    current_step=event.get("current_step"), result=event_result,
+                    error=event.get("error"),
+                )
             if (
                 updated and not result_published and event_status in {"completed", "failed", "timed_out"}
                 and updated.status == event_status and updated.result

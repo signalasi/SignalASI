@@ -178,6 +178,39 @@ class AgentTranscriptPresentationPolicyTest {
     }
 
     @Test
+    fun replacesGenericConnectorFallbacksWithVisibleCodexProgress() {
+        val entries = listOf(
+            entry("Analyzed the request", AgentTranscriptRole.PROCESS, "conversation", "turn", 1L,
+                "audit:1:REASONING_SUMMARY:fallback"),
+            entry("Running Codex", AgentTranscriptRole.PROCESS, "conversation", "turn", 2L,
+                "audit:2:TOOL_STARTED:codex"),
+            entry("I will inspect the provided input before acting.", AgentTranscriptRole.PROCESS,
+                "conversation", "turn", 3L,
+                "connector-event:task:REASONING_SUMMARY:codex:commentary:1"),
+            entry("Viewed 1 image", AgentTranscriptRole.PROCESS, "conversation", "turn", 4L,
+                "connector-event:task:TOOL_EVENT:codex:image_view:1")
+        )
+
+        val segments = AgentTranscriptPresentationPolicy.processSegments(entries)
+        val visibleText = segments.flatMap { segment -> segment.entries }.map(AgentTranscriptEntry::text)
+
+        assertEquals(
+            listOf(
+                "I will inspect the provided input before acting.",
+                "Viewed 1 image"
+            ),
+            visibleText
+        )
+        assertEquals(
+            listOf(
+                AgentTranscriptPresentationPolicy.ProcessContentKind.NARRATION,
+                AgentTranscriptPresentationPolicy.ProcessContentKind.TOOL_ACTIVITY
+            ),
+            segments.map(AgentTranscriptPresentationPolicy.ProcessSegment::kind)
+        )
+    }
+
+    @Test
     fun removesRedundantConnectorCompletionFromTheRenderedTurn() {
         val entries = listOf(
             entry("user", AgentTranscriptRole.USER, "conversation", "turn", 1L),

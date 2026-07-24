@@ -8,6 +8,130 @@ import codex_app_server
 
 
 class CodexConversationThreadTests(unittest.TestCase):
+    @staticmethod
+    def _event_server():
+        events = []
+        server = codex_app_server.CodexAppServer(
+            "codex",
+            {},
+            lambda task_id, event: events.append((task_id, event)),
+        )
+        run = codex_app_server.CodexRun(
+            task_id="task-visible",
+            thread_id="thread-visible",
+            turn_id="turn-visible",
+        )
+        server._runs[run.task_id] = run
+        server._turn_tasks[run.turn_id] = run.task_id
+        return server, run, events
+
+    def test_visible_codex_progress_preserves_commentary_reasoning_and_image_events(self):
+        server, run, events = self._event_server()
+
+        server._handle_event({
+            "method": "item/completed",
+            "params": {
+                "threadId": run.thread_id,
+                "turnId": run.turn_id,
+                "item": {
+                    "id": "commentary-1",
+                    "type": "agentMessage",
+                    "phase": "commentary",
+                    "text": "I will inspect each answer and flag uncertain regions.",
+                },
+            },
+        })
+        server._handle_event({
+            "method": "item/completed",
+            "params": {
+                "threadId": run.thread_id,
+                "turnId": run.turn_id,
+                "item": {
+                    "id": "reasoning-1",
+                    "type": "reasoning",
+                    "summary": ["Comparing the written answers with the worksheet prompts."],
+                    "content": ["private reasoning must not be forwarded"],
+                },
+            },
+        })
+        for method in ("item/started", "item/completed"):
+            server._handle_event({
+                "method": method,
+                "params": {
+                    "threadId": run.thread_id,
+                    "turnId": run.turn_id,
+                    "item": {"id": "image-1", "type": "imageView", "path": "homework.jpg"},
+                },
+            })
+        server._handle_event({
+            "method": "item/completed",
+            "params": {
+                "threadId": run.thread_id,
+                "turnId": run.turn_id,
+                "item": {
+                    "id": "answer-1",
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": "The worksheet is mostly correct.",
+                },
+            },
+        })
+        server._handle_event({
+            "method": "turn/completed",
+            "params": {
+                "threadId": run.thread_id,
+                "turnId": run.turn_id,
+                "turn": {"id": run.turn_id, "status": "completed"},
+            },
+        })
+
+        progress = [event["progress_event"] for _, event in events if "progress_event" in event]
+        self.assertEqual(
+            ["commentary", "reasoning_summary", "image_view", "image_view"],
+            [event["code"] for event in progress],
+        )
+        self.assertEqual(["running", "completed"], [event["status"] for event in progress[-2:]])
+        self.assertNotIn("private reasoning", " ".join(event["detail"] for event in progress))
+        self.assertEqual("completed", events[-1][1]["status"])
+        self.assertEqual("The worksheet is mostly correct.", events[-1][1]["result"])
+
+    def test_reasoning_summary_delta_is_used_without_forwarding_reasoning_text_delta(self):
+        server, run, events = self._event_server()
+
+        server._handle_event({
+            "method": "item/reasoning/summaryTextDelta",
+            "params": {
+                "threadId": run.thread_id,
+                "turnId": run.turn_id,
+                "itemId": "reasoning-2",
+                "summaryIndex": 0,
+                "delta": "Checking the visible worksheet fields.",
+            },
+        })
+        server._handle_event({
+            "method": "item/reasoning/textDelta",
+            "params": {
+                "threadId": run.thread_id,
+                "turnId": run.turn_id,
+                "itemId": "reasoning-2",
+                "contentIndex": 0,
+                "delta": "hidden chain of thought",
+            },
+        })
+        server._handle_event({
+            "method": "item/completed",
+            "params": {
+                "threadId": run.thread_id,
+                "turnId": run.turn_id,
+                "item": {"id": "reasoning-2", "type": "reasoning", "summary": [], "content": []},
+            },
+        })
+
+        progress = [event["progress_event"] for _, event in events if "progress_event" in event]
+        self.assertEqual(1, len(progress))
+        self.assertEqual("Checking the visible worksheet fields.", progress[0]["detail"])
+        self.assertNotIn("hidden chain", progress[0]["detail"])
+
     def test_same_conversation_reuses_thread(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
             codex_app_server,

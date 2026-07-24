@@ -263,6 +263,7 @@ class AgentTaskManager:
         kind: str,
         title: str,
         *,
+        event_id: str = "",
         status: str = "completed",
         detail: str = "",
         metadata: dict | None = None,
@@ -272,9 +273,17 @@ class AgentTaskManager:
             task = self._tasks.get(task_id)
             if task is None or task.status in TERMINAL_STATES:
                 return task
+            now = int(time.time() * 1000)
+            stable_event_id = str(event_id or "").strip()[:200] or str(uuid.uuid4())
+            existing_index = next((
+                index for index, candidate in enumerate(task.events)
+                if str(candidate.get("event_id") or "") == stable_event_id
+            ), -1)
+            existing = task.events[existing_index] if existing_index >= 0 else None
             event = {
-                "event_id": str(uuid.uuid4()),
-                "created_at": int(time.time() * 1000),
+                "event_id": stable_event_id,
+                "created_at": int((existing or {}).get("created_at") or now),
+                "updated_at": now,
                 "kind": str(kind or "step")[:48],
                 "title": str(title or "Task step")[:240],
                 "status": str(status or "completed")[:32],
@@ -287,9 +296,15 @@ class AgentTaskManager:
                     event["metadata"] = {"truncated": True}
             except Exception:
                 event["metadata"] = {}
+            if existing_index >= 0:
+                task.events.pop(existing_index)
             task.events.append(event)
+            if task.status in {"accepted", "queued", "starting", "recovering"}:
+                task.status = "running"
+                if not task.started_at:
+                    task.started_at = now
             task.current_step = event["title"]
-            task.updated_at = event["created_at"]
+            task.updated_at = now
             task.status_seq += 1
             self._save_locked(task)
         self._emit(task, on_event)
