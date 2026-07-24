@@ -8955,11 +8955,7 @@ class InMemoryAgentMemoryStore : AgentMemoryStore {
 
 class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
     private val appContext = context.applicationContext
-    private val database = AgentEncryptedDatabase(
-        context,
-        DATABASE,
-        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-    )
+    private val database = AgentEncryptedDatabase(context, DATABASE)
     private var suppressObservations = false
 
     @Synchronized
@@ -9407,7 +9403,6 @@ class EncryptedAgentMemoryStore(context: Context) : AgentMemoryStore {
 
     companion object {
         private const val DATABASE = "signalasi_agent_memory_v2"
-        private const val UNUSED_LEGACY_PREFERENCES = "signalasi_agent_memory_v2_no_legacy"
         private const val KEY_ITEMS = "items"
         private const val MAX_ITEMS = 1_000
         private const val MAX_RECALL_ITEMS = 8

@@ -91,11 +91,7 @@ class InMemoryAgentManagedResponseLedger : AgentManagedResponseLedger {
 }
 
 class EncryptedAgentManagedResponseLedger(context: Context) : AgentManagedResponseLedger {
-    private val database = AgentEncryptedDatabase(
-        context.applicationContext,
-        DATABASE,
-        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-    )
+    private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE)
 
     override fun register(record: AgentManagedResponseRecord) = synchronized(PROCESS_LOCK) {
         require(record.ownerRunId.isNotBlank() && record.sourceMessageId > 0L)
@@ -174,7 +170,6 @@ class EncryptedAgentManagedResponseLedger(context: Context) : AgentManagedRespon
 
     private companion object {
         const val DATABASE = "signalasi_managed_connector_responses_v1"
-        const val UNUSED_LEGACY_PREFERENCES = "signalasi_managed_connector_responses_v1_no_legacy"
         const val KEY_RECORDS = "records"
         const val MAX_RECORDS = 512
         val PROCESS_LOCK = Any()

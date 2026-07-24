@@ -343,11 +343,7 @@ class EncryptedAgentPermissionGrantStore(
     context: Context,
     clock: () -> Long = { System.currentTimeMillis() }
 ) : AbstractAgentPermissionGrantStore(clock) {
-    private val database = AgentEncryptedDatabase(
-        context.applicationContext,
-        DATABASE,
-        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-    )
+    private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE)
 
     override fun readPersisted(): List<AgentPermissionGrant> =
         AgentPermissionGrantJsonCodec.decode(database.readString(KEY_GRANTS, "[]"))
@@ -360,7 +356,6 @@ class EncryptedAgentPermissionGrantStore(
 
     private companion object {
         const val DATABASE = "signalasi_permission_grants_v1"
-        const val UNUSED_LEGACY_PREFERENCES = "signalasi_permission_grants_v1_no_legacy"
         const val KEY_GRANTS = "grants"
     }
 }

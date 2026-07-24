@@ -207,11 +207,7 @@ class EncryptedAgentRunStartReceiptStore(
     context: Context,
     clock: () -> Long = { System.currentTimeMillis() }
 ) : AbstractAgentRunStartReceiptStore(clock) {
-    private val database = AgentEncryptedDatabase(
-        context.applicationContext,
-        DATABASE,
-        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-    )
+    private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE)
 
     override fun readPersisted(): List<AgentRunStartReceipt> =
         AgentRunStartReceiptJsonCodec.decode(database.readString(KEY_RECEIPTS, "[]"))
@@ -224,7 +220,6 @@ class EncryptedAgentRunStartReceiptStore(
 
     private companion object {
         const val DATABASE = "signalasi_run_start_receipts_v1"
-        const val UNUSED_LEGACY_PREFERENCES = "signalasi_run_start_receipts_v1_no_legacy"
         const val KEY_RECEIPTS = "receipts"
     }
 }

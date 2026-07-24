@@ -23,11 +23,7 @@ data class AgentObservedContext(
 }
 
 class AgentObservationContextStore(context: Context) {
-    private val database = AgentEncryptedDatabase(
-        context.applicationContext,
-        DATABASE,
-        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-    )
+    private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE)
 
     @Synchronized
     fun observe(
@@ -123,7 +119,6 @@ class AgentObservationContextStore(context: Context) {
 
     companion object {
         private const val DATABASE = "signalasi_agent_observation_context_v1"
-        private const val UNUSED_LEGACY_PREFERENCES = "signalasi_agent_observation_context_v1_no_legacy"
         private const val KEY_ITEMS = "items"
         private const val MAX_TOTAL_ENTRIES = 128
         private const val MAX_ENTRIES_PER_TARGET = 16

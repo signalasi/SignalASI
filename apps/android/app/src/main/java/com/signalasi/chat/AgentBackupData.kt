@@ -97,11 +97,8 @@ object AgentBackupData {
     fun restore(context: Context, payload: JSONObject) {
         payload.optJSONArray("memory")?.let { input ->
             val sanitized = sanitizeArray(input, MAX_MEMORY_ITEMS, MAX_MEMORY_ITEM_CHARACTERS)
-            AgentEncryptedDatabase(
-                context,
-                MEMORY_DATABASE,
-                legacyPreferencesName = "signalasi_agent_memory_v2_no_legacy"
-            ).writeString(ITEMS_KEY, sanitized.toString())
+            AgentEncryptedDatabase(context, MEMORY_DATABASE)
+                .writeString(ITEMS_KEY, sanitized.toString())
         }
         payload.optJSONArray("knowledge")?.let { input ->
             val sanitized = sanitizeArray(input, MAX_KNOWLEDGE_ITEMS, MAX_KNOWLEDGE_ITEM_CHARACTERS)
@@ -232,11 +229,7 @@ object AgentBackupData {
         maxItems: Int,
         maxItemCharacters: Int
     ): JSONArray {
-        val raw = AgentEncryptedDatabase(
-            context,
-            databaseName,
-            legacyPreferencesName = "${databaseName}_no_legacy"
-        ).readString(ITEMS_KEY, "[]")
+        val raw = AgentEncryptedDatabase(context, databaseName).readString(ITEMS_KEY, "[]")
         return sanitizeArray(runCatching { JSONArray(raw) }.getOrDefault(JSONArray()), maxItems, maxItemCharacters)
     }
 

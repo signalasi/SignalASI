@@ -630,11 +630,7 @@ internal class AgentRuntimePackDownloader(
 }
 
 class AgentRuntimePackCatalogStore(context: Context) {
-    private val database = AgentEncryptedDatabase(
-        context.applicationContext,
-        DATABASE,
-        legacyPreferencesName = UNUSED_LEGACY_PREFERENCES
-    )
+    private val database = AgentEncryptedDatabase(context.applicationContext, DATABASE)
 
     @Synchronized
     fun save(catalog: AgentRuntimePackCatalog) =
@@ -653,7 +649,6 @@ class AgentRuntimePackCatalogStore(context: Context) {
 
     companion object {
         private const val DATABASE = "signalasi_runtime_catalog_v1"
-        private const val UNUSED_LEGACY_PREFERENCES = "signalasi_runtime_catalog_v1_no_legacy"
         private const val KEY_CATALOG = "verified_catalog"
     }
 }

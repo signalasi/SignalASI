@@ -21,11 +21,7 @@ class AgentEncryptedPreferences(context: Context, private val preferencesName: S
     @Synchronized
     fun readString(key: String, defaultValue: String): String {
         val raw = preferences.getString(key, null) ?: return defaultValue
-        if (AgentStorageCipher.isEncrypted(raw)) {
-            return AgentStorageCipher.decrypt(raw, associatedData(key)) ?: defaultValue
-        }
-        writeString(key, raw)
-        return raw
+        return AgentStorageCipher.decrypt(raw, associatedData(key)) ?: defaultValue
     }
 
     @Synchronized
@@ -38,8 +34,6 @@ class AgentEncryptedPreferences(context: Context, private val preferencesName: S
     fun remove(key: String) {
         preferences.edit().remove(key).apply()
     }
-
-    fun contains(key: String): Boolean = preferences.contains(key)
 
     @Synchronized
     fun keys(): Set<String> = preferences.all.keys.toSet()
@@ -54,11 +48,8 @@ class AgentEncryptedPreferences(context: Context, private val preferencesName: S
 
 class AgentEncryptedDatabase(
     context: Context,
-    private val databaseName: String,
-    private val legacyPreferencesName: String = databaseName
+    private val databaseName: String
 ) : SQLiteOpenHelper(context.applicationContext, "$databaseName.db", null, 1) {
-    private val legacy = AgentEncryptedPreferences(context.applicationContext, legacyPreferencesName)
-
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE encrypted_values (storage_key TEXT PRIMARY KEY NOT NULL, encrypted_value TEXT NOT NULL)")
     }
@@ -74,12 +65,6 @@ class AgentEncryptedDatabase(
             if (cursor.moveToFirst()) {
                 return AgentStorageCipher.decrypt(cursor.getString(0), associatedData(key)) ?: defaultValue
             }
-        }
-        if (legacy.contains(key)) {
-            val migrated = legacy.readString(key, defaultValue)
-            writeString(key, migrated)
-            legacy.remove(key)
-            return migrated
         }
         return defaultValue
     }
@@ -99,20 +84,18 @@ class AgentEncryptedDatabase(
     @Synchronized
     fun remove(key: String) {
         writableDatabase.delete("encrypted_values", "storage_key = ?", arrayOf(key))
-        legacy.remove(key)
     }
 
     @Synchronized
     fun clear() {
         writableDatabase.delete("encrypted_values", null, null)
-        legacy.clear()
     }
 
     fun contains(key: String): Boolean {
         readableDatabase.rawQuery(
             "SELECT 1 FROM encrypted_values WHERE storage_key = ? LIMIT 1", arrayOf(key)
         ).use { if (it.moveToFirst()) return true }
-        return legacy.contains(key)
+        return false
     }
 
     private fun associatedData(key: String): ByteArray =
@@ -148,7 +131,7 @@ object AgentStorageCipher {
     }
 
     fun decrypt(value: String, associatedData: ByteArray): String? {
-        if (!isEncrypted(value)) return value
+        if (!isEncrypted(value)) return null
         return runCatching {
             val parts = value.removePrefix(PREFIX).split(':', limit = 2)
             require(parts.size == 2) { "Invalid Agent encrypted storage envelope" }
