@@ -684,6 +684,10 @@ class AgentProductionTeamController(
     private val worker: AgentTeamMemberWorker = ActionExecutorAgentTeamMemberWorker(context),
     private val managedResponses: AgentManagedResponseLedger = EncryptedAgentManagedResponseLedger(context),
     private val completionSink: AgentTeamCompletionSink = AgentConnectorTeamCompletionSink(context),
+    private val reputationLedger: AgentReputationLedger = AgentReputationLedger.encrypted(context),
+    private val reputationRegistrationSource: () -> List<AgentRegistration> = {
+        AppStoreAgentConnectorRegistry(context).registrations()
+    },
     limits: AgentSubagentLimits = AgentSubagentLimits(maxChildren = 12, maxConcurrency = 4)
 ) : Closeable {
     private val runtime = AgentTeamExecutionRuntime(store, limits)
@@ -749,6 +753,14 @@ class AgentProductionTeamController(
 
     fun snapshots(): List<AgentTeamExecutionSnapshot> = store.snapshots()
 
+    fun reputation(
+        agentId: String,
+        capabilities: Set<AgentCapability> = emptySet()
+    ): AgentReputationSnapshot = reputationLedger.snapshot(agentId, capabilities)
+
+    fun reputationReceipts(agentId: String = ""): List<AgentSignedExecutionReceipt> =
+        reputationLedger.receipts(agentId)
+
     fun progress(supervisorRunId: String, expanded: Boolean): AgentTeamProgressProjection? =
         snapshot(supervisorRunId)?.let { AgentTeamProgressPolicy.project(it, expanded) }
 
@@ -781,6 +793,7 @@ class AgentProductionTeamController(
         managedResponses.clear()
         completionSink.clear()
         crossTeamDelegations.clear()
+        reputationLedger.clear()
     }
 
     override fun close() {
@@ -793,7 +806,7 @@ class AgentProductionTeamController(
         val applied = store.applyLateResponse(record)
         if (applied) {
             managedResponses.markApplied(record.ownerRunId)
-            store.snapshot(record.supervisorRunId)?.let(completionSink::publish)
+            store.snapshot(record.supervisorRunId)?.let(::publishAndRecord)
         }
         return applied
     }
@@ -804,7 +817,7 @@ class AgentProductionTeamController(
             try {
                 runCatching { handle.await() }
                 val snapshot = store.snapshot(handle.supervisorRunId)
-                snapshot?.let(completionSink::publish)
+                snapshot?.let(::publishAndRecord)
                 if (delegationId.isNotBlank()) {
                     if (snapshot == null) {
                         runCatching {
@@ -834,7 +847,16 @@ class AgentProductionTeamController(
     }
 
     private fun publishTerminalSnapshots() {
-        store.snapshots().forEach(completionSink::publish)
+        store.snapshots().forEach(::publishAndRecord)
+    }
+
+    private fun publishAndRecord(snapshot: AgentTeamExecutionSnapshot) {
+        completionSink.publish(snapshot)
+        if (snapshot.state.isTerminal) {
+            runCatching {
+                reputationLedger.record(snapshot, reputationRegistrationSource())
+            }
+        }
     }
 }
 

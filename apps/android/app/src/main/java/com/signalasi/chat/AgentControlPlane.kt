@@ -801,7 +801,10 @@ object AgentRunRecoveryPolicy {
 class EncryptedAgentRegistry(context: Context) {
     private val appContext = context.applicationContext
     private val database = AgentEncryptedDatabase(appContext, DATABASE)
-    private val index = AgentNetworkIndex(loadRegistrations())
+    private val index = AgentNetworkIndex(
+        loadRegistrations(),
+        AgentReputationLedger.encrypted(appContext)
+    )
 
     init {
         appContext.deleteDatabase(LEGACY_DATABASE)

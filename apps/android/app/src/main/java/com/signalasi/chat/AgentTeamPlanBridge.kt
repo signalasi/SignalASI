@@ -29,7 +29,8 @@ internal object AgentTeamPlanCompiler {
         plan: AgentPlan,
         targets: List<AgentCallableTarget>,
         enabled: Boolean,
-        registrations: Collection<AgentRegistration> = emptyList()
+        registrations: Collection<AgentRegistration> = emptyList(),
+        reputation: AgentReputationSnapshotProvider = AgentReputationSnapshotProvider.NONE
     ): AgentPlan {
         if (!enabled || !plan.validation.valid) return plan
         val availableAgents = targets
@@ -49,7 +50,8 @@ internal object AgentTeamPlanCompiler {
                 plan = plan,
                 candidate = candidates.single(),
                 availableAgents = availableAgents,
-                registrations = registrations
+                registrations = registrations,
+                reputation = reputation
             )?.let { return it }
         }
         if (candidates.size < MIN_TEAM_MEMBERS || candidates.size > MAX_TEAM_MEMBERS) return plan
@@ -148,7 +150,8 @@ internal object AgentTeamPlanCompiler {
         plan: AgentPlan,
         candidate: Candidate,
         availableAgents: Map<String, AgentCallableTarget>,
-        registrations: Collection<AgentRegistration>
+        registrations: Collection<AgentRegistration>,
+        reputation: AgentReputationSnapshotProvider
     ): AgentPlan? {
         val eligibleRegistrations = registrations.filter { registration ->
             registration.kind == AgentConnectorKind.AGENT &&
@@ -156,7 +159,7 @@ internal object AgentTeamPlanCompiler {
         }
         if (eligibleRegistrations.size < MIN_TEAM_MEMBERS) return null
         val teamId = AgentTeamDispatchIds.teamId(plan, listOf(candidate.action))
-        val compilation = AgentDynamicTeamCompiler().compile(
+        val compilation = AgentDynamicTeamCompiler(reputation).compile(
             request = AgentDynamicTeamRequest(
                 goal = plan.goal,
                 teamId = teamId,
