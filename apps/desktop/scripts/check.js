@@ -170,6 +170,16 @@ if (!smokeAndroidReset.includes("SIGNALASI_ALLOW_DESTRUCTIVE_RESET")) {
   throw new Error("Android destructive reset smoke must require an explicit disposable-device opt-in");
 }
 
+for (const [name, source] of [
+  ["contact tags", smokeAndroidContactTags],
+  ["friends", smokeAndroidFriends],
+  ["voice settings", smokeAndroidVoiceSettings]
+]) {
+  if (source.includes("hermes_app_store.xml")) {
+    throw new Error(`Android ${name} smoke must use only the current SignalASI app store`);
+  }
+}
+
 if (!main.includes("/signalasi/verify")) {
   throw new Error("Electron desktop must use /signalasi/verify");
 }

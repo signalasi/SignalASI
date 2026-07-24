@@ -9,7 +9,6 @@ const apkPath = path.join(androidDir, "app", "build", "outputs", "apk", "debug",
 const packageName = "com.signalasi.chat";
 const activityName = `${packageName}/.MainActivity`;
 const appStorePrefs = "shared_prefs/signalasi_app_store.xml";
-const oldAppStorePrefs = "shared_prefs/hermes_app_store.xml";
 const voicePrefs = "shared_prefs/signalasi_voice_assistant.xml";
 const debugPrefs = "shared_prefs/signalasi_debug.xml";
 const outDir = path.join(root, "ui-smoke");
@@ -116,14 +115,12 @@ async function main() {
   adb(["shell", "am", "force-stop", packageName]);
 
   const originalAppStore = readAppFile(appStorePrefs);
-  const originalOldAppStore = readAppFile(oldAppStorePrefs);
   const originalVoice = readAppFile(voicePrefs);
   const originalDebug = readAppFile(debugPrefs);
 
   try {
     log("resetting isolated voice settings state");
     restoreAppFile(appStorePrefs, "");
-    restoreAppFile(oldAppStorePrefs, "");
     restoreAppFile(voicePrefs, "");
     restoreAppFile(debugPrefs, "");
     adb(["shell", "am", "force-stop", packageName]);
@@ -171,7 +168,6 @@ async function main() {
     adb(["shell", "am", "force-stop", packageName]);
     log("restoring original app state");
     restoreAppFile(appStorePrefs, originalAppStore);
-    restoreAppFile(oldAppStorePrefs, originalOldAppStore);
     restoreAppFile(voicePrefs, originalVoice);
     restoreAppFile(debugPrefs, originalDebug);
     adb(["shell", "am", "force-stop", packageName]);
