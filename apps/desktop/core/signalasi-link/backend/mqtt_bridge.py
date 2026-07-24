@@ -1542,7 +1542,6 @@ def _agent_task_payload(
         "merged_into_task_id": task.get("merged_into_task_id", ""),
         "progress_event": progress_event,
         "error": task.get("error", ""),
-        "events": list(task.get("events") or [])[-32:],
         "output_files": task.get("output_files", []),
         "desktop_id": resolved_desktop_id,
         "desktop_name": resolved_desktop_name,

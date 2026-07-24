@@ -39,9 +39,16 @@ MAX_VISIBLE_PROGRESS_TEXT = 2_000
 MAX_VISIBLE_TOOL_DETAIL = 500
 
 
+class CodexConversationBusyError(RuntimeError):
+    def __init__(self, active_task_id: str) -> None:
+        super().__init__(f"Codex conversation already has an active task: {active_task_id}")
+        self.active_task_id = active_task_id
+
+
 @dataclass
 class CodexRun:
     task_id: str
+    conversation_id: str = ""
     thread_id: str = ""
     turn_id: str = ""
     final_text: str = ""
@@ -93,6 +100,7 @@ class CodexAppServer:
         model: str = "gpt-5.6-sol",
         conversation_id: str = "",
         image_paths: list[str] | None = None,
+        fresh_thread_prompt: str = "",
     ) -> CodexRun:
         self._ensure_started()
         local_images = [
@@ -100,41 +108,54 @@ class CodexAppServer:
             for path in (image_paths or [])
             if str(path or "").strip() and os.path.isfile(path)
         ][:10]
-        run = CodexRun(task_id=task_id, prefers_chinese=self._contains_chinese(prompt))
-        with self._lock:
-            self._runs[task_id] = run
-            conversation_key = self._conversation_key(conversation_id)
-            run.thread_id = self._conversation_threads.get(conversation_key, "") if conversation_key else ""
-            thread_is_busy = bool(run.thread_id) and any(
-                existing.task_id != task_id and existing.thread_id == run.thread_id and not existing.finished
-                for existing in self._runs.values()
-            )
-            if not run.thread_id or thread_is_busy:
-                # Codex App Server accepts one active turn per thread. A concurrent
-                # mobile request gets a fresh branch; its compact phone context keeps
-                # the conversation useful without waiting behind a stalled turn.
-                run.thread_id = self._start_thread(cwd, model, conversation_id)
+        clean_conversation_id = str(conversation_id or "").strip()
+        run = CodexRun(
+            task_id=task_id,
+            conversation_id=clean_conversation_id,
+            prefers_chinese=self._contains_chinese(prompt),
+        )
+        reused_thread = False
+        try:
+            with self._lock:
+                active_run = self._active_run_locked(clean_conversation_id, exclude_task_id=task_id)
+                if active_run is not None:
+                    raise CodexConversationBusyError(active_run.task_id)
+                self._runs[task_id] = run
+                conversation_key = self._conversation_key(clean_conversation_id)
+                run.thread_id = self._conversation_threads.get(conversation_key, "") if conversation_key else ""
+                reused_thread = bool(run.thread_id)
+                if not run.thread_id:
+                    run.thread_id = self._start_thread(cwd, model, clean_conversation_id)
+        except Exception:
+            self._discard_run(run)
+            raise
         if not run.thread_id:
-            run.finished = True
+            self._discard_run(run)
             raise RuntimeError("Codex App Server did not return a thread id")
         self.on_event(task_id, {"status": "starting", "thread_id": run.thread_id, "current_step": "Starting Codex turn"})
+        turn_prompt = prompt if reused_thread else (fresh_thread_prompt or prompt)
         try:
-            response = self._start_turn(run.thread_id, prompt, model, local_images)
-        except RuntimeError as exc:
-            if not run.thread_id or "thread not found" not in str(exc).lower():
-                run.finished = True
-                raise
-            if conversation_id:
-                self._conversation_threads.pop(conversation_key, None)
-                self._save_conversation_threads()
-            run.thread_id = self._start_thread(cwd, model, conversation_id)
-            self.on_event(task_id, {
-                "status": "starting", "thread_id": run.thread_id,
-                "current_step": "Starting a fresh Codex thread",
-            })
-            response = self._start_turn(run.thread_id, prompt, model, local_images)
+            try:
+                response = self._start_turn(run.thread_id, turn_prompt, model, local_images)
+            except RuntimeError as exc:
+                if not run.thread_id or "thread not found" not in str(exc).lower():
+                    raise
+                if clean_conversation_id:
+                    self._conversation_threads.pop(conversation_key, None)
+                    self._save_conversation_threads()
+                run.thread_id = self._start_thread(cwd, model, clean_conversation_id)
+                self.on_event(task_id, {
+                    "status": "starting", "thread_id": run.thread_id,
+                    "current_step": "Starting a fresh Codex thread",
+                })
+                response = self._start_turn(
+                    run.thread_id,
+                    fresh_thread_prompt or prompt,
+                    model,
+                    local_images,
+                )
         except Exception:
-            run.finished = True
+            self._discard_run(run)
             raise
         run.turn_id = str((response.get("turn") or {}).get("id") or "")
         if run.turn_id:
@@ -153,6 +174,7 @@ class CodexAppServer:
         thread_id: str,
         turn_id: str,
         original_prompt: str,
+        conversation_id: str = "",
         elapsed_seconds: float = 0,
     ) -> CodexRun:
         """Reconnect to an existing Codex turn without replaying the prompt."""
@@ -167,6 +189,7 @@ class CodexAppServer:
         now = time.monotonic()
         run = CodexRun(
             task_id=task_id,
+            conversation_id=str(conversation_id or "").strip(),
             thread_id=clean_thread_id,
             turn_id=clean_turn_id,
             started_monotonic=now - max(0.0, float(elapsed_seconds or 0)),
@@ -328,21 +351,118 @@ class CodexAppServer:
         value = str(conversation_id or "").strip()
         return f"{CONVERSATION_THREAD_VERSION}:{value}" if value else ""
 
+    def _active_run_locked(
+        self,
+        conversation_id: str,
+        *,
+        exclude_task_id: str = "",
+    ) -> CodexRun | None:
+        clean_conversation_id = str(conversation_id or "").strip()
+        if not clean_conversation_id:
+            return None
+        mapped_thread_id = self._conversation_threads.get(
+            self._conversation_key(clean_conversation_id),
+            "",
+        )
+        candidates = [
+            run for run in self._runs.values()
+            if run.task_id != exclude_task_id and not run.finished and (
+                run.conversation_id == clean_conversation_id
+                or (mapped_thread_id and run.thread_id == mapped_thread_id)
+            )
+        ]
+        return max(candidates, key=lambda item: item.started_monotonic, default=None)
+
+    def active_task_id(self, conversation_id: str, exclude_task_id: str = "") -> str:
+        with self._lock:
+            run = self._active_run_locked(conversation_id, exclude_task_id=exclude_task_id)
+            return run.task_id if run is not None else ""
+
+    def wait_for_conversation_idle(
+        self,
+        conversation_id: str,
+        timeout_seconds: float = 2.0,
+    ) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while True:
+            if not self.active_task_id(conversation_id):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
+
+    def steer_task(
+        self,
+        task_id: str,
+        prompt: str,
+        image_paths: list[str] | None = None,
+        wait_for_turn_seconds: float = 15.0,
+    ) -> CodexRun | None:
+        """Add user guidance to an active turn without creating a parallel thread."""
+        self._ensure_started()
+        deadline = time.monotonic() + max(0.0, float(wait_for_turn_seconds))
+        run: CodexRun | None = None
+        while True:
+            with self._lock:
+                run = self._runs.get(str(task_id or "").strip())
+                if run is not None and run.finished:
+                    return None
+                if run is not None and run.turn_id:
+                    break
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.02)
+
+        local_images = [
+            os.path.abspath(path)
+            for path in (image_paths or [])
+            if str(path or "").strip() and os.path.isfile(path)
+        ][:10]
+        follow_up = (
+            "Apply this latest user instruction to the task already in progress. "
+            "Do not treat it as a separate request:\n"
+            f"{str(prompt or '').strip()}"
+        )
+        try:
+            self._request("turn/steer", {
+                "threadId": run.thread_id,
+                "expectedTurnId": run.turn_id,
+                "input": self._user_input(follow_up, local_images, include_task_policy=False),
+            }, timeout=30)
+        except RuntimeError as exc:
+            if self._is_not_steerable_error(exc):
+                return None
+            raise
+        run.last_event_monotonic = time.monotonic()
+        return run
+
     def _start_turn(self, thread_id: str, prompt: str, model: str, image_paths: list[str] | None = None) -> dict:
+        return self._request("turn/start", {
+            "threadId": thread_id,
+            "input": self._user_input(prompt, image_paths, include_task_policy=True),
+            "model": model, "effort": "low",
+        }, timeout=30)
+
+    @staticmethod
+    def _user_input(
+        prompt: str,
+        image_paths: list[str] | None,
+        *,
+        include_task_policy: bool,
+    ) -> list[dict]:
         from response_policy import apply_response_policy
         styled_prompt = apply_response_policy(prompt)
+        text = styled_prompt.rstrip()
+        if include_task_policy:
+            text = f"{text}\n\n{CODEX_TASK_POLICY}"
         user_input = [
-            {"type": "text", "text": f"{styled_prompt.rstrip()}\n\n{CODEX_TASK_POLICY}", "text_elements": []}
+            {"type": "text", "text": text, "text_elements": []}
         ]
         user_input.extend(
             {"type": "localImage", "path": path, "detail": "original"}
             for path in (image_paths or [])
         )
-        return self._request("turn/start", {
-            "threadId": thread_id,
-            "input": user_input,
-            "model": model, "effort": "low",
-        }, timeout=30)
+        return user_input
 
     @staticmethod
     def _latest_agent_message(turn: dict) -> str:
@@ -362,6 +482,14 @@ class CodexAppServer:
         with self._lock:
             if self._turn_tasks.get(run.turn_id) == run.task_id:
                 self._turn_tasks.pop(run.turn_id, None)
+
+    def _discard_run(self, run: CodexRun) -> None:
+        run.finished = True
+        with self._lock:
+            if self._turn_tasks.get(run.turn_id) == run.task_id:
+                self._turn_tasks.pop(run.turn_id, None)
+            if self._runs.get(run.task_id) is run:
+                self._runs.pop(run.task_id, None)
 
     def _load_conversation_threads(self) -> dict[str, str]:
         try:
@@ -824,6 +952,19 @@ class CodexAppServer:
     @staticmethod
     def _contains_chinese(value: str) -> bool:
         return any("\u4e00" <= character <= "\u9fff" for character in str(value or ""))
+
+    @staticmethod
+    def _is_not_steerable_error(error: Exception) -> bool:
+        normalized = str(error or "").lower()
+        return any(marker in normalized for marker in (
+            "expectedturnid",
+            "expected turn",
+            "no active turn",
+            "not active",
+            "not in progress",
+            "turn not found",
+            "thread is idle",
+        ))
 
     def _drain_stderr(self) -> None:
         process = self.process
