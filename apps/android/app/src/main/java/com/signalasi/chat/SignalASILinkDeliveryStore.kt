@@ -85,6 +85,23 @@ object SignalASILinkDeliveryStore {
     fun pending(context: Context): List<PendingMessage> =
         pendingFromArray(outboxArray(context), System.currentTimeMillis())
 
+    @Synchronized
+    fun makePendingImmediatelyRetryable(context: Context) {
+        val values = outboxArray(context)
+        val now = System.currentTimeMillis()
+        var changed = false
+        for (index in 0 until values.length()) {
+            val item = values.optJSONObject(index) ?: continue
+            if (item.optLong("next_attempt_at") > now) {
+                item.put("status", "queued")
+                    .put("next_attempt_at", now)
+                    .put("updated_at", now)
+                changed = true
+            }
+        }
+        if (changed) writeArray(context, KEY_OUTBOX, values)
+    }
+
     internal fun pendingFromArray(values: JSONArray, nowMillis: Long): List<PendingMessage> =
         buildList {
             for (index in 0 until values.length()) {
