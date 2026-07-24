@@ -87,7 +87,6 @@ import java.util.*
 import java.util.concurrent.Executors
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -325,8 +324,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
     }
     private val historyExecutor = Executors.newSingleThreadExecutor()
     private val cloudExecutor = Executors.newCachedThreadPool()
-    private val historySaveSeq = AtomicInteger()
-    private val historySaveRunnable = Runnable { enqueueChatHistorySave() }
+    private val pendingHistoryMessages = linkedMapOf<Long, JSONObject>()
+    private val historySaveRunnable = Runnable { enqueuePendingChatHistorySave() }
     private lateinit var mobileNativeAgent: MobileNativeAgent
     private lateinit var agentTranscriptStore: AgentTranscriptStore
     private lateinit var globalSuperAgentRuntime: GlobalSuperAgentRuntime
@@ -13931,7 +13930,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val index = list.indexOfFirst { it.id == messageId }
         if (index >= 0) {
             list[index].deliveryStatus = status
-            saveChatHistory()
+            saveChatHistory(list[index])
             if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
                 messageList.post {
                     if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
@@ -13947,7 +13946,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         val index = list.indexOfFirst { it.id == messageId }
         if (index < 0) return
         list[index].deliveryTrace.add(newTraceEvent(stage, detail))
-        saveChatHistory()
+        saveChatHistory(list[index])
         if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
             messageList.post {
                 if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
@@ -13979,7 +13978,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (!status.isNullOrBlank()) {
             message.deliveryStatus = status
         }
-        saveChatHistory()
+        saveChatHistory(message)
         if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
             messageList.post {
                 if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
@@ -13991,16 +13990,16 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
 
     private fun markContactRead(contactId: String) {
         val list = messages[contactId] ?: return
-        var changed = false
+        val changedMessages = mutableListOf<ChatMessage>()
         list.forEach { message ->
             if (!message.isMine && !message.isSystem && !hasTraceStage(message, "read")) {
                 message.deliveryTrace.add(newTraceEvent("read", "chat_opened"))
                 message.deliveryStatus = getString(R.string.delivery_status_read)
-                changed = true
+                changedMessages += message
             }
         }
-        if (!changed) return
-        saveChatHistory()
+        if (changedMessages.isEmpty()) return
+        saveChatHistory(changedMessages)
         if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
             messageList.post {
                 if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
@@ -14404,7 +14403,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 summary.unreadCount += 1
             }
         }
-        saveChatHistory()
+        saveChatHistory(stored)
         if (!stored.isSystem) {
             GlobalConversationEventBus.publishChatMessage(
                 this,
@@ -14431,8 +14430,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         if (!removed.isSystem) {
             GlobalConversationEventBus.publishChatMessageDeleted(this, contactId, removed.id)
         }
-        handler.removeCallbacks(historySaveRunnable)
-        historySaveSeq.incrementAndGet()
+        discardPendingChatHistory(listOf(removed.id))
         ChatHistoryStore.deleteMessage(this, removed.id)
         if (chatPage.visibility == View.VISIBLE && selectedContact?.id == contactId) {
             messageList.post {
@@ -14472,7 +14470,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                     )
                     if (sent) {
                         message.deliveryStatus = getString(R.string.agent_task_status_cancelling)
-                        saveChatHistory()
+                        saveChatHistory(message)
                     }
                     showChatPage(contact)
                 }
@@ -14596,7 +14594,7 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         )
         messages[CONTACT_SYSTEM.id] = mutableListOf(welcome)
         summaries[CONTACT_SYSTEM.id] = ContactSummary(content, welcome.timestamp, 0)
-        saveChatHistory()
+        saveChatHistory(welcome)
     }
 
     private fun ensureDesignSummaries() {
@@ -14669,58 +14667,55 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
         return array
     }
 
-    private fun saveChatHistory() {
+    private fun saveChatHistory(message: ChatMessage) {
+        saveChatHistory(listOf(message))
+    }
+
+    private fun saveChatHistory(changedMessages: Collection<ChatMessage>) {
+        if (changedMessages.isEmpty()) return
+        changedMessages.forEach { message ->
+            pendingHistoryMessages[message.id] = chatHistoryJson(message)
+        }
         handler.removeCallbacks(historySaveRunnable)
         handler.postDelayed(historySaveRunnable, 120L)
     }
 
     private fun flushChatHistoryAsync() {
         handler.removeCallbacks(historySaveRunnable)
-        persistChatHistorySnapshot()
+        enqueuePendingChatHistorySave()
     }
 
-    private fun enqueueChatHistorySave() {
-        persistChatHistorySnapshot()
+    private fun discardPendingChatHistory(messageIds: Collection<Long>) {
+        messageIds.forEach(pendingHistoryMessages::remove)
+        if (pendingHistoryMessages.isEmpty()) handler.removeCallbacks(historySaveRunnable)
     }
 
-    private fun persistChatHistorySnapshot() {
-        val snapshot = messages.mapValues { (_, list) ->
-            list.map { message ->
-                message.copy(deliveryTrace = message.deliveryTrace.toMutableList())
-            }
-        }
-        val saveSeq = historySaveSeq.incrementAndGet()
-        val writeSnapshot = {
-            val root = JSONObject()
-            snapshot.forEach { (contactId, list) ->
-                val array = JSONArray()
-                list.forEach { message ->
-                    array.put(JSONObject()
-                        .put("id", message.id)
-                        .put("content", message.content)
-                        .put("isMine", message.isMine)
-                        .put("contactId", message.contact.id)
-                        .put("isSystem", message.isSystem)
-                        .put("timestamp", message.timestamp)
-                        .put("deliveryStatus", message.deliveryStatus ?: "")
-                        .put("taskId", message.taskId)
-                        .put("taskStatus", message.taskStatus)
-                        .put("taskStatusSeq", message.taskStatusSeq)
-                        .put("remoteMessageId", message.remoteMessageId)
-                        .put("deliveryTrace", deliveryTraceJson(message.deliveryTrace)))
-                }
-                root.put(contactId, array)
-            }
-            ChatHistoryStore.mergeSnapshot(this, root)
-            lastHistoryLoadedAt = ChatHistoryStore.updatedVersion(this)
-        }
+    private fun enqueuePendingChatHistorySave() {
+        if (pendingHistoryMessages.isEmpty()) return
+        val batch = pendingHistoryMessages.values.map { JSONObject(it.toString()) }
+        pendingHistoryMessages.clear()
         runCatching {
             historyExecutor.execute {
-                if (saveSeq < historySaveSeq.get()) return@execute
-                writeSnapshot()
+                ChatHistoryStore.upsertAll(this, batch)
+                lastHistoryLoadedAt = ChatHistoryStore.updatedVersion(this)
             }
         }
     }
+
+    private fun chatHistoryJson(message: ChatMessage): JSONObject =
+        JSONObject()
+            .put("id", message.id)
+            .put("content", message.content)
+            .put("isMine", message.isMine)
+            .put("contactId", message.contact.id)
+            .put("isSystem", message.isSystem)
+            .put("timestamp", message.timestamp)
+            .put("deliveryStatus", message.deliveryStatus ?: "")
+            .put("taskId", message.taskId)
+            .put("taskStatus", message.taskStatus)
+            .put("taskStatusSeq", message.taskStatusSeq)
+            .put("remoteMessageId", message.remoteMessageId)
+            .put("deliveryTrace", deliveryTraceJson(message.deliveryTrace))
 
     // ===== Refreshing =====
     private fun refreshContactList() {
@@ -18967,10 +18962,10 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
                 setColor(Color.parseColor("#FF3B30"))
             }
             setOnClickListener {
-                handler.removeCallbacks(historySaveRunnable)
-                historySaveSeq.incrementAndGet()
-                ChatHistoryStore.deleteContact(this@MainActivity, contact.id)
-                messages.remove(contact.id)
+                val removedMessages = messages.remove(contact.id).orEmpty()
+                val removedMessageIds = removedMessages.map(ChatMessage::id)
+                discardPendingChatHistory(removedMessageIds)
+                ChatHistoryStore.deleteContact(this@MainActivity, contact.id, removedMessageIds)
                 summaries.remove(contact.id)
                 CloudConversationContextStore.removeContact(this@MainActivity, contact.id)
                 refreshContactList()
