@@ -208,7 +208,7 @@ class CodexConversationThreadTests(unittest.TestCase):
             self.assertTrue(server.delete_conversation("conversation-1"))
             self.assertNotIn(server._conversation_key("conversation-1"), server._conversation_threads)
 
-    def test_overlapping_tasks_use_independent_threads(self):
+    def test_overlapping_tasks_are_steered_without_creating_a_branch(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(
             codex_app_server,
             "CONVERSATION_THREADS_PATH",
@@ -217,9 +217,11 @@ class CodexConversationThreadTests(unittest.TestCase):
             server = codex_app_server.CodexAppServer("codex", {}, lambda _task, _event: None)
             server._ensure_started = lambda: None
             thread_count = 0
+            calls = []
 
             def request(method, params, timeout):
                 nonlocal thread_count
+                calls.append((method, params, timeout))
                 if method == "thread/start":
                     thread_count += 1
                     return {"thread": {"id": f"thread-{thread_count}"}}
@@ -227,13 +229,20 @@ class CodexConversationThreadTests(unittest.TestCase):
 
             server._request = request
             first = server.start_task("task-1", "first", temporary, conversation_id="conversation-1")
-            second = server.start_task("task-2", "second", temporary, conversation_id="conversation-1")
+            with self.assertRaises(codex_app_server.CodexConversationBusyError) as raised:
+                server.start_task("task-2", "second", temporary, conversation_id="conversation-1")
+            steered = server.steer_task(raised.exception.active_task_id, "be exact")
 
+            self.assertIs(first, steered)
             self.assertEqual("thread-1", first.thread_id)
-            self.assertEqual("thread-2", second.thread_id)
-            self.assertEqual("thread-2", server._conversation_threads[server._conversation_key("conversation-1")])
-            self.assertEqual(2, thread_count)
-            self.assertEqual(2, thread.call_count)
+            self.assertEqual("thread-1", server._conversation_threads[server._conversation_key("conversation-1")])
+            self.assertEqual(1, thread_count)
+            self.assertEqual(1, thread.call_count)
+            steer = next(params for method, params, _ in calls if method == "turn/steer")
+            self.assertEqual("thread-1", steer["threadId"])
+            self.assertEqual(first.turn_id, steer["expectedTurnId"])
+            self.assertIn("be exact", steer["input"][0]["text"])
+            self.assertNotIn(codex_app_server.CODEX_TASK_POLICY, steer["input"][0]["text"])
 
     def test_missing_persisted_thread_is_recreated(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(

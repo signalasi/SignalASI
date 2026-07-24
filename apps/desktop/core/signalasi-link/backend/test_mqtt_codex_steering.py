@@ -101,6 +101,12 @@ class _SteeringTaskManager:
     def active_for_conversation(self, conversation_id, **_options):
         return self.prior if conversation_id == self.prior.conversation_id else None
 
+    def add_event(self, task_id, _kind, _title, on_event=None, **_values):
+        task = self.current if self.current and self.current.task_id == task_id else self.prior
+        if on_event is not None:
+            on_event(task.public())
+        return task
+
     def update(self, task_id, status, on_event=None, **values):
         self.updates.append((task_id, status, values, on_event))
         task = self.current if self.current and self.current.task_id == task_id else self.prior

@@ -1744,6 +1744,8 @@ class MainActivity : Activity(), SignalASIMqttClient.Listener {
             else -> getString(R.string.agent_trace_remote_tool)
         }
         return if (detail.isBlank()) base else "$base · $detail"
+    }
+
     private fun connectorProgressText(progress: JSONObject): String {
         val kind = progress.optString("kind")
         val code = progress.optString("code").ifBlank {
