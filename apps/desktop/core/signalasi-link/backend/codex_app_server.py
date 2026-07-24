@@ -35,6 +35,8 @@ CODEX_MAX_TASK_SECONDS = max(
     CODEX_STALL_TIMEOUT_SECONDS,
     int(os.environ.get("SIGNALASI_CODEX_MAX_TASK_SECONDS", "900")),
 )
+MAX_VISIBLE_PROGRESS_TEXT = 2_000
+MAX_VISIBLE_TOOL_DETAIL = 500
 
 
 @dataclass
@@ -43,6 +45,9 @@ class CodexRun:
     thread_id: str = ""
     turn_id: str = ""
     final_text: str = ""
+    last_agent_text: str = ""
+    agent_message_deltas: dict[str, str] = field(default_factory=dict)
+    reasoning_summary_deltas: dict[str, dict[int, str]] = field(default_factory=dict)
     pending_requests: dict[int, dict] = field(default_factory=dict)
     started_monotonic: float = field(default_factory=time.monotonic)
     last_event_monotonic: float = field(default_factory=time.monotonic)
@@ -507,16 +512,71 @@ class CodexAppServer:
                 run.turn_id = turn_id
                 self._turn_tasks[turn_id] = task_id
             self.on_event(task_id, {**common, "turn_id": run.turn_id, "status": "running", "current_step": "Codex is working"})
+        elif method == "item/agentMessage/delta":
+            item_id = str(params.get("itemId") or "")
+            if item_id:
+                run.agent_message_deltas[item_id] = (
+                    run.agent_message_deltas.get(item_id, "") + str(params.get("delta") or "")
+                )[:MAX_VISIBLE_PROGRESS_TEXT]
+        elif method == "item/reasoning/summaryTextDelta":
+            item_id = str(params.get("itemId") or "")
+            if item_id:
+                summary_index = max(0, int(params.get("summaryIndex") or 0))
+                summaries = run.reasoning_summary_deltas.setdefault(item_id, {})
+                summaries[summary_index] = (
+                    summaries.get(summary_index, "") + str(params.get("delta") or "")
+                )[:MAX_VISIBLE_PROGRESS_TEXT]
         elif method == "item/started":
-            self.on_event(task_id, {**common, "status": "running", "current_step": self._item_label(params.get("item") or {})})
+            progress = self._tool_progress_event(params.get("item") or {}, completed=False)
+            if progress:
+                self._emit_progress(task_id, common, progress)
         elif method == "item/completed":
             item = params.get("item") or {}
-            if item.get("type") == "agentMessage" and item.get("text"):
-                run.final_text = str(item["text"])
+            item_type = str(item.get("type") or "")
+            item_id = str(item.get("id") or params.get("itemId") or "")
+            if item_type == "agentMessage":
+                text = self._clean_visible_text(
+                    item.get("text") or run.agent_message_deltas.pop(item_id, "")
+                )
+                phase = str(item.get("phase") or "")
+                if text:
+                    run.last_agent_text = text
+                    if phase == "commentary":
+                        self._emit_progress(
+                            task_id,
+                            common,
+                            self._narration_progress(item_id, text, "commentary"),
+                        )
+                    else:
+                        run.final_text = text
+            elif item_type == "reasoning":
+                summary = self._reasoning_summary(run, item_id, item)
+                if summary:
+                    self._emit_progress(
+                        task_id,
+                        common,
+                        self._narration_progress(item_id, summary, "reasoning_summary"),
+                    )
+            elif item_type == "plan":
+                text = self._clean_visible_text(item.get("text"))
+                if text:
+                    self._emit_progress(
+                        task_id,
+                        common,
+                        self._narration_progress(item_id, text, "plan"),
+                    )
+            else:
+                progress = self._tool_progress_event(item, completed=True)
+                if progress:
+                    self._emit_progress(task_id, common, progress)
         elif method == "turn/completed":
             status = str((params.get("turn") or {}).get("status") or "completed")
             mapped = {"completed": "completed", "failed": "failed", "interrupted": "cancelled"}.get(status, status)
+            if not run.final_text:
+                run.final_text = run.last_agent_text
             run.finished = True
+            run.agent_message_deltas.clear()
+            run.reasoning_summary_deltas.clear()
             if turn_id:
                 self._turn_tasks.pop(turn_id, None)
             self.on_event(task_id, {**common, "status": mapped, "current_step": "", "result": run.final_text})
@@ -530,16 +590,127 @@ class CodexAppServer:
                 elif "waitingOnUserInput" in detail:
                     self.on_event(task_id, {**common, "status": "waiting_input", "current_step": "Waiting for user input"})
 
-    @staticmethod
-    def _item_label(item: dict, completed: bool = False) -> str:
-        labels = {
-            "commandExecution": "Running command", "fileChange": "Updating files",
-            "mcpToolCall": "Calling MCP tool", "dynamicToolCall": "Calling tool",
-            "webSearch": "Searching the web", "agentMessage": "Preparing response",
-            "reasoning": "Planning", "plan": "Updating plan",
+    def _emit_progress(self, task_id: str, common: dict, progress: dict) -> None:
+        self.on_event(task_id, {
+            **common,
+            "status": "running",
+            "current_step": str(progress.get("title") or "Codex is working"),
+            "progress_event": progress,
+        })
+
+    @classmethod
+    def _narration_progress(cls, item_id: str, text: str, code: str) -> dict:
+        clean = cls._clean_visible_text(text)
+        return {
+            "event_id": cls._progress_event_id(item_id, code),
+            "kind": "narration",
+            "code": code,
+            "title": clean.splitlines()[0][:240],
+            "status": "completed",
+            "detail": clean,
+            "metadata": {"source": "codex_app_server"},
         }
-        label = labels.get(str(item.get("type") or ""), "Working")
-        return f"{label} complete" if completed and label not in {"Preparing response", "Planning"} else label
+
+    @classmethod
+    def _tool_progress_event(cls, item: dict, completed: bool) -> dict | None:
+        item_type = str(item.get("type") or "")
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            return None
+        status = "completed" if completed else "running"
+        raw_status = str(item.get("status") or "").lower()
+        if completed and ("fail" in raw_status or raw_status == "declined"):
+            status = "failed"
+
+        code = ""
+        started_title = ""
+        completed_title = ""
+        detail = ""
+        metadata: dict[str, object] = {"source": "codex_app_server", "item_type": item_type}
+        if item_type == "commandExecution":
+            code, started_title, completed_title = "command", "Running command", "Ran command"
+            detail = cls._clean_visible_text(item.get("command"))
+        elif item_type == "fileChange":
+            code, started_title, completed_title = "file_change", "Updating files", "Updated files"
+            metadata["count"] = len(item.get("changes") or [])
+        elif item_type == "mcpToolCall":
+            code, started_title, completed_title = "mcp_tool", "Calling MCP tool", "Called MCP tool"
+            detail = ".".join(filter(None, (
+                str(item.get("server") or "").strip(),
+                str(item.get("tool") or "").strip(),
+            )))
+        elif item_type == "dynamicToolCall":
+            code, started_title, completed_title = "dynamic_tool", "Calling tool", "Called tool"
+            detail = ".".join(filter(None, (
+                str(item.get("namespace") or "").strip(),
+                str(item.get("tool") or "").strip(),
+            )))
+        elif item_type == "webSearch":
+            code, started_title, completed_title = "web_search", "Searching the web", "Searched the web"
+            action = item.get("action") if isinstance(item.get("action"), dict) else {}
+            queries = action.get("queries") if isinstance(action.get("queries"), list) else []
+            detail = cls._clean_visible_text(
+                item.get("query") or action.get("query") or (queries[0] if queries else "")
+            )
+        elif item_type == "imageView":
+            code, started_title, completed_title = "image_view", "Viewing image", "Viewed image"
+            metadata["count"] = 1
+        elif item_type == "imageGeneration":
+            code, started_title, completed_title = "image_generation", "Generating image", "Generated image"
+        elif item_type in {"collabAgentToolCall", "subAgentActivity"}:
+            code, started_title, completed_title = (
+                "agent_collaboration",
+                "Coordinating Agents",
+                "Coordinated Agents",
+            )
+            detail = cls._clean_visible_text(item.get("tool") or item.get("kind"))
+        elif item_type == "contextCompaction":
+            code, started_title, completed_title = (
+                "context_compaction",
+                "Compacting context",
+                "Compacted context",
+            )
+        else:
+            return None
+
+        title = completed_title if completed else started_title
+        if status == "failed":
+            title = f"{completed_title} with an error"
+        metadata["code"] = code
+        return {
+            "event_id": cls._progress_event_id(item_id, code),
+            "kind": "tool",
+            "code": code,
+            "title": title,
+            "status": status,
+            "detail": detail[:MAX_VISIBLE_TOOL_DETAIL],
+            "metadata": metadata,
+        }
+
+    @classmethod
+    def _reasoning_summary(cls, run: CodexRun, item_id: str, item: dict) -> str:
+        raw_summary = item.get("summary") if isinstance(item.get("summary"), list) else []
+        summaries = [cls._clean_visible_text(value) for value in raw_summary]
+        summaries = [value for value in summaries if value]
+        if not summaries:
+            buffered = run.reasoning_summary_deltas.get(item_id, {})
+            summaries = [
+                cls._clean_visible_text(buffered[index])
+                for index in sorted(buffered)
+                if cls._clean_visible_text(buffered[index])
+            ]
+        run.reasoning_summary_deltas.pop(item_id, None)
+        return "\n\n".join(summaries)[:MAX_VISIBLE_PROGRESS_TEXT]
+
+    @staticmethod
+    def _progress_event_id(item_id: str, code: str) -> str:
+        clean_item = str(item_id or "").strip()[:160]
+        return f"codex:{code}:{clean_item}" if clean_item else f"codex:{code}"
+
+    @staticmethod
+    def _clean_visible_text(value: object) -> str:
+        text = str(value or "").replace("\x00", "").strip()
+        return text[:MAX_VISIBLE_PROGRESS_TEXT]
 
     @staticmethod
     def _request_label(method: str) -> str:
