@@ -145,6 +145,8 @@ object AgentPrivateDataInventory {
             sensitivity = AgentPrivateDataSensitivity.SECRET
         ),
         localOnly("permission_grants", "Host permission grants", "database:signalasi_permission_grants_v1", AgentPrivateDataSensitivity.SECRET),
+        localOnly("policy_firewall_replay", "External request replay claims", "database:signalasi_policy_firewall_replay_v1", AgentPrivateDataSensitivity.SECRET),
+        localOnly("policy_firewall_audit", "External request policy decisions", "database:signalasi_policy_firewall_audit_v1", AgentPrivateDataSensitivity.EPHEMERAL),
         localOnly("run_start_receipts", "Cross-end idempotency receipts", "database:signalasi_run_start_receipts_v1", AgentPrivateDataSensitivity.EPHEMERAL),
         localOnly("provider_health", "Per-runtime health and circuit state", "database:signalasi_agent_provider_health", AgentPrivateDataSensitivity.EPHEMERAL),
         localOnly("run_workspaces", "Active Run workspaces and checkpoints", "database:signalasi_agent_workspaces", AgentPrivateDataSensitivity.EPHEMERAL),
