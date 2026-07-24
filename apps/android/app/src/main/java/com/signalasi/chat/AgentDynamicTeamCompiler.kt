@@ -84,7 +84,9 @@ data class AgentDynamicTeamCompilation(
  * generic providers or merge identities: every assignment remains bound to a
  * concrete Agent, installation, device, trust level, and failure domain.
  */
-class AgentDynamicTeamCompiler {
+class AgentDynamicTeamCompiler(
+    private val reputation: AgentReputationSnapshotProvider = AgentReputationSnapshotProvider.NONE
+) {
     fun compile(
         request: AgentDynamicTeamRequest,
         registrations: Collection<AgentRegistration>,
@@ -96,7 +98,7 @@ class AgentDynamicTeamCompiler {
         val policy = request.policy
         val budget = policy.budget.normalized()
         val requirements = AgentTaskRequirementAnalyzer.analyze(goal)
-        val index = AgentNetworkIndex(registrations)
+        val index = AgentNetworkIndex(registrations, reputation)
         val warnings = mutableListOf<String>()
         val unfilledRoles = linkedSetOf<AgentDynamicTeamRole>()
         val assignments = mutableListOf<AgentDynamicTeamAssignment>()

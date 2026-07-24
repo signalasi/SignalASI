@@ -148,6 +148,7 @@ object AgentPrivateDataInventory {
         localOnly("policy_firewall_replay", "External request replay claims", "database:signalasi_policy_firewall_replay_v1", AgentPrivateDataSensitivity.SECRET),
         localOnly("policy_firewall_audit", "External request policy decisions", "database:signalasi_policy_firewall_audit_v1", AgentPrivateDataSensitivity.EPHEMERAL),
         localOnly("cross_team_delegations", "Isolated cross-team delegation envelopes and receipts", "database:signalasi_cross_team_delegations_v1", AgentPrivateDataSensitivity.EPHEMERAL),
+        localOnly("agent_reputation_ledger", "Signed Agent execution receipts and independent attestations", "database:signalasi_agent_reputation_ledger_v1", AgentPrivateDataSensitivity.PERSONAL),
         localOnly("run_start_receipts", "Cross-end idempotency receipts", "database:signalasi_run_start_receipts_v1", AgentPrivateDataSensitivity.EPHEMERAL),
         localOnly("provider_health", "Per-runtime health and circuit state", "database:signalasi_agent_provider_health", AgentPrivateDataSensitivity.EPHEMERAL),
         localOnly("run_workspaces", "Active Run workspaces and checkpoints", "database:signalasi_agent_workspaces", AgentPrivateDataSensitivity.EPHEMERAL),
