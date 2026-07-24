@@ -1469,10 +1469,7 @@ class MobileNativeAgent(
                 conversationContext = activeConversationContext
             )
         )
-        val conversationPrompt = ConversationContextCompactor.fitTextToTokenBudget(
-            activeConversationContext.asPromptBlock(),
-            maximumTokens = 10_000
-        )
+        val conversationPrompt = activeConversationContext.asTransportBlock(maximumTokens = 10_000)
         val memoryPrompt = memories.take(5).joinToString("\n") { "- ${it.value.take(600)}" }
         val cloudKnowledgePrompt = knowledgeItems
             .filter { it.cloudAccess != AgentKnowledgeCloudAccess.DENY }
@@ -1923,6 +1920,56 @@ class MobileNativeAgent(
         } else {
             snapshot()
         }
+    }
+
+    fun acceptConnectorSteered(
+        sourceMessageId: Long,
+        contactId: String,
+        mergedIntoTaskId: String
+    ): AgentUiState? {
+        if (sourceMessageId <= 0L || mergedIntoTaskId.isBlank()) return null
+        val pendingResult = lastActionResult ?: return null
+        if (phase != AgentPhase.WAITING_RESPONSE) return null
+        if (pendingResult.metadata["source_message_id"]?.toLongOrNull() != sourceMessageId) return null
+        val expectedContactId = pendingResult.metadata["contact_id"].orEmpty()
+        if (expectedContactId.isNotBlank() && contactId.isNotBlank() && expectedContactId != contactId) return null
+        val plan = currentPlan ?: return null
+        val actionId = pendingResult.actionId
+        val completedResult = AgentActionResult(
+            actionId = actionId,
+            success = true,
+            message = "",
+            metadata = pendingResult.metadata - setOf(
+                "timeout_stage",
+                "timeout_elapsed_ms"
+            ) + mapOf(
+                "awaiting_response" to "false",
+                "response_received_at" to System.currentTimeMillis().toString(),
+                "connector_disposition" to "steered",
+                "merged_into_task_id" to mergedIntoTaskId
+            )
+        )
+        val continuedPlan = AgentPlanLifecyclePolicy.normalize(
+            plan.markAction(actionId, AgentActionStatus.COMPLETED, completedResult)
+        ).plan
+        currentPlan = continuedPlan
+        lastActionResult = completedResult
+        val hasPendingActions = continuedPlan.actions.any {
+            it.status == AgentActionStatus.PENDING_CONFIRMATION || it.status == AgentActionStatus.PROPOSED
+        }
+        phase = when {
+            safetySettingsStore.load().executionPaused -> AgentPhase.PAUSED
+            continuedPlan.safetyReview.blocked -> AgentPhase.BLOCKED
+            hasPendingActions && continuedPlan.safetyReview.requiresConfirmation -> AgentPhase.WAITING_CONFIRMATION
+            hasPendingActions -> AgentPhase.EXECUTING
+            else -> AgentPhase.COMPLETED
+        }
+        recordAudit(
+            AgentAuditEvent.CONNECTOR_RESPONSE_RECEIVED,
+            "source_message_id=$sourceMessageId; contact=$contactId; disposition=steered"
+        )
+        saveTaskRecord()
+        return if (phase == AgentPhase.EXECUTING) executeFirstPendingAction() else snapshot()
     }
 
     private fun continueWithConnectorFallback(

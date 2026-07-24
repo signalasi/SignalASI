@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,9 @@ from conversation_context import (
     compacted_history_cursor,
     compile_context,
     estimate_tokens,
+    embedded_mobile_context,
     is_context_overflow,
+    merge_context_messages,
     reference_block,
     retry_context_windows,
     task_history_messages,
@@ -17,6 +20,79 @@ from conversation_context import (
 
 
 class ConversationContextTest(unittest.TestCase):
+    def test_merge_deduplicates_the_same_turn_but_preserves_repeated_words(self):
+        merged = merge_context_messages(
+            (
+                ContextMessage("user", "yes", "phone-entry-1", "turn-1"),
+                ContextMessage("assistant", "done", "phone-entry-2", "turn-1"),
+                ContextMessage("user", "yes", "phone-entry-3", "turn-2"),
+            ),
+            (
+                ContextMessage("user", "yes", "desktop-task:user", "turn-1"),
+                ContextMessage("assistant", "done", "desktop-task:assistant", "turn-1"),
+            ),
+        )
+
+        self.assertEqual(["yes", "done", "yes"], [item.content for item in merged])
+
+    def test_structured_mobile_context_preserves_turn_identity_and_supports_delta(self):
+        payload = {
+            "version": 1,
+            "conversation_id": "conversation-mobile",
+            "summary": "Earlier decisions",
+            "global_context": "Trusted preference",
+            "turns": [
+                {
+                    "entry_id": "entry-u1",
+                    "turn_id": "turn-1",
+                    "task_id": "task-1",
+                    "role": "user",
+                    "content": "Use the first result",
+                },
+                {
+                    "entry_id": "entry-a1",
+                    "turn_id": "turn-1",
+                    "task_id": "task-1",
+                    "role": "assistant",
+                    "content": "The first result is ready",
+                },
+                {
+                    "entry_id": "entry-u2",
+                    "turn_id": "turn-2",
+                    "task_id": "task-2",
+                    "role": "user",
+                    "content": "Compare it with the second result",
+                },
+            ],
+        }
+        prompt = (
+            "[SIGNALASI_CONVERSATION_CONTEXT_V1]\n"
+            f"{json.dumps(payload)}\n"
+            "[/SIGNALASI_CONVERSATION_CONTEXT_V1]\n\n"
+            "Current user request:\nContinue"
+        )
+
+        context = embedded_mobile_context(prompt)
+        delta = context.delta(synced_turn_ids=("turn-1",))
+        entry_delta = context.delta(synced_entry_ids=("entry-u1",))
+
+        self.assertTrue(context.present)
+        self.assertEqual("conversation-mobile", context.conversation_id)
+        self.assertEqual({"turn-1", "turn-2"}, set(context.turn_ids))
+        self.assertEqual(["Compare it with the second result"], [item.content for item in delta])
+        self.assertNotIn("Use the first result", [item.content for item in entry_delta])
+        self.assertTrue(context.summary_digest)
+        self.assertIn("Earlier decisions", context.reference_summary)
+
+    def test_invalid_mobile_context_is_ignored(self):
+        prompt = (
+            "[SIGNALASI_CONVERSATION_CONTEXT_V1]\n"
+            "{\"version\":2,\"turns\":[]}\n"
+            "[/SIGNALASI_CONVERSATION_CONTEXT_V1]"
+        )
+
+        self.assertFalse(embedded_mobile_context(prompt).present)
+
     def test_short_context_is_not_compacted(self):
         messages = [
             ContextMessage("user", "hello", "u1", "turn-1"),

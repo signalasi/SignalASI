@@ -304,6 +304,114 @@ data class AgentConversationContext(
         }
         if (allowsGlobalContext && globalContext.isNotBlank()) append(globalContext).append("\n")
     }.trim()
+
+    fun asTransportBlock(maximumTokens: Int = 10_000): String {
+        val safeMaximum = maximumTokens.coerceAtLeast(2_048)
+        val sourceItems = turns.map { entry ->
+            ConversationContextItem(
+                id = entry.id,
+                role = if (entry.role == AgentTranscriptRole.USER) {
+                    ConversationContextRole.USER
+                } else {
+                    ConversationContextRole.ASSISTANT
+                },
+                content = entry.text,
+                groupId = entry.turnId.ifBlank { "entry:${entry.id}" }
+            )
+        }
+        val entriesById = turns.associateBy(AgentTranscriptEntry::id)
+        var inputBudget = safeMaximum
+        repeat(5) {
+            val reservedTokens = minOf(2_048, (inputBudget / 4).coerceAtLeast(512))
+            val compiled = ConversationContextCompactor.compile(
+                messages = sourceItems,
+                previousSummary = summary,
+                budget = ConversationContextBudget(
+                    contextWindowTokens = (inputBudget + reservedTokens).coerceAtLeast(4_096),
+                    reservedOutputTokens = reservedTokens,
+                    triggerRatio = 0.80,
+                    targetRatio = 0.60,
+                    minimumRecentGroups = 3,
+                    maximumSummaryTokens = minOf(2_048, (inputBudget / 4).coerceAtLeast(512))
+                )
+            )
+            val block = encodeTransportBlock(
+                compiledSummary = compiled.summary,
+                compiledItems = compiled.messages,
+                entriesById = entriesById
+            )
+            if (ConversationContextCompactor.estimateTokens(block) <= safeMaximum) {
+                return block
+            }
+            inputBudget = (inputBudget * 0.72).toInt().coerceAtLeast(2_048)
+        }
+        val latest = turns.lastOrNull()
+        val fallbackSummary = ConversationContextCompactor.fitTextToTokenBudget(
+            summary,
+            maximumTokens = (safeMaximum / 3).coerceAtLeast(512),
+            preserveTail = false
+        )
+        val fallbackItems = latest?.let { entry ->
+            listOf(
+                ConversationContextItem(
+                    id = entry.id,
+                    role = if (entry.role == AgentTranscriptRole.USER) {
+                        ConversationContextRole.USER
+                    } else {
+                        ConversationContextRole.ASSISTANT
+                    },
+                    content = ConversationContextCompactor.fitTextToTokenBudget(
+                        entry.text,
+                        maximumTokens = (safeMaximum / 2).coerceAtLeast(768)
+                    ),
+                    groupId = entry.turnId.ifBlank { "entry:${entry.id}" }
+                )
+            )
+        }.orEmpty()
+        return encodeTransportBlock(fallbackSummary, fallbackItems, entriesById)
+    }
+
+    private fun encodeTransportBlock(
+        compiledSummary: String,
+        compiledItems: List<ConversationContextItem>,
+        entriesById: Map<String, AgentTranscriptEntry>
+    ): String {
+        val payload = JSONObject()
+            .put("version", 1)
+            .put("conversation_id", conversationId)
+            .put("summary", compiledSummary)
+            .put("turns", JSONArray().apply {
+                compiledItems.forEach { item ->
+                    val entry = entriesById[item.id] ?: return@forEach
+                    put(
+                        JSONObject()
+                            .put("entry_id", entry.id)
+                            .put("turn_id", entry.turnId)
+                            .put("task_id", entry.taskId)
+                            .put(
+                                "role",
+                                if (entry.role == AgentTranscriptRole.USER) "user" else "assistant"
+                            )
+                            .put("content", item.content)
+                    )
+                }
+            })
+        if (allowsGlobalContext && globalContext.isNotBlank()) {
+            payload.put(
+                "global_context",
+                ConversationContextCompactor.fitTextToTokenBudget(
+                    globalContext,
+                    maximumTokens = 1_024,
+                    preserveTail = false
+                )
+            )
+        }
+        return buildString {
+            append(AgentTranscriptStore.SIGNALASI_CONTEXT_TRANSPORT_HEADER).append('\n')
+            append(payload.toString()).append('\n')
+            append(AgentTranscriptStore.SIGNALASI_CONTEXT_TRANSPORT_FOOTER)
+        }
+    }
 }
 
 data class AgentConversationMetrics(
@@ -641,12 +749,18 @@ class AgentTranscriptStore(context: Context) {
     }
 
     @Synchronized
-    fun context(conversationId: String = activeConversation().id): AgentConversationContext {
+    fun context(
+        conversationId: String = activeConversation().id,
+        excludeTurnId: String = ""
+    ): AgentConversationContext {
         val conversation = conversations(includeArchived = true).firstOrNull { it.id == conversationId }
             ?: activeConversation()
         val window = unsummarizedDialogue(conversation)
-        val compacted = compileContext(window.conversation, window.dialogue)
-        val entriesById = window.dialogue.associateBy(AgentTranscriptEntry::id)
+        val dialogue = window.dialogue.filterNot {
+            excludeTurnId.isNotBlank() && it.turnId == excludeTurnId
+        }
+        val compacted = compileContext(window.conversation, dialogue)
+        val entriesById = dialogue.associateBy(AgentTranscriptEntry::id)
         val turns = compacted.messages.mapNotNull { item ->
             entriesById[item.id]?.copy(text = item.content)
         }
@@ -1158,6 +1272,8 @@ class AgentTranscriptStore(context: Context) {
     }
 
     companion object {
+        const val SIGNALASI_CONTEXT_TRANSPORT_HEADER = "[SIGNALASI_CONVERSATION_CONTEXT_V1]"
+        const val SIGNALASI_CONTEXT_TRANSPORT_FOOTER = "[/SIGNALASI_CONVERSATION_CONTEXT_V1]"
         const val PREFS = "signalasi_agent_transcript"
         const val KEY_CONVERSATIONS = "conversations"
         const val KEY_ACTIVE_CONVERSATION = "active_conversation"

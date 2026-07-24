@@ -527,9 +527,12 @@ class CodexAppServer:
                     summaries.get(summary_index, "") + str(params.get("delta") or "")
                 )[:MAX_VISIBLE_PROGRESS_TEXT]
         elif method == "item/started":
-            progress = self._tool_progress_event(params.get("item") or {}, completed=False)
-            if progress:
-                self._emit_progress(task_id, common, progress)
+            self._emit_item_progress(
+                task_id,
+                common,
+                params.get("item") or {},
+                completed=False,
+            )
         elif method == "item/completed":
             item = params.get("item") or {}
             item_type = str(item.get("type") or "")
@@ -557,6 +560,14 @@ class CodexAppServer:
                         common,
                         self._narration_progress(item_id, summary, "reasoning_summary"),
                     )
+                legacy_event = self._item_event(item, "completed")
+                if legacy_event:
+                    self.on_event(task_id, {
+                        **common,
+                        "status": "running",
+                        "current_step": self._item_label(item, completed=True),
+                        **legacy_event,
+                    })
             elif item_type == "plan":
                 text = self._clean_visible_text(item.get("text"))
                 if text:
@@ -565,10 +576,16 @@ class CodexAppServer:
                         common,
                         self._narration_progress(item_id, text, "plan"),
                     )
+                legacy_event = self._item_event(item, "completed")
+                if legacy_event:
+                    self.on_event(task_id, {
+                        **common,
+                        "status": "running",
+                        "current_step": self._item_label(item, completed=True),
+                        **legacy_event,
+                    })
             else:
-                progress = self._tool_progress_event(item, completed=True)
-                if progress:
-                    self._emit_progress(task_id, common, progress)
+                self._emit_item_progress(task_id, common, item, completed=True)
         elif method == "turn/completed":
             status = str((params.get("turn") or {}).get("status") or "completed")
             mapped = {"completed": "completed", "failed": "failed", "interrupted": "cancelled"}.get(status, status)
@@ -597,6 +614,94 @@ class CodexAppServer:
             "current_step": str(progress.get("title") or "Codex is working"),
             "progress_event": progress,
         })
+
+    def _emit_item_progress(
+        self,
+        task_id: str,
+        common: dict,
+        item: dict,
+        *,
+        completed: bool,
+    ) -> None:
+        progress = self._tool_progress_event(item, completed=completed)
+        legacy_event = self._item_event(
+            item,
+            "completed" if completed else "running",
+        )
+        if not progress and not legacy_event:
+            return
+        self.on_event(task_id, {
+            **common,
+            "status": "running",
+            "current_step": (
+                str(progress.get("title") or "")
+                if progress
+                else self._item_label(item, completed=completed)
+            ),
+            **({"progress_event": progress} if progress else {}),
+            **legacy_event,
+        })
+
+    @staticmethod
+    def _item_label(item: dict, completed: bool = False) -> str:
+        labels = {
+            "commandExecution": "Running command", "fileChange": "Updating files",
+            "mcpToolCall": "Calling MCP tool", "dynamicToolCall": "Calling tool",
+            "webSearch": "Searching the web", "agentMessage": "Preparing response",
+            "reasoning": "Planning", "plan": "Updating plan",
+        }
+        label = labels.get(str(item.get("type") or ""), "Working")
+        return f"{label} complete" if completed and label not in {"Preparing response", "Planning"} else label
+
+    @classmethod
+    def _item_event(cls, item: dict, status: str) -> dict:
+        item_type = str(item.get("type") or "").strip()
+        if not item_type or item_type == "agentMessage":
+            return {}
+        kind = {
+            "reasoning": "reasoning",
+            "plan": "plan",
+            "commandExecution": "command",
+            "fileChange": "file",
+            "mcpToolCall": "mcp",
+            "dynamicToolCall": "tool",
+            "webSearch": "network",
+        }.get(item_type, "tool")
+        detail = cls._item_detail(item, item_type)
+        item_id = str(item.get("id") or "").strip()
+        return {
+            "event_id": f"codex:{item_id}" if item_id else "",
+            "event_kind": kind,
+            "event_title": cls._item_label(item),
+            "event_status": status,
+            "event_detail": detail,
+            "event_metadata": {"provider": "codex", "item_type": item_type},
+        }
+
+    @staticmethod
+    def _item_detail(item: dict, item_type: str) -> str:
+        if item_type == "commandExecution":
+            command = item.get("command") or item.get("cmd") or ""
+            if isinstance(command, list):
+                command = " ".join(str(value) for value in command)
+            return str(command or "").strip()[:1_000]
+        if item_type in {"mcpToolCall", "dynamicToolCall"}:
+            server = str(item.get("server") or item.get("serverName") or "").strip()
+            tool = str(item.get("tool") or item.get("toolName") or item.get("name") or "").strip()
+            return " / ".join(value for value in (server, tool) if value)[:1_000]
+        if item_type == "webSearch":
+            return str(item.get("query") or "").strip()[:1_000]
+        if item_type == "fileChange":
+            changes = item.get("changes") or []
+            if isinstance(changes, list):
+                paths = [
+                    str(value.get("path") or value.get("file") or "").strip()
+                    for value in changes
+                    if isinstance(value, dict)
+                ]
+                return ", ".join(value for value in paths if value)[:1_000]
+        # Reasoning internals are deliberately not forwarded.
+        return ""
 
     @classmethod
     def _narration_progress(cls, item_id: str, text: str, code: str) -> dict:

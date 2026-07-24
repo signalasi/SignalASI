@@ -35,6 +35,7 @@ from desktop_agent_adapters import (
 
 EXECUTION_LOG_MAX_BYTES = 512 * 1024
 AGENT_RUNTIME_FAILURE_TTL_SECONDS = 5 * 60
+NATIVE_SESSION_AGENT_IDS = frozenset({"hermes", "claude", "openclaw"})
 CONTEXT_COMPACTION_PROMPT = (
     "Compact the supplied conversation prefix into a factual handoff for the next model turn. "
     "Preserve user goals, current project state, decisions, constraints, unresolved work, exact paths, URLs, "
@@ -141,7 +142,7 @@ BASE_AGENTS: dict[str, AgentSpec] = {
         id="hermes",
         name="Hermes Agent",
         kind="local-cli",
-        command=["hermes", "chat", "-q", "{prompt}"],
+        command=["hermes", "chat", "-Q", "-q", "{prompt}", "--source", "signalasi"],
         timeout=60,
         note="Hermes CLI",
         output_cleaner="hermes",
@@ -459,17 +460,30 @@ def _agent_adapter_descriptors() -> list[AgentAdapterDescriptor]:
 
 
 def _execute_agent_adapter_request(agent_id: str, request: AgentAdapterRequest) -> str:
+    from agent_conversation_sessions import agent_conversation_sessions
     from response_policy import apply_response_policy, sanitize_assistant_response
 
     spec = all_agent_specs().get(agent_id)
     if spec is not None and spec.id == "local-llm":
-        messages = _stateless_model_messages(request, spec.id)
-        raw_reply = ask_local_model(request.prompt, timeout=spec.timeout, messages=messages)
+        with agent_conversation_sessions().conversation_lock(spec.id, request.conversation_id):
+            messages = _stateless_model_messages(request, spec.id)
+            raw_reply = ask_local_model(request.prompt, timeout=spec.timeout, messages=messages)
     elif spec is not None and spec.id == "cloud-model":
-        raw_reply = _ask_cloud_model_for_request(request, spec)
+        with agent_conversation_sessions().conversation_lock(spec.id, request.conversation_id):
+            raw_reply = _ask_cloud_model_for_request(request, spec)
     else:
-        styled_prompt = apply_response_policy(request.prompt)
-        raw_reply = _ask_agent_sync_inner(agent_id, styled_prompt, spec, task_id=request.run_id)
+        prompt = (
+            request.prompt
+            if request.conversation_id
+            else apply_response_policy(request.prompt)
+        )
+        raw_reply = _ask_agent_sync_inner(
+            agent_id,
+            prompt,
+            spec,
+            task_id=request.run_id,
+            conversation_id=request.conversation_id,
+        )
     reply = sanitize_assistant_response(
         raw_reply
     )
@@ -489,6 +503,8 @@ def _stateless_model_messages(
         compacted_history_cursor,
         compile_context,
         conversation_summary_store,
+        embedded_mobile_context,
+        merge_context_messages,
         task_history_messages,
     )
     from response_policy import CODEX_STYLE_RESPONSE_POLICY
@@ -508,14 +524,23 @@ def _stateless_model_messages(
         source_prefix=None,
         after_cursor=summary_state.cursor,
     )
+    mobile_context = embedded_mobile_context(request.prompt)
+    history_messages = task_history_messages(
+        history,
+        request.prompt,
+        current_task_id=request.run_id,
+        after_cursor=summary_state.cursor,
+    )
     compiled = compile_context(
-        task_history_messages(
-            history,
-            request.prompt,
-            current_task_id=request.run_id,
-            after_cursor=summary_state.cursor,
+        merge_context_messages(mobile_context.messages, history_messages),
+        previous_summary="\n".join(
+            value
+            for value in (
+                summary_state.summary.strip(),
+                mobile_context.reference_summary,
+            )
+            if value
         ),
-        previous_summary=summary_state.summary,
         fixed_prompt=CODEX_STYLE_RESPONSE_POLICY,
         budget=ContextBudget(
             context_window_tokens=context_window,
@@ -1127,14 +1152,20 @@ def ask_agent_sync(contact_id: str, text: str, task_id: str = "") -> str:
     return str(deliver_agent_sync(contact_id, text, task_id=task_id).get("reply") or "")
 
 
-def _ask_agent_sync_inner(contact_id: str, text: str, spec: AgentSpec | None, task_id: str = "") -> str:
+def _ask_agent_sync_inner(
+    contact_id: str,
+    text: str,
+    spec: AgentSpec | None,
+    task_id: str = "",
+    conversation_id: str = "",
+) -> str:
     if spec is None:
         return f"[SignalASI] \u672a\u77e5 Agent: {contact_id}"
     if spec.id == "local-llm":
         return ask_local_model(text, timeout=spec.timeout)
     if spec.id == "cloud-model":
         return ask_cloud_model(text, timeout=spec.timeout)
-    return ask_cli_agent(spec, text, task_id=task_id)
+    return ask_cli_agent(spec, text, task_id=task_id, conversation_id=conversation_id)
 
 
 def _agent_permission(spec: AgentSpec | None) -> str:
@@ -1199,10 +1230,91 @@ def recent_agent_execution_log(limit: int = 50) -> dict:
         return {"path": str(execution_log_path), "entries": [], "error": str(exc)[:200]}
 
 
-def ask_cli_agent(spec: AgentSpec, text: str, task_id: str = "") -> str:
+def ask_cli_agent(
+    spec: AgentSpec,
+    text: str,
+    task_id: str = "",
+    conversation_id: str = "",
+) -> str:
     command = _command_for(spec)
     if not command:
         return f"[{spec.name}] \u672a\u914d\u7f6e\u542f\u52a8\u547d\u4ee4"
+    from agent_conversation_sessions import agent_conversation_sessions
+
+    sessions = agent_conversation_sessions()
+    with sessions.conversation_lock(spec.id, conversation_id):
+        return _ask_cli_agent_locked(
+            spec,
+            command,
+            text,
+            task_id=task_id,
+            conversation_id=conversation_id,
+        )
+
+
+def _ask_cli_agent_locked(
+    spec: AgentSpec,
+    command: list[str],
+    text: str,
+    *,
+    task_id: str,
+    conversation_id: str,
+    retried_stale_session: bool = False,
+) -> str:
+    from agent_conversation_sessions import agent_conversation_sessions
+
+    sessions = agent_conversation_sessions()
+    binding = sessions.get(spec.id, conversation_id)
+    has_native_session = spec.id in NATIVE_SESSION_AGENT_IDS and bool(conversation_id)
+    existing_native_session = bool(binding.session_id)
+    if has_native_session and spec.id in {"claude", "openclaw"} and not binding.session_id:
+        binding = sessions.ensure(spec.id, conversation_id)
+    if not conversation_id:
+        invocation_text = text
+    elif not has_native_session or not existing_native_session:
+        invocation_text = _compiled_cli_prompt(spec, text, task_id, conversation_id)
+    else:
+        invocation_text = (
+            _native_incremental_cli_prompt(
+                spec,
+                text,
+                task_id,
+                conversation_id,
+                after_cursor=binding.cursor,
+                synced_turn_ids=binding.synced_turn_ids,
+                synced_entry_ids=binding.synced_entry_ids,
+                summary_digest=binding.summary_digest,
+            )
+            or _styled_turn_prompt(text)
+        )
+    session_command = _native_session_command(
+        spec,
+        command,
+        binding.session_id,
+        existing=existing_native_session,
+    )
+    return _run_cli_agent_process(
+        spec,
+        session_command,
+        invocation_text,
+        original_text=text,
+        task_id=task_id,
+        conversation_id=conversation_id,
+        retried_stale_session=retried_stale_session,
+    )
+
+
+def _run_cli_agent_process(
+    spec: AgentSpec,
+    command: list[str],
+    text: str,
+    *,
+    original_text: str,
+    task_id: str,
+    conversation_id: str,
+    retried_stale_session: bool,
+) -> str:
+    process: subprocess.Popen | None = None
     try:
         from task_workspace import task_workspace
 
@@ -1234,21 +1346,304 @@ def ask_cli_agent(spec: AgentSpec, text: str, task_id: str = "") -> str:
         )
         if task_id:
             agent_task_manager.record_exit_code(task_id, process.returncode)
-        raw = (decode_output(stdout or b"") or decode_output(stderr or b"")).strip()
+        stdout_text = decode_output(stdout or b"").strip()
+        stderr_text = decode_output(stderr or b"").strip()
+        _capture_native_session(spec, conversation_id, stderr_text, stdout_text)
+        if process.returncode != 0:
+            failure = stderr_text or stdout_text or f"Process exited with code {process.returncode}"
+            if (
+                conversation_id
+                and not retried_stale_session
+                and _is_stale_native_session_error(spec, failure)
+            ):
+                from agent_conversation_sessions import agent_conversation_sessions
+
+                agent_conversation_sessions().delete(spec.id, conversation_id)
+                return _ask_cli_agent_locked(
+                    spec,
+                    _command_for(spec) or command,
+                    original_text,
+                    task_id=task_id,
+                    conversation_id=conversation_id,
+                    retried_stale_session=True,
+                )
+            return f"[{spec.name}] \u8c03\u7528\u5931\u8d25\uff1a{failure[:200]}"
+        raw = (stdout_text or stderr_text).strip()
         if not raw:
             return f"[{spec.name}] \u65e0\u54cd\u5e94"
-        return clean_agent_output(spec, raw, text)
+        reply = clean_agent_output(spec, raw, text)
+        _mark_native_session_synced(
+            spec,
+            conversation_id,
+            task_id,
+            original_text,
+        )
+        return reply
     except FileNotFoundError:
         return f"[{spec.name}] \u672a\u68c0\u6d4b\u5230\u547d\u4ee4\uff1a{command[0]}\u3002\u8bf7\u5728 SignalASI Desktop \u4e2d\u914d\u7f6e\u8fde\u63a5\u5668\u3002"
     except subprocess.TimeoutExpired:
         try:
-            process.kill()
-            process.communicate(timeout=3)
+            if process is not None:
+                process.kill()
+                process.communicate(timeout=3)
         except Exception:
             pass
         return f"[{spec.name}] \u8d85\u65f6"
     except Exception as exc:
         return f"[{spec.name}] \u8c03\u7528\u5931\u8d25\uff1a{str(exc)[:200]}"
+
+
+def _native_session_command(
+    spec: AgentSpec,
+    command: list[str],
+    session_id: str,
+    *,
+    existing: bool,
+) -> list[str]:
+    if not session_id or spec.id not in NATIVE_SESSION_AGENT_IDS:
+        return list(command)
+    if any(
+        item in command
+        for item in ("--resume", "-r", "--session-id", "--session-key")
+    ):
+        return list(command)
+    if spec.id == "hermes":
+        return [*command, "--resume", session_id] if existing else list(command)
+    if spec.id == "claude":
+        return [*command, "--resume" if existing else "--session-id", session_id]
+    if spec.id == "openclaw":
+        return [*command, "--session-id", session_id]
+    return list(command)
+
+
+def _capture_native_session(
+    spec: AgentSpec,
+    conversation_id: str,
+    stderr_text: str,
+    stdout_text: str,
+) -> None:
+    if spec.id != "hermes" or not conversation_id:
+        return
+    match = re.search(
+        r"(?im)^\s*session_id\s*:\s*([A-Za-z0-9._:-]{4,240})\s*$",
+        "\n".join((stderr_text, stdout_text)),
+    )
+    if match is None:
+        return
+    from agent_conversation_sessions import agent_conversation_sessions
+
+    agent_conversation_sessions().put(spec.id, conversation_id, match.group(1))
+
+
+def _is_stale_native_session_error(spec: AgentSpec, value: str) -> bool:
+    if spec.id not in NATIVE_SESSION_AGENT_IDS:
+        return False
+    normalized = str(value or "").lower()
+    stale_markers = (
+        "session not found",
+        "unknown session",
+        "no conversation found",
+        "cannot resume",
+        "could not resume",
+        "invalid session id",
+        "transcript not found",
+        "transcript is missing",
+    )
+    return any(marker in normalized for marker in stale_markers)
+
+
+def _styled_turn_prompt(text: str) -> str:
+    from conversation_context import current_request
+    from response_policy import apply_response_policy
+
+    return apply_response_policy(current_request(text))
+
+
+def _compiled_cli_prompt(
+    spec: AgentSpec,
+    text: str,
+    task_id: str,
+    conversation_id: str,
+) -> str:
+    from agent_task_manager import agent_task_manager
+    from conversation_context import (
+        ContextBudget,
+        compacted_history_cursor,
+        compile_context,
+        conversation_summary_store,
+        embedded_mobile_context,
+        merge_context_messages,
+        render_prompt,
+        task_history_messages,
+    )
+    from response_policy import CODEX_STYLE_RESPONSE_POLICY, response_language
+
+    context_window = _cli_context_window(spec)
+    summary_key = f"cli:{spec.id}:{conversation_id}"
+    store = conversation_summary_store()
+    state = store.state(summary_key)
+    history = agent_task_manager.conversation_messages(
+        conversation_id,
+        source_prefix=None,
+        after_cursor=state.cursor,
+    )
+    mobile_context = embedded_mobile_context(text)
+    history_messages = task_history_messages(
+        history,
+        text,
+        current_task_id=task_id,
+        after_cursor=state.cursor,
+    )
+    compiled = compile_context(
+        merge_context_messages(mobile_context.messages, history_messages),
+        previous_summary="\n".join(
+            value
+            for value in (
+                state.summary.strip(),
+                mobile_context.reference_summary,
+            )
+            if value
+        ),
+        fixed_prompt=CODEX_STYLE_RESPONSE_POLICY,
+        budget=ContextBudget(
+            context_window_tokens=context_window,
+            reserved_output_tokens=min(8_192, max(1_024, context_window // 8)),
+        ),
+    )
+    if compiled.compacted and compiled.summary:
+        cursor = compacted_history_cursor(
+            history,
+            compiled.compacted_group_ids,
+            state.cursor,
+        )
+        store.put(
+            summary_key,
+            compiled.summary,
+            through_created_at=cursor[0],
+            through_task_id=cursor[1],
+        )
+    language = response_language(text)
+    preamble = (
+        f"{CODEX_STYLE_RESPONSE_POLICY}\n"
+        f"- Turn language: {language}. Respond in {language} unless the user explicitly requests another language."
+    )
+    return render_prompt(compiled, text, preamble=preamble)
+
+
+def _native_incremental_cli_prompt(
+    spec: AgentSpec,
+    text: str,
+    task_id: str,
+    conversation_id: str,
+    *,
+    after_cursor: tuple[int, str],
+    synced_turn_ids: tuple[str, ...] = (),
+    synced_entry_ids: tuple[str, ...] = (),
+    summary_digest: str = "",
+) -> str:
+    from agent_task_manager import agent_task_manager
+    from conversation_context import (
+        ContextBudget,
+        compile_context,
+        embedded_mobile_context,
+        merge_context_messages,
+        render_prompt,
+        task_history_messages,
+    )
+    from response_policy import CODEX_STYLE_RESPONSE_POLICY, response_language
+
+    history = agent_task_manager.conversation_messages(
+        conversation_id,
+        source_prefix=None,
+        after_cursor=after_cursor,
+    )
+    missed = [
+        item
+        for item in history
+        if str(item.get("task_id") or "") != task_id
+    ]
+    mobile_context = embedded_mobile_context(text)
+    mobile_delta = mobile_context.delta(
+        synced_turn_ids=synced_turn_ids,
+        synced_entry_ids=synced_entry_ids,
+    )
+    changed_summary = (
+        mobile_context.reference_summary
+        if mobile_context.summary_digest != str(summary_digest or "")
+        else ""
+    )
+    if not missed and not mobile_delta and not changed_summary:
+        return ""
+    context_window = _cli_context_window(spec)
+    history_messages = task_history_messages(
+        missed,
+        text,
+        current_task_id=task_id,
+        after_cursor=after_cursor,
+    )
+    compiled = compile_context(
+        merge_context_messages(mobile_delta, history_messages),
+        previous_summary=changed_summary,
+        fixed_prompt=CODEX_STYLE_RESPONSE_POLICY,
+        budget=ContextBudget(
+            context_window_tokens=context_window,
+            reserved_output_tokens=min(8_192, max(1_024, context_window // 8)),
+        ),
+    )
+    language = response_language(text)
+    preamble = (
+        f"{CODEX_STYLE_RESPONSE_POLICY}\n"
+        "The following recent turns were completed through other SignalASI resources. "
+        "Treat them as prior dialogue and continue the same conversation.\n"
+        f"- Turn language: {language}. Respond in {language} unless the user explicitly requests another language."
+    )
+    return render_prompt(compiled, text, preamble=preamble)
+
+
+def _cli_context_window(spec: AgentSpec) -> int:
+    defaults = {
+        "claude": 200_000,
+        "hermes": 64_000,
+        "openclaw": 64_000,
+    }
+    environment_key = f"SIGNALASI_{spec.id.upper().replace('-', '_')}_CONTEXT_WINDOW_TOKENS"
+    try:
+        value = int(os.environ.get(environment_key, str(defaults.get(spec.id, 64_000))))
+    except (TypeError, ValueError):
+        value = defaults.get(spec.id, 64_000)
+    return max(4_096, value)
+
+
+def _mark_native_session_synced(
+    spec: AgentSpec,
+    conversation_id: str,
+    task_id: str,
+    prompt: str,
+) -> None:
+    if spec.id not in NATIVE_SESSION_AGENT_IDS or not conversation_id or not task_id:
+        return
+    from agent_conversation_sessions import agent_conversation_sessions
+    from agent_task_manager import agent_task_manager
+    from conversation_context import embedded_mobile_context
+
+    task = agent_task_manager.get(task_id)
+    if task is None:
+        return
+    mobile_context = embedded_mobile_context(prompt)
+    agent_conversation_sessions().mark_synced(
+        spec.id,
+        conversation_id,
+        through_created_at_millis=task.created_at,
+        through_task_id=task.task_id,
+        synced_turn_ids=tuple(
+            sorted(
+                set(mobile_context.turn_ids)
+                | ({task.client_turn_id} if task.client_turn_id else set())
+            )
+        ),
+        synced_entry_ids=tuple(sorted(mobile_context.entry_ids)),
+        summary_digest=mobile_context.summary_digest,
+    )
 
 
 def _agent_env(spec: AgentSpec) -> dict:

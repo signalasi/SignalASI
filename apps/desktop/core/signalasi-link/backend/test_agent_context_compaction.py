@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,66 @@ from desktop_agent_adapters import AgentAdapterRequest
 
 
 class AgentContextCompactionTest(unittest.TestCase):
+    def test_stateless_model_receives_phone_context_after_provider_switch(self):
+        mobile_payload = {
+            "version": 1,
+            "conversation_id": "conversation-switch",
+            "summary": "",
+            "turns": [
+                {
+                    "entry_id": "u1",
+                    "turn_id": "turn-phone-api",
+                    "role": "user",
+                    "content": "Find the Shanghai weather",
+                },
+                {
+                    "entry_id": "a1",
+                    "turn_id": "turn-phone-api",
+                    "role": "assistant",
+                    "content": "Shanghai is sunny today",
+                },
+            ],
+        }
+        request = AgentAdapterRequest(
+            agent_id="cloud-model",
+            prompt=(
+                "[SIGNALASI_CONVERSATION_CONTEXT_V1]\n"
+                f"{json.dumps(mobile_payload)}\n"
+                "[/SIGNALASI_CONVERSATION_CONTEXT_V1]\n\n"
+                "Current user request:\nCompare that with tomorrow"
+            ),
+            run_id="current-task",
+            conversation_id="conversation-switch",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            store = conversation_context.ConversationSummaryStore(
+                Path(directory) / "summaries.json"
+            )
+            with patch.object(
+                agent_task_manager.agent_task_manager,
+                "conversation_messages",
+                return_value=[],
+            ), patch.object(
+                agent_gateway,
+                "cloud_model_config",
+                return_value={
+                    "context_window_tokens": 64_000,
+                    "max_output_tokens": 4_096,
+                    "context_model_summary": False,
+                },
+            ), patch.object(conversation_context, "_summary_store", store):
+                messages = agent_gateway._stateless_model_messages(request, "cloud-model")
+
+        dialogue = [item["content"] for item in messages if item["role"] != "system"]
+        self.assertEqual(
+            [
+                "Find the Shanghai weather",
+                "Shanghai is sunny today",
+                "Compare that with tomorrow",
+            ],
+            dialogue,
+        )
+
     def test_context_summary_setting_accepts_typed_and_serialized_booleans(self):
         self.assertTrue(agent_config._as_bool(True, False))
         self.assertTrue(agent_config._as_bool("true", False))

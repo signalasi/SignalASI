@@ -18,6 +18,7 @@ from agent_task_store import AgentTaskStore
 TASKS_DB_PATH = Path.home() / ".signalasi" / "agent_tasks.sqlite3"
 TERMINAL_STATES = {"completed", "failed", "cancelled", "timed_out"}
 MAX_AUTOMATIC_RECOVERY_ATTEMPTS = 2
+MAX_TASK_EVENTS = 256
 EventCallback = Callable[[dict], None]
 
 
@@ -44,6 +45,7 @@ class AgentTask:
     source_message_id: str
     prompt: str
     conversation_id: str = ""
+    client_conversation_id: str = ""
     client_route_id: str = ""
     status: str = "accepted"
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
@@ -79,6 +81,7 @@ class AgentTask:
             "contact_id": self.contact_id,
             "source_message_id": self.source_message_id,
             "conversation_id": self.conversation_id,
+            "client_conversation_id": self.client_conversation_id,
             "client_route_id": self.client_route_id,
             "status": self.status,
             "created_at": self.created_at,
@@ -142,6 +145,7 @@ class AgentTaskManager:
         on_result: EventCallback | None = None,
         task_id: str = "",
         conversation_id: str = "",
+        client_conversation_id: str = "",
         client_route_id: str = "",
         client_turn_id: str = "",
         attachments: list[str] | None = None,
@@ -155,6 +159,7 @@ class AgentTaskManager:
             source_message_id=source_message_id,
             prompt=prompt,
             conversation_id=conversation_id,
+            client_conversation_id=client_conversation_id,
             client_route_id=client_route_id,
             client_turn_id=client_turn_id,
             attachments=[str(value) for value in (attachments or [])[:12]],
@@ -174,12 +179,14 @@ class AgentTaskManager:
     def create_external(
         self, agent_id: str, contact_id: str, source_message_id: str, prompt: str,
         on_event: EventCallback, task_id: str = "", conversation_id: str = "",
+        client_conversation_id: str = "",
         client_route_id: str = "", client_turn_id: str = "",
     ) -> AgentTask:
         task = AgentTask(
             task_id=task_id.strip() or str(uuid.uuid4()), agent_id=agent_id,
             contact_id=contact_id, source_message_id=source_message_id, prompt=prompt,
             conversation_id=conversation_id,
+            client_conversation_id=client_conversation_id,
             client_route_id=client_route_id,
             client_turn_id=client_turn_id,
         )
@@ -288,7 +295,10 @@ class AgentTaskManager:
                 "title": str(title or "Task step")[:240],
                 "status": str(status or "completed")[:32],
                 "detail": str(detail or "")[:4_000],
-                "metadata": dict(metadata or {}),
+                "metadata": {
+                    **dict((existing or {}).get("metadata") or {}),
+                    **dict(metadata or {}),
+                },
             }
             try:
                 encoded = json.dumps(event["metadata"], ensure_ascii=False, separators=(",", ":"))
@@ -299,6 +309,7 @@ class AgentTaskManager:
             if existing_index >= 0:
                 task.events.pop(existing_index)
             task.events.append(event)
+            del task.events[:-MAX_TASK_EVENTS]
             if task.status in {"accepted", "queued", "starting", "recovering"}:
                 task.status = "running"
                 if not task.started_at:
@@ -513,6 +524,29 @@ class AgentTaskManager:
             self._tasks[task.task_id] = task
             return task
 
+    def active_for_conversation(
+        self,
+        conversation_id: str,
+        *,
+        agent_id: str = "",
+        exclude_task_id: str = "",
+    ) -> AgentTask | None:
+        clean_conversation_id = str(conversation_id or "").strip()
+        clean_agent_id = str(agent_id or "").strip()
+        if not clean_conversation_id:
+            return None
+        with self._lock:
+            candidates = [
+                task for task in self._tasks.values()
+                if task.task_id != exclude_task_id
+                and task.conversation_id == clean_conversation_id
+                and task.status not in TERMINAL_STATES
+                and task.status != "interrupted"
+                and not task.cancel_requested
+                and (not clean_agent_id or task.agent_id == clean_agent_id)
+            ]
+            return max(candidates, key=lambda item: (item.created_at, item.task_id), default=None)
+
     def list(self, limit: int = 100, include_prompt: bool = False) -> list[dict]:
         with self._lock:
             records = self._store.list_recent(max(1, min(int(limit or 100), 500)))
@@ -548,6 +582,7 @@ class AgentTaskManager:
                     "result": record.get("result"),
                     "status": record.get("status"),
                     "agent_id": record.get("agent_id"),
+                    "client_turn_id": record.get("client_turn_id"),
                     "created_at": record.get("created_at"),
                 }
                 for record in records
@@ -719,6 +754,11 @@ class AgentTaskManager:
             source_message_id=str(row.get("source_message_id") or ""),
             prompt=str(row.get("prompt") or ""),
             conversation_id=str(row.get("conversation_id") or ""),
+            client_conversation_id=str(
+                row.get("client_conversation_id")
+                or row.get("conversation_id")
+                or ""
+            ),
             client_route_id=str(row.get("client_route_id") or ""),
             status=status,
             created_at=int(row.get("created_at") or 0),

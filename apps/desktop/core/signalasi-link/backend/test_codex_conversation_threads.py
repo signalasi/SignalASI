@@ -8,6 +8,51 @@ import codex_app_server
 
 
 class CodexConversationThreadTests(unittest.TestCase):
+    def test_app_server_exposes_visible_tool_events_without_reasoning_content(self):
+        events = []
+        server = codex_app_server.CodexAppServer(
+            "codex",
+            {},
+            lambda task_id, event: events.append((task_id, event)),
+        )
+        server._runs["task-1"] = codex_app_server.CodexRun(
+            task_id="task-1",
+            thread_id="thread-1",
+            turn_id="turn-1",
+        )
+        server._turn_tasks["turn-1"] = "task-1"
+
+        server._handle_event({
+            "method": "item/started",
+            "params": {
+                "turnId": "turn-1",
+                "item": {
+                    "id": "command-1",
+                    "type": "commandExecution",
+                    "command": ["python", "verify.py"],
+                },
+            },
+        })
+        server._handle_event({
+            "method": "item/started",
+            "params": {
+                "turnId": "turn-1",
+                "item": {
+                    "id": "reasoning-1",
+                    "type": "reasoning",
+                    "text": "private internal reasoning must not leave the server",
+                },
+            },
+        })
+
+        command = events[0][1]
+        reasoning = events[1][1]
+        self.assertEqual("command", command["event_kind"])
+        self.assertEqual("python verify.py", command["event_detail"])
+        self.assertEqual("reasoning", reasoning["event_kind"])
+        self.assertEqual("", reasoning["event_detail"])
+        self.assertNotIn("private internal reasoning", str(reasoning))
+
     @staticmethod
     def _event_server():
         events = []

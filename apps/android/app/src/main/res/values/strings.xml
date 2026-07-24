@@ -1299,6 +1299,14 @@
     <string name="agent_trace_tool_completed">%1$s completed · %2$s</string>
     <string name="agent_trace_tool_failed">%1$s needs revision · %2$s</string>
     <string name="agent_trace_tool_result_ready">Prepared the tool result</string>
+    <string name="agent_trace_remote_reasoning">Analyzing the request</string>
+    <string name="agent_trace_remote_plan">Updating the plan</string>
+    <string name="agent_trace_remote_command">Running a command</string>
+    <string name="agent_trace_remote_file">Updating files</string>
+    <string name="agent_trace_remote_network">Searching the web</string>
+    <string name="agent_trace_remote_mcp">Calling MCP</string>
+    <string name="agent_trace_remote_provider">Calling %1$s</string>
+    <string name="agent_trace_remote_tool">Running a tool</string>
     <string name="agent_trace_recovery_started">Recovering from an interrupted step</string>
     <string name="agent_trace_recovery_completed">Recovery succeeded</string>
     <string name="agent_trace_recovery_manual">Waiting for manual confirmation</string>
