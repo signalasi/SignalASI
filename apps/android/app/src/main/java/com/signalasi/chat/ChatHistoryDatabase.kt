@@ -15,6 +15,12 @@ internal data class ChatHistoryPage(
     val hasMore: Boolean
 )
 
+internal data class ChatHistoryContactSummary(
+    val contactId: String,
+    val lastMessage: JSONObject,
+    val unreadCount: Int
+)
+
 internal class ChatHistoryDatabase(
     context: Context,
     databaseName: String = DATABASE_NAME
@@ -32,6 +38,9 @@ internal class ChatHistoryDatabase(
                 contact_id TEXT NOT NULL,
                 timestamp_millis INTEGER NOT NULL,
                 is_mine INTEGER NOT NULL,
+                is_system INTEGER NOT NULL,
+                is_read INTEGER NOT NULL,
+                read_at_millis INTEGER NOT NULL,
                 task_id_hash TEXT NOT NULL,
                 remote_message_id_hash TEXT NOT NULL,
                 payload_hash TEXT NOT NULL,
@@ -47,6 +56,12 @@ internal class ChatHistoryDatabase(
         )
         db.execSQL(
             """
+            CREATE INDEX chat_messages_contact_page
+            ON chat_messages(contact_id, sequence)
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
             CREATE INDEX chat_messages_remote_id
             ON chat_messages(contact_id, remote_message_id_hash)
             """.trimIndent()
@@ -55,6 +70,12 @@ internal class ChatHistoryDatabase(
             """
             CREATE INDEX chat_messages_task
             ON chat_messages(contact_id, task_id_hash)
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE INDEX chat_messages_contact_unread
+            ON chat_messages(contact_id, is_mine, is_system, is_read, sequence)
             """.trimIndent()
         )
         db.execSQL(
@@ -74,7 +95,13 @@ internal class ChatHistoryDatabase(
         )
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        recreateCurrentSchema(db)
+    }
+
+    override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        recreateCurrentSchema(db)
+    }
 
     @Synchronized
     fun reserveMessageId(): Long {
@@ -213,6 +240,50 @@ internal class ChatHistoryDatabase(
     }
 
     @Synchronized
+    fun readContactSummaries(): List<ChatHistoryContactSummary> =
+        readableDatabase.rawQuery(
+            """
+            SELECT
+                message.message_id,
+                message.encrypted_payload,
+                message.is_read,
+                message.read_at_millis,
+                message.contact_id,
+                (
+                    SELECT COUNT(*)
+                    FROM chat_messages AS unread
+                    WHERE unread.contact_id = message.contact_id
+                      AND unread.is_mine = 0
+                      AND unread.is_system = 0
+                      AND unread.is_read = 0
+                ) AS unread_count
+            FROM chat_messages AS message
+            INNER JOIN (
+                SELECT contact_id, MAX(sequence) AS latest_sequence
+                FROM chat_messages
+                WHERE is_system = 0
+                GROUP BY contact_id
+            ) AS latest
+              ON latest.contact_id = message.contact_id
+             AND latest.latest_sequence = message.sequence
+            ORDER BY message.timestamp_millis DESC, message.sequence DESC
+            """.trimIndent(),
+            null
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(
+                        ChatHistoryContactSummary(
+                            contactId = cursor.getString(cursor.getColumnIndexOrThrow("contact_id")),
+                            lastMessage = decodeMessage(cursor),
+                            unreadCount = cursor.getInt(cursor.getColumnIndexOrThrow("unread_count"))
+                        )
+                    )
+                }
+            }
+        }
+
+    @Synchronized
     fun page(
         contactId: String,
         beforeSequenceExclusive: Long? = null,
@@ -255,6 +326,30 @@ internal class ChatHistoryDatabase(
     @Synchronized
     fun findMessage(messageId: Long): JSONObject? =
         querySingle("message_id = ?", arrayOf(messageId.toString()))
+
+    @Synchronized
+    fun markContactRead(contactId: String, readAtMillis: Long = System.currentTimeMillis()): Int {
+        if (contactId.isBlank()) return 0
+        val db = writableDatabase
+        db.beginTransaction()
+        return try {
+            val values = ContentValues().apply {
+                put("is_read", 1)
+                put("read_at_millis", readAtMillis)
+            }
+            val changed = db.update(
+                TABLE_MESSAGES,
+                values,
+                "contact_id = ? AND is_mine = 0 AND is_system = 0 AND is_read = 0",
+                arrayOf(contactId)
+            )
+            if (changed > 0) incrementVersion(db)
+            db.setTransactionSuccessful()
+            changed
+        } finally {
+            db.endTransaction()
+        }
+    }
 
     @Synchronized
     fun hasIncomingDuplicate(
@@ -380,6 +475,11 @@ internal class ChatHistoryDatabase(
         if (isTombstoned(db, messageId)) return false
         val current = querySingle(db, "message_id = ?", arrayOf(messageId.toString()))
         val message = mergeMessage(current, incoming)
+        val isRead = message.optBoolean("isRead") || payloadHasReadTrace(message)
+        val readAtMillis = message.optLong("readAt", 0L).takeIf { isRead && it > 0L }
+            ?: if (isRead) System.currentTimeMillis() else 0L
+        message.put("isRead", isRead)
+        message.put("readAt", readAtMillis)
         val raw = message.toString()
         val payloadHash = digest(raw)
         if (current != null && existingPayloadHash(db, messageId) == payloadHash) {
@@ -391,6 +491,9 @@ internal class ChatHistoryDatabase(
             put("contact_id", message.optString("contactId"))
             put("timestamp_millis", message.optLong("timestamp", System.currentTimeMillis()))
             put("is_mine", if (message.optBoolean("isMine")) 1 else 0)
+            put("is_system", if (message.optBoolean("isSystem")) 1 else 0)
+            put("is_read", if (isRead) 1 else 0)
+            put("read_at_millis", readAtMillis)
             put("task_id_hash", message.optString("taskId").takeIf(String::isNotBlank)?.let(::digest).orEmpty())
             put(
                 "remote_message_id_hash",
@@ -419,6 +522,10 @@ internal class ChatHistoryDatabase(
         }
         if (merged.optString("taskId").isBlank() && current.optString("taskId").isNotBlank()) {
             merged.put("taskId", current.optString("taskId"))
+        }
+        if (current.optBoolean("isRead") && !merged.optBoolean("isRead")) {
+            merged.put("isRead", true)
+            merged.put("readAt", current.optLong("readAt", 0L))
         }
         val currentTaskSequence = current.optLong("taskStatusSeq", 0L)
         val incomingTaskSequence = merged.optLong("taskStatusSeq", 0L)
@@ -488,6 +595,23 @@ internal class ChatHistoryDatabase(
         val raw = AgentStorageCipher.decrypt(encrypted, associatedData(messageId))
             ?: error("Chat history message could not be decrypted")
         return JSONObject(raw)
+            .put("isRead", cursor.getInt(cursor.getColumnIndexOrThrow("is_read")) != 0)
+            .put("readAt", cursor.getLong(cursor.getColumnIndexOrThrow("read_at_millis")))
+    }
+
+    private fun payloadHasReadTrace(message: JSONObject): Boolean {
+        val trace = message.optJSONArray("deliveryTrace") ?: return false
+        for (index in 0 until trace.length()) {
+            if (trace.optJSONObject(index)?.optString("stage") == "read") return true
+        }
+        return false
+    }
+
+    private fun recreateCurrentSchema(db: SQLiteDatabase) {
+        db.execSQL("DROP TABLE IF EXISTS $TABLE_TOMBSTONES")
+        db.execSQL("DROP TABLE IF EXISTS $TABLE_METADATA")
+        db.execSQL("DROP TABLE IF EXISTS $TABLE_MESSAGES")
+        onCreate(db)
     }
 
     private fun queryMaximumMessageId(db: SQLiteDatabase): Long =
@@ -560,7 +684,7 @@ internal class ChatHistoryDatabase(
 
     companion object {
         const val DATABASE_NAME = "signalasi_chat_history.db"
-        private const val DATABASE_VERSION = 1
+        private const val DATABASE_VERSION = 2
         private const val TABLE_MESSAGES = "chat_messages"
         private const val TABLE_METADATA = "chat_metadata"
         private const val TABLE_TOMBSTONES = "deleted_chat_messages"
@@ -568,7 +692,9 @@ internal class ChatHistoryDatabase(
         private const val KEY_UPDATED_VERSION = "updated_version"
         private const val DEFAULT_PAGE_SIZE = 100
         private const val MAX_PAGE_SIZE = 500
-        private val PAYLOAD_COLUMNS = arrayOf("message_id", "encrypted_payload")
-        private val PAGE_COLUMNS = arrayOf("sequence", "message_id", "encrypted_payload")
+        private val PAYLOAD_COLUMNS =
+            arrayOf("message_id", "encrypted_payload", "is_read", "read_at_millis")
+        private val PAGE_COLUMNS =
+            arrayOf("sequence", "message_id", "encrypted_payload", "is_read", "read_at_millis")
     }
 }
