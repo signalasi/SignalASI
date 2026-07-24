@@ -9,9 +9,6 @@ from pathlib import Path
 from typing import Any
 
 
-LEGACY_CONFIG_PATH = Path(__file__).with_name("signalasi_agents.json")
-
-
 def _config_path() -> Path:
     configured = os.environ.get("SIGNALASI_CONFIG_PATH", "").strip()
     if configured:
@@ -58,14 +55,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
 def load_config(mask_secrets: bool = False) -> dict[str, Any]:
     config = deepcopy(DEFAULT_CONFIG)
     config_path = _config_path()
-    source_path = config_path if config_path.exists() else LEGACY_CONFIG_PATH
-    if source_path.exists():
+    if config_path.exists():
         try:
-            with source_path.open("r", encoding="utf-8-sig") as handle:
+            with config_path.open("r", encoding="utf-8-sig") as handle:
                 saved = json.load(handle)
             _merge(config, saved)
-            if source_path == LEGACY_CONFIG_PATH and source_path != config_path:
-                _write_config(config_path, config)
         except Exception:
             pass
     if mask_secrets:

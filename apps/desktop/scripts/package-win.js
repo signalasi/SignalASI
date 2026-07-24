@@ -324,26 +324,6 @@ if (rcedit) {
   console.warn("rcedit not found; packaged exe will keep the Electron file resources.");
 }
 
-writeJson(path.join(packagedBackendDir, "signalasi_agents.json"), {
-  commands: {
-    hermes: "hermes chat -q",
-    codex: "codex exec --skip-git-repo-check --ephemeral --model gpt-5.6-sol -c model_reasoning_effort=\"low\" -",
-    claude: "claude -p",
-    "custom-agent": ""
-  },
-  local_model: {
-    name: "Local LLM",
-    provider: "auto",
-    url: "",
-    model: "qwen2.5:7b",
-    api_key: ""
-  },
-  custom_agent: {
-    name: "Custom Agent"
-  },
-  custom_agents: []
-});
-
 fs.writeFileSync(
   path.join(packageDir, "install-backend-deps.bat"),
   [

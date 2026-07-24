@@ -67,6 +67,49 @@ class BackendIntegrationContractTest(unittest.TestCase):
             """
         )
 
+    def test_database_path_does_not_copy_source_database(self) -> None:
+        self.run_isolated(
+            """
+            import os
+            from pathlib import Path
+            import models
+
+            state_dir = Path(os.environ["SIGNALASI_STATE_DIR"])
+            source_dir = state_dir / "source"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            (source_dir / "signalasi.db").write_bytes(b"obsolete-source-database")
+            models.__file__ = str(source_dir / "models.py")
+
+            target = state_dir / "current" / "signalasi.db"
+            os.environ["SIGNALASI_DATABASE_PATH"] = str(target)
+            assert models._database_path() == target
+            assert not target.exists()
+            """
+        )
+
+    def test_legacy_whisper_environment_is_ignored(self) -> None:
+        self.run_isolated(
+            """
+            import os
+
+            for key in (
+                "SIGNALASI_WHISPER_MODEL",
+                "SIGNALASI_WHISPER_DEVICE",
+                "SIGNALASI_WHISPER_COMPUTE_TYPE",
+            ):
+                os.environ.pop(key, None)
+            os.environ["HERMESCHAT_WHISPER_MODEL"] = "legacy-model"
+            os.environ["HERMESCHAT_WHISPER_DEVICE"] = "legacy-device"
+            os.environ["HERMESCHAT_WHISPER_COMPUTE_TYPE"] = "legacy-compute"
+
+            import stt_bridge
+
+            assert stt_bridge.MODEL_NAME == "medium"
+            assert stt_bridge.DEVICE == "cpu"
+            assert stt_bridge.COMPUTE_TYPE == "int8"
+            """
+        )
+
     def test_stable_api_response_contract(self) -> None:
         self.run_isolated(
             """

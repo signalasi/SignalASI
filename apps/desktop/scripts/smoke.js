@@ -11,7 +11,7 @@ const workspaceRoot = path.resolve(root, "..");
 const backendDir = path.join(root, "core", "signalasi-link", "backend");
 let backendPort = 8765;
 let backendOrigin = `http://127.0.0.1:${backendPort}`;
-const agentConfigPath = path.join(backendDir, "signalasi_agents.json");
+let backendStateDir = "";
 const fakeModelPort = 18993;
 const fakeModelOrigin = `http://127.0.0.1:${fakeModelPort}`;
 const requiredBackendCapabilities = ["model_display_names", "local_model_endpoint_probe", "mobile_cloud_models", "mcp_stdio_wrapper", "multiple_custom_agents", "api_response_codes", "agent_diagnostics_codes"];
@@ -80,10 +80,12 @@ async function fetchJson(pathname, options = {}) {
 }
 
 function readConfigSnapshot() {
+  const agentConfigPath = path.join(backendStateDir, "agents.json");
   return fs.existsSync(agentConfigPath) ? fs.readFileSync(agentConfigPath, "utf8") : undefined;
 }
 
 function restoreConfigSnapshot(snapshot) {
+  const agentConfigPath = path.join(backendStateDir, "agents.json");
   if (snapshot === undefined) {
     fs.rmSync(agentConfigPath, { force: true });
   } else {
@@ -217,9 +219,10 @@ async function smoke() {
 
   log("starting or reusing backend");
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalasi-smoke-"));
+  backendStateDir = path.join(tmpDir, "state");
   backendPort = await findFreeBackendPort();
   backendOrigin = `http://127.0.0.1:${backendPort}`;
-  const startedBackend = await startBackendIfNeeded(path.join(tmpDir, "state"));
+  const startedBackend = await startBackendIfNeeded(backendStateDir);
   try {
     const diagnostics = await waitForBackend();
     if (diagnostics.pairing_route !== "/signalasi/verify") fail("Unexpected pairing route");
