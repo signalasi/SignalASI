@@ -9,7 +9,6 @@ const apkPath = path.join(androidDir, "app", "build", "outputs", "apk", "debug",
 const packageName = "com.signalasi.chat";
 const activityName = `${packageName}/.MainActivity`;
 const appStorePrefs = "shared_prefs/signalasi_app_store.xml";
-const oldAppStorePrefs = "shared_prefs/hermes_app_store.xml";
 const outDir = path.join(root, "ui-smoke");
 const storeDump = path.join(outDir, "android-friends-app-store.xml");
 
@@ -129,12 +128,10 @@ async function main() {
   adb(["shell", "am", "force-stop", packageName]);
 
   const originalAppStore = readAppFile(appStorePrefs);
-  const originalOldAppStore = readAppFile(oldAppStorePrefs);
 
   try {
     log("resetting app store snapshot for isolated friend request flow");
     restoreAppFile(appStorePrefs, "");
-    restoreAppFile(oldAppStorePrefs, "");
     adb(["shell", "am", "force-stop", packageName]);
 
     log("scanning contact QR: should create a pending New Friend only");
@@ -205,7 +202,6 @@ async function main() {
     adb(["shell", "am", "force-stop", packageName]);
     log("restoring original app store");
     restoreAppFile(appStorePrefs, originalAppStore);
-    restoreAppFile(oldAppStorePrefs, originalOldAppStore);
     adb(["shell", "am", "force-stop", packageName]);
   }
 }

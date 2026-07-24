@@ -9,7 +9,6 @@ const apkPath = path.join(androidDir, "app", "build", "outputs", "apk", "debug",
 const packageName = "com.signalasi.chat";
 const activityName = `${packageName}/.MainActivity`;
 const appStorePrefs = "shared_prefs/signalasi_app_store.xml";
-const oldAppStorePrefs = "shared_prefs/hermes_app_store.xml";
 const outDir = path.join(root, "ui-smoke");
 const directoryDump = path.join(outDir, "android-contact-tags.xml");
 
@@ -107,6 +106,15 @@ async function main() {
       agent_kind: "cloud-api",
       delivery_mode: "cloud_api",
       cloud_provider: "Tag Model Smoke",
+      cloud_models: [{
+        name: "Tag Model Smoke",
+        model_id: "tag-model-smoke",
+        endpoint: "https://example.invalid/v1/chat/completions",
+        api_key: `sk-regression-${now}`,
+        api_style: "openai",
+        updated_at: now
+      }],
+      selected_cloud_model: "tag-model-smoke",
       trust_state: "verified",
       setup_status: "ready",
       created_at: now,
@@ -131,12 +139,10 @@ async function main() {
   adb(["shell", "am", "force-stop", packageName]);
 
   const originalAppStore = readAppFile(appStorePrefs);
-  const originalOldAppStore = readAppFile(oldAppStorePrefs);
 
   try {
     log("seeding isolated Agent, Model, and Device contacts");
     restoreAppFile(appStorePrefs, appStoreXml(contacts));
-    restoreAppFile(oldAppStorePrefs, "");
     adb(["shell", "am", "force-stop", packageName]);
 
     log("opening Contacts page and verifying type tags");
@@ -157,7 +163,6 @@ async function main() {
     adb(["shell", "am", "force-stop", packageName]);
     log("restoring original app store");
     restoreAppFile(appStorePrefs, originalAppStore);
-    restoreAppFile(oldAppStorePrefs, originalOldAppStore);
     adb(["shell", "am", "force-stop", packageName]);
   }
 }
