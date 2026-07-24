@@ -3,6 +3,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import itertools
 import json
 import os
 import queue
@@ -13,7 +14,7 @@ import threading
 import time
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -39,6 +40,12 @@ from link_delivery import (
     remove_task_result,
 )
 from link_protocol import LinkTopics, PROTOCOL_NAME, PROTOCOL_VERSION, decrypt_pairing_claim, make_envelope, parse_topic, validate_envelope, valid_route_id
+from mqtt_wire_chunking import (
+    MAX_PACKET_BYTES as MAX_MQTT_PACKET_BYTES,
+    MqttWireChunkAssembler,
+    encode_wire_payload,
+    is_chunk as is_mqtt_chunk,
+)
 from pairing_state import (
     clients_for_identity,
     get_client,
@@ -70,7 +77,7 @@ PORT = int(os.environ.get("SIGNALASI_MQTT_PORT", "8883"))
 MQTT_TLS = os.environ.get("SIGNALASI_MQTT_TLS", "1") != "0"
 FILES_DIR = Path.home() / "signalasi_files"
 MQTT_QOS = 1
-MQTT_TRANSPORT_EPOCH = "v3"
+MQTT_TRANSPORT_EPOCH = "v4-fragment"
 MOBILE_HIDDEN_AGENT_IDS = {"cloud-model"}
 
 client = None
@@ -82,7 +89,7 @@ pending_delivery_acks: dict[int, dict] = {}
 pending_delivery_acks_lock = threading.Lock()
 pending_outbound_acks: dict[int, tuple[str, str]] = {}
 pending_outbound_acks_lock = threading.Lock()
-MAX_MQTT_WIRE_BYTES = 768 * 1024
+MAX_MQTT_WIRE_BYTES = MAX_MQTT_PACKET_BYTES
 MAX_INLINE_ATTACHMENT_BYTES = 320 * 1024
 IMAGE_ATTACHMENT_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic", ".heif"}
 PRESENCE_INTERVAL_SECONDS = max(
@@ -94,6 +101,9 @@ presence_thread: threading.Thread | None = None
 inbound_route_queues: dict[str, queue.Queue] = {}
 inbound_route_queues_lock = threading.Lock()
 INBOUND_ROUTE_IDLE_SECONDS = 120
+MQTT_MAX_INFLIGHT = 64
+MAX_FRAGMENT_INFLIGHT = 16
+MAX_FRAGMENT_INFLIGHT_PER_TRANSFER = 4
 
 TOOL_SESSION_START_TYPE = "tool_session_start"
 TOOL_CALL_REQUEST_TYPE = "tool_call_request"
@@ -138,8 +148,44 @@ class _InboundMqttMessage:
     received_at_ms: int
 
 
+class _FragmentPublishInfo:
+    def __init__(self, mid: int, rc: int = mqtt.MQTT_ERR_SUCCESS) -> None:
+        self.mid = mid
+        self.rc = rc
+        self._published = False
+        self._lock = threading.Lock()
+
+    def is_published(self) -> bool:
+        with self._lock:
+            return self._published
+
+    def mark_published(self) -> None:
+        with self._lock:
+            self._published = True
+
+
+@dataclass
+class _OutboundFragmentTransfer:
+    transfer_id: int
+    digest: str
+    mqttc: Any
+    topic: str
+    packets: list[str]
+    info: _FragmentPublishInfo
+    next_packet_index: int = 0
+    pending_mids: set[int] = field(default_factory=set)
+    failed: bool = False
+
+
 phone_tool_sessions: dict[str, _PhoneToolSession] = {}
 phone_tool_sessions_lock = threading.RLock()
+inbound_chunk_assembler = MqttWireChunkAssembler()
+fragment_publish_lock = threading.RLock()
+fragment_publish_transfers: dict[int, _OutboundFragmentTransfer] = {}
+fragment_publish_transfer_by_mid: dict[int, int] = {}
+fragment_publish_transfer_by_digest: dict[str, int] = {}
+fragment_publish_id_sequence = itertools.count(-1, -1)
+fragment_publish_inflight = 0
 
 
 def _client_topics(client_route_id: str) -> LinkTopics:
@@ -1280,13 +1326,152 @@ def on_connect(mqttc, userdata, flags, reason_code, properties=None):
         log.warning(f"MQTT connection failed rc={reason_code}")
 
 
+def _publish_mqtt_wire_payload(mqttc, topic: str, wire_payload: str):
+    packets = encode_wire_payload(wire_payload)
+    if len(packets) == 1:
+        return mqttc.publish(topic, packets[0], qos=MQTT_QOS)
+
+    digest = hashlib.sha256(wire_payload.encode("utf-8")).hexdigest()
+    with fragment_publish_lock:
+        active_id = fragment_publish_transfer_by_digest.get(digest)
+        if active_id is not None:
+            active = fragment_publish_transfers.get(active_id)
+            if active is not None:
+                return active.info
+        transfer_id = next(fragment_publish_id_sequence)
+        publish_info = _FragmentPublishInfo(transfer_id)
+        transfer = _OutboundFragmentTransfer(
+            transfer_id=transfer_id,
+            digest=digest,
+            mqttc=mqttc,
+            topic=topic,
+            packets=packets,
+            info=publish_info,
+        )
+        fragment_publish_transfers[transfer_id] = transfer
+        fragment_publish_transfer_by_digest[digest] = transfer_id
+        _pump_fragment_transfers_locked()
+        if transfer.failed and not transfer.pending_mids:
+            fragment_publish_transfers.pop(transfer_id, None)
+            fragment_publish_transfer_by_digest.pop(digest, None)
+    log.info(
+        "MQTT fragmented transfer queued chunks=%s wire_bytes=%s topic=%s",
+        len(packets),
+        len(wire_payload.encode("utf-8")),
+        topic,
+    )
+    return publish_info
+
+
+def _pump_fragment_transfers_locked() -> None:
+    global fragment_publish_inflight
+    made_progress = True
+    while made_progress and fragment_publish_inflight < MAX_FRAGMENT_INFLIGHT:
+        made_progress = False
+        for transfer in list(fragment_publish_transfers.values()):
+            if fragment_publish_inflight >= MAX_FRAGMENT_INFLIGHT:
+                return
+            if (
+                transfer.failed
+                or transfer.next_packet_index >= len(transfer.packets)
+                or len(transfer.pending_mids) >= MAX_FRAGMENT_INFLIGHT_PER_TRANSFER
+            ):
+                continue
+            packet_index = transfer.next_packet_index
+            try:
+                physical_info = transfer.mqttc.publish(
+                    transfer.topic,
+                    transfer.packets[packet_index],
+                    qos=MQTT_QOS,
+                )
+            except Exception as exc:
+                transfer.failed = True
+                transfer.info.rc = getattr(mqtt, "MQTT_ERR_NO_CONN", 4)
+                log.warning(
+                    "MQTT fragment publish deferred chunk=%s/%s: %s",
+                    packet_index + 1,
+                    len(transfer.packets),
+                    exc,
+                )
+                if not transfer.pending_mids:
+                    fragment_publish_transfers.pop(transfer.transfer_id, None)
+                    fragment_publish_transfer_by_digest.pop(transfer.digest, None)
+                continue
+            if physical_info.rc != mqtt.MQTT_ERR_SUCCESS:
+                transfer.failed = True
+                transfer.info.rc = physical_info.rc
+                log.warning(
+                    "MQTT fragment publish rejected chunk=%s/%s rc=%s",
+                    packet_index + 1,
+                    len(transfer.packets),
+                    physical_info.rc,
+                )
+                if not transfer.pending_mids:
+                    fragment_publish_transfers.pop(transfer.transfer_id, None)
+                    fragment_publish_transfer_by_digest.pop(transfer.digest, None)
+                continue
+            transfer.next_packet_index += 1
+            transfer.pending_mids.add(int(physical_info.mid))
+            fragment_publish_transfer_by_mid[int(physical_info.mid)] = transfer.transfer_id
+            fragment_publish_inflight += 1
+            made_progress = True
+
+
+def _complete_fragment_publish(mqttc, mid: int) -> tuple[bool, int | None]:
+    global fragment_publish_inflight
+    with fragment_publish_lock:
+        transfer_id = fragment_publish_transfer_by_mid.pop(mid, None)
+        if transfer_id is None:
+            return False, None
+        transfer = fragment_publish_transfers.get(transfer_id)
+        if transfer is None:
+            return True, None
+        transfer.pending_mids.discard(mid)
+        fragment_publish_inflight = max(0, fragment_publish_inflight - 1)
+        logical_mid = None
+        if transfer.failed and not transfer.pending_mids:
+            fragment_publish_transfers.pop(transfer_id, None)
+            fragment_publish_transfer_by_digest.pop(transfer.digest, None)
+        elif (
+            transfer.next_packet_index >= len(transfer.packets)
+            and not transfer.pending_mids
+        ):
+            fragment_publish_transfers.pop(transfer_id, None)
+            fragment_publish_transfer_by_digest.pop(transfer.digest, None)
+            transfer.info.mark_published()
+            logical_mid = transfer.info.mid
+            log.info(
+                "MQTT fragmented transfer broker-acked chunks=%s topic=%s",
+                len(transfer.packets),
+                transfer.topic,
+            )
+        _pump_fragment_transfers_locked()
+        return True, logical_mid
+
+
+def _clear_mqtt_wire_transport_state() -> None:
+    global fragment_publish_inflight
+    inbound_chunk_assembler.clear()
+    with fragment_publish_lock:
+        fragment_publish_transfers.clear()
+        fragment_publish_transfer_by_mid.clear()
+        fragment_publish_transfer_by_digest.clear()
+        fragment_publish_inflight = 0
+
+
 def on_disconnect(mqttc, userdata, *args):
     reason_code = args[-2] if len(args) >= 2 else (args[0] if args else "unknown")
+    _clear_mqtt_wire_transport_state()
     log.warning(f"MQTT disconnected rc={reason_code}")
 
 
 def on_publish(mqttc, userdata, mid, reason_code=None, properties=None):
     log.debug(f"MQTT broker publish ack mid={mid} rc={reason_code}")
+    handled, logical_mid = _complete_fragment_publish(mqttc, int(mid))
+    if handled:
+        if logical_mid is None:
+            return
+        mid = logical_mid
     with pending_delivery_acks_lock:
         ack = pending_delivery_acks.pop(int(mid), None)
     if ack:
@@ -1309,12 +1494,16 @@ def track_outbound_publish(info, client_route_id: str, message_id: str) -> None:
         mark_outbound_published(client_route_id, message_id)
 
 
-def track_delivery_ack(mid: int, payload: dict, stage: str, detail: object = ""):
+def track_delivery_ack(mqttc, info, payload: dict, stage: str, detail: object = ""):
     ack = build_delivery_ack_payload(payload, stage, detail)
     if not ack:
         return
+    is_published = getattr(info, "is_published", None)
+    if callable(is_published) and is_published():
+        publish_delivery_ack(mqttc, ack)
+        return
     with pending_delivery_acks_lock:
-        pending_delivery_acks[int(mid)] = ack
+        pending_delivery_acks[int(info.mid)] = ack
 
 
 def build_delivery_ack_payload(payload: dict, stage: str, detail: object = "") -> dict:
@@ -1453,7 +1642,13 @@ def _publish_phone_payload(mqttc, wire_payload: dict, reply_payload: dict) -> bo
         )
         reply_payload["_client_route_id"] = wire_payload.get("_client_route_id", "")
         if reply_payload.get("type") != "delivery_ack":
-            track_delivery_ack(info.mid, reply_payload, "desktop_reply_broker_ack", target_topic)
+            track_delivery_ack(
+                mqttc,
+                info,
+                reply_payload,
+                "desktop_reply_broker_ack",
+                target_topic,
+            )
         log.info(f"MQTT encrypted reply published mid={info.mid} rc={info.rc}")
         return info.rc == mqtt.MQTT_ERR_SUCCESS
 
@@ -2381,11 +2576,46 @@ def _process_message(mqttc, userdata, msg):
         if paired_client is None:
             log.warning("MQTT message rejected: client route is not paired")
             return
+        if is_mqtt_chunk(wire_payload):
+            local_id = desktop_id()
+            source = str(wire_payload.get("from") or "")
+            target = str(wire_payload.get("to") or "")
+            if source == local_id and target == paired_client["signal_name"]:
+                return
+            if (
+                wire_payload.get("protocol") != PROTOCOL_NAME
+                or wire_payload.get("version") != PROTOCOL_VERSION
+                or source != paired_client["signal_name"]
+                or target != local_id
+            ):
+                log.warning("Rejected MQTT chunk with mismatched protocol or endpoint identity")
+                return
+            try:
+                assembled = inbound_chunk_assembler.accept(
+                    f"{client_route_id}:{channel}",
+                    wire_payload,
+                )
+            except ValueError as exc:
+                log.warning("Rejected MQTT fragmented transfer: %s", exc)
+                return
+            if assembled is None:
+                return
+            wire_payload = json.loads(assembled)
+            log.info(
+                "MQTT fragmented transfer reassembled bytes=%s client=%s",
+                len(assembled.encode("utf-8")),
+                client_route_id[-8:],
+            )
         wire_payload["_client_route_id"] = client_route_id
         if wire_payload.get("scheme") != "signal":
             log.warning("Rejected unencrypted MQTT message: scheme != signal")
             return
         else:
+            if (
+                str(wire_payload.get("from") or "") == desktop_id()
+                and str(wire_payload.get("to") or "") == paired_client["signal_name"]
+            ):
+                return
             if str(wire_payload.get("from") or "") != paired_client["signal_name"]:
                 log.warning("Rejected MQTT message: cryptographic sender does not match route")
                 return
@@ -2883,10 +3113,16 @@ def capability_manifest(client_route_id: str = "") -> dict:
             "desktop_control_authorization_v1",
             "desktop_control_screenshot_v1",
             "desktop_control_input_v1",
+            "mqtt_fragmentation_v1",
+            "mqtt_fragment_integrity_sha256",
         ],
         "limits": {
             "max_parallel_tasks": int(os.environ.get("SIGNALASI_MAX_PARALLEL_TASKS", "4")),
             "max_message_bytes": 524288,
+            "mqtt_direct_wire_bytes": 49152,
+            "mqtt_fragment_data_bytes": 32768,
+            "mqtt_fragment_inflight": MAX_FRAGMENT_INFLIGHT,
+            "mqtt_fragment_inflight_per_transfer": MAX_FRAGMENT_INFLIGHT_PER_TRANSFER,
         },
         "generated_at": int(time.time() * 1000),
         "connector_agents": mobile_connector_agents(client_route_id),
@@ -2923,7 +3159,7 @@ def _publish_to_registered_client(
     message_id = application_envelope["message_id"]
     if durable:
         queue_outbound(paired_client["client_route_id"], message_id, topic, wire_payload)
-    info = mqttc.publish(topic, wire_payload, qos=MQTT_QOS)
+    info = _publish_mqtt_wire_payload(mqttc, topic, wire_payload)
     if durable:
         track_outbound_publish(info, paired_client["client_route_id"], message_id)
     return info
@@ -2934,7 +3170,7 @@ def flush_outbound_messages(mqttc) -> None:
         paired_client = get_client(pending["client_route_id"])
         if not paired_client:
             continue
-        info = mqttc.publish(pending["topic"], pending["wire_payload"], qos=MQTT_QOS)
+        info = _publish_mqtt_wire_payload(mqttc, pending["topic"], pending["wire_payload"])
         track_outbound_publish(info, pending["client_route_id"], pending["message_id"])
 
 
@@ -3001,6 +3237,9 @@ def _presence_loop() -> None:
     global presence_thread
     try:
         while not presence_stop_event.wait(PRESENCE_INTERVAL_SECONDS):
+            mqttc = client
+            if mqttc is not None and mqttc.is_connected():
+                flush_outbound_messages(mqttc)
             status = publish_connector_status(reason="heartbeat")
             if not status.get("ok"):
                 log.debug("Desktop presence heartbeat skipped: %s", status)
@@ -3281,6 +3520,8 @@ def start():
     mqttc.on_disconnect = on_disconnect
     mqttc.on_message = on_mqtt_message
     mqttc.on_publish = on_publish
+    mqttc.max_inflight_messages_set(MQTT_MAX_INFLIGHT)
+    mqttc.max_queued_messages_set(256)
     if MQTT_TLS:
         mqttc.tls_set()
         mqttc.tls_insecure_set(False)

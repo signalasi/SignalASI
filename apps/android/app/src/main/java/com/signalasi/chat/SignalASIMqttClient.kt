@@ -16,6 +16,8 @@ import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
 import org.json.JSONObject
 import org.json.JSONArray
 import java.io.ByteArrayOutputStream
+import java.util.LinkedHashMap
+import java.util.UUID
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -109,6 +111,9 @@ object SignalASIMqttClient {
     private const val MAX_INLINE_ATTACHMENT_BYTES = 320 * 1024
     private const val PAIRING_CLAIM_MAX_AGE_MILLIS = 9 * 60_000L
     private const val SUBSCRIPTION_RETRY_DELAY_MILLIS = 3_000L
+    private const val MQTT_MAX_INFLIGHT = 64
+    private const val MAX_FRAGMENT_INFLIGHT = 16
+    private const val MAX_FRAGMENT_INFLIGHT_PER_TRANSFER = 4
 
     private data class PendingPairingClaim(
         val desktopId: String,
@@ -117,8 +122,20 @@ object SignalASIMqttClient {
         val queuedAtMillis: Long
     )
 
+    private data class OutboundFragmentTransfer(
+        val key: String,
+        val durableMessageId: String?,
+        val topic: String,
+        val packets: List<String>,
+        val purpose: String,
+        var nextPacketIndex: Int = 0,
+        var outstanding: Int = 0,
+        var failed: Boolean = false
+    )
+
     private val connecting = AtomicBoolean(false)
     private val connectionRetryScheduled = AtomicBoolean(false)
+    private val initialOutboxRecoveryPrepared = AtomicBoolean(false)
     private val retryHandler = Handler(Looper.getMainLooper())
     private val connectionRetryPolicy = MqttConnectionRetryPolicy()
     private val subscriptionRecoveryState = MqttSubscriptionRecoveryState()
@@ -143,6 +160,11 @@ object SignalASIMqttClient {
     private val pairingClaimRetryRunnable = Runnable { flushPendingPairingClaim() }
     private val listeners = CopyOnWriteArraySet<Listener>()
     private val deliveryMessageIds = ConcurrentHashMap<Int, String>()
+    private val fragmentTransferLock = Any()
+    private val fragmentTransfers = LinkedHashMap<String, OutboundFragmentTransfer>()
+    private val fragmentTransferKeysByMid = HashMap<Int, String>()
+    private val inboundChunkAssembler = SignalASIMqttChunkAssembler()
+    private var fragmentInflight = 0
     private val pairingClaimLock = Any()
     private var client: MqttAsyncClient? = null
     private var pendingPairingClaim: PendingPairingClaim? = null
@@ -196,19 +218,16 @@ object SignalASIMqttClient {
         val wirePayload = encrypted.toString()
         SignalASILinkDeliveryStore.enqueue(context, messageId, link.routes.control, wirePayload)
         SignalASILinkDeliveryStore.markAttempt(context, messageId)
-        val token = publishSafely(
+        if (!publishWirePayload(
             mqtt,
             link.routes.control,
-            MqttMessage(wirePayload.toByteArray(Charsets.UTF_8)).apply {
-                qos = MQTT_QOS
-                isRetained = false
-            },
-            "server_revocation"
-        ) ?: run {
+            wirePayload,
+            "server_revocation",
+            messageId
+        )) {
             scheduleOutboxRetries()
             return true
         }
-        deliveryMessageIds[token.messageId] = messageId
         return true
     }
 
@@ -265,19 +284,16 @@ object SignalASIMqttClient {
         val wirePayload = encrypted.toString()
         SignalASILinkDeliveryStore.enqueue(context, messageId, link.routes.control, wirePayload)
         SignalASILinkDeliveryStore.markAttempt(context, messageId)
-        val token = publishSafely(
+        if (!publishWirePayload(
             mqtt,
             link.routes.control,
-            MqttMessage(wirePayload.toByteArray(Charsets.UTF_8)).apply {
-                qos = MQTT_QOS
-                isRetained = false
-            },
-            "desktop_control"
-        ) ?: run {
+            wirePayload,
+            "desktop_control",
+            messageId
+        )) {
             scheduleOutboxRetries()
             return true
         }
-        deliveryMessageIds[token.messageId] = messageId
         return true
     }
 
@@ -316,6 +332,7 @@ object SignalASIMqttClient {
                     Log.w(TAG, "MQTT connection lost", cause)
                     connecting.set(false)
                     invalidateSubscriptions()
+                    clearWireTransportState()
                     setConnected(false)
                     setSecureReady(false)
                     retryHandler.removeCallbacks(retryRunnable)
@@ -331,7 +348,9 @@ object SignalASIMqttClient {
 
                 override fun deliveryComplete(token: IMqttDeliveryToken?) {
                     val context = appContext ?: return
-                    val messageId = token?.messageId?.let { deliveryMessageIds.remove(it) } ?: return
+                    val mid = token?.messageId ?: return
+                    if (completeFragmentDelivery(context, mid)) return
+                    val messageId = deliveryMessageIds.remove(mid) ?: return
                     SignalASILinkDeliveryStore.markPublished(context, messageId)
                 }
             })
@@ -342,6 +361,7 @@ object SignalASIMqttClient {
             isCleanSession = false
             keepAliveInterval = 30
             connectionTimeout = 10
+            maxInflight = MQTT_MAX_INFLIGHT
         }
 
         retryHandler.removeCallbacks(connectionRetryRunnable)
@@ -745,20 +765,21 @@ object SignalASIMqttClient {
         }
 
         SignalASILinkDeliveryStore.markAttempt(context, messageId)
-        val token = publishSafely(
+        val published = publishWirePayload(
             mqtt,
             topic,
-            MqttMessage(wirePayload.toByteArray(Charsets.UTF_8)).apply {
-                qos = MQTT_QOS
-                isRetained = false
-            },
-            "encrypted_message"
-        ) ?: run {
+            wirePayload,
+            "encrypted_message",
+            messageId
+        )
+        if (!published) {
             scheduleOutboxRetries()
             return MqttOutboxDispatchPolicy.result(connected = true, published = false)
         }
-        deliveryMessageIds[token.messageId] = messageId
-        Log.i(TAG, "Published encrypted MQTT message topic=$topic bytes=${encrypted.optString("body").length}")
+        Log.i(
+            TAG,
+            "Queued encrypted MQTT message topic=$topic wire_bytes=${wirePayload.toByteArray(Charsets.UTF_8).size}"
+        )
         return MqttOutboxDispatchPolicy.result(connected = true, published = true)
     }
 
@@ -768,17 +789,16 @@ object SignalASIMqttClient {
         if (!mqtt.isConnected) return
         for (pending in SignalASILinkDeliveryStore.pending(context)) {
             if (pending.topic.isBlank() || pending.wirePayload.isBlank()) continue
+            if (isFragmentTransferActive(pending.messageId)) continue
             SignalASILinkDeliveryStore.markAttempt(context, pending.messageId)
-            val token = publishSafely(
+            val published = publishWirePayload(
                 mqtt,
                 pending.topic,
-                MqttMessage(pending.wirePayload.toByteArray(Charsets.UTF_8)).apply {
-                    qos = MQTT_QOS
-                    isRetained = false
-                },
-                "outbox_retry"
-            ) ?: break
-            deliveryMessageIds[token.messageId] = pending.messageId
+                pending.wirePayload,
+                "outbox_retry",
+                pending.messageId
+            )
+            if (!published) break
         }
     }
 
@@ -812,6 +832,146 @@ object SignalASIMqttClient {
     }.onFailure {
         Log.w(TAG, "MQTT publish deferred purpose=$purpose", it)
     }.getOrNull()
+
+    private fun publishWirePayload(
+        mqtt: MqttAsyncClient,
+        topic: String,
+        wirePayload: String,
+        purpose: String,
+        durableMessageId: String? = null
+    ): Boolean {
+        val packets = runCatching { SignalASIMqttWireChunking.encode(wirePayload) }
+            .onFailure { Log.e(TAG, "MQTT wire payload rejected purpose=$purpose", it) }
+            .getOrNull() ?: return false
+        if (packets.size == 1) {
+            val token = publishSafely(
+                mqtt,
+                topic,
+                mqttMessage(packets.first()),
+                purpose
+            ) ?: return false
+            if (!durableMessageId.isNullOrBlank()) {
+                deliveryMessageIds[token.messageId] = durableMessageId
+                if (token.isComplete && deliveryMessageIds.remove(token.messageId) != null) {
+                    appContext?.let { SignalASILinkDeliveryStore.markPublished(it, durableMessageId) }
+                }
+            }
+            return true
+        }
+
+        val key = durableMessageId?.let { "durable:$it" } ?: "ephemeral:${UUID.randomUUID()}"
+        synchronized(fragmentTransferLock) {
+            if (fragmentTransfers.containsKey(key)) return true
+            fragmentTransfers[key] = OutboundFragmentTransfer(
+                key = key,
+                durableMessageId = durableMessageId,
+                topic = topic,
+                packets = packets,
+                purpose = purpose
+            )
+            pumpFragmentTransfersLocked(mqtt)
+            val transfer = fragmentTransfers[key]
+            if (transfer == null) return false
+            if (transfer.failed && transfer.outstanding == 0) {
+                fragmentTransfers.remove(key)
+                return false
+            }
+        }
+        Log.i(
+            TAG,
+            "MQTT fragmented transfer queued purpose=$purpose chunks=${packets.size} " +
+                "wire_bytes=${wirePayload.toByteArray(Charsets.UTF_8).size}"
+        )
+        return true
+    }
+
+    private fun mqttMessage(payload: String): MqttMessage =
+        MqttMessage(payload.toByteArray(Charsets.UTF_8)).apply {
+            qos = MQTT_QOS
+            isRetained = false
+        }
+
+    private fun pumpFragmentTransfersLocked(mqtt: MqttAsyncClient) {
+        var madeProgress: Boolean
+        do {
+            madeProgress = false
+            val transfers = fragmentTransfers.values.toList()
+            for (transfer in transfers) {
+                if (fragmentInflight >= MAX_FRAGMENT_INFLIGHT) return
+                if (transfer.failed ||
+                    transfer.nextPacketIndex >= transfer.packets.size ||
+                    transfer.outstanding >= MAX_FRAGMENT_INFLIGHT_PER_TRANSFER
+                ) {
+                    continue
+                }
+                val packetIndex = transfer.nextPacketIndex
+                val token = publishSafely(
+                    mqtt,
+                    transfer.topic,
+                    mqttMessage(transfer.packets[packetIndex]),
+                    "${transfer.purpose}_fragment_${packetIndex + 1}_of_${transfer.packets.size}"
+                )
+                if (token == null) {
+                    transfer.failed = true
+                    if (!transfer.durableMessageId.isNullOrBlank()) {
+                        retryHandler.post { scheduleOutboxRetries() }
+                    }
+                    if (transfer.outstanding == 0) fragmentTransfers.remove(transfer.key)
+                    continue
+                }
+                transfer.nextPacketIndex += 1
+                transfer.outstanding += 1
+                fragmentInflight += 1
+                fragmentTransferKeysByMid[token.messageId] = transfer.key
+                madeProgress = true
+            }
+        } while (madeProgress && fragmentInflight < MAX_FRAGMENT_INFLIGHT)
+    }
+
+    private fun completeFragmentDelivery(context: Context, mid: Int): Boolean {
+        var completedMessageId: String? = null
+        var failedMessageId: String? = null
+        synchronized(fragmentTransferLock) {
+            val key = fragmentTransferKeysByMid.remove(mid) ?: return false
+            val transfer = fragmentTransfers[key] ?: return true
+            transfer.outstanding = (transfer.outstanding - 1).coerceAtLeast(0)
+            fragmentInflight = (fragmentInflight - 1).coerceAtLeast(0)
+            when {
+                transfer.failed && transfer.outstanding == 0 -> {
+                    fragmentTransfers.remove(key)
+                    failedMessageId = transfer.durableMessageId
+                }
+                transfer.nextPacketIndex >= transfer.packets.size && transfer.outstanding == 0 -> {
+                    fragmentTransfers.remove(key)
+                    completedMessageId = transfer.durableMessageId
+                    Log.i(
+                        TAG,
+                        "MQTT fragmented transfer broker-acked chunks=${transfer.packets.size} " +
+                            "purpose=${transfer.purpose}"
+                    )
+                }
+            }
+            client?.takeIf { it.isConnected }?.let(::pumpFragmentTransfersLocked)
+        }
+        completedMessageId?.let { SignalASILinkDeliveryStore.markPublished(context, it) }
+        if (failedMessageId != null) scheduleOutboxRetries()
+        return true
+    }
+
+    private fun isFragmentTransferActive(messageId: String): Boolean =
+        synchronized(fragmentTransferLock) {
+            fragmentTransfers.containsKey("durable:$messageId")
+        }
+
+    private fun clearWireTransportState() {
+        deliveryMessageIds.clear()
+        inboundChunkAssembler.clear()
+        synchronized(fragmentTransferLock) {
+            fragmentTransfers.clear()
+            fragmentTransferKeysByMid.clear()
+            fragmentInflight = 0
+        }
+    }
 
     private fun outgoingTopic(contactId: String): String? =
         appContext?.let { AppStore.outgoingTopicForContact(it, contactId) }
@@ -855,6 +1015,32 @@ object SignalASIMqttClient {
             topic == it.routes.down || topic == it.routes.control
         } ?: run {
             Log.w(TAG, "Rejected message on unknown relationship topic")
+            return
+        }
+        if (SignalASIMqttWireChunking.isChunk(wire)) {
+            val localId = SignalASICrypto.localSignalasiId()
+            if (wire.optString("from") == localId && wire.optString("to") == link.desktopId) {
+                return
+            }
+            if (wire.optString("from") != link.desktopId || wire.optString("to") != localId) {
+                Log.w(TAG, "Rejected MQTT chunk with mismatched endpoint identity")
+                return
+            }
+            val assembled = try {
+                inboundChunkAssembler.accept("${link.desktopId}:$topic", wire)
+            } catch (exception: IllegalArgumentException) {
+                Log.w(TAG, "Rejected MQTT fragmented transfer", exception)
+                return
+            }
+            if (assembled == null) return
+            val reassembledWire = runCatching { JSONObject(assembled) }
+                .onFailure { Log.w(TAG, "Rejected reassembled MQTT wire payload", it) }
+                .getOrNull() ?: return
+            Log.i(
+                TAG,
+                "MQTT fragmented transfer reassembled bytes=${assembled.toByteArray(Charsets.UTF_8).size}"
+            )
+            handleIncoming(topic, reassembledWire)
             return
         }
         if (wire.optString("type") == "pairing_confirmed") {
@@ -925,13 +1111,10 @@ object SignalASIMqttClient {
             link.desktopId
         )
         val encrypted = SignalASICrypto.encryptPayloadForDesktop(link.desktopId, envelope) ?: return
-        publishSafely(
+        publishWirePayload(
             mqtt,
             link.routes.control,
-            MqttMessage(encrypted.toString().toByteArray(Charsets.UTF_8)).apply {
-                qos = MQTT_QOS
-                isRetained = false
-            },
+            encrypted.toString(),
             "delivery_receipt"
         )
     }
@@ -1015,16 +1198,13 @@ object SignalASIMqttClient {
                 )
                 val encrypted = SignalASICrypto.encryptPayloadForDesktop(link.desktopId, envelope)
                     ?: return@forEach
-                val token = publishSafely(
+                val published = publishWirePayload(
                     mqtt,
                     link.routes.control,
-                    MqttMessage(encrypted.toString().toByteArray(Charsets.UTF_8)).apply {
-                        qos = MQTT_QOS
-                        isRetained = false
-                    },
+                    encrypted.toString(),
                     "connector_status"
                 )
-                if (token != null) {
+                if (published) {
                     Log.i(TAG, "Requested connector status desktop=${link.desktopId.takeLast(8)}")
                 }
             }
@@ -1109,6 +1289,9 @@ object SignalASIMqttClient {
         cancelSubscriptionRetry()
         subscribe()
         flushPendingPairingClaim()
+        if (initialOutboxRecoveryPrepared.compareAndSet(false, true)) {
+            SignalASILinkDeliveryStore.makePendingImmediatelyRetryable(context)
+        }
         scheduleOutboxRetries()
         scheduleConnectorStatusRequest()
         retryHandler.postDelayed(
