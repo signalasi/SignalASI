@@ -1512,7 +1512,8 @@ class MobileNativeAgent(
         val draftPlan = AgentTeamPlanCompiler.compile(
             plan = contextualPlan,
             targets = targets,
-            enabled = modelPlannerSettings().multiAgentCoordination
+            enabled = modelPlannerSettings().multiAgentCoordination,
+            registrations = connectorRegistry.registrations()
         )
         val safetyReview = safetyPolicy.review(draftPlan)
         currentPlan = draftPlan.withSafetyReview(safetyReview)

@@ -98,6 +98,104 @@ class AgentTeamPlanBridgeTest {
     }
 
     @Test
+    fun complexSingleAgentPlanCompilesAvailableNamedAgentsIntoDynamicTeam() {
+        val original = plan(agentAction("implement", "codex")).copy(
+            goal = "Implement and verify a Python API using current documentation"
+        )
+        val targets = listOf(
+            AgentCallableTarget(
+                id = "codex",
+                title = "Codex - Development PC",
+                kind = AgentConnectorKind.AGENT,
+                status = AgentConnectorStatus.AVAILABLE,
+                capabilities = listOf(
+                    AgentCapability.CHAT,
+                    AgentCapability.REASONING,
+                    AgentCapability.CODE,
+                    AgentCapability.TASK_EXECUTION
+                ),
+                failureDomain = "desktop-development",
+                adapterType = "codex-app-server"
+            ),
+            AgentCallableTarget(
+                id = "hermes",
+                title = "Hermes - Research PC",
+                kind = AgentConnectorKind.AGENT,
+                status = AgentConnectorStatus.AVAILABLE,
+                capabilities = listOf(
+                    AgentCapability.CHAT,
+                    AgentCapability.REASONING,
+                    AgentCapability.RESEARCH,
+                    AgentCapability.LIVE_DATA,
+                    AgentCapability.KNOWLEDGE_SEARCH
+                ),
+                failureDomain = "desktop-research",
+                adapterType = "hermes-cli"
+            )
+        )
+
+        val registrations = targetRegistrations(targets)
+        val dynamic = AgentDynamicTeamCompiler().compile(
+            AgentDynamicTeamRequest(
+                goal = original.goal,
+                policy = AgentDynamicTeamPolicy(pinnedAgentIds = setOf("codex"))
+            ),
+            registrations
+        )
+        assertEquals(
+            "Dynamic compilation failed: ${dynamic.outcome}, ${dynamic.warnings}",
+            AgentDynamicTeamOutcome.TEAM,
+            dynamic.outcome
+        )
+
+        val compiled = AgentTeamPlanCompiler.compile(
+            plan = original,
+            targets = targets,
+            enabled = true,
+            registrations = registrations
+        )
+
+        val action = compiled.actions.single()
+        assertTrue(
+            "Dynamic bridge did not attach a team spec; validation=${compiled.validation.issues}",
+            action.parameters[AGENT_TEAM_SPEC_PARAMETER].orEmpty().isNotBlank()
+        )
+        val spec = requireNotNull(
+            AgentTeamDispatchSpecCodec.decode(action.parameters[AGENT_TEAM_SPEC_PARAMETER].orEmpty())
+        )
+        assertEquals("codex", spec.definition.primaryAgentId)
+        assertEquals(setOf("codex", "hermes"), spec.definition.members.mapTo(linkedSetOf()) { it.agentId })
+        assertEquals(
+            setOf(
+                AgentCapability.CODE,
+                AgentCapability.LIVE_DATA,
+                AgentCapability.KNOWLEDGE_SEARCH
+            ),
+            spec.definition.collectiveCapabilities
+        )
+        assertTrue(compiled.validation.valid)
+    }
+
+    @Test
+    fun simpleSingleAgentPlanDoesNotCreateAnUnnecessaryDynamicTeam() {
+        val original = plan(agentAction("chat", "codex")).copy(goal = "Hello")
+        val targets = listOf(
+            target("codex", AgentConnectorKind.AGENT, AgentCapability.CHAT),
+            target("hermes", AgentConnectorKind.AGENT, AgentCapability.CHAT)
+        )
+
+        val compiled = AgentTeamPlanCompiler.compile(
+            plan = original,
+            targets = targets,
+            enabled = true,
+            registrations = targetRegistrations(targets)
+        )
+
+        assertEquals(original.actions, compiled.actions)
+        assertNull(compiled.actions.single().parameters[AGENT_TEAM_SPEC_PARAMETER])
+    }
+
+    @Test
     fun repeatedAgentIdentityCannotBecomeAHostTeam() {
         val original = plan(
             agentAction("first", "researcher"),
@@ -233,6 +331,11 @@ class AgentTeamPlanBridgeTest {
         status = AgentConnectorStatus.AVAILABLE,
         capabilities = listOf(capability)
     )
+
+    private fun targetRegistrations(targets: List<AgentCallableTarget>): List<AgentRegistration> =
+        object : AgentConnectorRegistry {
+            override fun availableTargets(): List<AgentCallableTarget> = targets
+        }.registrations()
 
     private fun AgentAction.withAgentKnowledge(value: String): AgentAction = copy(
         parameters = parameters + ("_signalasi_agent_knowledge_context" to value)

@@ -28,7 +28,8 @@ internal object AgentTeamPlanCompiler {
     fun compile(
         plan: AgentPlan,
         targets: List<AgentCallableTarget>,
-        enabled: Boolean
+        enabled: Boolean,
+        registrations: Collection<AgentRegistration> = emptyList()
     ): AgentPlan {
         if (!enabled || !plan.validation.valid) return plan
         val availableAgents = targets
@@ -39,6 +40,17 @@ internal object AgentTeamPlanCompiler {
             val connectorId = action.parameters["connector_id"].orEmpty().trim()
             val target = availableAgents[connectorId] ?: return@mapNotNull null
             Candidate(action, target)
+        }
+        if (candidates.size == 1 &&
+            plan.actions.count { it.kind == AgentActionKind.CALL_CONNECTOR } == 1 &&
+            registrations.isNotEmpty()
+        ) {
+            compileDynamicTeam(
+                plan = plan,
+                candidate = candidates.single(),
+                availableAgents = availableAgents,
+                registrations = registrations
+            )?.let { return it }
         }
         if (candidates.size < MIN_TEAM_MEMBERS || candidates.size > MAX_TEAM_MEMBERS) return plan
         if (candidates.map { it.target.id }.distinct().size != candidates.size) return plan
@@ -132,6 +144,68 @@ internal object AgentTeamPlanCompiler {
         return if (validation.valid) compiled.copy(validation = validation) else plan
     }
 
+    private fun compileDynamicTeam(
+        plan: AgentPlan,
+        candidate: Candidate,
+        availableAgents: Map<String, AgentCallableTarget>,
+        registrations: Collection<AgentRegistration>
+    ): AgentPlan? {
+        val eligibleRegistrations = registrations.filter { registration ->
+            registration.kind == AgentConnectorKind.AGENT &&
+                registration.agentId in availableAgents
+        }
+        if (eligibleRegistrations.size < MIN_TEAM_MEMBERS) return null
+        val teamId = AgentTeamDispatchIds.teamId(plan, listOf(candidate.action))
+        val compilation = AgentDynamicTeamCompiler().compile(
+            request = AgentDynamicTeamRequest(
+                goal = plan.goal,
+                teamId = teamId,
+                policy = AgentDynamicTeamPolicy(
+                    pinnedAgentIds = setOf(candidate.target.id)
+                )
+            ),
+            registrations = eligibleRegistrations
+        )
+        val definition = compilation.definition
+            ?.takeIf { compilation.outcome == AgentDynamicTeamOutcome.TEAM }
+            ?: return null
+        if (definition.members.any { it.agentId !in availableAgents }) return null
+
+        val runId = AgentTeamDispatchIds.supervisorRunId(teamId)
+        val spec = AgentTeamDispatchSpec(definition, runId)
+        val syntheticId = "agent-team-${teamId.take(12)}"
+        val primary = availableAgents.getValue(definition.primaryAgentId)
+        val synthetic = candidate.action.copy(
+            id = syntheticId,
+            target = "Agent team: ${primary.title}",
+            description = "Coordinate ${definition.members.size} specialist Agents",
+            parameters = candidate.action.parameters + mapOf(
+                "connector_id" to definition.primaryAgentId,
+                "original_goal" to plan.goal,
+                "node_ref" to "agent_team",
+                AGENT_TEAM_SPEC_PARAMETER to AgentTeamDispatchSpecCodec.encode(spec),
+                AGENT_TEAM_RUN_PARAMETER to runId,
+                AGENT_TEAM_SOURCE_PARAMETER to spec.sourceMessageId.toString()
+            )
+        )
+        val idMap = mapOf(candidate.action.id to syntheticId)
+        val actions = plan.actions.map { action ->
+            if (action.id == candidate.action.id) {
+                synthetic
+            } else {
+                action.remapToolGraphIds(action.id, idMap)
+            }
+        }
+        val compiled = plan.copy(
+            actions = actions,
+            selectedAgentOrModel = "Agent team: ${primary.title}",
+            timeoutSeconds = plan.timeoutSeconds.coerceAtLeast(TEAM_TIMEOUT_SECONDS).coerceAtMost(240),
+            route = AgentRouteResolver.resolve(synthetic, availableAgents.values.toList())
+        )
+        val validation = AgentPlanValidator.validate(compiled)
+        return compiled.takeIf { validation.valid }?.copy(validation = validation)
+    }
+
     private fun transitiveDependencies(
         actionId: String,
         candidates: List<Candidate>
@@ -181,6 +255,9 @@ internal object AgentTeamDispatchSpecCodec {
         .put("team_id", spec.definition.teamId)
         .put("primary_agent_id", spec.definition.primaryAgentId)
         .put("visibility", spec.definition.visibilityMode.name)
+        .put("collective_capabilities", JSONArray(
+            spec.definition.collectiveCapabilities.map(AgentCapability::name)
+        ))
         .put("members", JSONArray().apply {
             spec.definition.members.forEach { member ->
                 put(JSONObject()
@@ -238,7 +315,8 @@ internal object AgentTeamDispatchSpecCodec {
                 members = members,
                 visibilityMode = runCatching {
                     AgentTeamVisibilityMode.valueOf(json.optString("visibility"))
-                }.getOrDefault(AgentTeamVisibilityMode.BACKGROUND)
+                }.getOrDefault(AgentTeamVisibilityMode.BACKGROUND),
+                collectiveCapabilities = json.optJSONArray("collective_capabilities").enumCapabilities()
             ),
             supervisorRunId = runId
         )
@@ -268,7 +346,7 @@ internal object AgentTeamDispatchSpecCodec {
             .toMap()
     }
 
-    private const val VERSION = 1
+    private const val VERSION = 2
 }
 
 internal fun AgentAction.rekeyAgentTeamForRetry(): AgentAction {

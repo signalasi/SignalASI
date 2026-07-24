@@ -288,7 +288,8 @@ data class AgentTeamDefinition(
     val teamId: String = UUID.randomUUID().toString(),
     val primaryAgentId: String,
     val members: List<AgentTeamMember>,
-    val visibilityMode: AgentTeamVisibilityMode = AgentTeamVisibilityMode.BACKGROUND
+    val visibilityMode: AgentTeamVisibilityMode = AgentTeamVisibilityMode.BACKGROUND,
+    val collectiveCapabilities: Set<AgentCapability> = emptySet()
 )
 
 data class AgentTeamRun(
@@ -649,6 +650,15 @@ class AgentAdapterDirectory {
 }
 
 class AgentTeamCoordinator(private val directory: AgentAdapterDirectory) {
+    suspend fun compile(
+        request: AgentDynamicTeamRequest,
+        nowMillis: Long = System.currentTimeMillis()
+    ): AgentDynamicTeamCompilation = AgentDynamicTeamCompiler().compile(
+        request = request,
+        registrations = directory.registrations(),
+        nowMillis = nowMillis
+    )
+
     suspend fun start(definition: AgentTeamDefinition, request: AgentRunRequest): AgentTeamRun {
         val members = definition.members.distinctBy { it.agentId }
         require(definition.teamId.isNotBlank()) { "Team id must not be blank" }
@@ -668,7 +678,11 @@ class AgentTeamCoordinator(private val directory: AgentAdapterDirectory) {
         val primaryRun = primaryAdapter.startRun(
             request.copy(
                 deliveryMode = AgentDeliveryMode.RESPOND,
-                requiredCapabilities = request.requiredCapabilities + primaryMember.requiredCapabilities
+                requiredCapabilities = if (definition.collectiveCapabilities.isEmpty()) {
+                    request.requiredCapabilities + primaryMember.requiredCapabilities
+                } else {
+                    primaryMember.requiredCapabilities
+                }
             )
         )
         val runs = linkedMapOf(primaryMember.agentId to primaryRun)
@@ -686,7 +700,11 @@ class AgentTeamCoordinator(private val directory: AgentAdapterDirectory) {
                                 runId = UUID.randomUUID().toString(),
                                 parentRunId = primaryRun.runId,
                                 deliveryMode = member.deliveryMode,
-                                requiredCapabilities = request.requiredCapabilities + member.requiredCapabilities,
+                                requiredCapabilities = if (definition.collectiveCapabilities.isEmpty()) {
+                                    request.requiredCapabilities + member.requiredCapabilities
+                                } else {
+                                    member.requiredCapabilities
+                                },
                                 idempotencyKey = "${request.idempotencyKey}:${member.agentId}"
                             )
                         )

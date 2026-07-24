@@ -401,9 +401,13 @@ class AgentTeamExecutionRuntime(
                 runId = stableChildRunId(request.runId, member.agentId),
                 parentRunId = request.runId,
                 deliveryMode = member.deliveryMode,
-                requiredCapabilities = member.requiredCapabilities + if (member.agentId == definition.primaryAgentId) {
-                    request.requiredCapabilities
-                } else emptySet(),
+                requiredCapabilities = if (definition.collectiveCapabilities.isEmpty()) {
+                    member.requiredCapabilities + if (member.agentId == definition.primaryAgentId) {
+                        request.requiredCapabilities
+                    } else emptySet()
+                } else {
+                    member.requiredCapabilities
+                },
                 context = request.context + member.context + mapOf(
                     "team_id" to definition.teamId,
                     "team_role" to member.role,
@@ -466,6 +470,12 @@ class AgentTeamExecutionRuntime(
             } else member.dependsOnAgentIds
         }
         require(isAcyclic(dependencies)) { "Agent team dependencies must form an acyclic graph" }
+        if (definition.collectiveCapabilities.isNotEmpty()) {
+            val declaredCapabilities = members.flatMapTo(linkedSetOf(), AgentTeamMember::requiredCapabilities)
+            require(declaredCapabilities.containsAll(definition.collectiveCapabilities)) {
+                "Agent team members do not cover the collective capability contract"
+            }
+        }
         return members
     }
 
@@ -948,6 +958,9 @@ private object AgentTeamExecutionCodec {
         .put("team_id", definition.teamId)
         .put("primary_agent_id", definition.primaryAgentId)
         .put("visibility_mode", definition.visibilityMode.name)
+        .put("collective_capabilities", JSONArray(
+            definition.collectiveCapabilities.map(AgentCapability::name)
+        ))
         .put("members", JSONArray().apply {
             definition.members.forEach { member ->
                 put(JSONObject()
@@ -987,7 +1000,9 @@ private object AgentTeamExecutionCodec {
             teamId = json.optString("team_id").ifBlank { UUID.randomUUID().toString() },
             primaryAgentId = primary,
             members = members,
-            visibilityMode = enumValue(json.optString("visibility_mode"), AgentTeamVisibilityMode.BACKGROUND)
+            visibilityMode = enumValue(json.optString("visibility_mode"), AgentTeamVisibilityMode.BACKGROUND),
+            collectiveCapabilities = strings(json.optJSONArray("collective_capabilities"))
+                .mapNotNull { value -> enumOrNull<AgentCapability>(value) }.toSet()
         )
     }
 
