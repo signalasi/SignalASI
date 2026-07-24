@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import mimetypes
 import re
@@ -10,7 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 
 MAX_BLOCKS = 100
@@ -27,12 +28,23 @@ ALLOWED_TYPES = {
     "webpage", "unknown",
 }
 RICH_FENCE = re.compile(r"```signalasi-rich\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+ARTIFACT_TYPES = {"image", "gallery", "video", "audio", "file"}
+ARTIFACT_CATEGORIES = {"outputs", "downloads", "screenshots"}
+IMAGE_MIME_TYPES = {
+    ".avif": "image/avif",
+    ".gif": "image/gif",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
 
 
 def build_rich_output(content: str, output_files: list[dict] | None = None, task_id: str = "") -> tuple[str, dict | None]:
     """Return accessible fallback text and an optional validated rich document."""
     source = str(content or "")
     blocks: list[dict] = []
+    had_explicit_document = bool(RICH_FENCE.search(source))
 
     for match in RICH_FENCE.finditer(source):
         parsed = _load_json(match.group(1))
@@ -44,16 +56,32 @@ def build_rich_output(content: str, output_files: list[dict] | None = None, task
             blocks.extend(_normalize_block(item) for item in candidate if isinstance(item, dict))
 
     clean_content = RICH_FENCE.sub("", source).strip()
-    blocks = [item for item in blocks if item]
+    blocks = [
+        hydrated
+        for item in blocks
+        if item
+        for hydrated in [_hydrate_explicit_artifact(item, task_id)]
+        if hydrated
+    ]
     from response_policy import is_input_artifact
     blocks.extend(
         _artifact_block(item, task_id)
         for item in (output_files or [])
         if isinstance(item, dict) and not is_input_artifact(item)
     )
-    blocks = [item for item in blocks if item][:MAX_BLOCKS]
+    blocks = _dedupe_blocks(item for item in blocks if item)[:MAX_BLOCKS]
 
     if not blocks:
+        if had_explicit_document:
+            if clean_content:
+                return clean_content[:MAX_TEXT], None
+            prefers_chinese = any("\u4e00" <= character <= "\u9fff" for character in source)
+            unavailable = (
+                "\u751f\u6210\u7684\u6587\u4ef6\u5f53\u524d\u4e0d\u53ef\u7528\uff0c\u8bf7\u91cd\u8bd5\u3002"
+                if prefers_chinese else
+                "The generated file is unavailable. Please try again."
+            )
+            return unavailable, None
         return source.strip(), None
     if not clean_content:
         clean_content = _fallback_text(blocks)
@@ -82,7 +110,7 @@ def _normalize_block(raw: dict) -> dict:
         value = str(raw.get(key) or "").strip()[:limit]
         if value:
             block[key] = value
-    if block_type == "webpage" and _is_image_uri(block.get("uri", ""), block.get("mime_type", "")):
+    if block_type in {"file", "webpage"} and _is_image_uri(block.get("uri", ""), block.get("mime_type", "")):
         block["type"] = "image"
         block_type = "image"
     if block_type in {"table", "chart"}:
@@ -131,11 +159,12 @@ def _normalize_block(raw: dict) -> dict:
 
 
 def _artifact_block(raw: dict, task_id: str) -> dict:
-    relative = str(raw.get("relative_path") or "").replace("\\", "/").strip("/")
-    name = str(raw.get("name") or PurePosixPath(relative).name or "Artifact")[:500]
-    if not relative:
+    relative = _safe_relative_artifact_path(str(raw.get("relative_path") or ""))
+    source = _artifact_source(task_id, relative)
+    if source is None:
         return {}
-    mime_type = str(raw.get("mime_type") or mimetypes.guess_type(name)[0] or "application/octet-stream")
+    name = str(raw.get("name") or source.name or "Artifact")[:500]
+    mime_type = str(raw.get("mime_type") or _guess_mime_type(name))
     if mime_type.startswith("image/"):
         block_type = "image"
     elif mime_type.startswith("video/"):
@@ -144,19 +173,23 @@ def _artifact_block(raw: dict, task_id: str) -> dict:
         block_type = "audio"
     else:
         block_type = "file"
+    size = source.stat().st_size
+    digest = _file_sha256(source)
+    category = PurePosixPath(relative).parts[0].lower()
     safe_task = quote(str(task_id or "task"), safe="")
     safe_path = quote(relative, safe="/")
     block = {
-        "id": f"artifact-{abs(hash((task_id, relative)))}",
+        "id": f"artifact-{digest[:24]}",
         "type": block_type,
         "title": name,
-        "text": f"{raw.get('category') or 'output'} · {int(raw.get('size') or 0)} bytes",
+        "text": f"{category} · {_human_size(size)}",
         "uri": f"signalasi-artifact://{safe_task}/{safe_path}",
         "mime_type": mime_type,
         "fallback_text": relative,
         "metadata": {
-            "size": _human_size(int(raw.get("size") or 0)),
-            "category": str(raw.get("category") or "output")[:80],
+            "size": _human_size(size),
+            "category": category,
+            "sha256": digest,
         },
     }
     inline = _inline_artifact(task_id, relative, mime_type)
@@ -168,15 +201,161 @@ def _artifact_block(raw: dict, task_id: str) -> dict:
     return block
 
 
-def _inline_artifact(task_id: str, relative: str, mime_type: str) -> tuple[str, str] | None:
-    if not str(mime_type or "").lower().startswith("image/"):
+def _hydrate_explicit_artifact(block: dict, task_id: str) -> dict | None:
+    if str(block.get("type") or "") not in ARTIFACT_TYPES:
+        return block
+    if str(block.get("type") or "") == "gallery":
+        return block
+
+    encoded = str(block.get("data_b64") or "").strip()
+    if encoded:
+        metadata = dict(block.get("metadata") or {})
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+            metadata.setdefault("sha256", hashlib.sha256(raw).hexdigest())
+        except (TypeError, ValueError):
+            pass
+        if metadata:
+            block["metadata"] = metadata
+        return block
+
+    uri = str(block.get("uri") or "").strip()
+    relative = _artifact_relative_from_uri(uri)
+    if relative:
+        canonical = _artifact_block(
+            {
+                "name": block.get("title") or PurePosixPath(relative).name,
+                "relative_path": relative,
+                "mime_type": block.get("mime_type"),
+            },
+            task_id,
+        )
+        if not canonical:
+            return None
+        for key in ("title", "text", "fallback_text"):
+            value = str(block.get(key) or "").strip()
+            if value:
+                canonical[key] = value
+        metadata = dict(block.get("metadata") or {})
+        metadata.update(canonical.get("metadata") or {})
+        canonical["metadata"] = metadata
+        return canonical
+
+    scheme = urlparse(uri).scheme.lower()
+    if scheme in {"http", "https", "content", "android.resource", "data"}:
+        return block
+    return None
+
+
+def _dedupe_blocks(blocks) -> list[dict]:
+    result: list[dict] = []
+    artifact_indexes: dict[str, int] = {}
+    for block in blocks:
+        if str(block.get("type") or "") not in ARTIFACT_TYPES:
+            result.append(block)
+            continue
+        identity = _block_identity(block)
+        if not identity:
+            result.append(block)
+            continue
+        previous_index = artifact_indexes.get(identity)
+        if previous_index is None:
+            artifact_indexes[identity] = len(result)
+            result.append(block)
+        elif _block_quality(block) > _block_quality(result[previous_index]):
+            result[previous_index] = block
+    return result
+
+
+def _block_identity(block: dict) -> str:
+    title = str(block.get("title") or "").strip().casefold()
+    fallback = str(block.get("fallback_text") or "").replace("\\", "/").strip().casefold()
+    artifact_name = fallback or title
+    metadata = block.get("metadata")
+    if isinstance(metadata, dict):
+        digest = str(metadata.get("sha256") or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", digest):
+            return f"sha256:{digest}:{artifact_name}"
+    encoded = str(block.get("data_b64") or "").strip()
+    if encoded:
+        try:
+            digest = hashlib.sha256(base64.b64decode(encoded, validate=True)).hexdigest()
+            return f"sha256:{digest}:{artifact_name}"
+        except (TypeError, ValueError):
+            pass
+    uri = unquote(str(block.get("uri") or "")).replace("\\", "/").strip()
+    if uri:
+        return f"uri:{uri.casefold()}"
+    if fallback or title:
+        return f"name:{fallback}:{title}"
+    return ""
+
+
+def _block_quality(block: dict) -> int:
+    metadata = block.get("metadata")
+    return (
+        (8 if str(block.get("data_b64") or "").strip() else 0)
+        + (4 if str(block.get("mime_type") or "").strip() else 0)
+        + (2 if isinstance(metadata, dict) and metadata.get("sha256") else 0)
+        + (1 if str(block.get("uri") or "").startswith("signalasi-artifact://") else 0)
+    )
+
+
+def _safe_relative_artifact_path(value: str) -> str:
+    normalized = unquote(str(value or "").strip().strip("<>")).replace("\\", "/").strip("/")
+    candidate = PurePosixPath(normalized)
+    if len(candidate.parts) < 2 or any(part in {"", ".", ".."} for part in candidate.parts):
+        return ""
+    category = candidate.parts[0].lower()
+    if category not in ARTIFACT_CATEGORIES:
+        return ""
+    if category == "downloads" and candidate.parts[1].lower() == "input":
+        return ""
+    return candidate.as_posix()
+
+
+def _artifact_relative_from_uri(uri: str) -> str:
+    value = str(uri or "").strip()
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme.lower() == "signalasi-artifact":
+        return _safe_relative_artifact_path(parsed.path)
+    if not parsed.scheme:
+        return _safe_relative_artifact_path(value)
+    return ""
+
+
+def _artifact_source(task_id: str, relative: str) -> Path | None:
+    safe_relative = _safe_relative_artifact_path(relative)
+    if not task_id or not safe_relative:
         return None
     try:
         from task_workspace import task_workspace
         root = task_workspace(task_id).resolve()
-        source = (root / relative).resolve()
+        source = (root / Path(*PurePosixPath(safe_relative).parts)).resolve()
         source.relative_to(root)
         if not source.is_file() or source.is_symlink():
+            return None
+        return source
+    except (OSError, ValueError):
+        return None
+
+
+def _file_sha256(source: Path) -> str:
+    digest = hashlib.sha256()
+    with source.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _inline_artifact(task_id: str, relative: str, mime_type: str) -> tuple[str, str] | None:
+    if not str(mime_type or "").lower().startswith("image/"):
+        return None
+    try:
+        source = _artifact_source(task_id, relative)
+        if source is None:
             return None
         raw = source.read_bytes()
         output_mime = mime_type
@@ -237,6 +416,11 @@ def _is_image_uri(uri: str, mime_type: str) -> bool:
         return True
     path = urlparse(str(uri or "")).path.lower()
     return path.endswith((".gif", ".png", ".jpg", ".jpeg", ".webp", ".avif"))
+
+
+def _guess_mime_type(name: str) -> str:
+    suffix = Path(str(name or "")).suffix.lower()
+    return IMAGE_MIME_TYPES.get(suffix) or mimetypes.guess_type(str(name or ""))[0] or "application/octet-stream"
 
 
 def _human_size(size: int) -> str:

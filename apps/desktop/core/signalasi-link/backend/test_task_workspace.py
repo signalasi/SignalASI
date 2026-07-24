@@ -74,6 +74,38 @@ class TaskWorkspaceTests(unittest.TestCase):
                 )
             self.assertEqual([], artifacts)
 
+    def test_imports_relative_artifact_from_current_conversation_task(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "SignalASIWorkspace"
+            with patch.dict(os.environ, {"SIGNALASI_WORKSPACE_ROOT": str(root)}):
+                source_task = task_workspace.task_workspace("source-turn", "codex")
+                source = source_task / "outputs" / "作业批改_全对.jpg"
+                source.write_bytes(b"annotated-image")
+                response = """```signalasi-rich
+{"blocks":[{"type":"file","name":"作业批改_全对.jpg","uri":"outputs/作业批改_全对.jpg"}]}
+```"""
+                artifacts = task_workspace.import_referenced_task_artifacts(
+                    "current-turn",
+                    response,
+                    source_task_ids=["source-turn"],
+                )
+            self.assertEqual(["outputs/作业批改_全对.jpg"], [item["relative_path"] for item in artifacts])
+            copied = root / "tasks" / "current-turn" / "outputs" / "作业批改_全对.jpg"
+            self.assertEqual(b"annotated-image", copied.read_bytes())
+
+    def test_rejects_relative_artifact_traversal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "SignalASIWorkspace"
+            with patch.dict(os.environ, {"SIGNALASI_WORKSPACE_ROOT": str(root)}):
+                source_task = task_workspace.task_workspace("source-turn", "codex")
+                (source_task / "private.jpg").write_bytes(b"private")
+                artifacts = task_workspace.import_referenced_task_artifacts(
+                    "current-turn",
+                    "outputs/../private.jpg",
+                    source_task_ids=["source-turn"],
+                )
+            self.assertEqual([], artifacts)
+
 
 if __name__ == "__main__":
     unittest.main()

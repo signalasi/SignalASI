@@ -148,6 +148,40 @@ class AgentRichContentTest {
     }
 
     @Test
+    fun duplicateArtifactCardsKeepOnlyThePreviewableImage() {
+        val digest = "a".repeat(64)
+        val encoded = """
+            {
+              "version": 1,
+              "blocks": [
+                {
+                  "id": "relative-only",
+                  "type": "file",
+                  "title": "marked.jpg",
+                  "uri": "outputs/marked.jpg",
+                  "metadata": {"sha256": "$digest"}
+                },
+                {
+                  "id": "previewable",
+                  "type": "image",
+                  "title": "marked.jpg",
+                  "uri": "signalasi-artifact://task/outputs/marked.jpg",
+                  "data_b64": "aW1hZ2U=",
+                  "mime_type": "image/jpeg",
+                  "metadata": {"sha256": "$digest"}
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val block = AgentRichContentCodec.decode(encoded).single()
+
+        assertEquals("previewable", block.id)
+        assertEquals(AgentRichBlockType.IMAGE, block.type)
+        assertEquals("aW1hZ2U=", block.dataB64)
+    }
+
+    @Test
     fun phoneRuntimeResultIncludesOnePreviewableSavableArtifactCard() {
         val rich = AgentRuntimeArtifactUi.richOutput(
             output = mapOf(
