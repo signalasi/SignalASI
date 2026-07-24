@@ -1,4 +1,5 @@
 ﻿const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const net = require("node:net");
@@ -186,11 +187,24 @@ async function main() {
   });
 
   const tempPort = await findFreePort();
+  const backendStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalasi-packaged-smoke-"));
   console.log(`[packaged-smoke] starting packaged backend on temporary port ${tempPort}`);
   const backend = spawn(
     bundledPython,
     ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", String(tempPort)],
-    { cwd: packagedBackendDir, windowsHide: true, stdio: "ignore" }
+    {
+      cwd: packagedBackendDir,
+      windowsHide: true,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        SIGNALASI_STATE_DIR: backendStateDir,
+        SIGNALASI_DATA_DIR: path.join(backendStateDir, "pairing"),
+        SIGNALASI_DATABASE_PATH: path.join(backendStateDir, "signalasi.db"),
+        SIGNALASI_CONFIG_PATH: path.join(backendStateDir, "agents.json"),
+        SIGNALASI_DISABLE_EXTERNAL_SERVICES: "1"
+      }
+    }
   );
   try {
     let backendOk = false;
@@ -246,6 +260,7 @@ async function main() {
   } finally {
     stopProcessTree(backend);
     stopPackagedBackendHelpers();
+    fs.rmSync(backendStateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 
   console.log("[packaged-smoke] starting packaged exe UI smoke");

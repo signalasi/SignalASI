@@ -2,7 +2,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
 import os
-import shutil
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Enum as SAEnum
 from sqlalchemy.orm import declarative_base, sessionmaker
 import enum
@@ -50,9 +49,6 @@ def _database_path() -> Path:
     root = Path(state_directory) if state_directory else Path(os.environ.get("APPDATA") or Path.home()) / "SignalASI"
     target = Path(configured) if configured else root / "signalasi.db"
     target.parent.mkdir(parents=True, exist_ok=True)
-    legacy = Path(__file__).with_name("signalasi.db")
-    if not target.exists() and legacy.exists() and legacy.resolve() != target.resolve():
-        shutil.copy2(legacy, target)
     return target
 
 

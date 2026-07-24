@@ -9,39 +9,40 @@ import agent_config
 
 
 class AgentConfigStorageTest(unittest.TestCase):
-    def test_legacy_source_config_migrates_to_private_state_directory(self):
+    def test_missing_current_config_uses_defaults_without_creating_state(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            state_dir = root / "state"
-            legacy = root / "legacy.json"
-            legacy.write_text(
-                json.dumps({"commands": {"claude": "custom-claude -"}}),
-                encoding="utf-8",
-            )
-            with patch.dict(os.environ, {"SIGNALASI_STATE_DIR": str(state_dir)}, clear=False), \
-                    patch.object(agent_config, "LEGACY_CONFIG_PATH", legacy):
+            state_dir = Path(directory) / "state"
+            with patch.dict(
+                os.environ,
+                {"SIGNALASI_STATE_DIR": str(state_dir), "SIGNALASI_CONFIG_PATH": ""},
+                clear=False,
+            ):
                 loaded = agent_config.load_config()
 
-            self.assertEqual("custom-claude -", loaded["commands"]["claude"])
-            self.assertTrue((state_dir / "agents.json").is_file())
+            self.assertEqual(agent_config.DEFAULT_CONFIG["commands"]["claude"], loaded["commands"]["claude"])
+            self.assertFalse((state_dir / "agents.json").exists())
 
     def test_save_config_writes_only_to_runtime_state(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            state_dir = root / "state"
-            legacy = root / "legacy.json"
-            with patch.dict(os.environ, {"SIGNALASI_STATE_DIR": str(state_dir)}, clear=False), \
-                    patch.object(agent_config, "LEGACY_CONFIG_PATH", legacy):
+            state_dir = Path(directory) / "state"
+            with patch.dict(
+                os.environ,
+                {"SIGNALASI_STATE_DIR": str(state_dir), "SIGNALASI_CONFIG_PATH": ""},
+                clear=False,
+            ):
                 agent_config.save_config({"custom_agent": {"name": "Test Agent"}})
 
             saved = json.loads((state_dir / "agents.json").read_text(encoding="utf-8"))
             self.assertEqual("Test Agent", saved["custom_agent"]["name"])
-            self.assertFalse(legacy.exists())
 
     def test_cloud_api_and_context_settings_round_trip_without_exposing_secret(self):
         with tempfile.TemporaryDirectory() as directory:
             state_dir = Path(directory) / "state"
-            with patch.dict(os.environ, {"SIGNALASI_STATE_DIR": str(state_dir)}, clear=False):
+            with patch.dict(
+                os.environ,
+                {"SIGNALASI_STATE_DIR": str(state_dir), "SIGNALASI_CONFIG_PATH": ""},
+                clear=False,
+            ):
                 masked = agent_config.save_config({
                     "cloud_model": {
                         "provider": "deepseek",

@@ -11,7 +11,6 @@ const workspaceRoot = path.resolve(root, "..");
 const backendDir = path.join(root, "core", "signalasi-link", "backend");
 let backendPort = 8765;
 let backendOrigin = `http://127.0.0.1:${backendPort}`;
-const agentConfigPath = path.join(backendDir, "signalasi_agents.json");
 const requiredBackendCapabilities = ["model_display_names", "local_model_endpoint_probe", "mobile_cloud_models", "mcp_stdio_wrapper", "multiple_custom_agents", "agent_execution_log", "api_response_codes", "agent_diagnostics_codes"];
 let backendStateDir = "";
 
@@ -98,10 +97,12 @@ function parseJsonFromBackendOutput(output) {
 }
 
 function readConfigSnapshot() {
+  const agentConfigPath = path.join(backendStateDir, "agents.json");
   return fs.existsSync(agentConfigPath) ? fs.readFileSync(agentConfigPath, "utf8") : undefined;
 }
 
 function restoreConfigSnapshot(snapshot) {
+  const agentConfigPath = path.join(backendStateDir, "agents.json");
   if (snapshot === undefined) {
     fs.rmSync(agentConfigPath, { force: true });
   } else {

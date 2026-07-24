@@ -102,6 +102,7 @@ const smokeLock = fs.readFileSync(path.join(root, "scripts/smoke-lock.js"), "utf
 const connectorStatus = fs.readFileSync(path.join(root, "scripts/connector-status.js"), "utf8");
 const statusDoc = fs.readFileSync(path.join(root, "docs/CONNECTOR_STATUS.md"), "utf8");
 const backendMain = fs.readFileSync(path.join(backendDir, "main.py"), "utf8");
+const backendModels = fs.readFileSync(path.join(backendDir, "models.py"), "utf8");
 const backendMqtt = fs.readFileSync(path.join(backendDir, "mqtt_bridge.py"), "utf8");
 const backendPairing = fs.readFileSync(path.join(backendDir, "pairing_state.py"), "utf8");
 const backendLinkProtocol = fs.readFileSync(path.join(backendDir, "link_protocol.py"), "utf8");
@@ -168,6 +169,31 @@ for (const resource of ["colors.xml", "styles.xml"]) {
 
 if (!smokeAndroidReset.includes("SIGNALASI_ALLOW_DESTRUCTIVE_RESET")) {
   throw new Error("Android destructive reset smoke must require an explicit disposable-device opt-in");
+}
+
+for (const [name, source, forbidden] of [
+  ["Agent config", backendAgentConfig, "LEGACY_CONFIG_PATH"],
+  ["Desktop database", backendModels, "Path(__file__).with_name(\"signalasi.db\")"],
+  ["Desktop STT", backendStt, "HERMESCHAT_WHISPER_"],
+  ["Windows package", packager, "signalasi_agents.json"],
+  ["Desktop smoke", smoke, "signalasi_agents.json"],
+  ["Desktop e2e", smokeE2e, "signalasi_agents.json"]
+]) {
+  if (source.includes(forbidden)) {
+    throw new Error(`${name} must not fall back to source-tree or Hermes-era data`);
+  }
+}
+
+for (const marker of [
+  "signalasi-packaged-smoke-",
+  "SIGNALASI_STATE_DIR",
+  "SIGNALASI_DATABASE_PATH",
+  "SIGNALASI_CONFIG_PATH",
+  "SIGNALASI_DISABLE_EXTERNAL_SERVICES"
+]) {
+  if (!smokePackaged.includes(marker)) {
+    throw new Error(`Packaged smoke must isolate current runtime state: ${marker}`);
+  }
 }
 
 if (!main.includes("/signalasi/verify")) {
