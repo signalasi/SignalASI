@@ -33,8 +33,6 @@ class MqttTaskTurnRoutingTests(unittest.TestCase):
     def tearDown(self):
         with mqtt_bridge.pending_task_events_lock:
             mqtt_bridge.pending_task_events.clear()
-        with mqtt_bridge.pending_task_results_lock:
-            mqtt_bridge.pending_task_results.clear()
         self.database_patch.stop()
         self.temporary.cleanup()
 
