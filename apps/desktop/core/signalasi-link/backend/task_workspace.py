@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import filecmp
 import os
 import re
 import shutil
 import time
 import uuid
 from pathlib import Path
+from pathlib import PurePosixPath
 from urllib.parse import unquote, urlparse
 
 
@@ -18,6 +20,12 @@ MAX_IMPORTED_ARTIFACT_BYTES = 64 * 1024 * 1024
 MARKDOWN_TARGET = re.compile(r"!?\[[^\]]*\]\(\s*<?([^>\r\n)]+)>?\s*\)")
 WINDOWS_ARTIFACT_PATH = re.compile(
     r"/?[A-Za-z]:[\\/][^\r\n<>\"|?*]+?\.[A-Za-z0-9]{1,12}(?=$|[\s>)\],;\uFF0C\u3002])",
+    re.IGNORECASE,
+)
+RELATIVE_ARTIFACT_PATH = re.compile(
+    r"(?<![A-Za-z0-9_.-])((?:outputs|downloads|screenshots)[\\/]"
+    r"[^\r\n<>\"|?*]+?\.[A-Za-z0-9]{1,12})"
+    r"(?=$|[\s>)\],;\"'}\uFF0C\u3002])",
     re.IGNORECASE,
 )
 
@@ -145,23 +153,75 @@ def referenced_task_artifact_paths(content: str, limit: int = 20) -> list[Path]:
     return resolved
 
 
-def import_referenced_task_artifacts(task_id: str, content: str, limit: int = 20) -> list[dict]:
+def referenced_relative_artifact_paths(content: str, limit: int = 20) -> list[PurePosixPath]:
+    """Extract bounded SignalASI-owned relative artifact paths from model output."""
+    resolved: list[PurePosixPath] = []
+    seen: set[str] = set()
+    for match in RELATIVE_ARTIFACT_PATH.finditer(str(content or "")):
+        value = str(match.group(1) or "").replace("\\", "/").strip("/")
+        candidate = PurePosixPath(value)
+        if len(candidate.parts) < 2 or any(part in {"", ".", ".."} for part in candidate.parts):
+            continue
+        category = candidate.parts[0].lower()
+        if category not in {"outputs", "downloads", "screenshots"}:
+            continue
+        if category == "downloads" and candidate.parts[1].lower() == "input":
+            continue
+        key = candidate.as_posix().casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(candidate)
+        if len(resolved) >= max(1, min(limit, 50)):
+            break
+    return resolved
+
+
+def import_referenced_task_artifacts(
+    task_id: str,
+    content: str,
+    limit: int = 20,
+    source_task_ids: list[str] | tuple[str, ...] = (),
+) -> list[dict]:
     """Copy referenced artifacts from an earlier turn into the current task."""
     current_root = task_workspace(task_id).resolve()
     output_root = (current_root / "outputs").resolve()
     for source in referenced_task_artifact_paths(content, limit=limit):
         if _is_within(source, current_root):
             continue
-        target = output_root / source.name
-        serial = 2
-        while target.exists():
-            if target.is_file() and target.stat().st_size == source.stat().st_size:
-                break
-            target = output_root / f"{source.stem}-{serial}{source.suffix}"
-            serial += 1
-        if not target.exists():
-            shutil.copy2(source, target)
+        _copy_artifact_to_output(source, output_root)
+
+    tasks_root = (workspace_root() / "tasks").resolve()
+    safe_sources = list(dict.fromkeys(_safe_component(value) for value in source_task_ids))
+    for relative in referenced_relative_artifact_paths(content, limit=limit):
+        for safe_source_id in safe_sources:
+            if not safe_source_id or safe_source_id == current_root.name:
+                continue
+            source_root = (tasks_root / safe_source_id).resolve()
+            source = (source_root / Path(*relative.parts)).resolve()
+            if (
+                not _is_within(source_root, tasks_root)
+                or not _is_within(source, source_root)
+                or not source.is_file()
+                or source.is_symlink()
+                or source.stat().st_size > MAX_IMPORTED_ARTIFACT_BYTES
+            ):
+                continue
+            _copy_artifact_to_output(source, output_root)
+            break
     return task_artifacts(task_id)
+
+
+def _copy_artifact_to_output(source: Path, output_root: Path) -> Path:
+    target = output_root / source.name
+    serial = 2
+    while target.exists():
+        if target.is_file() and filecmp.cmp(target, source, shallow=False):
+            return target
+        target = output_root / f"{source.stem}-{serial}{source.suffix}"
+        serial += 1
+    shutil.copy2(source, target)
+    return target
 
 
 def _safe_component(value: str) -> str:

@@ -135,7 +135,7 @@ object AgentRichContentCodec {
                 )
                 if (block.hasRenderableContent()) add(block)
             }
-        }
+        }.deduplicateArtifacts()
     }
 
     fun encode(blocks: List<AgentRichBlock>): String {
@@ -296,6 +296,58 @@ object AgentRichContentCodec {
         text.isNotBlank() || title.isNotBlank() || uri.isNotBlank() || dataB64.isNotBlank() || columns.isNotEmpty() ||
             rows.isNotEmpty() || actions.isNotEmpty() || fields.isNotEmpty() ||
             type in setOf(AgentRichBlockType.PROGRESS, AgentRichBlockType.STATUS, AgentRichBlockType.DIVIDER)
+
+    private fun List<AgentRichBlock>.deduplicateArtifacts(): List<AgentRichBlock> {
+        val result = mutableListOf<AgentRichBlock>()
+        val indexes = mutableMapOf<String, Int>()
+        forEach { block ->
+            val identity = block.artifactIdentity()
+            if (identity.isBlank()) {
+                result += block
+                return@forEach
+            }
+            val previousIndex = indexes[identity]
+            if (previousIndex == null) {
+                indexes[identity] = result.size
+                result += block
+            } else if (block.artifactQuality() > result[previousIndex].artifactQuality()) {
+                result[previousIndex] = block
+            }
+        }
+        return result
+    }
+
+    private fun AgentRichBlock.artifactIdentity(): String {
+        if (type !in setOf(
+                AgentRichBlockType.IMAGE,
+                AgentRichBlockType.VIDEO,
+                AgentRichBlockType.AUDIO,
+                AgentRichBlockType.FILE
+            )
+        ) return ""
+        val artifactName = fallbackText
+            .replace('\\', '/')
+            .trim()
+            .lowercase()
+            .ifBlank { title.trim().lowercase() }
+        metadata["sha256"]
+            ?.trim()
+            ?.lowercase()
+            ?.takeIf { it.matches(Regex("[0-9a-f]{64}")) }
+            ?.let { return "sha256:$it:$artifactName" }
+        if (dataB64.isNotBlank()) return "data:${dataB64.hashCode()}:$artifactName"
+        if (uri.isNotBlank()) return "uri:${uri.replace('\\', '/').trim().lowercase()}"
+        if (fallbackText.isNotBlank() || title.isNotBlank()) {
+            return "name:${fallbackText.replace('\\', '/').trim().lowercase()}:${title.trim().lowercase()}"
+        }
+        return ""
+    }
+
+    private fun AgentRichBlock.artifactQuality(): Int =
+        (if (dataB64.isNotBlank()) 8 else 0) +
+            (if (mimeType.isNotBlank()) 4 else 0) +
+            (if (metadata["sha256"].isNullOrBlank()) 0 else 2) +
+            (if (uri.startsWith("signalasi-artifact://")) 1 else 0)
 
     private fun normalizeBlockText(value: String, type: AgentRichBlockType): String =
         if (type in setOf(AgentRichBlockType.CODE, AgentRichBlockType.DIFF, AgentRichBlockType.JSON, AgentRichBlockType.HTML)) {
