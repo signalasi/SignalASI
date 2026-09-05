@@ -334,6 +334,7 @@ class MqttDurableDeliveryTest(unittest.TestCase):
             "client_route_id": "route-1",
             "conversation_id": "conversation-1",
             "turn_id": "turn-1",
+            "contact_id": "contact-1", "source_message_id": "source-1", "agent_id": "codex",
         }
         wire_payload = {"_client_route_id": "route-1"}
 

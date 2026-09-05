@@ -30,6 +30,7 @@ def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(DB_PATH, timeout=10)
     db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=FULL")
     db.execute(
         """CREATE TABLE IF NOT EXISTS inbound_messages (
             client_route_id TEXT NOT NULL,
@@ -92,18 +93,25 @@ def _connect() -> sqlite3.Connection:
         "SELECT value FROM delivery_metadata WHERE key='secure_storage_version'"
     ).fetchone()
     if secure_version is None or str(secure_version[0]) != SECURE_STORAGE_VERSION:
-        # Delivery records are transient. Development plaintext stores are
-        # discarded instead of being imported into the encrypted schema.
-        db.execute("DELETE FROM inbound_messages")
-        db.execute("DELETE FROM inbound_ciphertexts")
-        db.execute("DELETE FROM outbound_messages")
-        db.execute("DELETE FROM task_result_outbox")
-        db.execute("DELETE FROM delivery_metadata")
-        db.execute(
-            "INSERT INTO delivery_metadata(key,value) VALUES('secure_storage_version',?)",
-            (SECURE_STORAGE_VERSION,),
-        )
+        db.execute("BEGIN IMMEDIATE")
+        secure_version = db.execute(
+            "SELECT value FROM delivery_metadata WHERE key='secure_storage_version'"
+        ).fetchone()
+        if secure_version is None or str(secure_version[0]) != SECURE_STORAGE_VERSION:
+            # Recheck under the writer lock: concurrent first-open must not
+            # discard rows committed by another process during initialization.
+            db.execute("DELETE FROM inbound_messages")
+            db.execute("DELETE FROM inbound_ciphertexts")
+            db.execute("DELETE FROM outbound_messages")
+            db.execute("DELETE FROM task_result_outbox")
+            db.execute("DELETE FROM delivery_metadata")
+            db.execute(
+                "INSERT INTO delivery_metadata(key,value) VALUES('secure_storage_version',?)",
+                (SECURE_STORAGE_VERSION,),
+            )
         db.commit()
+    from task_result_outbox import ensure_schema
+    ensure_schema(db)
     return db
 
 
@@ -145,7 +153,6 @@ def ensure_transport_epoch(epoch: str) -> bool:
             if row and str(row[0]) == normalized:
                 return False
             db.execute("DELETE FROM outbound_messages")
-            db.execute("DELETE FROM task_result_outbox")
             db.execute(
                 """INSERT INTO delivery_metadata(key,value) VALUES('transport_epoch',?)
                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
@@ -406,6 +413,9 @@ def discard_route(client_route_id: str) -> dict[str, int]:
                     (sealed_route_id,),
                 )
                 removed[result_key] = max(0, int(cursor.rowcount or 0))
+            removed["task_results"] += max(0, db.execute(
+                "DELETE FROM task_result_queue WHERE client_route_id=?", (sealed_route_id,),
+            ).rowcount)
             db.commit()
         finally:
             db.close()
@@ -431,81 +441,28 @@ def queue_task_result(
     client_route_id: str,
     wire_payload: dict,
     payload: dict,
-) -> None:
-    normalized_task_id = str(task_id or "").strip()
-    normalized_route_id = str(client_route_id or "").strip()
-    if not normalized_task_id:
-        raise ValueError("task id is required")
-    if not normalized_route_id:
-        raise ValueError("client route id is required")
-    now = time.time()
-    encoded_wire_payload = json.dumps(wire_payload, ensure_ascii=False, separators=(",", ":"))
-    encoded_payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    with _lock:
-        db = _connect()
-        try:
-            db.execute(
-                """INSERT INTO task_result_outbox
-                   (task_id,client_route_id,wire_payload,payload,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?)
-                   ON CONFLICT(task_id) DO UPDATE SET
-                       client_route_id=excluded.client_route_id,
-                       wire_payload=excluded.wire_payload,
-                       payload=excluded.payload,
-                       updated_at=excluded.updated_at""",
-                (
-                    normalized_task_id,
-                    _route(normalized_route_id),
-                    _protect(encoded_wire_payload, "task-wire-payload"),
-                    _protect(encoded_payload, "task-payload"),
-                    now,
-                    now,
-                ),
-            )
-            db.commit()
-        finally:
-            db.close()
+    *,
+    replay: bool = False,
+) -> dict | None:
+    return _task_results().enqueue(task_id, client_route_id, wire_payload, payload, replay=replay)
 
 
-def pending_task_results() -> list[dict]:
-    with _lock:
-        db = _connect()
-        try:
-            db.execute(
-                "DELETE FROM task_result_outbox WHERE created_at < ?",
-                (time.time() - OUTBOUND_RETENTION_SECONDS,),
-            )
-            rows = db.execute(
-                """SELECT task_id,client_route_id,wire_payload,payload,created_at
-                   FROM task_result_outbox
-                   ORDER BY created_at"""
-            ).fetchall()
-            db.commit()
-        finally:
-            db.close()
-    return [
-        {
-            "task_id": row[0],
-            "client_route_id": _unroute(row[1]),
-            "wire_payload": json.loads(_reveal(row[2], "task-wire-payload")),
-            "payload": json.loads(_reveal(row[3], "task-payload")),
-            "created_at": row[4],
-        }
-        for row in rows
-    ]
+def _task_results():
+    from task_result_outbox import TaskResultOutbox
+    return TaskResultOutbox(DB_PATH, _connect)
 
 
-def remove_task_result(task_id: str) -> None:
-    with _lock:
-        db = _connect()
-        try:
-            db.execute(
-                "DELETE FROM task_result_outbox WHERE task_id=?",
-                (str(task_id or "").strip(),),
-            )
-            db.commit()
-        finally:
-            db.close()
+def pending_task_results(*, limit: int = 32) -> list[dict]:
+    return _task_results().pending(limit=limit)
+
+
+def task_result_is_current(record: dict) -> bool:
+    return _task_results().current(record)
+
+
+def remove_task_result(record: dict) -> bool:
+    """Retire only the observed revision after durable transport takes ownership."""
+    return _task_results().hand_off(record)
 
 
 def _outbound_retry_due(status: str, attempts: int, updated_at: float, now: float) -> bool:

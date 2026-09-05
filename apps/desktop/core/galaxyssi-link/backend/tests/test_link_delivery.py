@@ -149,7 +149,13 @@ class LinkDeliveryTest(unittest.TestCase):
                         ],
                     )
 
-    def test_transport_epoch_clears_obsolete_outbox_only_once(self) -> None:
+    @staticmethod
+    def result_payload(task_id, route, **changes):
+        return {"task_id": task_id, "client_route_id": route, "conversation_id": "conversation",
+                "turn_id": "turn", "contact_id": "contact", "source_message_id": "source",
+                "agent_id": "codex", **changes}
+
+    def test_transport_epoch_clears_only_broker_bound_ciphertexts_once(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = Path(temporary) / "delivery.db"
             with patch.object(link_delivery, "DB_PATH", database):
@@ -158,11 +164,11 @@ class LinkDeliveryTest(unittest.TestCase):
                     "old-task",
                     "client",
                     {"_client_route_id": "client"},
-                    {"task_id": "old-task", "content": "old"},
+                    self.result_payload("old-task", "client", content="old"),
                 )
                 self.assertTrue(link_delivery.ensure_transport_epoch("v2"))
                 self.assertEqual([], link_delivery.pending_outbound())
-                self.assertEqual([], link_delivery.pending_task_results())
+                self.assertEqual("old-task", link_delivery.pending_task_results()[0]["task_id"])
 
                 link_delivery.queue_outbound("client", "current", "topic", "wire")
                 self.assertFalse(link_delivery.ensure_transport_epoch("v2"))
@@ -177,7 +183,7 @@ class LinkDeliveryTest(unittest.TestCase):
                     "client-1",
                     {"scheme": "signal", "_client_route_id": "client-1"},
                     {
-                        "task_id": "task-1",
+                        **self.result_payload("task-1", "client-1"),
                         "message_id": "5a22fe7b-8ef9-54c2-9c90-3120f17d277e",
                         "content": "completed",
                     },
@@ -187,7 +193,7 @@ class LinkDeliveryTest(unittest.TestCase):
                     "client-1",
                     {"scheme": "signal", "_client_route_id": "client-1"},
                     {
-                        "task_id": "task-1",
+                        **self.result_payload("task-1", "client-1"),
                         "message_id": "5a22fe7b-8ef9-54c2-9c90-3120f17d277e",
                         "content": "completed",
                     },
@@ -198,7 +204,7 @@ class LinkDeliveryTest(unittest.TestCase):
                 self.assertEqual("task-1", pending[0]["task_id"])
                 self.assertEqual("completed", pending[0]["payload"]["content"])
 
-                link_delivery.remove_task_result("task-1")
+                link_delivery.remove_task_result(pending[0])
                 self.assertEqual([], link_delivery.pending_task_results())
 
     def test_route_topic_and_payload_are_not_plaintext_at_rest(self) -> None:
@@ -214,8 +220,8 @@ class LinkDeliveryTest(unittest.TestCase):
                 link_delivery.queue_task_result(
                     "task-secret",
                     "client-route-secret",
-                    {"body": "wire-secret"},
-                    {"content": "result-secret"},
+                    {"body": "wire-secret", "_client_route_id": "client-route-secret"},
+                    self.result_payload("task-secret", "client-route-secret", content="result-secret"),
                 )
 
                 self.assertEqual(
@@ -256,8 +262,8 @@ class LinkDeliveryTest(unittest.TestCase):
                     link_delivery.queue_task_result(
                         f"task-{route_id}",
                         route_id,
-                        {"route": route_id},
-                        {"content": route_id},
+                        {"_client_route_id": route_id},
+                        self.result_payload(f"task-{route_id}", route_id, content=route_id),
                     )
 
                 removed = link_delivery.discard_route("revoked")

@@ -562,6 +562,7 @@ class MqttTaskTurnRoutingTests(unittest.TestCase):
             "client_route_id": "phone-1",
             "conversation_id": "conversation-1",
             "turn_id": "turn-1",
+            "contact_id": "contact-1", "source_message_id": "source-1", "agent_id": "codex",
             "content": "done",
         }
 
@@ -589,6 +590,8 @@ class MqttTaskTurnRoutingTests(unittest.TestCase):
         payload = {
             "type": "chat",
             "task_id": "task-2",
+            "client_route_id": "client-1", "conversation_id": "conversation-1", "turn_id": "turn-1",
+            "contact_id": "contact-1", "source_message_id": "source-1", "agent_id": "codex",
             "message_id": "e70793b8-6ee2-532d-995b-4f55fc73c253",
             "content": "done",
         }
