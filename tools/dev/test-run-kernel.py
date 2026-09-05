@@ -28,7 +28,7 @@ def main() -> int:
             "PYTHONDONTWRITEBYTECODE": "1",
         }
         return subprocess.call(
-            [sys.executable, "-m", "unittest", *modules, "-q"],
+            [sys.executable, "-m", "unittest", *(sys.argv[1:] or modules), "-q"],
             cwd=backend, env=environment,
         )
 

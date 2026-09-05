@@ -141,7 +141,8 @@ class TaskResultArchiveTest(unittest.TestCase):
         import agent_task_result_archive
         import mqtt_bridge
 
-        def queue(task_id, route, wire, payload):
+        def queue(task_id, route, wire, payload, *, replay=False):
+            self.assertFalse(replay)
             self.assertEqual("ready", self.page()["status"])
             self.assertEqual("route", route)
             self.assertEqual(self.page()["sha256"], payload["result_recovery"]["sha256"])

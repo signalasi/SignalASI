@@ -56,6 +56,7 @@ from link_delivery import (
     previous_acknowledgement,
     queue_outbound,
     queue_task_result,
+    task_result_is_current,
     remove_task_result,
 )
 from link_protocol import (
@@ -3865,7 +3866,7 @@ def flush_pending_task_events(mqttc) -> None:
             log.warning(f"Agent task event replay deferred task_id={task_id}: {exc}")
 
 
-def _publish_or_queue_task_result(mqttc, wire_payload: dict, payload: dict) -> bool:
+def _publish_or_queue_task_result(mqttc, wire_payload: dict, payload: dict, *, replay: bool = False) -> bool:
     task_id = str(payload.get("task_id") or "")
     client_route_id = str(wire_payload.get("_client_route_id") or "")
     payload_route_id = str(payload.get("client_route_id") or "").strip()
@@ -3886,61 +3887,66 @@ def _publish_or_queue_task_result(mqttc, wire_payload: dict, payload: dict) -> b
             payload_route_id,
         )
         return False
+    from task_result_outbox import result_identity
+    try:
+        fields, generation = result_identity(task_id, client_route_id, wire_payload, payload)
+    except ValueError:
+        log.error("Agent task result missing complete execution identity")
+        return False
     persisted_payload = dict(payload)
-    generation = payload.get("execution_generation", 1)
-    persisted_payload.setdefault(
-        "message_id",
-        str(uuid.uuid5(
-            uuid.NAMESPACE_URL,
-            f"{PROTOCOL_NAME}:task-result:{client_route_id}:{task_id}"
-            + (f":generation:{generation}" if generation != 1 else ""),
-        )),
-    )
+    persisted_payload["message_id"] = str(uuid.uuid5(uuid.NAMESPACE_URL,
+        f"{PROTOCOL_NAME}:task-result:" + json.dumps([fields, generation], sort_keys=True)))
     from agent_task_result_archive import archive
 
     receipt = archive.put(persisted_payload)
     if receipt is not None:
         persisted_payload["result_recovery"] = receipt
-    queue_task_result(
+    pending = queue_task_result(
         task_id,
         client_route_id,
         dict(wire_payload),
         persisted_payload,
+        replay=replay,
     )
+    if pending is None:
+        return False
     _ensure_outbound_retry_thread()
+    if mqttc is None or not mqttc.is_connected():
+        return False
+    return _publish_pending_task_result(mqttc, pending)
+
+
+def _publish_pending_task_result(mqttc, pending: dict) -> bool:
+    if not task_result_is_current(pending):
+        return False
+    route = pending["client_route_id"]
+    payload = dict(pending["payload"])
+    message_id = str(payload.get("message_id") or "")
+    owned_states = {"queued", "sending", "published"}
+    status = outbound_status(route, message_id) if message_id else None
+    if status in owned_states:
+        remove_task_result(pending)
+        return False
+    if status is not None:
+        # Failed ciphertext is not a successful handoff. Keep the logical reply
+        # available for recovery without continuously retrying the exhausted wire.
+        return False
     try:
-        published = bool(
-            mqttc is not None and mqttc.is_connected()
-            and _publish_phone_payload(mqttc, wire_payload, persisted_payload)
-        )
+        published = bool(_publish_phone_payload(mqttc, dict(pending["wire_payload"]), payload))
     except Exception as exc:
-        log.warning("Agent task result queued task_id=%s: %s", task_id, exc)
+        log.warning("Agent task result replay deferred task_id=%s: %s", pending["task_id"], exc)
         published = False
-    if published or outbound_status(client_route_id, persisted_payload["message_id"]):
-        remove_task_result(task_id)
+    if published or (message_id and outbound_status(route, message_id) in owned_states):
+        remove_task_result(pending)
     return published
 
 
 def flush_pending_task_results(mqttc) -> None:
     for pending in pending_persisted_task_results():
-        task_id = str(pending["task_id"])
-        client_route_id = str(pending["client_route_id"])
-        wire_payload = dict(pending["wire_payload"])
-        payload = dict(pending["payload"])
-        message_id = str(payload.get("message_id") or "")
-        if message_id and outbound_status(client_route_id, message_id):
-            remove_task_result(task_id)
-            continue
         try:
-            if _publish_phone_payload(mqttc, wire_payload, payload):
-                remove_task_result(task_id)
-            elif message_id and outbound_status(client_route_id, message_id):
-                remove_task_result(task_id)
+            _publish_pending_task_result(mqttc, pending)
         except Exception as exc:
-            if message_id and outbound_status(client_route_id, message_id):
-                remove_task_result(task_id)
-            else:
-                log.warning("Agent task result replay deferred task_id=%s: %s", task_id, exc)
+            log.warning("Agent task result handoff deferred task_id=%s: %s", pending["task_id"], exc)
 
 
 def _publish_task_artifacts(
@@ -8421,7 +8427,7 @@ def republish_agent_task_result(task_id: str) -> dict:
     )
     payload = _build_republished_task_result(task.public(), route_id)
     wire_payload = {"scheme": "signal", "_client_route_id": route_id}
-    if _publish_or_queue_task_result(client, wire_payload, payload):
+    if _publish_or_queue_task_result(client, wire_payload, payload, replay=True):
         _publish_task_artifacts(
             client,
             wire_payload,
