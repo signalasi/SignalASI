@@ -492,20 +492,22 @@ class MainActivity : Activity(), GalaxySSIMqttClient.Listener {
     internal val agentConnectorResponseListener = AgentConnectorResponseListener { response ->
         agentConnectorStreamAttempts.close(response.sourceMessageId)
         pendingAgentConnectorStreamUpdates.remove(response.sourceMessageId)
-        val recoveryKey = "runtime-restore:${response.sourceMessageId}:${response.contactId}"
+        val recoveryKey = "runtime-restore:${AgentConnectorResponseCodec.identity(response)}"
         if (!agentConnectorResponsesInFlight.add(recoveryKey)) return@AgentConnectorResponseListener
         agentRuntimeRecoveryExecutor.execute {
-            runtimeForConnectorResponse(
-                sourceMessageId = response.sourceMessageId,
-                contactId = response.contactId,
-                conversationId = response.conversationId,
-                turnId = response.turnId,
-                taskId = response.taskId,
-                restorePersisted = true
-            )
-            agentConnectorResponsesInFlight.remove(recoveryKey)
-            if (isFinishing || isDestroyed) return@execute
-            consumeAgentConnectorResponse(response)
+            try {
+                if (!AgentConnectorResponseStore.isCurrentExecution(this, response)) return@execute
+                runtimeForConnectorResponse(
+                    sourceMessageId = response.sourceMessageId,
+                    contactId = response.contactId,
+                    conversationId = response.conversationId,
+                    turnId = response.turnId,
+                    taskId = response.taskId,
+                    restorePersisted = true
+                )
+                if (isFinishing || isDestroyed) return@execute
+                consumeAgentConnectorResponse(response)
+            } finally { agentConnectorResponsesInFlight.remove(recoveryKey) }
         }
     }
     internal val agentConnectorStreamListener = AgentConnectorStreamListener { update ->
@@ -1768,7 +1770,8 @@ class MainActivity : Activity(), GalaxySSIMqttClient.Listener {
                 addMessage(msg, fromIncoming = true)
                 if (supersededResponse) supersededConnectorSourceIds.remove(sourceMessageId)
                 if (responseTaskId.isNotBlank()) {
-                    completedConnectorTaskIds.add(responseTaskId)
+                    completedConnectorTaskIds.add(AgentRemoteOutcomeCodec.taskKey(responseTaskId,
+                        envelope?.let(AgentRemoteOutcomeCodec::version)?.generation ?: 1L))
                 }
                 if (!nativeAgentResponse && resolvedResponseConversationId.isNotBlank()) {
                     agentTranscriptContentExecutor.execute {

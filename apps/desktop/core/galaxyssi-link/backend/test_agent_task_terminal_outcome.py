@@ -223,10 +223,24 @@ raise AssertionError('terminal callback did not run')
             raise OSError("connection lost")
 
         with patch.object(agent_task_result_archive, "archive", self.archive), \
+                patch.object(mqtt_bridge, "_publish_or_queue_task_result", side_effect=OSError("queue failure")), \
                 patch.object(mqtt_bridge, "_try_publish_task_event", side_effect=publish), \
                 patch.object(mqtt_bridge, "pending_task_events", {}):
             self.assertFalse(mqtt_bridge._publish_or_queue_task_event(None,
                 {"_client_route_id": "route"}, self.task, []))
+
+    def test_terminal_event_uses_durable_result_channel(self):
+        import agent_task_result_archive
+        import mqtt_bridge
+
+        with patch.object(agent_task_result_archive, "archive", self.archive), \
+                patch.object(mqtt_bridge, "_publish_or_queue_task_result", return_value=False) as result, \
+                patch.object(mqtt_bridge, "_try_publish_task_event") as event:
+            self.assertFalse(mqtt_bridge._publish_or_queue_task_event(None,
+                {"_client_route_id": "route"}, {**self.task, "status": "cancelled"}, []))
+            event.assert_not_called()
+            self.assertEqual("cancelled", result.call_args.args[2]["task_status"])
+            self.assertFalse(result.call_args.args[2]["success"])
 
     def test_transport_message_id_changes_for_a_new_execution(self):
         import agent_task_result_archive

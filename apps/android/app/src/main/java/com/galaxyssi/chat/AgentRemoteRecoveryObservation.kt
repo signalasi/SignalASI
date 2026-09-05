@@ -7,7 +7,9 @@ data class AgentRemoteRecoveryObservation(
     val status: String,
     val remoteTaskId: String,
     val remoteRunId: String,
-    val statusSequence: Long
+    val statusSequence: Long,
+    val executionGeneration: Long = 1L,
+    val awaitingTerminalReply: Boolean = false
 ) {
     val workspaceStatus: AgentWorkspaceStatus?
         get() = when (status) {
@@ -15,8 +17,8 @@ data class AgentRemoteRecoveryObservation(
             "waiting_input", "waiting_approval" -> AgentWorkspaceStatus.WAITING_CONFIRMATION
             "pausing", "paused", "takeover", "interrupted" -> AgentWorkspaceStatus.PAUSED
             "completed" -> AgentWorkspaceStatus.WAITING_RESPONSE
-            "failed", "timed_out" -> AgentWorkspaceStatus.FAILED
-            "cancelled" -> AgentWorkspaceStatus.CANCELLED
+            "failed", "timed_out" -> if (awaitingTerminalReply) AgentWorkspaceStatus.WAITING_RESPONSE else AgentWorkspaceStatus.FAILED
+            "cancelled" -> if (awaitingTerminalReply) AgentWorkspaceStatus.WAITING_RESPONSE else AgentWorkspaceStatus.CANCELLED
             else -> null
         }
 }

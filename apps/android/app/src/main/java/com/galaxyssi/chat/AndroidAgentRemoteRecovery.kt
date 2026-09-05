@@ -85,13 +85,23 @@ internal object AndroidAgentRemoteRecovery {
                         }
                         observations.forEachIndexed { index, result ->
                             val query = batch[index]
+                            val version = AgentRemoteOutcomeCodec.version(result) ?: return@forEachIndexed
+                            if (result.optString("remote_run_id").isBlank() || version.sequence < 0L ||
+                                result.optString("status") == "unavailable") return@forEachIndexed
+                            val fields = JSONObject(query.payload.toString()).put("execution_generation", version.generation)
+                                .put("status_sequence", version.sequence).put("task_status", result.optString("status"))
+                                .put("expected_status", result.optString("status"))
+                            val identity = AgentRemoteOutcomeCodec.observation(fields) ?: return@forEachIndexed
+                            val terminal = result.optString("status") in AgentRemoteOutcomeCodec.TERMINAL
                             val observation = AgentRemoteRecoveryObservation(query.payload.getString("conversation_id"),
                                 query.desktopId, result.optString("status"), result.optString("task_id"),
-                                result.optString("remote_run_id"), result.optLong("status_sequence", -1L))
+                                result.optString("remote_run_id"), result.optLong("status_sequence", -1L),
+                                executionGeneration = version.generation, awaitingTerminalReply = terminal)
                             if (observation.workspaceStatus == null || observation.remoteRunId.isBlank() ||
                                 observation.statusSequence < 0L) return@forEachIndexed
-                            if (observation.status == "completed") {
-                                AndroidAgentResultRecovery.request(context, query.desktopId, query.payload)
+                            if (!AgentConnectorResponseStore.observeExecution(context, identity)) return@forEachIndexed
+                            if (terminal) {
+                                AndroidAgentResultRecovery.request(context, query.desktopId, fields)
                             }
                             add(query to observation)
                         }

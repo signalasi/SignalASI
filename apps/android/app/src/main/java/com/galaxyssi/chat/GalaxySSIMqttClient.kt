@@ -2192,6 +2192,22 @@ object GalaxySSIMqttClient {
         payload: JSONObject,
         sourceDesktopId: String = payload.optString("desktop_id")
     ) {
+        if (!payload.optBoolean("peer_chat") && payload.optString("task_id").isNotBlank() &&
+            payload.optString("type") in setOf("text", "agent_task_event") &&
+            AgentTaskIdentityStore.matchesRegistered(context, payload)
+        ) {
+            val finalReply = payload.optString("type") == "text"
+            val observation = if (finalReply) AgentRemoteOutcomeCodec.decode(payload, "")
+                else AgentRemoteOutcomeCodec.observation(payload)
+            if (observation == null || !AgentConnectorResponseStore.observeExecution(context, observation,
+                    finalReply = finalReply)) {
+                GalaxySSILinkDeliveryStore.completeIncoming(context, payload.optString("message_id"))
+                return
+            }
+            if (payload.optString("type") == "text" && payload.optString("task_status") in AgentRemoteOutcomeCodec.FAILURES) {
+                payload.put("content", AgentRemoteOutcomeCodec.content(context, payload))
+            }
+        }
         if (payload.optString("type") == "agent_task_result_page") {
             AndroidAgentResultRecovery.receive(context, payload, sourceDesktopId)
             GalaxySSILinkDeliveryStore.completeIncoming(context, payload.optString("message_id"))

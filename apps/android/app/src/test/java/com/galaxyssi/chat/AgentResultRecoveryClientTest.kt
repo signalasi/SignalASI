@@ -9,6 +9,43 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AgentResultRecoveryClientTest {
+    @Test fun terminalFailuresAndStatusOnlyCancellationCanBeRecovered(): Unit = runBlocking {
+        for (status in AgentRemoteOutcomeCodec.FAILURES) {
+            val client = AgentResultRecoveryClient()
+            val answer = body(if (status == "cancelled") "" else "actual failure").put("task_status", status)
+                .put("execution_generation", 2).put("terminal_reason", status)
+            val result = client.fetch("desktop", fields().put("execution_generation", 2).put("expected_status", status)) {
+                assertEquals(2L, it.getLong("execution_generation"))
+                client.receive(page(it, answer), "desktop")
+            }
+            assertEquals(status, result!!.getString("task_status"))
+        }
+    }
+
+    @Test fun differentExecutionPageCannotSatisfyCurrentRequest(): Unit = runBlocking {
+        val client = AgentResultRecoveryClient()
+        lateinit var sent: JSONObject
+        val request = async(start = CoroutineStart.UNDISPATCHED) {
+            client.fetch("desktop", fields().put("execution_generation", 2)) { sent = it; true }
+        }
+        val answer = body().put("execution_generation", 2)
+        assertFalse(client.receive(page(sent, answer).put("execution_generation", 1), "desktop"))
+        assertTrue(client.receive(page(sent, answer), "desktop"))
+        assertNotNull(request.await())
+    }
+
+    @Test fun innerGenerationAndObservedStatusMustMatchArchivePayload(): Unit = runBlocking {
+        for (field in listOf("execution_generation", "task_status")) {
+            val client = AgentResultRecoveryClient()
+            val answer = body().put("execution_generation", 2)
+                .put(field, if (field == "task_status") "failed" else 1)
+            val result = client.fetch("desktop", fields().put("execution_generation", 2).put("expected_status", "completed")) {
+                client.receive(page(it, answer), "desktop")
+            }
+            assertNull(result)
+        }
+    }
+
     private fun fields() = JSONObject().put("client_route_id", "route").put("conversation_id", "conversation")
         .put("task_id", "task").put("turn_id", "turn").put("contact_id", "contact")
         .put("source_message_id", "42").put("agent_id", "codex")

@@ -3679,6 +3679,7 @@ def _agent_task_payload(
         "completed_at": task.get("completed_at", 0),
         "elapsed_ms": task.get("elapsed_ms", 0),
         "status_seq": task.get("status_seq", 0),
+        "execution_generation": task.get("execution_generation", 1),
         "process_id": task.get("process_id", 0),
         "thread_id": task.get("thread_id", ""),
         "turn_id": _client_task_turn_id(task),
@@ -3782,10 +3783,16 @@ def _publish_or_queue_task_event(mqttc, wire_payload: dict, task: dict, trace: l
             wire_route_id,
         )
         return False
-    from agent_task_terminal_outcome import persist_terminal_outcome
+    from agent_task_terminal_outcome import persist_terminal_outcome, terminal_outcome
     from agent_task_result_archive import archive
 
     persist_terminal_outcome(task, archive)
+    outcome = terminal_outcome(task)
+    if outcome is not None:
+        try:
+            return _publish_or_queue_task_result(mqttc, wire_payload, outcome)
+        except Exception as error:
+            log.warning("Terminal reply deferred; preserving status event: %s", type(error).__name__)
     pending = _PendingTaskEvent(
         wire_payload=dict(wire_payload),
         task=dict(task),

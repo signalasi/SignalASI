@@ -39,7 +39,40 @@ class AgentConnectorFallbackRuntimeDeviceTest {
         assertEquals(AgentPhase.CANCELLED, exercise(true, true, cancelCloud = true).phase)
     }
 
-    private fun exercise(success: Boolean, awaiting: Boolean, structuredCloudFailure: Boolean = false, cancelCloud: Boolean = false): AgentUiState {
+    @Test fun recoveredCancellationStopsWithoutAnotherProviderCall() {
+        val state = exercise(true, true, terminalStatus = "cancelled")
+        assertEquals(AgentPhase.CANCELLED, state.phase)
+        assertEquals("actual remote outcome", state.lastActionResult?.message)
+    }
+
+    @Test fun manuallyLockedTerminalFailureRetainsItsActualCause() {
+        val state = exercise(true, true, terminalStatus = "failed")
+        assertEquals(AgentPhase.FAILED, state.phase)
+        assertEquals("actual remote outcome", state.lastActionResult?.message)
+    }
+
+    @Test fun canonicalFailureSurvivesLaterStatusRevision() {
+        val state = exercise(true, true, terminalStatus = "timed_out", observedGeneration = 2, observedSequence = 100)
+        assertEquals(AgentPhase.FAILED, state.phase)
+        assertEquals("100", state.lastActionResult?.metadata?.get("remote_task_status_seq"))
+        assertEquals("actual remote outcome", state.lastActionResult?.message)
+    }
+
+    @Test fun cancellationFromOlderExecutionCannotStopCurrentRetry() {
+        val state = exercise(true, true, terminalStatus = "cancelled", observedGeneration = 3)
+        assertEquals(AgentPhase.WAITING_RESPONSE, state.phase)
+        assertEquals("3", state.lastActionResult?.metadata?.get("remote_execution_generation"))
+    }
+
+    @Test fun autoTerminalFailureContinuesThroughExistingFallbackLifecycle() {
+        val state = exercise(true, true, terminalStatus = "failed", allowTerminalFallback = true)
+        assertEquals(AgentPhase.WAITING_RESPONSE, state.phase)
+        assertEquals("test-hermes", state.lastActionResult?.metadata?.get("contact_id"))
+    }
+
+    private fun exercise(success: Boolean, awaiting: Boolean, structuredCloudFailure: Boolean = false,
+        cancelCloud: Boolean = false, terminalStatus: String = "", observedGeneration: Long = 1,
+        observedSequence: Long = -1, allowTerminalFallback: Boolean = false): AgentUiState {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val screen = ScreenContext(foregroundApp = "GalaxySSI", pageTitle = "Agent")
         val session = InMemoryAgentSessionStore()
@@ -59,9 +92,14 @@ class AgentConnectorFallbackRuntimeDeviceTest {
             actionExecutor = object : AgentActionExecutor {
                 override fun execute(action: AgentAction, screen: ScreenContext): AgentActionResult {
                     dispatches++
-                    assertEquals("test-codex", action.parameters["connector_id"])
+                    val expectedTarget = if (dispatches > 1 && allowTerminalFallback) "test-hermes" else "test-codex"
+                    assertEquals(expectedTarget, action.parameters["connector_id"])
                     assertEquals("desktop-agent", action.parameters["connector_adapter_type"])
-                    assertEquals("test-codex", session.load()?.currentPlan?.actions?.single()?.parameters?.get("connector_id"))
+                    assertEquals(expectedTarget, session.load()?.currentPlan?.actions?.single()?.parameters?.get("connector_id"))
+                    if (dispatches > 1 && allowTerminalFallback) {
+                        assertEquals("actual remote outcome", session.load()?.lastActionResult?.message)
+                        assertEquals(terminalStatus, session.load()?.lastActionResult?.metadata?.get("remote_task_status"))
+                    }
                     if (structuredCloudFailure) {
                         assertTrue(AgentConnectorFallbackTrail.parse(action.parameters["routing_retried_resource_ids"].orEmpty())
                             .containsAll(listOf("test-cloud-a", "test-cloud-b")))
@@ -71,7 +109,7 @@ class AgentConnectorFallbackRuntimeDeviceTest {
                     return AgentActionResult(action.id, success, if (success) "test-success" else "test-permanent-error",
                         AgentConnectorFallbackAction.resultMetadata(action) + mapOf(
                             "awaiting_response" to awaiting.toString(), "non_retriable" to (!success).toString(),
-                            "source_message_id" to "902", "contact_id" to "test-codex", "resource_id" to "test-codex"
+                            "source_message_id" to "902", "contact_id" to expectedTarget, "resource_id" to expectedTarget
                         ))
                 }
             },
@@ -87,7 +125,8 @@ class AgentConnectorFallbackRuntimeDeviceTest {
                 override fun clear() { records.clear() }
             },
             connectorRegistry = object : AgentConnectorRegistry {
-                override fun availableTargets() = listOf(target)
+                override fun availableTargets() = if (allowTerminalFallback)
+                    listOf(target, target.copy(id = "test-hermes", title = "Hermes test")) else listOf(target)
             },
             sessionStore = session,
             screenObservationOverride = false
@@ -146,6 +185,23 @@ class AgentConnectorFallbackRuntimeDeviceTest {
         )))
         assertEquals(1, dispatches)
         assertEquals(state.phase, session.load()?.phase)
+        if (terminalStatus.isNotBlank()) {
+            agent.lastActionResult = agent.lastActionResult!!.copy(metadata = agent.lastActionResult!!.metadata + mapOf(
+                "resource_location" to "desktop", "conversation_id" to "test-conversation", "turn_id" to "test-turn",
+                "remote_task_id" to "test-task", "remaining_fallback_ids" to "", "routing_deferred_retry_ids" to "",
+                "manual_target_locked" to (terminalStatus != "cancelled" && !allowTerminalFallback).toString(),
+                "remote_execution_generation" to observedGeneration.toString(),
+                "remote_task_status_seq" to observedSequence.toString()))
+            assertTrue(agent.startExecutionLoop("test-turn"))
+            assertTrue(agent.advanceExecutionLoop(AgentExecutionLoopPhase.ACT, "Test dispatch", action.id))
+            assertTrue(agent.advanceExecutionLoop(AgentExecutionLoopPhase.WAITING_RESPONSE, "Test wait", action.id))
+            val final = requireNotNull(agent.acceptConnectorOutcome(AgentConnectorResponse(902, "test-codex",
+                "actual remote outcome", "test-conversation", "test-turn", "test-task", success = false,
+                taskStatus = terminalStatus, executionGeneration = 2, statusSequence = 2)))
+            assertEquals(if (allowTerminalFallback) 2 else 1, dispatches)
+            assertEquals(final.phase, session.load()?.phase)
+            return final
+        }
         return state
     }
 }

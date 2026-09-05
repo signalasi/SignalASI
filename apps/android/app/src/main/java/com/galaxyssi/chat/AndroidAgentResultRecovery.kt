@@ -2,7 +2,6 @@ package com.galaxyssi.chat
 
 import android.content.Context
 import android.util.Log
-import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -25,7 +24,8 @@ internal object AndroidAgentResultRecovery {
 
     fun request(context: Context, desktopId: String, fields: JSONObject) {
         val app = context.applicationContext
-        val key = listOf(desktopId) + AgentResultRecoveryClient.identity(fields)
+        val generation = AgentRemoteOutcomeCodec.version(fields)?.generation ?: return
+        val key = listOf(desktopId, generation.toString()) + AgentResultRecoveryClient.identity(fields)
         if (!active.add(key)) return
         scope.launch {
             try {
@@ -34,7 +34,9 @@ internal object AndroidAgentResultRecovery {
                         stillPending = { eligible(app, desktopId, fields) },
                         publish = { publish(app, desktopId, it) }) ?: return@withPermit
                     if (!eligible(app, desktopId, fields)) return@withPermit
-                    val response = response(payload)
+                    val response = AgentRemoteOutcomeCodec.decode(payload, AgentRemoteOutcomeCodec.content(app, payload),
+                        CodexStyleResponsePolicy.filterAssistantRichOutput(AgentRichContentCodec.fromEnvelope(payload)))
+                        ?: return@withPermit
                     // The bus commits to the encrypted inbox before notifying the UI.
                     AgentConnectorResponseBus.publish(app, response)
                     acknowledge(app, payload, response)
@@ -56,6 +58,7 @@ internal object AndroidAgentResultRecovery {
         val desktop = contact.optString("desktop_id")
         if (desktop.isBlank() || !paired(context, desktop, payload)) return
         val ack = JSONObject().put("type", "agent_task_result_received").put("sha256", digest)
+            .put("execution_generation", response.executionGeneration)
         AgentResultRecoveryClient.FIELDS.forEach { ack.put(it, payload.optString(it)) }
         runCatching { publish(context, desktop, ack) }
             .onFailure { Log.w("GalaxySSIRecovery", "Durable result receipt deferred") }
@@ -67,6 +70,10 @@ internal object AndroidAgentResultRecovery {
         if (AgentTerminalDeliveryStore.isTerminal(context, source)) return false
         val pending = AgentPendingDeliveryStore.find(context, source, fields.optString("contact_id")) ?: return false
         if (!AgentTaskIdentityStore.matchesRegistered(context, fields)) return false
+        val observation = AgentRemoteOutcomeCodec.observation(fields) ?: return false
+        // Discovery has no generation yet. Only a verified observation pins a body transfer.
+        if (fields.has("execution_generation") &&
+            !AgentConnectorResponseStore.isCurrentExecution(context, observation)) return false
         if (pending.sourceMessageId != source || pending.contactId != fields.optString("contact_id") ||
             pending.conversationId != fields.optString("conversation_id") || pending.turnId != fields.optString("turn_id") ||
             (pending.taskId != fields.optString("task_id") && pending.taskId != pending.turnId) ||
@@ -87,19 +94,4 @@ internal object AndroidAgentResultRecovery {
             GalaxySSIMqttClient.outgoingTopicFor(contact), contact)
     }
 
-    private fun response(payload: JSONObject): AgentConnectorResponse {
-        val encoded = payload.optString("exact_content_b64")
-        val exact = if (payload.optString("exact_content_encoding") == "base64-utf8" && encoded.length in 1..256 * 1024) {
-            runCatching {
-                val bytes = Base64.getDecoder().decode(encoded)
-                try { if (bytes.size <= 128 * 1024) String(bytes, Charsets.UTF_8) else null }
-                finally { bytes.fill(0) }
-            }.getOrNull()
-        } else null
-        return AgentConnectorResponse(sourceMessageId = payload.optString("source_message_id").toLong(),
-            contactId = payload.getString("contact_id"), content = exact ?: payload.optString("content"),
-            conversationId = payload.getString("conversation_id"), turnId = payload.getString("turn_id"),
-            taskId = payload.getString("task_id"), richOutputJson = CodexStyleResponsePolicy.filterAssistantRichOutput(
-                AgentRichContentCodec.fromEnvelope(payload)))
-    }
 }

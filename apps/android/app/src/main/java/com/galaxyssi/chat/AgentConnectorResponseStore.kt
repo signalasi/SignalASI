@@ -17,6 +17,12 @@ object AgentConnectorResponseStore {
         return store(context).append(response)
     }
 
+    internal fun observeExecution(context: Context, response: AgentConnectorResponse, finalReply: Boolean = false): Boolean =
+        !superseded(context, response) && store(context).observeExecution(response, finalReply)
+
+    internal fun isCurrentExecution(context: Context, response: AgentConnectorResponse): Boolean =
+        store(context).isCurrentExecution(response)
+
     /** One bounded page, not the entire recoverable inbox. */
     fun pending(context: Context): List<AgentConnectorResponse> = pendingPage(context).responses
 
@@ -25,7 +31,7 @@ object AgentConnectorResponseStore {
         val inbox = store(context)
         val page = inbox.page(afterSequence, throughSequence)
         return page.copy(responses = page.responses.filterNot { response ->
-            superseded(context, response).also { if (it) inbox.acknowledge(response) }
+            (superseded(context, response) || !inbox.isCurrentExecution(response)).also { if (it) inbox.acknowledge(response) }
         })
     }
 
@@ -47,7 +53,7 @@ object AgentConnectorResponseStore {
 
     fun removeHandled(context: Context, response: AgentConnectorResponse, terminal: Boolean) {
         if (terminal && response.conversationId.isNotBlank() && response.turnId.isNotBlank()) {
-            removeTurn(context, response.conversationId, response.turnId)
+            store(context).acknowledgeThrough(response)
         } else remove(context, response)
     }
 
@@ -56,6 +62,8 @@ object AgentConnectorResponseStore {
         responses.filterNot { candidate ->
             if (terminal && handled.conversationId.isNotBlank() && handled.turnId.isNotBlank()) {
                 candidate.conversationId == handled.conversationId && candidate.turnId == handled.turnId
+                    && !(AgentConnectorResponseCodec.scopeIdentity(candidate) == AgentConnectorResponseCodec.scopeIdentity(handled)
+                        && candidate.executionGeneration > handled.executionGeneration)
             } else matches(candidate, handled)
         }
 

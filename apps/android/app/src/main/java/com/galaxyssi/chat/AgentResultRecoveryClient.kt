@@ -11,13 +11,14 @@ import org.json.JSONObject
 
 /** Pulls one canonical reply in bounded pages; it never executes or resumes a tool. */
 internal class AgentResultRecoveryClient {
-    private data class Pending(val desktop: String, val identity: List<String>, val page: Int,
+    private data class Pending(val desktop: String, val identity: List<String>, val generation: Long, val page: Int,
         val result: CompletableDeferred<JSONObject> = CompletableDeferred())
     private val pending = ConcurrentHashMap<String, Pending>()
 
     suspend fun fetch(desktop: String, fields: JSONObject, timeoutMillis: Long = 8_000L,
         stillPending: () -> Boolean = { true }, publish: (JSONObject) -> Boolean): JSONObject? {
         val expected = identity(fields)
+        val version = AgentRemoteOutcomeCodec.version(fields) ?: return null
         require(desktop.isNotBlank() && expected.all { it.isNotBlank() && it.length <= 200 })
         if (GalaxySSITransportPrivacyPolicy.isLocalOnly(fields)) return null
         val bytes = WipeableBuffer()
@@ -54,8 +55,12 @@ internal class AgentResultRecoveryClient {
                 if (complete.size.toLong() != total || sha256(complete) != digest) return null
                 val result = runCatching { JSONObject(String(complete, Charsets.UTF_8)) }.getOrNull() ?: return null
                 if (identity(result) != expected || result.optString("type") != "text" ||
-                    result.optString("task_status") != "completed" ||
-                    (result.optString("content").isBlank() && result.optJSONObject("rich_output") == null)) return null
+                    result.optString("task_status") !in AgentRemoteOutcomeCodec.TERMINAL ||
+                    AgentRemoteOutcomeCodec.version(result)?.generation != version.generation ||
+                    (fields.optString("expected_status").isNotBlank() &&
+                        fields.optString("expected_status") != result.optString("task_status")) ||
+                    (result.optString("content").isBlank() && result.optJSONObject("rich_output") == null &&
+                        result.optString("task_status") !in AgentRemoteOutcomeCodec.FAILURES)) return null
                 return result.put("result_recovery", JSONObject().put("sha256", digest))
             } finally { complete.fill(0) }
         } finally { bytes.wipe() }
@@ -64,13 +69,15 @@ internal class AgentResultRecoveryClient {
     private suspend fun query(desktop: String, fields: JSONObject, page: Int, digest: String,
         timeoutMillis: Long, publish: (JSONObject) -> Boolean): JSONObject? {
         val nonce = UUID.randomUUID().toString()
-        val request = Pending(desktop, identity(fields), page)
+        val generation = requireNotNull(AgentRemoteOutcomeCodec.version(fields)).generation
+        val request = Pending(desktop, identity(fields), generation, page)
         pending[nonce] = request
         try {
             val payload = JSONObject().apply { FIELDS.forEach { put(it, fields.optString(it)) } }
                 .put("type", "agent_task_result_page_request")
                 .put("request_id", nonce).put("page_index", page).put("sha256", digest)
                 .put("desktop_id", desktop)
+                .put("execution_generation", generation)
             if (!publish(payload)) return null
             return withTimeoutOrNull(timeoutMillis) { request.result.await() }
         } finally { pending.remove(nonce, request); request.result.cancel() }
@@ -79,6 +86,7 @@ internal class AgentResultRecoveryClient {
     fun receive(payload: JSONObject, authenticatedDesktop: String): Boolean {
         val request = pending[payload.optString("request_id")] ?: return false
         if (payload.optString("type") != "agent_task_result_page" || authenticatedDesktop != request.desktop ||
+            AgentRemoteOutcomeCodec.version(payload)?.generation != request.generation ||
             identity(payload) != request.identity || payload.optInt("page_index", -1) != request.page) return false
         return request.result.complete(payload)
     }

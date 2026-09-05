@@ -159,6 +159,7 @@ class AgentRunRecoveryCoordinator(
         val reason = "remote_status_${observation.status}"
         if (snapshot.lastEvent.payload["remote_status"] == observation.status &&
             snapshot.lastEvent.payload["remote_status_sequence"]?.toString() == observation.statusSequence.toString() &&
+            snapshot.lastEvent.payload["remote_execution_generation"]?.toString() == observation.executionGeneration.toString() &&
             priorWorkspace?.status == remoteStatus && priorWorkspace.remoteRunId == remote.handle.remoteRunId
         ) {
             return AgentRunRecoveryResult(
@@ -181,6 +182,7 @@ class AgentRunRecoveryCoordinator(
             sequence = 0L, payload = snapshot.lastEvent.payload + mapOf(
                 "recovery_source" to "verified_remote", "reason" to reason,
                 "remote_status" to observation.status, "remote_status_sequence" to observation.statusSequence,
+                "remote_execution_generation" to observation.executionGeneration,
                 "remote_task_id" to observation.remoteTaskId, "remote_run_id" to observation.remoteRunId
             )), snapshot.lastSequence)
         if (committed == null) return staleResult(snapshot)

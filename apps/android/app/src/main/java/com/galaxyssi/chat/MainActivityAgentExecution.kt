@@ -1044,10 +1044,11 @@ internal fun MainActivity.recordDirectAgentRun(turnId: String, action: AgentActi
     val toolName = action.parameters["tool_id"].orEmpty().ifBlank { "android.${action.kind.name.lowercase()}" }
     val nativeResultJson = result.metadata["native_tool_output"].orEmpty()
     val invocationId = result.metadata["invocation_id"].orEmpty().ifBlank { action.id }
+    val cancelled = result.metadata["remote_task_status"] == "cancelled"
     val call = AgentToolCallRecord(
         id = invocationId,
         toolName = toolName,
-        status = if (result.success) AgentToolCallStatus.SUCCEEDED else AgentToolCallStatus.FAILED,
+        status = if (cancelled) AgentToolCallStatus.CANCELLED else if (result.success) AgentToolCallStatus.SUCCEEDED else AgentToolCallStatus.FAILED,
         argumentsJson = action.parameters["input_json"].orEmpty().ifBlank { JSONObject(action.parameters).toString() },
         resultJson = nativeResultJson.ifBlank { JSONObject(result.metadata).put("message", result.message).toString() },
         errorMessage = if (result.success) "" else result.message,
@@ -1063,6 +1064,7 @@ internal fun MainActivity.recordDirectAgentRun(turnId: String, action: AgentActi
         renderSpecJson = "{}",
         artifacts = runtimeArtifactsFromResult(nativeResultJson),
         success = result.success,
+        finalStatus = if (cancelled) AgentRecordedRunStatus.CANCELLED else null,
         executionResourceId = "galaxyssi-mobile"
     )?.let(::observeCompletedAgentRun)
 }

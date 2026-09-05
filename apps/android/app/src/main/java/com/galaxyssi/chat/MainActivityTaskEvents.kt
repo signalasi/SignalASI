@@ -226,6 +226,10 @@ import kotlin.math.sin
 
 internal fun MainActivity.handleAgentTaskEvent(envelope: JSONObject?): Boolean {
     if (envelope?.optString("type") != "agent_task_event") return false
+    val executionVersion = AgentRemoteOutcomeCodec.version(envelope) ?: return true
+    AgentRemoteOutcomeCodec.observation(envelope)?.let {
+        if (!AgentConnectorResponseStore.isCurrentExecution(this, it)) return true
+    }
     if (VoiceFeatureFlags.isAgentVoiceRunBridgeEnabled(this) && isVoiceAgentRunBridgeInitialized()) {
         voiceAgentRunBridge.consumeRemoteEnvelope(envelope)
     }
@@ -318,6 +322,7 @@ internal fun MainActivity.handleAgentTaskEvent(envelope: JSONObject?): Boolean {
     val taskDisposition = envelope.optString("task_disposition")
     val isSteeredCompletion = status == "completed" && taskDisposition == "steered"
     val taskId = envelope.optString("task_id")
+    val completionKey = AgentRemoteOutcomeCodec.taskKey(taskId, executionVersion.generation)
     val envelopeConversationId = envelope.optString("conversation_id")
     if (status in setOf("completed", "failed", "cancelled", "timed_out")) {
         AgentGlobalRunSlotStore(this).releaseBySourceMessageId(sourceMessageId)
@@ -327,7 +332,7 @@ internal fun MainActivity.handleAgentTaskEvent(envelope: JSONObject?): Boolean {
         }
         voiceCoordinatorIdsBySourceMessage.remove(sourceMessageId)
     }
-    if (taskId in completedConnectorTaskIds &&
+    if (completionKey in completedConnectorTaskIds &&
         AgentRemoteTaskStatusPolicy.settlesWithoutResponse(status)
     ) {
         return true
@@ -361,10 +366,10 @@ internal fun MainActivity.handleAgentTaskEvent(envelope: JSONObject?): Boolean {
         taskId = taskId
     )
     updateAgentRegistryTaskHeartbeat(contactId, status)
-    if (taskId in completedConnectorTaskIds && status !in setOf("completed", "failed", "cancelled", "timed_out")) {
+    if (completionKey in completedConnectorTaskIds && status !in setOf("completed", "failed", "cancelled", "timed_out")) {
         return true
     }
-    val statusSeq = envelope.optLong("status_seq", 0L)
+    val statusSeq = executionVersion.sequence
     val existingMessage = messages[contactId]?.firstOrNull { it.id == sourceMessageId }
     if (taskRuntime == null && existingMessage != null && !directBindingMatches) {
         val expectedConversationId = AgentTaskIdentityPolicy.conversationId(contactId, "")
@@ -429,7 +434,8 @@ internal fun MainActivity.handleAgentTaskEvent(envelope: JSONObject?): Boolean {
         taskStatus = status,
         statusSeq = statusSeq,
         conversationId = envelopeConversationId,
-        turnId = envelopeTurnId
+        turnId = envelopeTurnId,
+        executionGeneration = executionVersion.generation
     )
     val nativeState = if (isSteeredCompletion) {
         taskRuntime?.acceptConnectorSteered(
@@ -454,7 +460,7 @@ internal fun MainActivity.handleAgentTaskEvent(envelope: JSONObject?): Boolean {
     traceTaskEvent("runtime_status")
     if (isSteeredCompletion) {
         activeAgentTasks.remove(sourceMessageId)
-        if (taskId.isNotBlank()) completedConnectorTaskIds.add(taskId)
+        if (taskId.isNotBlank()) completedConnectorTaskIds.add(completionKey)
     }
     val targetName = contactById(contactId).name
     val executionView = envelope.optJSONObject("execution_view")
@@ -689,7 +695,7 @@ internal fun MainActivity.handleAgentTaskEvent(envelope: JSONObject?): Boolean {
     if (taskRuntime != null &&
         AgentRemoteTaskStatusPolicy.settlesWithoutResponse(status)
     ) {
-        if (taskId.isNotBlank()) completedConnectorTaskIds.add(taskId)
+        if (taskId.isNotBlank()) completedConnectorTaskIds.add(completionKey)
         settleAgentConnectorTerminalEvent(
             runtime = taskRuntime,
             sourceMessageId = sourceMessageId,
@@ -699,6 +705,7 @@ internal fun MainActivity.handleAgentTaskEvent(envelope: JSONObject?): Boolean {
             taskId = taskId,
             status = status,
             statusSeq = statusSeq,
+            executionGeneration = executionVersion.generation,
             message = envelope.optString("error").ifBlank { statusLabel },
             envelope = JSONObject(envelope.toString()),
             showFailureRecovery = showFailureRecovery
@@ -731,11 +738,12 @@ internal fun MainActivity.settleAgentConnectorTerminalEvent(
     taskId: String,
     status: String,
     statusSeq: Long,
+    executionGeneration: Long,
     message: String,
     envelope: JSONObject,
     showFailureRecovery: Boolean
 ) {
-    val responseKey = "terminal:$sourceMessageId:$contactId:$taskId"
+    val responseKey = "terminal:$sourceMessageId:$contactId:$taskId:$executionGeneration"
     if (!agentConnectorResponsesInFlight.add(responseKey)) return
     cancelConnectorTimeouts(sourceMessageId)
     thread(name = "galaxyssi-agent-terminal-${status.take(24)}") {
@@ -748,7 +756,8 @@ internal fun MainActivity.settleAgentConnectorTerminalEvent(
             statusSeq = statusSeq,
             message = message,
             conversationId = conversationId,
-            turnId = turnId
+            turnId = turnId,
+            executionGeneration = executionGeneration
         )
         if (state == null) {
             agentConnectorResponsesInFlight.remove(responseKey)
@@ -764,7 +773,10 @@ internal fun MainActivity.settleAgentConnectorTerminalEvent(
             conversationId = conversationId,
             turnId = turnId,
             taskId = taskId,
-            success = false
+            success = false,
+            taskStatus = status.takeIf { it in AgentRemoteOutcomeCodec.FAILURES }.orEmpty(),
+            executionGeneration = executionGeneration,
+            statusSequence = statusSeq
         )
         finishStructuredAgentHandoff(turnId, terminalResponse)
         val replacementSourceId = state.lastActionResult?.metadata

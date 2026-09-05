@@ -18,10 +18,19 @@ data class AgentConnectorResponse(
     val richOutputJson: String = "",
     val receivedAtMillis: Long = System.currentTimeMillis(),
     val resolvedContactId: String = "",
-    val providerAttempts: AgentProviderAttemptReport? = null
+    val providerAttempts: AgentProviderAttemptReport? = null,
+    val taskStatus: String = "",
+    val executionGeneration: Long = 1L,
+    val statusSequence: Long = -1L
 ) {
     val executionContactId: String
         get() = resolvedContactId.ifBlank { contactId }
+
+    val remoteFailure: Boolean
+        get() = taskStatus in AgentRemoteOutcomeCodec.FAILURES
+
+    val executionVersion: AgentRemoteExecutionVersion
+        get() = AgentRemoteExecutionVersion(executionGeneration, statusSequence)
 }
 
 data class AgentConnectorStreamUpdate(
@@ -96,6 +105,7 @@ object AgentConnectorResponseBus {
             richOutputJson = richOutput
         )
         if (normalized.content.isBlank() && normalized.richOutputJson.isBlank()) return false
+        if (!AgentConnectorResponseStore.isCurrentExecution(context, normalized)) return false
         if (AgentManagedConnectorResponseRegistry.consume(normalized)) return true
         if (EncryptedAgentManagedResponseLedger(context).complete(normalized) != null) return true
         val durable = if (AgentConnectorResponseStore.append(context, normalized)) normalized

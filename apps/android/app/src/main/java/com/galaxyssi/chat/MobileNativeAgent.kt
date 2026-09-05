@@ -547,7 +547,8 @@ class MobileNativeAgent(
         taskStatus: String,
         statusSeq: Long,
         conversationId: String = "",
-        turnId: String = ""
+        turnId: String = "",
+        executionGeneration: Long = 1L
     ): AgentUiState? {
         if (!canAcceptConnectorResponse(
                 sourceMessageId,
@@ -558,8 +559,11 @@ class MobileNativeAgent(
             ) || taskId.isBlank()
         ) return null
         val pendingResult = lastActionResult ?: return null
-        val previousSeq = pendingResult.metadata["remote_task_status_seq"]?.toLongOrNull() ?: -1L
-        if (statusSeq > 0L && statusSeq < previousSeq) return snapshot()
+        val previousGeneration = pendingResult.metadata["remote_execution_generation"]?.toLongOrNull() ?: 1L
+        if (executionGeneration < previousGeneration) return snapshot()
+        val previousSeq = if (executionGeneration > previousGeneration) -1L
+            else pendingResult.metadata["remote_task_status_seq"]?.toLongOrNull() ?: -1L
+        if (statusSeq >= 0L && statusSeq < previousSeq) return snapshot()
         val now = System.currentTimeMillis()
         if (AgentRemoteTaskStatusPolicy.keepsResourceHealthy(taskStatus)) {
             pendingResult.metadata["failure_domain"].orEmpty().takeIf(String::isNotBlank)?.let { domain ->
@@ -570,6 +574,7 @@ class MobileNativeAgent(
             metadata = pendingResult.metadata + mapOf(
                 "remote_task_id" to taskId,
                 "remote_task_status" to AgentRemoteTaskStatusPolicy.normalize(taskStatus),
+                "remote_execution_generation" to executionGeneration.toString(),
                 "remote_task_status_seq" to maxOf(previousSeq, statusSeq).toString(),
                 "remote_task_status_updated_at" to now.toString()
             )
@@ -587,12 +592,15 @@ class MobileNativeAgent(
         statusSeq: Long,
         message: String,
         conversationId: String = "",
-        turnId: String = ""
+        turnId: String = "",
+        expectedSourceMessageId: Long = sourceMessageId,
+        executionGeneration: Long = 1L,
+        canonicalReply: Boolean = false
     ): AgentUiState? {
         val normalizedStatus = AgentRemoteTaskStatusPolicy.normalize(taskStatus)
         if (!AgentRemoteTaskStatusPolicy.settlesWithoutResponse(normalizedStatus)) return null
         if (!canAcceptConnectorResponse(
-                sourceMessageId = sourceMessageId,
+                sourceMessageId = expectedSourceMessageId,
                 contactId = contactId,
                 conversationId = conversationId,
                 turnId = turnId,
@@ -600,8 +608,11 @@ class MobileNativeAgent(
             ) || taskId.isBlank()
         ) return null
         val pending = lastActionResult ?: return null
-        val previousSeq = pending.metadata["remote_task_status_seq"]?.toLongOrNull() ?: -1L
-        if (statusSeq > 0L && statusSeq < previousSeq) return snapshot()
+        val previousGeneration = pending.metadata["remote_execution_generation"]?.toLongOrNull() ?: 1L
+        if (executionGeneration < previousGeneration) return snapshot()
+        val previousSeq = if (executionGeneration > previousGeneration) -1L
+            else pending.metadata["remote_task_status_seq"]?.toLongOrNull() ?: -1L
+        if (!canonicalReply && statusSeq >= 0L && statusSeq < previousSeq) return snapshot()
         val plan = currentPlan ?: return null
         val now = System.currentTimeMillis()
         val elapsed = (
@@ -620,6 +631,7 @@ class MobileNativeAgent(
             put("awaiting_response", "false")
             put("remote_task_id", taskId)
             put("remote_task_status", normalizedStatus)
+            put("remote_execution_generation", executionGeneration.toString())
             put("remote_task_status_seq", maxOf(previousSeq, statusSeq).toString())
             put("remote_task_status_updated_at", now.toString())
             put("remote_task_terminal_at", now.toString())

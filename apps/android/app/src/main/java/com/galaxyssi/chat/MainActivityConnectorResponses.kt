@@ -248,6 +248,9 @@ internal fun MainActivity.publishAgentConnectorResponse(envelope: JSONObject?, m
     val sourceMessageId = payload.optString("source_message_id").toLongOrNull()
         ?: payload.optLong("source_message_id", 0L).takeIf { it > 0L }
         ?: return false
+    val response = AgentRemoteOutcomeCodec.decode(payload,
+        AgentRemoteOutcomeCodec.content(this, payload, message.content),
+        CodexStyleResponsePolicy.filterAssistantRichOutput(AgentRichContentCodec.fromEnvelope(payload))) ?: return false
     if (AgentTerminalDeliveryStore.isTerminal(this, sourceMessageId)) {
         Log.i("GalaxySSIAgent", "Discarded late response for terminal source=$sourceMessageId")
         return true
@@ -258,7 +261,7 @@ internal fun MainActivity.publishAgentConnectorResponse(envelope: JSONObject?, m
     val coordinatorSessionId = voiceCoordinatorSession(voiceTraceId).ifBlank {
         voiceCoordinatorIdsBySourceMessage[sourceMessageId].orEmpty()
     }
-    if (voiceTraceId.isNotBlank()) {
+    if (voiceTraceId.isNotBlank() && response.success) {
         activeVoiceTraceId = voiceTraceId
         VoiceLatencyTelemetry.record(
             this,
@@ -269,27 +272,24 @@ internal fun MainActivity.publishAgentConnectorResponse(envelope: JSONObject?, m
         )
     }
     if (coordinatorSessionId.isNotBlank()) {
-        dispatchVoiceCoordinator(VoiceInteractionEvent.Completed(coordinatorSessionId))
+        val status = response.taskStatus
+        dispatchVoiceCoordinator(when (status) {
+            "cancelled" -> VoiceInteractionEvent.Cancelled(coordinatorSessionId, "remote_agent_cancelled")
+            "failed", "timed_out" -> VoiceInteractionEvent.Failed(coordinatorSessionId,
+                VoiceFailure(code = "agent_$status", recoverable = true, stage = voiceInteractionCoordinator.snapshot().phase))
+            else -> VoiceInteractionEvent.Completed(coordinatorSessionId)
+        })
         voiceCoordinatorIdsBySourceMessage.remove(sourceMessageId)
     }
-    val response = AgentConnectorResponse(
-        sourceMessageId = sourceMessageId,
-        contactId = payload.optString("contact_id").ifBlank { message.contact.id },
-        content = message.content,
-        conversationId = payload.optString("conversation_id"),
-        turnId = payload.optString("turn_id"),
-        taskId = payload.optString("task_id"),
-        richOutputJson = CodexStyleResponsePolicy.filterAssistantRichOutput(
-            AgentRichContentCodec.fromEnvelope(payload)
-        )
-    )
     com.galaxyssi.chat.metrics.AgentLatencyTelemetry.record(this, response.taskId, "phone_response_received")
     com.galaxyssi.chat.metrics.AgentLatencyTelemetry.record(
         this, response.taskId, "phone_final_received", outcome = payload.optString("task_status")
     )
     // A verified final response owns this remote task's terminal outcome. Ignore
     // status envelopes that arrive later and would regress a continuing loop.
-    response.taskId.takeIf(String::isNotBlank)?.let(completedConnectorTaskIds::add)
+    response.taskId.takeIf(String::isNotBlank)?.let {
+        completedConnectorTaskIds.add(AgentRemoteOutcomeCodec.taskKey(it, response.executionGeneration))
+    }
     agentRuntimeRecoveryExecutor.execute {
         if (isGlobalSuperAgentRuntimeInitialized() &&
             globalSuperAgentRuntime.consumeResearchResponse(response)
@@ -302,7 +302,7 @@ internal fun MainActivity.publishAgentConnectorResponse(envelope: JSONObject?, m
         }
         AndroidAgentResultRecovery.acknowledge(this, payload, response)
         // The durable reply must not wait for the optional voice projection's ledger scan.
-        if (updateVoiceRun) {
+        if (updateVoiceRun && response.success) {
             runCatching {
                 voiceAgentRunBridge.consumeLegacyFinal(
                     sourceMessageId = response.sourceMessageId,
@@ -373,13 +373,15 @@ internal fun MainActivity.consumeBoundDirectConnectorResponse(response: AgentCon
                     "contact_id" to response.contactId,
                     "conversation_id" to binding.conversationId,
                     "turn_id" to binding.turnId,
-                    "task_id" to taskId
+                    "task_id" to taskId,
+                    "remote_task_status" to response.taskStatus,
+                    "remote_execution_generation" to response.executionGeneration.toString()
                 )
             )
         )
     }
     deleteAgentTranscriptByDedupeKey(binding.conversationId, "connector-task:$taskId")
-    completedConnectorTaskIds.add(taskId)
+    completedConnectorTaskIds.add(AgentRemoteOutcomeCodec.taskKey(taskId, response.executionGeneration))
     agentTranscriptStore.recordUsage(
         binding.conversationId,
         response.inputTokens,
@@ -405,6 +407,10 @@ internal fun MainActivity.consumeBoundDirectConnectorResponse(response: AgentCon
 }
 
 internal fun MainActivity.consumeAgentConnectorResponse(response: AgentConnectorResponse) {
+    if (!AgentConnectorResponseStore.isCurrentExecution(this, response)) {
+        AgentConnectorResponseStore.remove(this, response)
+        return
+    }
     if (AgentTerminalDeliveryStore.isTerminal(this, response.sourceMessageId)) {
         AgentConnectorResponseStore.remove(this, response)
         liveAgentConnectorStreams.remove(response.sourceMessageId)
@@ -457,9 +463,9 @@ internal fun MainActivity.consumeAgentConnectorResponse(response: AgentConnector
         return
     }
     agentConnectorResponsesInFlight.remove(
-        "supervised-control:${response.sourceMessageId}:${response.contactId}"
+        "supervised-control:${AgentConnectorResponseCodec.identity(response)}"
     )
-    val responseKey = "${response.sourceMessageId}:${response.contactId}"
+    val responseKey = AgentConnectorResponseCodec.identity(response)
     if (!agentConnectorResponsesInFlight.add(responseKey)) return
     resumeAgentConnectorResponse(response, runtime, responseKey)
 }
@@ -468,7 +474,7 @@ internal fun MainActivity.deferSupervisedProjectControlResponse(
     response: AgentConnectorResponse,
     attempt: Int = 0
 ) {
-    val responseKey = "supervised-control:${response.sourceMessageId}:${response.contactId}"
+    val responseKey = "supervised-control:${AgentConnectorResponseCodec.identity(response)}"
     if (!agentConnectorResponsesInFlight.add(responseKey)) return
     handler.postDelayed(
         {
@@ -763,23 +769,11 @@ internal fun MainActivity.resumeAgentConnectorResponse(
                     turnId = turnId
                 )
                 var state = try {
-                    runtime.acceptConnectorResponse(
-                        sourceMessageId = response.sourceMessageId,
-                        contactId = response.contactId,
-                        content = response.content,
-                        success = response.success,
-                        richOutputJson = response.richOutputJson,
+                    runtime.acceptConnectorOutcome(
+                        response = response,
                         conversationId = responseIdentity.conversationId,
                         turnId = responseIdentity.turnId,
                         taskId = responseIdentity.taskId,
-                        providerAttempts = response.providerAttempts,
-                        inputTokens = response.inputTokens,
-                        outputTokens = response.outputTokens,
-                        costMicros = response.costMicros,
-                        networkBytes = (
-                            response.content.toByteArray(Charsets.UTF_8).size +
-                                response.richOutputJson.toByteArray(Charsets.UTF_8).size
-                            ).toLong(),
                         expectedSourceMessageId = expectedSourceMessageId
                     ) ?: runtime.snapshot()
                 } catch (failure: Throwable) {
@@ -928,23 +922,11 @@ internal fun MainActivity.consumeLegacyAgentConnectorResponse(
             conversationId = conversationId,
             turnId = turnId
         )
-        var state = runtime.acceptConnectorResponse(
-            sourceMessageId = response.sourceMessageId,
-            contactId = response.contactId,
-            content = response.content,
-            success = response.success,
-            richOutputJson = response.richOutputJson,
+        var state = runtime.acceptConnectorOutcome(
+            response = response,
             conversationId = response.conversationId,
             turnId = response.turnId,
-            taskId = response.taskId,
-            providerAttempts = response.providerAttempts,
-            inputTokens = response.inputTokens,
-            outputTokens = response.outputTokens,
-            costMicros = response.costMicros,
-            networkBytes = (
-                response.content.toByteArray(Charsets.UTF_8).size +
-                    response.richOutputJson.toByteArray(Charsets.UTF_8).size
-                ).toLong()
+            taskId = response.taskId
         ) ?: runtime.snapshot()
         if (turnId.isNotBlank()) {
             state = finalizeAgentExecutionLoop(runtime, turnId, state)
@@ -1266,7 +1248,9 @@ internal fun MainActivity.consumeOrphanedAgentConnectorResponse(response: AgentC
                     "contact_id" to response.contactId,
                     "conversation_id" to conversationId,
                     "turn_id" to exactTurnId,
-                    "task_id" to taskId
+                    "task_id" to taskId,
+                    "remote_task_status" to response.taskStatus,
+                    "remote_execution_generation" to response.executionGeneration.toString()
                 )
             )
         )
@@ -1279,7 +1263,7 @@ internal fun MainActivity.consumeOrphanedAgentConnectorResponse(response: AgentC
         AgentDeliveryFailureRecorder.dedupeKey(response.sourceMessageId)
     )
     pendingDirectConnectorRuns.remove(response.sourceMessageId)
-    completedConnectorTaskIds.add(taskId)
+    completedConnectorTaskIds.add(AgentRemoteOutcomeCodec.taskKey(taskId, response.executionGeneration))
     agentTranscriptStore.recordUsage(
         conversationId, response.inputTokens, response.outputTokens, response.costMicros
     )

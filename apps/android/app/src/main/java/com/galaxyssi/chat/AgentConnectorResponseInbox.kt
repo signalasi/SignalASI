@@ -28,7 +28,31 @@ internal class AgentConnectorResponseInbox(
         migrate()
         require(response.sourceMessageId > 0) { "Invalid connector response source identity" }
         require(response.content.isNotBlank() || response.richOutputJson.isNotBlank()) { "Empty connector response" }
-        return insert(helper.writableDatabase, response)
+        val database = helper.writableDatabase
+        database.beginTransaction()
+        return try {
+            val inserted = insert(database, response)
+            database.setTransactionSuccessful()
+            inserted
+        } finally { database.endTransaction() }
+    }
+
+    @Synchronized
+    fun observeExecution(response: AgentConnectorResponse, finalReply: Boolean = false): Boolean {
+        migrate()
+        val database = helper.writableDatabase
+        database.beginTransaction()
+        return try {
+            val accepted = observe(database, response, finalReply)
+            database.setTransactionSuccessful()
+            accepted
+        } finally { database.endTransaction() }
+    }
+
+    @Synchronized
+    fun isCurrentExecution(response: AgentConnectorResponse): Boolean {
+        migrate()
+        return (currentVersion(helper.readableDatabase, response)?.generation ?: 1L) <= response.executionGeneration
     }
 
     @Synchronized
@@ -68,7 +92,7 @@ internal class AgentConnectorResponseInbox(
     @Synchronized
     fun contains(response: AgentConnectorResponse): Boolean {
         migrate()
-        return exists("identity_key=? AND handled=0", arrayOf(AgentConnectorResponseCodec.identity(response)))
+        return isCurrentExecution(response) && exists("identity_key=? AND handled=0", arrayOf(AgentConnectorResponseCodec.identity(response)))
     }
 
     @Synchronized
@@ -80,7 +104,7 @@ internal class AgentConnectorResponseInbox(
     @Synchronized
     fun find(response: AgentConnectorResponse): AgentConnectorResponse? {
         migrate()
-        return decodeBody(helper.readableDatabase, AgentConnectorResponseCodec.identity(response))
+        return if (isCurrentExecution(response)) decodeBody(helper.readableDatabase, AgentConnectorResponseCodec.identity(response)) else null
     }
 
     @Synchronized
@@ -104,11 +128,20 @@ internal class AgentConnectorResponseInbox(
     }
 
     @Synchronized
+    fun acknowledgeThrough(response: AgentConnectorResponse) {
+        migrate()
+        val key = AgentConnectorResponseCodec.identity(response)
+        acknowledgeWhere("turn_key=? AND sequence<=(SELECT sequence FROM inbox WHERE identity_key=?)",
+            arrayOf(AgentConnectorResponseCodec.turnKey(response.conversationId, response.turnId), key))
+    }
+
+    @Synchronized
     fun clear() {
         val database = helper.writableDatabase
         database.beginTransaction()
         try {
             database.delete("inbox", null, null)
+            database.delete("remote_executions", null, null)
             database.execSQL("INSERT OR IGNORE INTO inbox_metadata(name) VALUES ('legacy_migrated')")
             database.setTransactionSuccessful()
         } finally { database.endTransaction() }
@@ -130,6 +163,7 @@ internal class AgentConnectorResponseInbox(
     )
 
     private fun insert(database: SQLiteDatabase, response: AgentConnectorResponse): Boolean {
+        if (!observe(database, response, finalReply = true)) return false
         val key = AgentConnectorResponseCodec.identity(response)
         if (database.rawQuery("SELECT 1 FROM inbox WHERE identity_key=? LIMIT 1", arrayOf(key)).use { it.moveToFirst() }) {
             return false
@@ -137,6 +171,8 @@ internal class AgentConnectorResponseInbox(
         val values = ContentValues().apply {
             put("identity_key", key)
             put("turn_key", AgentConnectorResponseCodec.turnKey(response.conversationId, response.turnId))
+            put("scope_key", AgentConnectorResponseCodec.scopeIdentity(response))
+            put("execution_generation", response.executionGeneration)
             put("encrypted_value", AgentStorageCipher.encrypt(AgentConnectorResponseCodec.encode(response).toString(), aad(key)))
         }
         val inserted = database.insertWithOnConflict("inbox", null, values, SQLiteDatabase.CONFLICT_IGNORE) != -1L
@@ -144,6 +180,28 @@ internal class AgentConnectorResponseInbox(
             "Connector response was not persisted"
         }
         return inserted
+    }
+
+    private fun currentVersion(database: SQLiteDatabase, response: AgentConnectorResponse): AgentRemoteExecutionVersion? =
+        database.rawQuery("SELECT generation,status_sequence FROM remote_executions WHERE scope_key=?",
+            arrayOf(AgentConnectorResponseCodec.scopeIdentity(response))).use { cursor ->
+            if (cursor.moveToFirst()) AgentRemoteExecutionVersion(cursor.getLong(0), cursor.getLong(1)) else null
+        }
+
+    private fun observe(database: SQLiteDatabase, response: AgentConnectorResponse, finalReply: Boolean = false): Boolean {
+        val candidate = response.executionVersion
+        val current = currentVersion(database, response)
+        if (current != null && (candidate.generation < current.generation || (!finalReply && !current.accepts(candidate)))) return false
+        val next = current?.advance(candidate) ?: candidate
+        if (next == current) return true
+        val key = AgentConnectorResponseCodec.scopeIdentity(response)
+        database.insertWithOnConflict("remote_executions", null, ContentValues().apply {
+            put("scope_key", key); put("generation", next.generation); put("status_sequence", next.sequence)
+        }, SQLiteDatabase.CONFLICT_REPLACE).also { check(it != -1L) { "Execution observation was not persisted" } }
+        database.update("inbox", ContentValues().apply { put("handled", 1); putNull("encrypted_value") },
+            "(scope_key=? OR identity_key=?) AND execution_generation<? AND handled=0",
+            arrayOf(key, key, next.generation.toString()))
+        return true
     }
 
     private fun migrate() {
@@ -205,7 +263,7 @@ internal class AgentConnectorResponseInbox(
 
     private fun aad(key: String): ByteArray = "connector-inbox:$databaseName:$key".toByteArray(Charsets.UTF_8)
 
-    private class InboxDatabase(context: Context, name: String) : SQLiteOpenHelper(context, name, null, 1) {
+    private class InboxDatabase(context: Context, name: String) : SQLiteOpenHelper(context, name, null, 2) {
         init { setWriteAheadLoggingEnabled(true) }
 
         override fun onConfigure(db: SQLiteDatabase) {
@@ -216,13 +274,27 @@ internal class AgentConnectorResponseInbox(
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("CREATE TABLE inbox (sequence INTEGER PRIMARY KEY AUTOINCREMENT," +
                 "identity_key TEXT NOT NULL UNIQUE,turn_key TEXT NOT NULL," +
-                "handled INTEGER NOT NULL DEFAULT 0,encrypted_value TEXT)")
+                "handled INTEGER NOT NULL DEFAULT 0,encrypted_value TEXT," +
+                "scope_key TEXT NOT NULL DEFAULT '',execution_generation INTEGER NOT NULL DEFAULT 1)")
             db.execSQL("CREATE INDEX inbox_pending ON inbox(handled,sequence)")
             db.execSQL("CREATE INDEX inbox_turn ON inbox(turn_key,handled)")
             db.execSQL("CREATE TABLE inbox_metadata (name TEXT PRIMARY KEY NOT NULL)")
+            createExecutionTable(db)
         }
 
-        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+            if (oldVersion < 2) {
+                db.execSQL("ALTER TABLE inbox ADD COLUMN scope_key TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE inbox ADD COLUMN execution_generation INTEGER NOT NULL DEFAULT 1")
+                createExecutionTable(db)
+            }
+        }
+
+        private fun createExecutionTable(db: SQLiteDatabase) {
+            db.execSQL("CREATE INDEX inbox_execution ON inbox(scope_key,execution_generation,handled)")
+            db.execSQL("CREATE TABLE remote_executions (scope_key TEXT PRIMARY KEY NOT NULL," +
+                "generation INTEGER NOT NULL,status_sequence INTEGER NOT NULL)")
+        }
     }
 
     companion object {
