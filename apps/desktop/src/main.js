@@ -2059,7 +2059,8 @@ async function getPairingQr(grantDesktopExecutor = false) {
     fingerprint: pairing.fingerprint || "",
     pairingAccess: pairing.pairing_access || {},
     desktopDevice: pairing.desktop_device || {},
-    expiresAt: Number(pairing.expires_at || 0)
+    expiresAt: Number(pairing.expires_at || 0),
+    createdAt: Number(pairing.created_at || 0)
   };
 }
 

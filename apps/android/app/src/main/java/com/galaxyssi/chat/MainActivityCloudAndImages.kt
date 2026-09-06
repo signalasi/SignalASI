@@ -1182,6 +1182,12 @@ internal fun MainActivity.parseIncomingMessage(payload: String): ChatMessage {
         return ChatMessage(newMessageId(), "", false, CONTACT_SYSTEM, isSystem = true, deliveryTrace = incomingTrace)
     }
     if (json?.optString("type") == "pairing_confirmed") {
+        Toast.makeText(
+            this,
+            getString(R.string.pairing_desktop_added, json.optString("desktop_display_name").ifBlank { json.optString("desktop_name") }),
+            Toast.LENGTH_LONG
+        ).show()
+        refreshDirectoryContacts()
         json.optJSONArray("connector_agents")?.let { agents ->
             AppStore.updateConnectorAgentStatuses(this, agents)
             requestAgentRegistrySnapshotSync(force = true)

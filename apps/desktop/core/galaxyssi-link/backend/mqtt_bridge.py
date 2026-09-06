@@ -95,6 +95,7 @@ from pairing_state import (
     list_clients,
     pairing_status,
     pairing_session_for_topic,
+    pairing_session as lookup_pairing_session,
     record_pairing_success,
     revoke_client,
     touch_client,
@@ -237,6 +238,7 @@ mqtt_subscription_lock = threading.RLock()
 mqtt_subscription_pending: dict[int, tuple[tuple[str, str], ...]] = {}
 mqtt_subscription_pending_started_at: dict[int, float] = {}
 mqtt_subscription_active: dict[str, str] = {}
+mqtt_pairing_confirmations: dict[str, tuple] = {}
 mqtt_subscription_early_subacks: dict[int, tuple[bool, ...]] = {}
 mqtt_subscriptions_ready = threading.Event()
 mqtt_connection_generation = 0
@@ -1483,6 +1485,7 @@ def _activate_subscription_acknowledgements(
                     topic,
                 )
     _refresh_subscription_ready()
+    _flush_pairing_confirmations()
 
 
 def _subscribe_topics(mqttc, subscriptions: list[tuple[str, str]]) -> int:
@@ -1588,6 +1591,7 @@ def _reset_subscription_state() -> None:
         mqtt_subscription_pending.clear()
         mqtt_subscription_pending_started_at.clear()
         mqtt_subscription_active.clear()
+        mqtt_pairing_confirmations.clear()
         mqtt_subscription_early_subacks.clear()
         mqtt_subscription_last_reconcile = 0.0
         mqtt_subscriptions_ready.clear()
@@ -7220,6 +7224,26 @@ def handle_pairing_claim(mqttc, payload: dict):
     pairing_session = claim_pairing_session(token, fingerprint, client_route_id)
     if pairing_session is None:
         log.warning("MQTT pairing claim rejected: invalid or mismatched token binding")
+        session = lookup_pairing_session(token)
+        if session is not None:
+            local_fingerprint = str(get_signal_bundle().get("identityKeySha256") or "")
+            rejected_client = {
+                "client_route_id": client_route_id,
+                "identity_fingerprint": fingerprint,
+                "local_identity_fingerprint": local_fingerprint,
+                "link_secret": derive_link_secret(session["secret"], local_fingerprint, fingerprint),
+            }
+            rejection = {
+                "type": "pairing_rejected", "reason": "token_bound",
+                "protocol": PROTOCOL_NAME, "version": PROTOCOL_VERSION,
+                "desktop_id": desktop_id(), "desktop_fingerprint": local_fingerprint,
+                "client_route_id": client_route_id,
+            }
+            mqttc.publish(
+                _topics_for_client(rejected_client).send,
+                seal_wire_packet(json.dumps(rejection), rejected_client["link_secret"]),
+                qos=MQTT_QOS,
+            )
         return
     access_grant = client_grant({"access": pairing_session.get("access")})
     local_fingerprint = str(get_signal_bundle().get("identityKeySha256") or "")
@@ -7351,8 +7375,32 @@ def _publish_pairing_confirmation(mqttc, paired_client: dict, fingerprint: str, 
         json.dumps(ack_payload, ensure_ascii=False, separators=(",", ":")),
         str(paired_client.get("link_secret") or ""),
     )
-    info = mqttc.publish(topics.send, sealed, qos=MQTT_QOS)
-    log.info("MQTT opaque pairing confirmation published mid=%s rc=%s", info.mid, info.rc)
+    # A successful pairing must imply that the first phone message has a subscriber.
+    with mqtt_subscription_lock:
+        mqtt_pairing_confirmations[paired_client["client_route_id"]] = (
+            mqttc, topics.send, tuple(topics.receive_window), sealed,
+        )
+    _flush_pairing_confirmations()
+
+
+def _flush_pairing_confirmations():
+    ready = []
+    with mqtt_subscription_lock:
+        for route_id, pending in list(mqtt_pairing_confirmations.items()):
+            mqttc, topic, required, sealed = pending
+            if not all(mqtt_subscription_active.get(item) == route_id for item in required):
+                continue
+            mqtt_pairing_confirmations.pop(route_id, None)
+            ready.append((route_id, mqttc, topic, sealed))
+    for route_id, mqttc, topic, sealed in ready:
+        if get_client(route_id) is None:
+            continue
+        try:
+            info = mqttc.publish(topic, sealed, qos=MQTT_QOS)
+            log.info("MQTT opaque pairing confirmation published mid=%s rc=%s", info.mid, info.rc)
+        except Exception as exc:
+            # The phone replays its claim until it receives a confirmation.
+            log.warning("MQTT pairing confirmation publish failed: %s", type(exc).__name__)
 
 
 def mobile_connector_agents(

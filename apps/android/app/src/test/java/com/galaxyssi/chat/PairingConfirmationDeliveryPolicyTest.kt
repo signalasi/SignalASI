@@ -34,6 +34,13 @@ class PairingConfirmationDeliveryPolicyTest {
     }
 
     @Test
+    fun `new pairing route bootstraps even when a previous route has a Signal session`() {
+        assertTrue(PairingConfirmationDeliveryPolicy.needsSessionBootstrap(true, routePaired = false))
+        assertTrue(PairingConfirmationDeliveryPolicy.needsSessionBootstrap(false, routePaired = false))
+        assertFalse(PairingConfirmationDeliveryPolicy.needsSessionBootstrap(true, routePaired = true))
+    }
+
+    @Test
     fun `only the first durable confirmation starts bootstrap and UI delivery`() {
         assertTrue(
             PairingConfirmationDeliveryPolicy.isFirstDelivery(

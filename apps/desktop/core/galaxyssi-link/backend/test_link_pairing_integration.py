@@ -44,6 +44,13 @@ class FakeMqtt:
 
     def subscribe(self, topic, **kwargs):
         self.subscriptions.append((topic, kwargs))
+        subscriptions = tuple(
+            (item[0], mqtt_bridge._expected_subscriptions().get(item[0], ""))
+            for item in topic
+        )
+        mqtt_bridge._activate_subscription_acknowledgements(
+            subscriptions, tuple(True for _ in subscriptions)
+        )
 
     def unsubscribe(self, topic):
         self.subscriptions = [item for item in self.subscriptions if item[0] != topic]
@@ -88,6 +95,7 @@ def client_claim(token: str, client_route: str, identity: bytes, name: str) -> d
 
 class LinkPairingIntegrationTests(unittest.TestCase):
     def setUp(self):
+        mqtt_bridge._reset_subscription_state()
         _ImmediateTimer.created.clear()
         self.temp = tempfile.TemporaryDirectory()
         self.state_patch = patch.object(pairing_state, "STATE_PATH", Path(self.temp.name) / "registry.json")
@@ -104,6 +112,7 @@ class LinkPairingIntegrationTests(unittest.TestCase):
             patch.object(mqtt_bridge, "desktop_id", return_value="desktop_" + "d" * 16),
             patch.object(mqtt_bridge, "desktop_name", return_value="Test Desktop"),
             patch.object(mqtt_bridge, "mobile_connector_agents", return_value=[]),
+            patch.object(mqtt_bridge, "publish_pairing_revoked", return_value={"ok": True}),
             patch.object(mqtt_bridge.threading, "Timer", _ImmediateTimer),
             patch.object(desktop_control, "desktop_control_manager", return_value=self.control),
         ]

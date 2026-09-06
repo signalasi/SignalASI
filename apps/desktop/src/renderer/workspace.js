@@ -2415,22 +2415,33 @@ function renderGateway() {
 }
 
 async function refreshGateway() {
+  if (state.pairingStatusLoading) return;
+  state.pairingStatusLoading = true;
   try {
     state.pairing = await window.galaxyssi.getPairingStatus();
     renderGateway();
     renderHistory();
+    if (state.pairingQrCreatedAt && (state.pairing.clients || []).some(
+      client => Number(client.paired_at || 0) >= state.pairingQrCreatedAt
+    )) {
+      await loadPairingFrame(true).catch(() => {});
+    }
   } catch (error) {
     state.pairing = { clients: [] };
     renderGateway();
     renderHistory();
     $("#gatewaySummary p").textContent = error.message || String(error);
+  } finally {
+    state.pairingStatusLoading = false;
   }
 }
 
 async function loadPairingFrame(force = false) {
+  if (state.pairingQrLoading) return;
   const image = $("#pairingFrame");
   const stillValid = Number(state.pairingQrExpiresAt || 0) > (Date.now() / 1000) + 15;
   if (!force && image.getAttribute("src") && stillValid) return;
+  state.pairingQrLoading = true;
   if (force) image.removeAttribute("src");
   const fingerprint = $("#pairingFingerprint");
   const accessSummary = $("#pairingAccessSummary");
@@ -2442,6 +2453,7 @@ async function loadPairingFrame(force = false) {
     const pairing = await window.galaxyssi.getPairingQr(state.pairingGrantDesktopExecutor);
     image.src = pairing.imageDataUrl;
     state.pairingQrExpiresAt = pairing.expiresAt || 0;
+    state.pairingQrCreatedAt = pairing.createdAt || 0;
     deviceName.textContent = pairing.desktopDevice?.display_name || t("This Desktop");
     fingerprint.textContent = pairing.fingerprint
       ? t("Computer fingerprint: {fingerprint}", { fingerprint: pairing.fingerprint })
@@ -2454,6 +2466,8 @@ async function loadPairingFrame(force = false) {
     state.pairingQrExpiresAt = 0;
     fingerprint.textContent = t("Unable to load the pairing QR. Restart the Desktop backend and try again.");
     throw error;
+  } finally {
+    state.pairingQrLoading = false;
   }
 }
 
@@ -5675,6 +5689,7 @@ async function init() {
   window.setInterval(() => {
     if (elements.drawer.classList.contains("open") && $("#gatewayPanel").classList.contains("active")) {
       refreshDesktopControl();
+      if ($("#pairingDetails").open) refreshGateway();
     }
     if (elements.drawer.classList.contains("open") && $("#settingsPanel").classList.contains("active")
         && state.evolutionTasks.some((task) => ACTIVE_EVOLUTION_STATES.has(task.status))) {

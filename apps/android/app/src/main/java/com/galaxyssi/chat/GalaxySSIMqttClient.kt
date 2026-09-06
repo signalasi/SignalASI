@@ -37,7 +37,8 @@ internal object PairingConfirmationDeliveryPolicy {
     fun messageId(suppliedId: String, desktopId: String, clientRouteId: String): String =
         suppliedId.trim().ifBlank { "pairing-confirmed:$desktopId:$clientRouteId" }
 
-    fun needsSessionBootstrap(hasExistingSession: Boolean): Boolean = !hasExistingSession
+    fun needsSessionBootstrap(hasExistingSession: Boolean, routePaired: Boolean = true): Boolean =
+        !hasExistingSession || !routePaired
 
     fun isFirstDelivery(stage: GalaxySSILinkDeliveryStore.IncomingStageResult): Boolean =
         stage == GalaxySSILinkDeliveryStore.IncomingStageResult.STAGED
@@ -1063,6 +1064,7 @@ object GalaxySSIMqttClient {
                 if (pendingPairingClaim == pending) pendingPairingClaim = null
             }
             Log.w(TAG, "Discarded expired pending pairing claim")
+            notifyPairingFailure(pending.desktopId, "timeout")
             return
         }
         val mqtt = client
@@ -1955,6 +1957,26 @@ object GalaxySSIMqttClient {
             handleIncomingDecoded(topic, link, reassembledWire)
             return
         }
+        if (wire.optString("type") == "pairing_rejected") {
+            if (wire.optString("protocol") != GalaxySSILinkProtocol.NAME ||
+                wire.optInt("version") != GalaxySSILinkProtocol.VERSION ||
+                wire.optString("desktop_id") != link.desktopId ||
+                wire.optString("desktop_fingerprint") != link.desktopFingerprint ||
+                wire.optString("client_route_id") != link.routes.clientRouteId ||
+                link.paired
+            ) return
+            val removed = synchronized(pairingClaimLock) {
+                if (pendingPairingClaim?.desktopId != link.desktopId) false else {
+                    pendingPairingClaim = null
+                    true
+                }
+            }
+            if (removed) {
+                retryHandler.removeCallbacks(pairingClaimRetryRunnable)
+                notifyPairingFailure(link.desktopId, wire.optString("reason"))
+            }
+            return
+        }
         if (wire.optString("type") == "pairing_confirmed") {
             handlePairingConfirmation(link, wire)
             return
@@ -2514,13 +2536,13 @@ object GalaxySSIMqttClient {
         val expected = json.optString("desktop_fingerprint")
         if (!expected.equals(link.desktopFingerprint, ignoreCase = true)) return
         val hasSession = GalaxySSICrypto.hasDesktopSession(context, desktopId)
-        val sessionReady = if (PairingConfirmationDeliveryPolicy.needsSessionBootstrap(hasSession)) {
+        val sessionReady = if (PairingConfirmationDeliveryPolicy.needsSessionBootstrap(hasSession, link.paired)) {
             json.optJSONObject("signal_bundle")?.let { bundle ->
                 GalaxySSICrypto.processPcBundleForDesktop(
                     desktopId,
                     bundle,
                     expected,
-                    replaceExisting = false
+                    replaceExisting = !link.paired
                 )
             } == true
         } else {
@@ -2537,6 +2559,8 @@ object GalaxySSIMqttClient {
             json.optJSONObject("pairing_access")
         )
         AppStore.updateDesktopDeviceContact(context, json)
+        setSecureReady(true)
+        dispatchPendingMessages()
         json.optJSONArray("connector_agents")?.let { AppStore.updateConnectorAgentStatuses(context, it) }
         val stage = GalaxySSILinkDeliveryStore.stageIncoming(context, messageId, json.toString())
         if (!PairingConfirmationDeliveryPolicy.isFirstDelivery(stage)) return
@@ -2547,6 +2571,25 @@ object GalaxySSIMqttClient {
             bypassThrottle = true
         )
         listeners.forEach { listener -> listener.onMessage(json.toString()) }
+    }
+
+    private fun notifyPairingFailure(desktopId: String, reason: String) {
+        val context = appContext ?: return
+        val message = context.getString(
+            if (reason == "token_bound") R.string.desktop_pairing_code_used
+            else R.string.desktop_pairing_timed_out
+        )
+        val event = JSONObject()
+            .put("type", "pairing_failed")
+            .put("desktop_id", desktopId)
+            .put("sender", "system")
+            .put("contact_id", "system")
+            .put("message_id", UUID.randomUUID().toString())
+            .put("content", message)
+        retryHandler.post {
+            android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_LONG).show()
+            listeners.forEach { it.onMessage(event.toString()) }
+        }
     }
 
     private fun handleSecureControlMessage(json: JSONObject): Boolean {

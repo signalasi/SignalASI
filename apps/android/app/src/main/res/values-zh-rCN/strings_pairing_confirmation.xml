@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="desktop_pairing_waiting">正在等待 %1$s 确认配对…</string>
+    <string name="desktop_pairing_code_used">此二维码已被使用，请扫描 Desktop 上的新二维码。</string>
+    <string name="desktop_pairing_timed_out">Desktop 未确认配对，请检查连接并扫描新二维码。</string>
+</resources>

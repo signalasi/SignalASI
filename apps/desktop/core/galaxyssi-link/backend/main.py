@@ -112,6 +112,7 @@ def galaxyssi_pairing_payload(
     payload["pairing_token"] = pairing["token"]
     payload["pairing_secret"] = pairing["secret"]
     payload["pairing_access"] = pairing["access"]
+    payload["pairing_created_at"] = pairing["created_at"]
     try:
         from mqtt_bridge import reconcile_mqtt_subscriptions
 
@@ -181,6 +182,7 @@ def galaxyssi_pairing_qr(grant_desktop_executor: bool = False) -> dict:
         "pairing_access": payload["pairing_access"],
         "desktop_device": payload.get("desktop_device") or {},
         "expires_at": int(time.time()) + 10 * 60,
+        "created_at": payload["pairing_created_at"],
         "qr_payload_bytes": len(encoded_payload.encode("utf-8")),
         "qr_version": qr.version,
     }
