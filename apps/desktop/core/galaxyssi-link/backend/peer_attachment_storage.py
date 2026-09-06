@@ -25,7 +25,8 @@ class PeerAttachmentStorage:
         if not 0 < size <= MAX_ATTACHMENT_BYTES:
             raise PeerAttachmentError("Peer attachment size is outside the supported range")
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        # Keep staging names short so a valid Windows target stays writable.
+        temporary = target.with_name(f".{uuid.uuid4().hex}.tmp")
         digest = hashlib.sha256()
         copied = 0
         try:

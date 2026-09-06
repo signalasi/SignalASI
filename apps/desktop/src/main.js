@@ -23,7 +23,8 @@ const BACKEND_DIR = fs.existsSync(DEV_BACKEND_DIR) ? DEV_BACKEND_DIR : PACKAGED_
 const RUNTIME_ROOT = fs.existsSync(DEV_BACKEND_DIR) ? APP_ROOT : path.resolve(APP_ROOT, "..");
 const UI_SMOKE = process.env.GALAXYSSI_UI_SMOKE === "1";
 if (UI_SMOKE) {
-  const smokeUserData = path.join(process.env.GALAXYSSI_UI_SMOKE_DIR || path.join(RUNTIME_ROOT, "ui-smoke"), "user-data");
+  const smokeUserData = path.join(process.env.GALAXYSSI_STATE_DIR
+    || process.env.GALAXYSSI_UI_SMOKE_DIR || path.join(RUNTIME_ROOT, "ui-smoke"), "user-data");
   app.setPath("userData", smokeUserData);
 }
 
@@ -462,38 +463,31 @@ async function runUiSmoke() {
       throw new Error(`Desktop English language restore failed: ${JSON.stringify(restoredLanguage)}`);
     }
     await captureSmokeScreenshot(overviewPath);
+    const peerFixture = await new Promise((resolve, reject) => {
+      execFile(findPython(), [
+        path.join(BACKEND_DIR, "ui_smoke_fixtures.py"),
+        path.join(app.getPath("userData"), "runtime"),
+        path.join(__dirname, "renderer", "galaxyssi-mark.png")
+      ], {
+        cwd: BACKEND_DIR, windowsHide: true, timeout: 30_000,
+        env: { ...process.env, GALAXYSSI_UI_SMOKE_DIR: outDir,
+          GALAXYSSI_DISABLE_EXTERNAL_SERVICES: "1" }
+      }, (error, stdout, stderr) => {
+        if (error) { reject(new Error(`UI smoke fixture failed: ${stderr || error.message}`)); return; }
+        try { resolve(JSON.parse(stdout)); } catch (parseError) { reject(parseError); }
+      });
+    });
     const peerImageState = await mainWindow.webContents.executeJavaScript(`
       (async () => {
-        const routeId = "smoke-peer-image-phone";
-        const messageId = "smoke-peer-image-message";
-        const key = peerImagePreviewKey(messageId, 0);
+        const routeId = ${JSON.stringify(peerFixture.route_id)};
+        const messageId = ${JSON.stringify(peerFixture.message_id)};
         state.pairing = {
           ...(state.pairing || {}),
           clients: [{ client_route_id: routeId, display_name: "Galaxy S26 Ultra" }]
         };
         state.activePeerRouteId = routeId;
-        state.peerMessages = [{
-          message_id: messageId,
-          client_route_id: routeId,
-          direction: "inbound",
-          sender_name: "Galaxy S26 Ultra",
-          content: "",
-          attachments: [{
-            name: "GalaxySSI-photo.jpg",
-            mime_type: "image/jpeg",
-            size_bytes: 820034,
-            sha256: "smoke-image",
-            available: true
-          }],
-          delivery_status: "received",
-          created_at_ms: Date.now()
-        }];
-        state.peerImagePreviewCache.set(key, {
-          key,
-          name: "GalaxySSI-photo.jpg",
-          mimeType: "image/png",
-          objectUrl: new URL("./galaxyssi-mark.png", location.href).href
-        });
+        await refreshPeerMessages();
+        await loadPeerImagePreview(messageId, 0);
         state.renderingSignature = "";
         document.querySelector("#agentApp").classList.add("peer-mode");
         renderHistory();
@@ -520,16 +514,25 @@ async function runUiSmoke() {
     await captureSmokeScreenshot(peerImagePath);
     const peerImageViewerState = await mainWindow.webContents.executeJavaScript(`
       (async () => {
-        document.querySelector("[data-view-peer-image]")?.click();
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        // Exercise the refresh which used to erase the memory-only fixture.
+        await refreshPeerMessages();
+        const button = document.querySelector("[data-view-peer-image]");
+        if (!button) throw new Error("Durable smoke image is missing after refresh");
+        button.click();
         const viewer = document.querySelector("#peerImageViewer");
         const image = document.querySelector("#peerImageViewerImage");
+        const deadline = Date.now() + 5000;
+        while (viewer?.hidden !== false && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
         try { await image?.decode(); } catch {}
         return {
           open: viewer?.hidden === false,
           image: image?.naturalWidth > 0 && image?.naturalHeight > 0,
           save: Boolean(document.querySelector("#savePeerImageButton")),
-          close: Boolean(document.querySelector("#closePeerImageViewerButton"))
+          close: Boolean(document.querySelector("#closePeerImageViewerButton")),
+          messageCount: state.peerMessages.length,
+          focused: document.hasFocus()
         };
       })()
     `);
