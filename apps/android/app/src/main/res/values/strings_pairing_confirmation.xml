@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="desktop_pairing_waiting">Waiting for %1$s to confirm pairing…</string>
+    <string name="desktop_pairing_code_used">This QR code has already been used. Scan a new code from Desktop.</string>
+    <string name="desktop_pairing_timed_out">Desktop did not confirm pairing. Check the connection and scan a new QR code.</string>
+</resources>

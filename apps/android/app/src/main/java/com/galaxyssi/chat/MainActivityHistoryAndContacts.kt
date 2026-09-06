@@ -1272,11 +1272,10 @@ internal fun MainActivity.completeDesktopPairing(pairingQr: JSONObject) {
         Toast.makeText(this, getString(R.string.pairing_scan_failed, "GalaxySSI Link is offline"), Toast.LENGTH_LONG).show()
         return
     }
-    AppStore.markDesktopVerified(this, pairingQr)
     val pairedName = pairingQr.optString("desktop_display_name")
         .ifBlank { pairingQr.optJSONObject("desktop_device")?.optString("display_name").orEmpty() }
         .ifBlank { pairingQr.optString("desktop_name", "PC") }
-    Toast.makeText(this, getString(R.string.pairing_desktop_added, pairedName), Toast.LENGTH_LONG).show()
+    Toast.makeText(this, getString(R.string.desktop_pairing_waiting, pairedName), Toast.LENGTH_LONG).show()
     refreshDirectoryContacts()
     hideFeaturePage()
     showConversationHub(ConversationHubTab.CONTACTS)
