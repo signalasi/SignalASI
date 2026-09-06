@@ -756,7 +756,8 @@ class MobileNativeAgent(
     }
 
     @Synchronized
-    fun handleConnectorDeliveryFailure(sourceMessageId: Long, message: String): AgentUiState? {
+    fun handleConnectorDeliveryFailure(sourceMessageId: Long, message: String, failureCode: String = ""): AgentUiState? {
+        require(failureCode.isBlank() || failureCode in com.galaxyssi.chat.blob.BlobFailureContract.terminalCodes)
         if (sourceMessageId <= 0L || phase != AgentPhase.WAITING_RESPONSE) return null
         val pending = lastActionResult ?: return null
         if (pending.metadata["source_message_id"]?.toLongOrNull() != sourceMessageId) return null
@@ -765,7 +766,9 @@ class MobileNativeAgent(
             message = message,
             metadata = pending.metadata + mapOf(
                 "awaiting_response" to "false",
-                "delivery_failed" to "true"
+                "delivery_failed" to "true",
+                "delivery_failure_code" to failureCode,
+                "attachment_delivery_failed" to failureCode.isNotBlank().toString()
             )
         )
         val plan = currentPlan ?: return null

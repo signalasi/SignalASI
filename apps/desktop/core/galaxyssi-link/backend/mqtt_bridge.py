@@ -4651,6 +4651,20 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         )
         return paths
 
+    def restore_attachment_observation(task_id: str, decision: ModelRecoveryDecision):
+        from attachment_recovery_observation import observe_attachment_recovery
+        from blob_failures import failure_observation
+
+        return observe_attachment_recovery(
+            lambda: restore_requested_attachments(task_id, decision),
+            on_failure=lambda code: agent_task_manager.add_event(
+                task_id, "replan", failure_observation(code),
+                event_id=f"recovery-request:{task_id}:{decision.attachment_ids}",
+                status="failed", metadata={"error_code": code, "attachment_count": len(decision.attachment_ids)},
+                on_event=publish_event,
+            ),
+        )
+
     progress_event_gate = _TaskProgressEventGate()
 
     def publish_event(task: dict) -> None:
@@ -4928,11 +4942,8 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                 on_event=publish_event,
             )
             if decision.action == ModelRecoveryAction.REQUEST_ATTACHMENT:
-                paths = restore_requested_attachments(task.task_id, decision)
-                next_prompt = content_with_attachments(
-                    task.task_id,
-                    recovery_follow_up(decision, paths),
-                )
+                observation = restore_attachment_observation(task.task_id, decision)
+                next_prompt = content_with_attachments(task.task_id, observation.follow_up(decision))
                 continue
             if decision.action == ModelRecoveryAction.RETRY:
                 next_prompt = content_with_attachments(
@@ -5665,9 +5676,9 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                     def continue_after_recovery() -> None:
                         nonlocal result_published
                         try:
-                            paths: list[str] = []
+                            attachment_observation = None
                             if decision.action == ModelRecoveryAction.REQUEST_ATTACHMENT:
-                                paths = restore_requested_attachments(task_id, decision)
+                                attachment_observation = restore_attachment_observation(task_id, decision)
                             if decision.action == ModelRecoveryAction.SWITCH_AGENT:
                                 from agent_gateway import all_agent_specs
 
@@ -5717,7 +5728,8 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                                 raise RuntimeError("Codex recovery runtime is unavailable")
                             follow_up = content_with_attachments(
                                 task_id,
-                                recovery_follow_up(decision, paths),
+                                attachment_observation.follow_up(decision) if attachment_observation is not None
+                                else recovery_follow_up(decision),
                             )
                             input_paths = sorted((workspace / "downloads" / "input").glob("*"))
                             image_paths = [

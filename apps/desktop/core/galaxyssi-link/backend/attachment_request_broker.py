@@ -8,6 +8,7 @@ import uuid
 from typing import Callable, Iterable
 
 from input_attachment_transfer import AttachmentTransferReceipt
+from blob_failures import TERMINAL_BLOB_ERRORS, failure_observation
 from link_protocol import valid_route_id
 
 
@@ -19,6 +20,12 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
 
 class AttachmentRequestError(RuntimeError):
     pass
+
+
+class AttachmentTransferFailed(AttachmentRequestError):
+    def __init__(self, code: str):
+        super().__init__(failure_observation(code))
+        self.code = code
 
 
 @dataclass
@@ -37,6 +44,7 @@ class _PendingRequest:
     available_ids: set[str] = field(default_factory=set)
     missing_ids: set[str] = field(default_factory=set)
     error: str = ""
+    error_code: str = ""
 
     @property
     def complete(self) -> bool:
@@ -96,6 +104,8 @@ class AttachmentRequestBroker:
                 raise AttachmentRequestError("Attachment recovery request could not be delivered")
             if not pending.event.wait(max(1.0, float(timeout_seconds))):
                 raise AttachmentRequestError("Phone attachment recovery timed out")
+            if pending.error_code:
+                raise AttachmentTransferFailed(pending.error_code)
             if pending.error:
                 raise AttachmentRequestError(pending.error)
             if pending.missing_ids:
@@ -114,7 +124,12 @@ class AttachmentRequestBroker:
             pending = self._pending.get(request_id)
             if pending is None or not self._matches(pending, payload, client_route_id):
                 return False
+            if pending.event.is_set():
+                return False
             status = str(payload.get("status") or "").strip().lower()
+            error_code = payload.get("error_code", "")
+            if error_code and (not isinstance(error_code, str) or error_code not in TERMINAL_BLOB_ERRORS):
+                return False
             available = set(_attachment_ids(payload.get("available_attachment_ids") or ()))
             missing = set(_attachment_ids(payload.get("missing_attachment_ids") or ()))
             if not available.issubset(set(pending.expected_ids)):
@@ -124,7 +139,9 @@ class AttachmentRequestBroker:
             pending.available_ids.update(available)
             pending.missing_ids.update(missing)
             if status == "failed":
-                pending.error = _safe_error(payload.get("error")) or "Phone attachment recovery failed"
+                pending.error_code = error_code
+                pending.error = (failure_observation(error_code) if error_code else
+                                 _safe_error(payload.get("error")) or "Phone attachment recovery failed")
                 pending.event.set()
             elif status == "missing" or pending.missing_ids:
                 pending.event.set()
@@ -137,7 +154,9 @@ class AttachmentRequestBroker:
     def accept_receipt(self, receipt: AttachmentTransferReceipt) -> bool:
         request_id = str(getattr(receipt, "attachment_request_id", "") or "").strip()
         attachment_id = str(getattr(receipt, "attachment_id", "") or "").strip()
-        if not request_id or not attachment_id or receipt.status != "stored":
+        if not request_id or not attachment_id or receipt.status not in {"stored", "failed"}:
+            return False
+        if receipt.status == "failed" and receipt.error_code not in TERMINAL_BLOB_ERRORS:
             return False
         with self._lock:
             pending = self._pending.get(request_id)
@@ -149,9 +168,17 @@ class AttachmentRequestBroker:
                 receipt.task_id != pending.task_id,
                 receipt.turn_id != pending.turn_id,
                 receipt.contact_id != pending.contact_id,
+                receipt.source_message_id != pending.source_message_id,
                 attachment_id not in pending.expected_ids,
             )):
                 return False
+            if pending.event.is_set():
+                return False
+            if receipt.status == "failed":
+                pending.error = failure_observation(receipt.error_code)
+                pending.error_code = receipt.error_code
+                pending.event.set()
+                return True
             pending.receipts[attachment_id] = receipt.descriptor()
             if pending.complete:
                 pending.event.set()

@@ -32,6 +32,14 @@ _lock = threading.RLock()
 _last_prune_at = 0.0
 
 
+class AttachmentIntegrityError(ValueError):
+    """A verified stream cannot be committed; retry requires a fresh source."""
+
+    def __init__(self, message: str, code: str):
+        super().__init__(message)
+        self.code = code
+
+
 @dataclass(frozen=True)
 class AttachmentTransferReceipt:
     transfer_id: str
@@ -51,6 +59,7 @@ class AttachmentTransferReceipt:
     received_bytes: int = 0
     progress: int = 0
     missing_ranges: tuple[tuple[int, int], ...] = ()
+    error_code: str = ""
 
     def payload(self) -> dict:
         result = {
@@ -76,6 +85,10 @@ class AttachmentTransferReceipt:
         }
         if self.status == "missing":
             result["missing_ranges"] = [list(value) for value in self.missing_ranges]
+        if self.status == "failed":
+            from blob_failures import failure_observation
+            failure_observation(self.error_code)
+            result["error_code"] = self.error_code
         return result
 
     def descriptor(self) -> dict:
@@ -235,11 +248,11 @@ def ingest_verified_stream(payload: dict, blocks, *, client_route_id: str,
                 check_active()
                 written += len(block)
                 if written > manifest["size_bytes"]:
-                    raise ValueError("Attachment transfer exceeds declared length")
+                    raise AttachmentIntegrityError("Attachment transfer exceeds declared length", "file_size_mismatch")
                 digest.update(block)
                 output.write(block)
             if written != manifest["size_bytes"] or digest.hexdigest() != manifest["sha256"]:
-                raise ValueError("Attachment transfer integrity check failed")
+                raise AttachmentIntegrityError("Attachment transfer integrity check failed", "plaintext_hash_mismatch")
             output.flush()
             os.fsync(output.fileno())
         check_active()
@@ -315,11 +328,16 @@ def _ensure_manifest(payload: dict, *, client_route_id: str) -> dict:
         _require_same_manifest(existing, manifest)
         return existing
     attachment_root = transfer_dir.parent
-    existing_transfer_count = sum(
-        1 for candidate in attachment_root.iterdir()
-        if candidate.is_dir() and SHA256_PATTERN.fullmatch(candidate.name)
-    ) if attachment_root.is_dir() else 0
-    if existing_transfer_count >= MAX_ATTACHMENTS_PER_TASK:
+    # Recovery attempts are distinct transfers of the same logical attachment.
+    existing_attachments = set()
+    if attachment_root.is_dir():
+        for candidate in attachment_root.iterdir():
+            if candidate.is_dir() and SHA256_PATTERN.fullmatch(candidate.name):
+                previous = _read_manifest(candidate)
+                existing_attachments.add(previous.get("attachment_id", candidate.name)
+                                         if previous else candidate.name)
+    if (manifest["attachment_id"] not in existing_attachments and
+            len(existing_attachments) >= MAX_ATTACHMENTS_PER_TASK):
         raise ValueError("Attachment transfer count exceeds the task limit")
     transfer_dir.mkdir(parents=True, exist_ok=False)
     _write_manifest(transfer_dir, manifest)
@@ -349,6 +367,7 @@ def _validated_manifest(payload: dict, *, client_route_id: str) -> dict:
         turn_id,
         attachment_id,
         digest,
+        attachment_request_id,
     )
     if not _constant_time_equal(transfer_id, expected_transfer_id):
         raise ValueError("Attachment transfer identity does not match its scope")
@@ -625,6 +644,7 @@ def transfer_id_for(
     turn_id: str,
     attachment_id: str,
     digest: str,
+    attachment_request_id: str = "",
 ) -> str:
     canonical = "\0".join(
         (
@@ -634,7 +654,7 @@ def transfer_id_for(
             turn_id,
             attachment_id,
             digest,
-        )
+        ) + ((attachment_request_id,) if attachment_request_id else ())
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

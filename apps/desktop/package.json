@@ -1,6 +1,6 @@
 {
   "name": "galaxyssi-desktop",
-  "version": "1.0.16",
+  "version": "1.0.20",
   "description": "GalaxySSI Desktop super agent and trusted mobile gateway.",
   "license": "Apache-2.0",
   "main": "src/main.js",

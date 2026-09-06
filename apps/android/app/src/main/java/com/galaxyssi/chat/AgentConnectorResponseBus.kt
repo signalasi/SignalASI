@@ -21,7 +21,8 @@ data class AgentConnectorResponse(
     val providerAttempts: AgentProviderAttemptReport? = null,
     val taskStatus: String = "",
     val executionGeneration: Long = 1L,
-    val statusSequence: Long = -1L
+    val statusSequence: Long = -1L,
+    val deliveryFailureCode: String = ""
 ) {
     val executionContactId: String
         get() = resolvedContactId.ifBlank { contactId }

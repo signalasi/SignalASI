@@ -70,9 +70,18 @@ class AgentConnectorFallbackRuntimeDeviceTest {
         assertEquals("test-hermes", state.lastActionResult?.metadata?.get("contact_id"))
     }
 
+    @Test fun attachmentFailureReachesPlannerWithoutSwitchingProviders() {
+        val state = exercise(true, true, deliveryFailureCode = "blob_expired")
+        assertEquals(AgentPhase.FAILED, state.phase)
+        assertEquals("blob_expired", state.lastActionResult?.metadata?.get("delivery_failure_code"))
+        assertEquals("true", state.lastActionResult?.metadata?.get("attachment_delivery_failed"))
+        assertEquals("test-codex", state.lastActionResult?.metadata?.get("contact_id"))
+    }
+
     private fun exercise(success: Boolean, awaiting: Boolean, structuredCloudFailure: Boolean = false,
         cancelCloud: Boolean = false, terminalStatus: String = "", observedGeneration: Long = 1,
-        observedSequence: Long = -1, allowTerminalFallback: Boolean = false): AgentUiState {
+        observedSequence: Long = -1, allowTerminalFallback: Boolean = false,
+        deliveryFailureCode: String = ""): AgentUiState {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val screen = ScreenContext(foregroundApp = "GalaxySSI", pageTitle = "Agent")
         val session = InMemoryAgentSessionStore()
@@ -80,6 +89,7 @@ class AgentConnectorFallbackRuntimeDeviceTest {
         val target = AgentCallableTarget("test-codex", "Codex test", AgentConnectorKind.AGENT,
             AgentConnectorStatus.AVAILABLE, listOf(AgentCapability.CHAT), "test-desktop", adapterType = "desktop-agent")
         var dispatches = 0
+        var observations = 0
         val agent = MobileNativeAgent(
             context,
             perceptionProvider = object : ScreenPerceptionProvider {
@@ -87,7 +97,15 @@ class AgentConnectorFallbackRuntimeDeviceTest {
                 override fun capture(foregroundApp: String, pageTitle: String) = screen
             },
             planner = object : AgentPlanner {
-                override fun plan(request: AgentRequest): AgentPlan = error("Unexpected replan")
+                override fun plan(request: AgentRequest): AgentPlan {
+                    check(deliveryFailureCode.isNotBlank()) { "Unexpected replan" }
+                    observations++
+                    assertTrue(request.replanReason.contains(deliveryFailureCode))
+                    assertTrue(request.replanReason.contains("No verified attachment was delivered"))
+                    assertTrue(request.executionHistory.any { it.status == AgentActionStatus.FAILED })
+                    // No model proposal is fabricated: verify the observation boundary and retain the real error.
+                    return AgentPlan(request.goal, request.screen, emptyList(), emptyList(), confirmationRequired = false)
+                }
             },
             actionExecutor = object : AgentActionExecutor {
                 override fun execute(action: AgentAction, screen: ScreenContext): AgentActionResult {
@@ -185,6 +203,23 @@ class AgentConnectorFallbackRuntimeDeviceTest {
         )))
         assertEquals(1, dispatches)
         assertEquals(state.phase, session.load()?.phase)
+        if (deliveryFailureCode.isNotBlank()) {
+            agent.lastActionResult = agent.lastActionResult!!.copy(metadata = agent.lastActionResult!!.metadata + mapOf(
+                "conversation_id" to "test-conversation", "turn_id" to "test-turn", "remote_task_id" to "test-task",
+                "remaining_fallback_ids" to "test-hermes", "routing_deferred_retry_ids" to "test-hermes"))
+            assertTrue(agent.startExecutionLoop("test-turn"))
+            assertTrue(agent.advanceExecutionLoop(AgentExecutionLoopPhase.ACT, "Test dispatch", action.id))
+            assertTrue(agent.advanceExecutionLoop(AgentExecutionLoopPhase.WAITING_RESPONSE, "Test wait", action.id))
+            val failure = AgentConnectorResponse(902, "test-codex", "附件已过期，需要重新传输", "test-conversation",
+                "test-turn", "test-task", success = false, deliveryFailureCode = deliveryFailureCode)
+            assertNull(agent.acceptConnectorOutcome(failure.copy(conversationId = "other")))
+            assertNull(agent.acceptConnectorOutcome(failure.copy(taskId = "other")))
+            assertEquals(0, observations)
+            val final = requireNotNull(agent.acceptConnectorOutcome(failure))
+            assertEquals(1, observations)
+            assertEquals(1, dispatches)
+            return final
+        }
         if (terminalStatus.isNotBlank()) {
             agent.lastActionResult = agent.lastActionResult!!.copy(metadata = agent.lastActionResult!!.metadata + mapOf(
                 "resource_location" to "desktop", "conversation_id" to "test-conversation", "turn_id" to "test-turn",

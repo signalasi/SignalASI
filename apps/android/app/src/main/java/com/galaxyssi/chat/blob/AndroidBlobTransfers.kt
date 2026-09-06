@@ -38,10 +38,10 @@ internal object AndroidBlobTransfers {
     fun wake(context: Context) { if (exists(context)) get(context).wake() }
     private fun exists(context: Context) = File(context.noBackupFilesDir, "blob-outgoing-v1/jobs.sqlite3").exists()
 
-    fun acceptStored(context: Context, payload: JSONObject, sourceId: String): Boolean {
-        if (payload.optString("status") != "stored" || !exists(context)) return false
+    fun acceptReceipt(context: Context, payload: JSONObject, sourceId: String): Boolean {
+        if (payload.optString("status") !in setOf("stored", "failed") || !exists(context)) return false
         val link = GalaxySSILinkProtocol.serverLink(context, sourceId)?.takeIf { it.paired } ?: return false
-        return get(context).acceptStored(payload, sourceId, link.routes.remoteFingerprint)
+        return get(context).acceptReceipt(payload, sourceId, link.routes.remoteFingerprint)
     }
 }
 
@@ -78,9 +78,11 @@ private class BlobOutgoingCoordinator(private val context: Context) {
         ids.forEach { journal.cancel(it); active[it]?.cancel() }
         wake()
     }
-    fun acceptStored(payload: JSONObject, sourceId: String, fingerprint: String): Boolean {
+    fun acceptReceipt(payload: JSONObject, sourceId: String, fingerprint: String): Boolean {
         val id = payload.optString("transfer_id")
-        if (!journal.stored(id, payload, sourceId, fingerprint)) return false
+        val accepted = if (payload.optString("status") == "failed") journal.failedReceipt(id, payload, sourceId, fingerprint)
+            else journal.stored(id, payload, sourceId, fingerprint)
+        if (!accepted) return false
         active[id]?.cancel()
         wake()
         return true
@@ -131,6 +133,15 @@ private class BlobOutgoingCoordinator(private val context: Context) {
             val manifest = work.body.getJSONObject("manifest")
             val binding = BlobOutgoingContract.binding(manifest)
             val directory = staging(work.id)
+            if (work.phase == BlobOutgoingJournal.FAILURE) {
+                if (!BlobFailureDelivery.persist(context, work.body)) {
+                    throw BlobFailure("blob_failure_observation_pending", 503)
+                }
+                GalaxySSILinkDeliveryStore.discardBlockedByAttachmentTransfers(context, listOf(work.id))
+                GalaxySSILinkDeliveryStore.discardAttachmentTransferMessages(context, work.id)
+                journal.failureObserved(work)
+                return
+            }
             if (work.phase != BlobOutgoingJournal.UPLOAD) {
                 cleanup(work, directory, binding, cancel)
                 return
@@ -167,7 +178,15 @@ private class BlobOutgoingCoordinator(private val context: Context) {
             // Relay completion is not permission to release the attachment-dependent task.
             journal.defer(work, System.currentTimeMillis() + 30_000)
         } catch (error: Exception) {
-            val code = if (error is BlobFailure) error.code else "blob_transfer_failed"
+            val code = when (error) {
+                is BlobFailure -> error.code
+                is java.io.FileNotFoundException -> "blob_source_missing"
+                else -> "blob_transfer_failed"
+            }
+            if (work.phase == BlobOutgoingJournal.UPLOAD && code in BlobFailureContract.terminalCodes) {
+                journal.fail(work, code)
+                return
+            }
             Log.w("BlobTransfers", "Transfer deferred code=$code")
             journal.defer(work, System.currentTimeMillis() + BlobOutgoingContract.retryDelay(work.attempts), code)
         }
