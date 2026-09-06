@@ -3,6 +3,7 @@
 
 const { spawnSync } = require("node:child_process");
 const https = require("node:https");
+const fs = require("node:fs");
 const path = require("node:path");
 
 const root = path.resolve(__dirname, "..", "..");
@@ -120,8 +121,8 @@ function list(items) {
   }
 }
 
-async function latestWorkflowRuns() {
-  const url = `https://api.github.com/repos/${repo}/actions/runs?per_page=10`;
+async function latestWorkflowRuns(head) {
+  const url = `https://api.github.com/repos/${repo}/actions/runs?head_sha=${encodeURIComponent(head)}&per_page=100`;
   const data = await requestJson(url);
   const byName = new Map();
   for (const run of data.workflow_runs || []) {
@@ -132,6 +133,18 @@ async function latestWorkflowRuns() {
   return [...byName.values()]
     .filter((run) => ["Repository Guard", "Windows Package"].includes(run.name))
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function workflowAuditFailures(runs, fullHead) {
+  return requiredWorkflows.flatMap((workflowName) => {
+    const run = runs.find((item) => item.name === workflowName);
+    if (!run) return [`${workflowName} has no visible run for current HEAD.`];
+    if (run.head_sha !== fullHead) return [`${workflowName} run does not match current HEAD.`];
+    if (run.status !== "completed" || run.conclusion !== "success") {
+      return [`${workflowName} must be completed/success for current HEAD; got ${run.status}/${run.conclusion || "pending"}.`];
+    }
+    return [];
+  });
 }
 
 async function main() {
@@ -169,28 +182,35 @@ async function main() {
   section("Manual Release Checks");
   list(manualChecks);
 
+  section("Branch Protection");
+  try {
+    const { auditRepositoryProtection } = await import("../security/branch-protection.mjs");
+    const policy = JSON.parse(fs.readFileSync(path.join(root, ".github", "release-protection-policy.json"), "utf8"));
+    const protection = auditRepositoryProtection(policy);
+    console.log(`- ${protection.repository}/${protection.branch}: ${protection.status}`);
+    console.log(`- Required checks: ${protection.required_checks.length}; rulesets: ${protection.ruleset_ids.join(", ") || "none"}; legacy: ${protection.legacy_present}`);
+    if (!protection.passed) {
+      console.log(`- Protection not established: ${protection.failures.join(", ")}`);
+      if (strict) failures.push(protection.status === "unverified"
+        ? "Branch protection evidence is incomplete."
+        : "Branch protection requirements are not satisfied.");
+    }
+  } catch (error) {
+    console.log(`- Branch protection could not be verified: ${error.message}`);
+    if (strict) failures.push("Branch protection evidence is unavailable.");
+  }
+
   section("GitHub Actions");
   try {
-    const runs = await latestWorkflowRuns();
+    const runs = await latestWorkflowRuns(fullHead);
     if (runs.length === 0) {
       console.log("- No Repository Guard or Windows Package runs found.");
     } else {
       for (const run of runs) {
         console.log(`- ${run.name}: ${run.status}/${run.conclusion || "pending"} (${run.head_sha.slice(0, 7)}) ${run.html_url}`);
       }
-      if (strict) {
-        for (const workflowName of requiredWorkflows) {
-          const run = runs.find((item) => item.name === workflowName);
-          if (!run) {
-            failures.push(`${workflowName} has no visible run.`);
-          } else if (run.head_sha !== fullHead) {
-            failures.push(`${workflowName} latest run is for ${run.head_sha.slice(0, 7)}, not current HEAD ${head}.`);
-          } else if (run.status !== "completed" || run.conclusion !== "success") {
-            failures.push(`${workflowName} must be completed/success for current HEAD; got ${run.status}/${run.conclusion || "pending"}.`);
-          }
-        }
-      }
     }
+    if (strict) failures.push(...workflowAuditFailures(runs, fullHead));
   } catch (error) {
     console.log(`- Unable to read GitHub Actions: ${error.message}`);
     if (strict) {
@@ -210,7 +230,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message || error);
-  process.exit(1);
-});
+module.exports = { workflowAuditFailures };
+
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.stack || error.message || error);
+    process.exit(1);
+  });
+}

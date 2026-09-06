@@ -3,11 +3,6 @@ name: Evolution candidate gates
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "apps/desktop/**"
-      - "apps/android/**"
-      - "config/evolution-*.json"
-      - ".github/workflows/evolution-candidate.yml"
   workflow_dispatch:
 
 permissions:
