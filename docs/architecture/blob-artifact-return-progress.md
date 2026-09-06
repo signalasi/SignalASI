@@ -697,3 +697,28 @@ throughput, frame-time percentiles, production MQTT/pairing acceptance, or proof
 that tail latency can never exceed the gate. The initial 534 ms failure remains
 part of the evidence. The new Blob receiver capability remains unadvertised;
 Relay provisioning and complete production UI/paired-device rollout are pending.
+
+### Late peer-card hydration
+
+A terminal receive event may be committed and dispatched before the raw incoming
+peer message reaches `MainActivity.addMessage`. Database projection alone does
+not update that newly inserted in-memory card. The incoming-card path now queues
+an indexed terminal-event lookup on the history executor. It passes attachment
+identity only, without copying message text or local file paths. Returned events
+are applied to matching loaded cards using the same identity and completion-wins
+checks as live events. It does not create messages, rewrite history, or reload
+the conversation directory. Destroyed activities and removed cards are ignored.
+
+The query is isolated by contact, original message ID, transfer ID, artifact URI,
+hash and size. Plain text and legacy attachments do not use this hydration path.
+Device regressions cover event-before-card lookup without history/version
+mutation, cross-identity rejection, reopen and duplicate attachment handling,
+and terminal-only recovery without overwriting completed cards. Production
+paired-transfer UI acceptance remains separate; capability advertisement is
+still disabled.
+
+Validation on 2026-09-07: all 137 JVM regressions passed with the live loopback
+HTTPS interop fixture. On physical SM-G9880, the contact projection and receive
+journal instrumentation suites passed all 34 tests in 2.589 seconds. These tests
+use isolated databases and do not replace production pairing or chat history.
+The Android patch release is 1.0.28 (872); Desktop code is unchanged.

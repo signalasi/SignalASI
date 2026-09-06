@@ -60,6 +60,52 @@ class BlobChatHistoryDeviceTest {
         assertEquals("complete", state(db))
     }
 
+    @Test fun lateCardCanReadTerminalEventWithoutInsertingAChatRowOrChangingVersion() = fixture { _, db ->
+        db.applyBlobAttachmentEvent(event())
+        val version = db.updatedVersion()
+        val found = db.matchingBlobAttachmentEvents(message()).single()
+        assertEquals("artifact_available", found.getString("type"))
+        assertEquals(version, db.updatedVersion())
+        assertTrue(db.page("desktop").messages.isEmpty())
+    }
+
+    @Test fun hydrationRejectsOtherContactsMessagesAndAttachmentIdentities() = fixture { _, db ->
+        db.applyBlobAttachmentEvent(event())
+        val wrongMessages = listOf(message(contact = "other"), message().put("isMine", true),
+            message().put("remoteMessageId", "other-message"))
+        wrongMessages.forEach { assertTrue(db.matchingBlobAttachmentEvents(it).isEmpty()) }
+        mapOf("transfer_id" to "d".repeat(64), "sha256" to "d".repeat(64),
+            "artifact_uri" to "galaxyssi-artifact://blob/" + "d".repeat(64), "size_bytes" to 999L)
+            .forEach { (key, value) ->
+                val wrong = message()
+                wrong.getJSONArray("attachments").getJSONObject(0).put(key, value)
+                assertTrue(key, db.matchingBlobAttachmentEvents(wrong).isEmpty())
+            }
+    }
+
+    @Test fun hydrationSurvivesReopenAndDoesNotDuplicateEventsForRepeatedAttachments() = fixture { name, db ->
+        db.applyBlobAttachmentEvent(event("artifact_download_failed"))
+        db.close()
+        ChatHistoryDatabase(context, name).use { reopened ->
+            val incoming = message()
+            incoming.getJSONArray("attachments").put(incoming.getJSONArray("attachments").getJSONObject(0))
+            assertEquals("artifact_download_failed", reopened.matchingBlobAttachmentEvents(incoming)
+                .single().getString("type"))
+            reopened.applyBlobAttachmentEvent(event())
+            assertEquals("artifact_available", reopened.matchingBlobAttachmentEvents(incoming)
+                .single().getString("type"))
+        }
+    }
+
+    @Test fun hydrationCannotOverwriteAlreadyCompletedCardsAndProgressIsNotHydrated() = fixture { _, db ->
+        db.applyBlobAttachmentEvent(event("artifact_blob_progress"))
+        assertTrue(db.matchingBlobAttachmentEvents(message()).isEmpty())
+        db.applyBlobAttachmentEvent(event("artifact_download_failed"))
+        val complete = message()
+        complete.getJSONArray("attachments").getJSONObject(0).put("transfer_state", "complete")
+        assertTrue(db.matchingBlobAttachmentEvents(complete).isEmpty())
+    }
+
     @Test fun failedTransferAlsoSurvivesReopenAndLaterCompletion() = fixture { name, db ->
         db.upsert(message())
         assertTrue(db.applyBlobAttachmentEvent(event("artifact_download_failed")))
@@ -160,6 +206,8 @@ class BlobChatHistoryDeviceTest {
         val legacy = message(2).put("remoteMessageId", "legacy-message")
         legacy.getJSONArray("attachments").getJSONObject(0).put("artifact_uri", "content://legacy/file")
         assertTrue(db.upsert(legacy))
+        assertTrue(db.matchingBlobAttachmentEvents(message().put("attachments", JSONArray())).isEmpty())
+        assertTrue(db.matchingBlobAttachmentEvents(legacy).isEmpty())
         assertEquals(2, db.page("desktop").messages.size)
     }
 

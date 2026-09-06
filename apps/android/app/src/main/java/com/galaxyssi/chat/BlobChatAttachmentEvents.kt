@@ -24,13 +24,20 @@ internal class BlobChatAttachmentEvents(private val cipher: AgentRowStorageCiphe
     }
 
     fun project(db: SQLiteDatabase, message: JSONObject): JSONObject {
-        if (message.optBoolean("isMine")) return message
+        var result = message
+        matching(db, message).forEach { event ->
+            result = BlobArtifactPresentation.updateMessage(event, result) ?: result
+        }
+        return result
+    }
+
+    fun matching(db: SQLiteDatabase, message: JSONObject): List<JSONObject> {
+        if (message.optBoolean("isMine")) return emptyList()
         val contact = message.optString("contactId")
         val remote = message.optString("remoteMessageId")
-        if (contact.isBlank() || remote.isBlank()) return message
-        val attachments = message.optJSONArray("attachments") ?: return message
-        if (attachments.length() == 0) return message
-        var result = message
+        if (contact.isBlank() || remote.isBlank()) return emptyList()
+        val attachments = message.optJSONArray("attachments") ?: return emptyList()
+        val events = linkedMapOf<String, JSONObject>()
         var remoteHash: String? = null
         for (index in 0 until attachments.length()) {
             val attachment = attachments.optJSONObject(index) ?: continue
@@ -39,9 +46,11 @@ internal class BlobChatAttachmentEvents(private val cipher: AgentRowStorageCiphe
             if (!transfer.matches(Regex("[0-9a-f]{64}"))) continue
             if (remoteHash == null) remoteHash = hash(remote)
             val event = read(db, contact, remoteHash, transfer) ?: continue
-            result = BlobArtifactPresentation.updateMessage(event, result) ?: result
+            if (BlobArtifactPresentation.updateAttachment(event, contact, remote, false, attachment) != null) {
+                events[transfer] = event
+            }
         }
-        return result
+        return events.values.toList()
     }
 
     private fun read(db: SQLiteDatabase, contact: String, remote: String, transfer: String): JSONObject? =
