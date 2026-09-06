@@ -255,6 +255,9 @@ tasks.matching { task ->
 }
 
 tasks.withType<Test>().configureEach {
+    val blobInteropFixture = providers.environmentVariable("GALAXYSSI_BLOB_TEST_ROOT").orElse("")
+    inputs.property("galaxyssi.blobInteropFixture", blobInteropFixture)
+    environment("GALAXYSSI_BLOB_TEST_ROOT", blobInteropFixture.get())
     testLogging {
         events("failed")
         exceptionFormat = TestExceptionFormat.FULL
