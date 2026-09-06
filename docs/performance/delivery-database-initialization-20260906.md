@@ -103,6 +103,23 @@ their existing 30-second deadlines. A separate real QR diagnostic completed in
 9.69 seconds (260-byte optical payload); this does not establish that the two
 timeouts were fixed. They remain subject to the merged-main regression below.
 
+## Merged-main verification
+
+Latest main `c3d0fafd5` (PR #2831) was fetched and merged before final verification.
+Only the Desktop version fields conflicted; they retain 1.0.22 and the merged
+Blob settings feature/tests remain present.
+
+- Full backend suite: **1,474 passed, 434 subtests passed in 462.39 seconds**.
+  Three existing dependency deprecation warnings; no excluded tests or raised
+  test deadlines. Both QR integration tests passed in this run. The earlier
+  timeout observations above remain a performance risk, not a claimed QR fix.
+- Desktop check: **26 tests passed**, plus the Desktop structure check.
+- Repository checks and whitespace validation passed on the merged tree before
+  PR publication.
+- The source-only fix does not modify Android or require a phone reinstall.
+  Production Desktop 1.0.21 remains running; no claim of real-device performance
+  acceptance or live fault injection is made by this database regression.
+
 ## Operational boundary
 
 All database and fault tests use isolated temporary directories. No production
