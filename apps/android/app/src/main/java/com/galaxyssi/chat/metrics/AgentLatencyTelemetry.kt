@@ -13,6 +13,17 @@ internal object AgentLatencyTelemetry {
     private val replyBindings = AgentReplyTraceBindings()
     @Volatile private var journal: AgentTimingJournal? = null
     @Volatile private var tracer: AgentLatencyTracer? = null
+    val transport = AgentTransportTiming(
+        emit = { trace, stage, operation, outcome, at ->
+            tracer?.recordOpaque(trace, stage, operation, outcome, at)
+        },
+        nowNs = SystemClock::elapsedRealtimeNanos
+    )
+
+    fun transportQueued(context: Context, endpoint: String, messageId: String, taskId: String) {
+        if (taskId.isBlank()) return
+        runCatching { get(context); transport.queued(endpoint, messageId, taskId) }
+    }
 
     private fun get(context: Context): AgentLatencyTracer = tracer ?: synchronized(this) {
         tracer ?: AgentTimingJournal(File(context.applicationContext.noBackupFilesDir, "diagnostics/agent_latency_v1.jsonl"))

@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="agent_latency_transport_queue">传输出队等待</string>
+    <string name="agent_latency_broker_ack">线路发送至 broker 确认</string>
+    <string name="agent_latency_peer_receipt">入队至对端加密接收确认</string>
     <string name="agent_latency_title">Agent 分阶段耗时</string>
     <string name="agent_latency_recent">最近请求</string>
     <string name="agent_latency_loading">正在加载测量记录</string>

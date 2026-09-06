@@ -172,7 +172,7 @@ class MqttDurableDeliveryTest(unittest.TestCase):
         def pending(*, client_route_id: str, limit: int):
             return [dict(item) for item in candidates[client_route_id][:limit]]
 
-        def publish(_mqttc, topic: str, _wire_payload: str, _link_secret: str):
+        def publish(_mqttc, topic: str, _wire_payload: str, _link_secret: str, *, timing_scope=None):
             published_topics.append(topic)
             return SimpleNamespace(rc=mqtt_bridge.mqtt.MQTT_ERR_SUCCESS, mid=len(published_topics))
 
@@ -234,7 +234,7 @@ class MqttDurableDeliveryTest(unittest.TestCase):
         client_record = paired_client("current", last_seen_at=1.0)
         published_topics: list[str] = []
 
-        def publish(_mqttc, topic: str, _wire_payload: str, _link_secret: str):
+        def publish(_mqttc, topic: str, _wire_payload: str, _link_secret: str, *, timing_scope=None):
             published_topics.append(topic)
             return SimpleNamespace(
                 rc=mqtt_bridge.mqtt.MQTT_ERR_SUCCESS,
@@ -275,7 +275,7 @@ class MqttDurableDeliveryTest(unittest.TestCase):
         }
         client_record = paired_client("current", last_seen_at=1.0)
 
-        def publish(_mqttc, _topic: str, _wire_payload: str, _link_secret: str):
+        def publish(_mqttc, _topic: str, _wire_payload: str, _link_secret: str, *, timing_scope=None):
             def acquire_lock() -> None:
                 with mqtt_bridge.durable_outbound_lock:
                     lock_was_available.set()

@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="agent_latency_transport_queue">Transport queue to dispatch</string>
+    <string name="agent_latency_broker_ack">Wire send to broker confirmation</string>
+    <string name="agent_latency_peer_receipt">Queued to encrypted peer receipt</string>
     <string name="agent_latency_title">Agent stage timings</string>
     <string name="agent_latency_recent">Recent requests</string>
     <string name="agent_latency_loading">Loading measurements</string>

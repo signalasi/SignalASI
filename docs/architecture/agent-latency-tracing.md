@@ -106,7 +106,9 @@ production latency journal. Layout tests build a separate metric View, so
 their sample percentile values cannot pollute production statistics either.
 
 This is the connector timing foundation, not completion of the overall
-performance objective. Still required: explicit broker/application ACK spans,
+performance objective. [Transport ACK latency](transport-ack-latency.md) adds
+explicit broker/peer-receipt spans for task-associated durable envelopes.
+Still required: complete real paired ACK acceptance,
 blob/image stages, cloud/local provider and model-load boundaries, runtime
 verification spans, cold-start/list/gesture frame measurements, actual provider
 and S26U replay/chaos samples, and enforced real P95/P99 acceptance gates. No

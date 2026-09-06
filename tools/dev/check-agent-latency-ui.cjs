@@ -25,7 +25,8 @@ const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => `&#${c.ch
         </style><section class="agent-stage-latency">${render(report, {
           escapeHtml, t: (key) => locale[key] || key
         })}</section></html>`);
-      assert.equal(await page.locator('.agent-latency-table tbody tr').count(), 11);
+      assert.equal(await page.locator('.agent-latency-table tbody tr').count(), 14);
+      assert.ok(await page.locator('tbody').innerText().then((text) => text.includes('broker')));
       assert.ok(await page.locator('thead').innerText().then((text) => text.includes('P99')));
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       const cells = await page.locator('.agent-latency-table td').evaluateAll((nodes) =>
