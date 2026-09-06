@@ -245,6 +245,7 @@ internal fun MainActivity.addMessage(msg: ChatMessage, fromIncoming: Boolean = f
         }
     }
     saveChatHistory(stored)
+    if (fromIncoming) hydrateBlobAttachmentPresentation(stored)
     if (!stored.isSystem && !AppStore.isDesktopDeviceContact(this, stored.contact.id)) {
         GlobalConversationEventBus.publishChatMessage(
             this,

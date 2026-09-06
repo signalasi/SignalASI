@@ -60,6 +60,10 @@ object ChatHistoryStore {
         database(context).readContactSummaries()
 
     @Synchronized
+    internal fun matchingBlobAttachmentEvents(context: Context, message: JSONObject): List<JSONObject> =
+        database(context).matchingBlobAttachmentEvents(message)
+
+    @Synchronized
     internal fun applyBlobAttachmentEvent(context: Context, event: JSONObject): Boolean =
         database(context).applyBlobAttachmentEvent(event)
 

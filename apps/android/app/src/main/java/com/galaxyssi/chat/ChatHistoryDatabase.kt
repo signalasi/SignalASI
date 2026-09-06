@@ -171,6 +171,10 @@ internal class ChatHistoryDatabase(
     }
 
     @Synchronized
+    fun matchingBlobAttachmentEvents(message: JSONObject): List<JSONObject> =
+        blobAttachmentEvents.matching(readableDatabase, message)
+
+    @Synchronized
     fun applyBlobAttachmentEvent(event: JSONObject): Boolean {
         if (!com.galaxyssi.chat.blob.BlobArtifactPresentation.isTerminalPeerEvent(event)) return false
         ensureLegacyRowsMigrated()
