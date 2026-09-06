@@ -4,6 +4,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.json.JSONObject
 import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
@@ -13,6 +14,7 @@ import java.io.File
 class BlobOutgoingRestartDeviceTest {
     @Test fun persistOrRecover() {
         val arguments = InstrumentationRegistry.getArguments()
+        assumeTrue(arguments.containsKey("blobRestartId"))
         val name = requireNotNull(arguments.getString("blobRestartId"))
         require(name.matches(Regex("blob-outgoing-restart-[a-z0-9-]{1,64}")))
         val context = InstrumentationRegistry.getInstrumentation().targetContext

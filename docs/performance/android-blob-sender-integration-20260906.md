@@ -100,6 +100,23 @@ Artifacts:
 
 ## Remaining integration and acceptance
 
+### Instrumentation entry-point follow-up
+
+The two-process scenario requires an external driver to supply a test ID and
+phase around force-stop. Like the existing Run Kernel restart tests, a general
+instrumentation run without that ID now reports an assumption skip instead of
+failing on a missing parameter. This skip is not counted as recovery evidence.
+With explicit parameters, both phases were rerun on S20U and passed (0.092s and
+0.034s runner durations). The App was reopened and only the test package removed.
+No production App code or installed APK changed in this follow-up.
+
+Final test APK: `build/galaxyssi-blob-sender-tests-final.apk`, 1,584,717 bytes,
+SHA-256 `3CAC6AF2F9FC17B3DF36CEED4CF06976987A356E99BBAE7F072A40E9FA2798D6`.
+Logs: `build/blob-s20-restart-default.log` and
+`build/blob-s20-restart-final-{persist,recover}.log`.
+
+### Outstanding acceptance
+
 - No production relay has been provisioned and no running Desktop was replaced.
   Android-to-Desktop Agent attachment submission over the actual paired public
   network has not been validated. This installation alone does not move existing
