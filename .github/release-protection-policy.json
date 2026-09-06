@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "repository": "galaxyssi/GalaxySSI",
+  "branch": "main",
+  "required_checks": [
+    "repository-check",
+    "core-regressions",
+    "desktop-source-smoke",
+    "android-build",
+    "package-win",
+    "backend",
+    "desktop-source",
+    "android",
+    "trusted-automation-review"
+  ]
+}
