@@ -60,6 +60,10 @@ object ChatHistoryStore {
         database(context).readContactSummaries()
 
     @Synchronized
+    internal fun applyBlobAttachmentEvent(context: Context, event: JSONObject): Boolean =
+        database(context).applyBlobAttachmentEvent(event)
+
+    @Synchronized
     internal fun pruneInternalTransportMessages(context: Context): Int {
         if (internalTransportMessagesPruned) return 0
         val removed = database(context).deleteInternalTransportMessages()

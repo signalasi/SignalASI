@@ -86,6 +86,7 @@ data class PeerChatAttachment(
 
 internal object PeerChatPresentation {
     private val internalTransportTypes = setOf(
+        "artifact_blob_progress",
         PeerAttachmentTransferProgress.TYPE,
         "input_attachment_manifest",
         "input_attachment_chunk",

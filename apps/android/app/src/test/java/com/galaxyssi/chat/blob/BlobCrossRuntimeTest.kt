@@ -17,6 +17,68 @@ import javax.crypto.spec.SecretKeySpec
 
 /** Invoked by tools/dev/test-android-blob-interoperability.py with an isolated HTTPS relay. */
 class BlobCrossRuntimeTest {
+    @Test fun `artifact output resumes then publishes and receipts before staging cleanup`() {
+        val fixtureRoot = System.getenv("GALAXYSSI_BLOB_TEST_ROOT").orEmpty()
+        assumeTrue("Requires the isolated cross-runtime test runner", fixtureRoot.isNotEmpty())
+        val root = File(fixtureRoot)
+        val fixture = JSONObject(File(root, "fixture.json").readText())
+        val origin = fixture.getJSONObject("offer").getString("relay")
+        val source = File(root, "source.bin")
+        val key = SecretKeySpec(ByteArray(32) { (it + 43).toByte() }, "AES")
+        val manifest = BlobArtifactContract.makeManifest(JSONObject().put("client_route_id", "a".repeat(22))
+            .put("desktop_id", "desktop").put("conversation_id", "中文产物回传测试").put("task_id", "task")
+            .put("turn_id", "turn").put("contact_id", "contact").put("source_message_id", "message")
+            .put("artifact_id", "b".repeat(64)).put("artifact_uri", "galaxyssi-artifact://task/output.bin")
+            .put("name", "回传文件.bin").put("relative_path", "output.bin").put("mime_type", "application/octet-stream")
+            .put("size_bytes", source.length()).put("original_size_bytes", source.length())
+            .put("sha256", fixture.getString("sha256")).put("original_sha256", fixture.getString("sha256"))
+            .put("execution_generation", 1).put("peer_chat", false))
+        val client = BlobTransferClient(BlobHttp(origin, trustedClient(File(root, "relay.crt"))), fixture.getString("token"))
+        val binding = BlobArtifactContract.binding(manifest)
+        val id = manifest.getString("transfer_id")
+        val storage = BlobArtifactStorage(File(root, "artifact-output"), key)
+        val stagingRoot = File(root, "artifact-downloads")
+        val events = mutableListOf<String>()
+        BlobStaging.prepare(File(root, "artifact-sender"), source.length(), fixture.getString("sha256"),
+            binding, source::inputStream, key).use { sender ->
+            val blobOffer = client.upload(sender)
+            val body = JSONObject().put("offer", JSONObject().put("type", BlobArtifactContract.OFFER_TYPE)
+                .put("version", 1).put("manifest", manifest).put("blob_offer", blobOffer).put("transport_revision", 1))
+                .put("route_id", "a".repeat(22)).put("desktop_id", "desktop").put("origin", origin)
+                .put("peer_fingerprint", "c".repeat(64)).put("local_fingerprint", "d".repeat(64))
+            var cancellation = BlobCancellation()
+            var interrupt = true
+            val pipeline = BlobArtifactReceivePipeline(stagingRoot, storage,
+                checkIdentity = { assertEquals("desktop", it.getString("desktop_id")) },
+                publish = { assertTrue(storage.verified(it)); events += "publish"; true },
+                sendReceipt = { _, receipt ->
+                    assertEquals(listOf("publish"), events)
+                    assertEquals(id, receipt.getString("transfer_id"))
+                    assertEquals("stored", receipt.getString("status"))
+                    events += "receipt"; true
+                }, observeFailure = { _, _ -> fail("Unexpected failure observation"); false },
+                client = { client }, storageKey = key,
+                progress = { _, done, _ -> if (interrupt && done >= BlobProtocol.CHUNK_BYTES) cancellation.cancel() })
+            fun work(phase: Int) = BlobArtifactReceiveWork(id, body, phase, "fixture", 0, "")
+            assertEquals("transfer_cancelled", assertThrows(BlobFailure::class.java) {
+                pipeline.process(work(BlobArtifactReceiveJournal.DOWNLOAD), cancellation) {}
+            }.code)
+            assertTrue(events.isEmpty()); assertFalse(storage.verified(manifest))
+            assertTrue(File(stagingRoot, "$id/1/00000000.blob").isFile)
+            interrupt = false; cancellation = BlobCancellation()
+            for (phase in 0..3) pipeline.process(work(phase), cancellation) {}
+            assertEquals(listOf("publish", "receipt"), events)
+            assertFalse(File(stagingRoot, id).exists())
+            assertTrue(storage.verified(manifest))
+            client.revoke(sender)
+            // A duplicate offer after sender cleanup verifies the local file without contacting the Relay.
+            pipeline.process(work(BlobArtifactReceiveJournal.DOWNLOAD), cancellation) {}
+            File(root, "kotlin-artifact-result.json").writeText(JSONObject()
+                .put("blob_id", sender.private.blobId).put("sha256", manifest.getString("sha256"))
+                .put("phases", org.json.JSONArray(events)).put("local_verified_after_revoke", true).toString())
+        }
+    }
+
     @Test fun `Kotlin and Python exchange authenticated resumable ciphertext over real HTTPS`() {
         val fixtureRoot = System.getenv("GALAXYSSI_BLOB_TEST_ROOT").orEmpty()
         assumeTrue("Requires the isolated cross-runtime test runner", fixtureRoot.isNotEmpty())

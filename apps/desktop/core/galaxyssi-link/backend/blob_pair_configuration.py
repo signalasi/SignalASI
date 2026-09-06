@@ -14,6 +14,7 @@ from secure_state import read_secure_json, write_secure_json
 
 _LOCK = threading.RLock()
 _PURPOSE = "blob.pair-configuration.v1"
+ARTIFACT_CAPABILITY_TYPE = "artifact_blob_capability"
 
 
 def _identity(bridge, route: str) -> tuple[dict, dict]:
@@ -127,6 +128,53 @@ def can_publish(bridge, route: str) -> bool:
     with _LOCK:
         _, binding = _identity(bridge, route)
         return _read(bridge, route, binding)["opted_in"]
+
+
+def _artifact_capability(value: dict) -> dict:
+    if (not isinstance(value, dict) or set(value) != {"version", "revision", "enabled"}
+            or type(value["version"]) is not int or value["version"] != 1
+            or type(value["revision"]) is not int or not 1 <= value["revision"] <= 2**53 - 1
+            or type(value["enabled"]) is not bool):
+        raise BlobError("invalid_artifact_blob_capability", 400)
+    return dict(value)
+
+
+def record_artifact_capability(bridge, route: str, source: str, payload: dict) -> bool:
+    """Persist an authenticated receiver declaration before acknowledging its message.
+
+    Input-upload opt-in is deliberately independent from output receiver support.
+    The phone increments revision when enabling/disabling its receiver; replayed
+    declarations cannot undo a newer state. Pair replacement resets the binding.
+    """
+    if not isinstance(payload, dict) or payload.get("type") != ARTIFACT_CAPABILITY_TYPE:
+        return False
+    value = _artifact_capability({key: payload.get(key) for key in ("version", "revision", "enabled")})
+    with _LOCK:
+        _, binding = _identity(bridge, route)
+        if (source != binding["source"] or payload.get("client_route_id") != route
+                or payload.get("desktop_id") != bridge.desktop_id()
+                or payload.get("desktop_fingerprint") != binding["local"]):
+            raise BlobError("artifact_blob_capability_identity_mismatch", 409)
+        doc = _read(bridge, route, binding)
+        previous = doc.get("artifact_receiver")
+        if previous is not None:
+            previous = _artifact_capability(previous)
+            if value["revision"] < previous["revision"]:
+                return True
+            if value["revision"] == previous["revision"]:
+                if value != previous:
+                    raise BlobError("artifact_blob_capability_revision_conflict", 409)
+                return True
+        doc["artifact_receiver"] = value
+        write_secure_json(_path(bridge, route), doc, purpose=_PURPOSE)
+        return True
+
+
+def can_receive_artifacts(bridge, route: str) -> bool:
+    with _LOCK:
+        _, binding = _identity(bridge, route)
+        value = _read(bridge, route, binding).get("artifact_receiver")
+        return value is not None and _artifact_capability(value)["enabled"]
 
 
 def origin_for_peer(bridge, route: str, source: str) -> str:

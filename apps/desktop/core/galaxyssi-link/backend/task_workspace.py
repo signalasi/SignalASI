@@ -11,12 +11,13 @@ import uuid
 from pathlib import Path
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urlparse
+from blob_protocol import MAX_FILE_BYTES
 
 
 BACKEND_DIR = Path(__file__).resolve().parent
 DEFAULT_WORKSPACE_ROOT = Path.home() / "GalaxySSI_Workspace"
 TASK_SUBDIRECTORIES = ("outputs", "scripts", "downloads", "screenshots", "logs", "temp")
-MAX_IMPORTED_ARTIFACT_BYTES = 64 * 1024 * 1024
+MAX_IMPORTED_ARTIFACT_BYTES = MAX_FILE_BYTES
 INTERNAL_ARTIFACT_SUFFIXES = (
     ".idsig",
     ".sig",
@@ -90,15 +91,17 @@ def cleanup_task_temporary_files(task_ids: list[str] | set[str]) -> list[str]:
     return cleaned
 
 
-def cleanup_task_workspace(task_id: str) -> bool:
+def cleanup_task_workspace(task_id: str, *, missing_ok: bool = False) -> bool:
     """Remove one GalaxySSI-owned task workspace after phone handoff."""
     safe_id = _safe_component(task_id)
     if not safe_id:
         return False
     tasks_root = (workspace_root() / "tasks").resolve()
     directory = (tasks_root / safe_id).resolve()
-    if not _is_within(directory, tasks_root) or not directory.exists():
+    if not _is_within(directory, tasks_root):
         return False
+    if not directory.exists():
+        return missing_ok
     shutil.rmtree(directory, ignore_errors=True)
     return not directory.exists()
 

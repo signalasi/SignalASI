@@ -98,6 +98,12 @@ internal class PeerFileAttachmentView(context: Context) : FrameLayout(context) {
         }
     }
 
+    fun updateProgress(attachment: PeerChatAttachment) {
+        progressRing.progress = attachment.transferProgress.coerceIn(0, 99)
+        detailView.text = context.getString(R.string.peer_attachment_downloading_progress,
+            AgentInputAttachment.humanSize(attachment.sizeBytes), attachment.transferProgress.coerceIn(0, 99))
+    }
+
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 }
 
