@@ -1,5 +1,7 @@
 """Regression gates must fail even when a launcher or a transport-only test succeeds."""
 import importlib.util
+import copy
+import json
 import os
 from pathlib import Path
 import shutil
@@ -19,6 +21,82 @@ device_spec.loader.exec_module(device)
 
 
 class BlobToolingTest(unittest.TestCase):
+    @staticmethod
+    def device_result():
+        return {"result": "passed", "sha256_verified": True, "each_chunk_uploaded_once": True,
+                "intentional_app_process_death": True, "metrics": {
+                    "interrupting": {"baseline_pss_kib": 141471, "sampled_peak_pss_kib": 155406,
+                        "sampled_growth_kib": 13935, "prepare_ms": 2724, "tls_rejection_verified": True},
+                    "completed": {"resume_checkpoint_ms": 20, "control_probe_max_ms": 103,
+                        "main_callback_max_ms": 3, "control_probes": 326, "probe_failures": 0}}}
+
+    def test_measured_bounded_preparation_passes_benchmark(self):
+        self.assertTrue(device.device_acceptance(self.device_result())["passed"])
+
+    def test_transport_success_does_not_hide_original_memory_regression(self):
+        value = self.device_result()
+        value["metrics"]["interrupting"].update(baseline_pss_kib=141308,
+            sampled_peak_pss_kib=323821, sampled_growth_kib=182513)
+        result = device.device_acceptance(value)
+        self.assertFalse(result["passed"])
+        self.assertEqual(["preparation_memory_budget_exceeded"], result["failures"])
+
+    def test_device_gate_rejects_missing_metrics_instead_of_treating_them_as_zero(self):
+        original = self.device_result()
+        for phase, values in original["metrics"].items():
+            for key in values:
+                with self.subTest(phase=phase, missing=key):
+                    value = copy.deepcopy(original)
+                    del value["metrics"][phase][key]
+                    self.assertFalse(device.device_acceptance(value)["passed"])
+        for bad in (None, [], "bad", {}):
+            value = copy.deepcopy(original)
+            value["metrics"] = bad
+            self.assertFalse(device.device_acceptance(value)["passed"])
+
+    def test_device_gate_rejects_noninteger_negative_and_inconsistent_pss(self):
+        for bad in (True, -1, 1.5, "13935", float("nan")):
+            value = self.device_result()
+            value["metrics"]["interrupting"]["sampled_growth_kib"] = bad
+            self.assertFalse(device.device_acceptance(value)["passed"])
+        value = self.device_result()
+        value["metrics"]["interrupting"]["sampled_peak_pss_kib"] = 141470
+        self.assertIn("preparation_memory_inconsistent", device.device_acceptance(value)["failures"])
+
+    def test_recovery_and_responsiveness_are_not_replaced_by_transfer_success(self):
+        for key, bad in [("resume_checkpoint_ms", 5001), ("control_probe_max_ms", 501),
+                         ("main_callback_max_ms", 101), ("probe_failures", 1), ("control_probes", 0)]:
+            value = self.device_result()
+            value["metrics"]["completed"][key] = bad
+            self.assertFalse(device.device_acceptance(value)["passed"], key)
+
+    def test_integrity_process_death_and_tls_require_explicit_evidence(self):
+        for key in ("sha256_verified", "each_chunk_uploaded_once", "intentional_app_process_death"):
+            for bad in (False, None, 1, "true"):
+                value = self.device_result()
+                value[key] = bad
+                self.assertFalse(device.device_acceptance(value)["passed"])
+        value = self.device_result()
+        value["result"] = "failed"
+        self.assertFalse(device.device_acceptance(value)["passed"])
+
+    def test_benchmark_budget_is_explicit_validated_and_recorded(self):
+        for bad in (0, -1, 1025, True, float("inf")):
+            with self.assertRaises(ValueError):
+                device.device_acceptance(self.device_result(), bad)
+        self.assertEqual(16, device.device_acceptance(self.device_result(), 16)["maximum_prepare_growth_mib"])
+        self.assertFalse(device.device_acceptance(self.device_result(), 1)["passed"])
+
+    def test_device_acceptance_failure_is_saved_and_returns_nonzero(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            value = self.device_result()
+            self.assertEqual(1, device.write_device_report(root, value, 1))
+            saved = json.loads((root / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", saved["result"])
+            self.assertIn("preparation_memory_budget_exceeded", saved["acceptance"]["failures"])
+            self.assertEqual(13935, saved["metrics"]["interrupting"]["sampled_growth_kib"])
+
     def test_device_runner_rejects_stale_or_ambiguous_app_version(self):
         self.assertEqual("1.0.21", device.checked_version("  versionCode=867\r\n  versionName=1.0.21\r\n", "1.0.21"))
         for details in ("", "versionName=1.0.20", "versionName=1.0.210", "versionName=1.0.21\nversionName=1.0.20"):

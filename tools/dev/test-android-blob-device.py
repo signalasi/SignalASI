@@ -27,6 +27,61 @@ def checked_version(package_details: str, expected: str) -> str:
     return matches[0].strip()
 
 
+def device_acceptance(result: dict, maximum_prepare_growth_mib: int = 32) -> dict:
+    """Benchmark limits only; never a runtime limit on user files or Agent actions."""
+    if type(maximum_prepare_growth_mib) is not int or not 1 <= maximum_prepare_growth_mib <= 1024:
+        raise ValueError("Invalid preparation memory benchmark budget")
+    failures = []
+    if result.get("result") != "passed":
+        failures.append("transport_not_passed")
+    for name in ("sha256_verified", "each_chunk_uploaded_once", "intentional_app_process_death"):
+        if result.get(name) is not True:
+            failures.append(name + "_not_verified")
+    metrics = result.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    preparation = metrics.get("interrupting")
+    completed = metrics.get("completed")
+    preparation = preparation if isinstance(preparation, dict) else {}
+    completed = completed if isinstance(completed, dict) else {}
+
+    def integer(values, name, low=0):
+        value = values.get(name)
+        if type(value) is not int or value < low:
+            failures.append(name + "_invalid_or_missing")
+            return None
+        return value
+
+    baseline = integer(preparation, "baseline_pss_kib", 1)
+    peak = integer(preparation, "sampled_peak_pss_kib", 1)
+    growth = integer(preparation, "sampled_growth_kib")
+    if None not in (baseline, peak, growth) and (peak < baseline or peak - baseline != growth):
+        failures.append("preparation_memory_inconsistent")
+    if growth is not None and growth > maximum_prepare_growth_mib * 1024:
+        failures.append("preparation_memory_budget_exceeded")
+    if preparation.get("tls_rejection_verified") is not True:
+        failures.append("tls_rejection_not_verified")
+    integer(preparation, "prepare_ms")
+    integer(completed, "control_probes", 1)
+    if integer(completed, "probe_failures") not in (None, 0):
+        failures.append("control_or_main_probe_failed")
+    limits = {"resume_checkpoint_ms": 5000, "control_probe_max_ms": 500, "main_callback_max_ms": 100}
+    for name, maximum in limits.items():
+        value = integer(completed, name)
+        if value is not None and value > maximum:
+            failures.append(name + "_budget_exceeded")
+    return {"passed": not failures, "failures": failures,
+            "maximum_prepare_growth_mib": maximum_prepare_growth_mib, "limits_ms": limits,
+            "scope": "sampled_pss_and_control_callbacks_over_adb_reverse_not_wan_or_frame_times"}
+
+
+def write_device_report(log_root: Path, result: dict, maximum_prepare_growth_mib: int = 32) -> int:
+    result["acceptance"] = device_acceptance(result, maximum_prepare_growth_mib)
+    if not result["acceptance"]["passed"]:
+        result["result"] = "failed"
+    (log_root / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    return 0 if result["acceptance"]["passed"] else 1
+
+
 def pattern_file(path: Path, size: int) -> str:
     pattern = bytes(range(251)) * 8192
     digest = hashlib.sha256()
@@ -47,6 +102,8 @@ def main() -> int:
     parser.add_argument("--serial", required=True, help="Explicit S20U ADB serial; no other device is touched")
     parser.add_argument("--expected-app-version", required=True, help="Reject an old installed App before changing test state")
     parser.add_argument("--size-mib", type=int, default=16, choices=range(2, 513), metavar="2..512")
+    parser.add_argument("--max-prepare-growth-mib", type=int, default=32, choices=range(1, 1025), metavar="1..1024",
+                        help="Sampled preparation PSS growth benchmark budget; does not limit the production App")
     parser.add_argument("--test-apk", type=Path,
                         default=ROOT / "apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk")
     parser.add_argument("--adb", default=str(Path(os.environ.get("ANDROID_HOME", "")) / "platform-tools/adb.exe")
@@ -244,9 +301,9 @@ def main() -> int:
             cleanup(relay.close)
             if cleanup_errors:
                 raise RuntimeError("Test cleanup failed: " + ",".join(cleanup_errors))
-        (log_root / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+        exit_code = write_device_report(log_root, result, args.max_prepare_growth_mib)
         print(json.dumps(result), flush=True)
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
