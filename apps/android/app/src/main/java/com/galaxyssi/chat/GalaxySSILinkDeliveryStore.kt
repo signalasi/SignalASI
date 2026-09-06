@@ -207,6 +207,16 @@ object GalaxySSILinkDeliveryStore {
     }
 
     @Synchronized
+    internal fun hasAttachmentDependency(context: Context, transferId: String): Boolean {
+        val values = outboxArray(context)
+        for (index in 0 until values.length()) {
+            val dependencies = values.optJSONObject(index)?.optJSONArray(BLOCKED_BY_ATTACHMENT_TRANSFERS) ?: continue
+            if ((0 until dependencies.length()).any { dependencies.optString(it) == transferId }) return true
+        }
+        return false
+    }
+
+    @Synchronized
     fun releaseAttachmentDependency(
         context: Context,
         transferId: String
@@ -578,7 +588,8 @@ object GalaxySSILinkDeliveryStore {
         payload.optString("transfer_id").lowercase().takeIf {
             payload.optString("type") in setOf(
                 "input_attachment_manifest",
-                "input_attachment_chunk"
+                "input_attachment_chunk",
+                "input_attachment_blob_offer"
             ) && it.matches(SHA256)
         }.orEmpty()
 

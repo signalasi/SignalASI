@@ -21,6 +21,7 @@ jobs:
         with:
           python-version: "3.11"
       - uses: gradle/actions/setup-gradle@v4
+      - run: python tools/dev/test-blob-tooling.py -v
       - run: npm --prefix apps/desktop ci
       - run: npm run package:desktop:win
       - run: npm run smoke:desktop:packaged

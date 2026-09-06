@@ -2,6 +2,7 @@ package com.galaxyssi.chat
 
 import android.content.Context
 import android.util.Base64
+import com.galaxyssi.chat.blob.BlobChunkInputStream
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
@@ -78,16 +79,7 @@ internal data class AgentPreparedOutboundAttachment(
             .put("eager_chunks", eagerChunks)
 
     fun chunkPayload(index: Int): JSONObject {
-        require(index in 0 until chunkCount) { "Attachment chunk index is invalid" }
-        val start = index.toLong() * chunkSizeBytes
-        val expected = minOf(
-            chunkSizeBytes.toLong(),
-            sizeBytes - start
-        ).toInt()
-        require(expected > 0) { "Attachment chunk is empty" }
-        val encryptedChunk = outboundEncryptedChunkFile(chunkDirectory, index)
-        val bytes = AttachmentAtRestCipher.decryptBytes(encryptedChunk)
-        require(bytes.size == expected) { "Encrypted attachment chunk length is invalid" }
+        val bytes = readPlainChunk(index)
         return try {
             commonPayload("input_attachment_chunk")
                 .put("chunk_index", index)
@@ -97,6 +89,29 @@ internal data class AgentPreparedOutboundAttachment(
         } finally {
             bytes.wipeSensitive()
         }
+    }
+
+    fun openPlaintext(): InputStream = BlobChunkInputStream(chunkCount, sizeBytes, ::readPlainChunk)
+
+    private fun readPlainChunk(index: Int): ByteArray {
+        require(index in 0 until chunkCount) { "Attachment chunk index is invalid" }
+        val start = index.toLong() * chunkSizeBytes
+        val expected = minOf(
+            chunkSizeBytes.toLong(),
+            sizeBytes - start
+        ).toInt()
+        require(expected > 0) { "Attachment chunk is empty" }
+        val encryptedChunk = outboundEncryptedChunkFile(chunkDirectory, index)
+        require(encryptedChunk.length() <= expected + 128L &&
+            AttachmentAtRestCipher.metadata(encryptedChunk).plaintextLength == expected.toLong()) {
+            "Encrypted attachment chunk length is invalid"
+        }
+        val bytes = AttachmentAtRestCipher.decryptBytes(encryptedChunk)
+        if (bytes.size != expected) {
+            bytes.wipeSensitive()
+            throw IllegalArgumentException("Encrypted attachment chunk length is invalid")
+        }
+        return bytes
     }
 
     private fun commonPayload(type: String): JSONObject = JSONObject()

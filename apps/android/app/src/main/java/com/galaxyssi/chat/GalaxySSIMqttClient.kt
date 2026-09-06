@@ -8,6 +8,9 @@ import com.galaxyssi.chat.metrics.AgentLatencyTelemetry
 import com.galaxyssi.chat.metrics.AgentTransportTiming
 
 import android.content.Context
+import com.galaxyssi.chat.blob.AndroidBlobTransfers
+import com.galaxyssi.chat.blob.BlobRelayConfiguration
+import com.galaxyssi.chat.blob.BlobRelayConfigurations
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -100,6 +103,7 @@ object GalaxySSIMqttClient {
     private val attachmentTransferExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "galaxyssi-link-attachments").apply { isDaemon = true }
     }
+    private val attachmentControlInbox = AttachmentControlInbox(attachmentTransferExecutor)
     private val outboxDispatchExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "galaxyssi-link-outbox").apply { isDaemon = true }
     }
@@ -748,8 +752,16 @@ object GalaxySSIMqttClient {
         if (outboundAttachments.isNotEmpty()) {
             val activeContext = context
                 ?: return disclosureFailed("Attachment transfer context is unavailable")
+            val blobIds = mutableSetOf<String>()
+            try {
+                outboundAttachments.forEach { if (AndroidBlobTransfers.register(activeContext, it)) blobIds.add(it.transferId) }
+            } catch (error: Exception) {
+                AndroidBlobTransfers.cancel(activeContext, blobIds)
+                AgentOutboundAttachmentTransferStore.discard(activeContext, outboundAttachments.map { it.transferId })
+                return disclosureFailed("Attachment transfer journal could not be saved")
+            }
             val queuedTask = synchronized(outboxDispatchLock) {
-                for (attachmentStep in AgentAttachmentPublishOrder.initialSteps(outboundAttachments)) {
+                for (attachmentStep in AgentAttachmentPublishOrder.initialSteps(outboundAttachments.filterNot { it.transferId in blobIds })) {
                     if (!publishJsonResult(
                             attachmentStep.payload(),
                             topic,
@@ -769,12 +781,14 @@ object GalaxySSIMqttClient {
                 )
             }
             if (!queuedTask.accepted) {
+                AndroidBlobTransfers.cancel(activeContext, blobIds)
                 AgentOutboundAttachmentTransferStore.discard(
                     activeContext,
                     outboundAttachments.map { it.transferId }
                 )
                 return disclosureFailed("Attachment transfer and Agent task could not be queued")
             }
+            AndroidBlobTransfers.activate(activeContext, blobIds)
             if (client?.isConnected != true) connect(activeContext)
             scheduleOutboxRetries()
             return disclosureCompleted(queuedTask).also {
@@ -1113,6 +1127,13 @@ object GalaxySSIMqttClient {
     ): Boolean = publishJson(payload, topic, contactId)
 
     internal fun outgoingTopicFor(contactId: String): String? = outgoingTopic(contactId)
+
+    internal fun publishBlobOffer(payload: JSONObject, contactId: String): Boolean =
+        publishJsonResult(payload, outgoingTopic(contactId), contactId, queueOnly = true).accepted
+
+    internal fun notifyBlobProgress(payload: JSONObject) = notifyMessageListeners(payload)
+
+    internal fun dispatchBlobDependencies() { retryHandler.post { dispatchPendingMessages() } }
 
     private fun publishJsonResult(
         payload: JSONObject,
@@ -1992,7 +2013,23 @@ object GalaxySSIMqttClient {
         }
         setSecureReady(true)
         val payload = GalaxySSILinkProtocol.unwrapEnvelope(decrypted) ?: return
+        if (payload.optString("type") in setOf("input_attachment_receipt", AgentAttachmentRecoveryRequest.REQUEST_TYPE)) {
+            payload.put("source_id", link.desktopId)
+        }
         val incomingMessageId = payload.optString("message_id")
+        if (payload.optString("type") == BlobRelayConfiguration.TYPE) {
+            try {
+                BlobRelayConfigurations.ingest(context, payload, link.desktopId)
+            } catch (error: Exception) {
+                Log.w(TAG, "Rejected Blob relay configuration: ${error.javaClass.simpleName}")
+                return
+            }
+            GalaxySSILinkDeliveryStore.bindCiphertext(context, ciphertextDigest, incomingMessageId, receiptRequired = true)
+            GalaxySSILinkDeliveryStore.claimIncoming(context, incomingMessageId)
+            publishInboundReceipt(link, incomingMessageId)
+            AndroidBlobTransfers.wake(context)
+            return
+        }
         GalaxySSILinkDeliveryStore.bindCiphertext(
             context,
             ciphertextDigest,
@@ -2126,6 +2163,7 @@ object GalaxySSIMqttClient {
         val payload = GalaxySSILinkProtocol.unwrapEnvelope(decrypted) ?: return
         val routes = AppStore.phoneRoutesForIdentity(context, senderId) ?: return
         if (routes.receiveWindow.none { it == topic }) return
+        if (payload.optString("type") == "input_attachment_receipt") payload.put("source_id", senderId)
         val incomingMessageId = payload.optString("message_id")
         GalaxySSILinkDeliveryStore.bindCiphertext(
             context,
@@ -2149,10 +2187,13 @@ object GalaxySSIMqttClient {
             GalaxySSILinkDeliveryStore.IncomingStageResult.STAGED -> Unit
         }
         publishPhoneContactReceipt(context, senderId, incomingMessageId)
+        if (payload.optString("type") == BlobRelayConfiguration.TYPE) {
+            GalaxySSILinkDeliveryStore.completeIncoming(context, incomingMessageId)
+            return
+        }
         if (payload.optString("type") == "input_attachment_receipt") {
-            attachmentTransferExecutor.execute {
+            processAttachmentControl(context, payload) {
                 handleInputAttachmentReceipt(context, payload, senderId)
-                GalaxySSILinkDeliveryStore.completeIncoming(context, incomingMessageId)
             }
             return
         }
@@ -2217,6 +2258,11 @@ object GalaxySSIMqttClient {
         payload: JSONObject,
         sourceDesktopId: String = payload.optString("desktop_id")
     ) {
+        if (payload.optString("type") == BlobRelayConfiguration.TYPE) {
+            // Configuration is accepted only at the authenticated Desktop ingress above.
+            GalaxySSILinkDeliveryStore.completeIncoming(context, payload.optString("message_id"))
+            return
+        }
         if (!payload.optBoolean("peer_chat") && payload.optString("task_id").isNotBlank() &&
             payload.optString("type") in setOf("text", "agent_task_event") &&
             AgentTaskIdentityStore.matchesRegistered(context, payload)
@@ -2340,17 +2386,15 @@ object GalaxySSIMqttClient {
             return
         }
         if (payload.optString("type") == "input_attachment_receipt") {
-            attachmentTransferExecutor.execute {
-                handleInputAttachmentReceipt(context, payload, sourceDesktopId)
+            processAttachmentControl(context, payload) {
+                handleInputAttachmentReceipt(context, payload, payload.optString("source_id").ifBlank { sourceDesktopId })
             }
-            GalaxySSILinkDeliveryStore.completeIncoming(context, payload.optString("message_id"))
             return
         }
         if (payload.optString("type") == AgentAttachmentRecoveryRequest.REQUEST_TYPE) {
-            attachmentTransferExecutor.execute {
-                handleInputAttachmentRequest(context, payload, sourceDesktopId)
+            processAttachmentControl(context, payload) {
+                handleInputAttachmentRequest(context, payload, payload.optString("source_id").ifBlank { sourceDesktopId })
             }
-            GalaxySSILinkDeliveryStore.completeIncoming(context, payload.optString("message_id"))
             return
         }
         if (payload.optString("type") == "proactive_task_event") {
@@ -2383,6 +2427,16 @@ object GalaxySSIMqttClient {
         }
         payload.optJSONArray("connector_agents")?.let { AppStore.updateConnectorAgentStatuses(context, it) }
         notifyMessageListeners(payload)
+    }
+
+    private fun processAttachmentControl(context: Context, payload: JSONObject, process: () -> Unit) {
+        val id = payload.optString("message_id")
+        attachmentControlInbox.enqueue(id, process,
+            complete = { GalaxySSILinkDeliveryStore.completeIncoming(context, id) },
+            failed = { error ->
+                Log.w(TAG, "Attachment control retained for replay: ${error.javaClass.simpleName}")
+                retryHandler.postDelayed({ schedulePendingIncomingReplay() }, 2_000)
+            })
     }
 
     private fun notifyMessageListeners(payload: JSONObject) {
@@ -2523,8 +2577,10 @@ object GalaxySSIMqttClient {
     }
 
     private fun resumePendingAttachmentTransfers(context: Context) {
+        AndroidBlobTransfers.wake(context)
         attachmentTransferExecutor.execute {
             AgentOutboundAttachmentTransferStore.pending(context).forEach { attachment ->
+                if (AndroidBlobTransfers.owns(context, attachment.transferId)) return@forEach
                 val desktopLink = GalaxySSILinkProtocol.serverLink(context, attachment.scope.desktopId)
                 val phoneRoutes = AppStore.phoneRoutesForIdentity(context, attachment.scope.desktopId)
                 val route = desktopLink?.routes ?: phoneRoutes ?: return@forEach
@@ -2564,6 +2620,7 @@ object GalaxySSIMqttClient {
         payload: JSONObject,
         sourceDesktopId: String
     ) {
+        if (AndroidBlobTransfers.acceptStored(context, payload, sourceDesktopId)) return
         val transfer = AgentOutboundAttachmentTransferStore.find(
             context,
             payload.optString("transfer_id").lowercase()
@@ -2572,6 +2629,10 @@ object GalaxySSIMqttClient {
             transfer.scope.desktopId != sourceDesktopId ||
             payload.optString("client_route_id") != transfer.scope.clientRouteId
         ) return
+        if (AndroidBlobTransfers.owns(context, transfer.transferId)) {
+            AndroidBlobTransfers.wake(context)
+            return
+        }
         val progress = payload.optInt("progress", -1).takeIf { it >= 0 }
             ?: PeerAttachmentTransferProgress.percent(
                 payload.optLong("received_bytes", 0L),
@@ -2776,6 +2837,7 @@ object GalaxySSIMqttClient {
             request.contactId
         )
         prepared.forEach { attachment ->
+            if (AndroidBlobTransfers.register(context, attachment, immediate = true)) return@forEach
             publishJsonResult(
                 attachment.manifestPayload(resume = false),
                 link.routes.up,
@@ -2829,6 +2891,7 @@ object GalaxySSIMqttClient {
                     .put("desktop_id", link.desktopId)
                     .put("capability_manifest_version", link.capabilityManifestVersion)
                     .put("request_capability_manifest", requestManifest)
+                    .put("request_blob_configuration", true)
                     .put("time", now)
                 val envelope = GalaxySSILinkProtocol.makeEnvelope(
                     payload,
