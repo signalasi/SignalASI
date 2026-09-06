@@ -23,6 +23,16 @@ at `3c48121ac60c04bc6649b64ec985b70ea00ec1d3` using authenticated GET requests.
   does not negate the effective ruleset, so the combined audit correctly passed.
 - No permission, configuration or branch mutation was performed.
 
+The audit PR exposed a separate CI trigger mismatch: `backend`, `desktop-source`,
+and `android` were required by the ruleset, but the Evolution candidate workflow
+had a path filter that excluded tooling-only and documentation-only PRs. Remove
+that workflow-level path filter so every PR targeting main runs these checks.
+The jobs and their test commands remain unchanged; no synthetic success or skipped
+job is substituted for actual verification. This increases CI work for docs-only
+changes but keeps the checks consistent with the existing mandatory ruleset.
+This follows GitHub's documented treatment of
+[skipped required checks](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
+
 The locally retained structured result is
 `build/reports/branch-protection.json`. This timestamped observation is not a
 claim that configuration will remain unchanged; rerun the audit before release.
