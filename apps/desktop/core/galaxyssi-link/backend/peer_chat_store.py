@@ -68,6 +68,7 @@ class PeerChatStore:
                   WHERE remote_message_id <> '';
                 CREATE INDEX IF NOT EXISTS peer_messages_route_time
                   ON peer_messages(client_route_id, created_at_ms, message_id);
+                CREATE TABLE IF NOT EXISTS peer_message_tombstones (message_id TEXT PRIMARY KEY);
                 """
             )
             connection.execute(
@@ -99,6 +100,7 @@ class PeerChatStore:
         remote_message_id: str = "",
         delivery_status: str = "stored",
         created_at_ms: int = 0,
+        idempotent: bool = False,
     ) -> dict:
         route_id = str(client_route_id or "").strip()
         if not route_id:
@@ -116,6 +118,17 @@ class PeerChatStore:
         stored_remote_message_id = self._seal_remote(remote_message_id)
         encoded_attachments = self._encrypt_attachments(normalized_attachments)
         with self._lock, closing(self._connect()) as connection:
+            if idempotent:
+                connection.execute("BEGIN IMMEDIATE")
+                if connection.execute("SELECT 1 FROM peer_message_tombstones WHERE message_id=?", (local_id,)).fetchone():
+                    raise ValueError("peer_message_deleted")
+                existing = connection.execute("SELECT * FROM peer_messages WHERE message_id=?", (local_id,)).fetchone()
+                if existing is not None:
+                    if (existing["client_route_id"] != stored_route_id or existing["direction"] != normalized_direction
+                            or self._decrypt_content(existing["content"]) != normalized_content
+                            or self._decrypt_attachments(existing["attachments_json"]) != normalized_attachments):
+                        raise ValueError("peer_message_conflict")
+                    return self._public(existing)
             if remote_message_id:
                 existing = connection.execute(
                     """
@@ -155,11 +168,12 @@ class PeerChatStore:
         self._notify(result)
         return result
 
-    def update_delivery_status(self, message_id: str, status: str) -> dict | None:
+    def update_delivery_status(self, message_id: str, status: str, *, only_if: tuple[str, ...] | None = None) -> dict | None:
         with self._lock, closing(self._connect()) as connection:
-            connection.execute(
-                "UPDATE peer_messages SET delivery_status = ? WHERE message_id = ?",
-                (str(status or "")[:32], str(message_id or "")),
+            predicate = " AND delivery_status IN (" + ",".join("?" for _ in only_if) + ")" if only_if is not None else ""
+            updated = connection.execute(
+                "UPDATE peer_messages SET delivery_status = ? WHERE message_id = ?" + predicate,
+                (str(status or "")[:32], str(message_id or ""), *(only_if or ())),
             )
             row = connection.execute(
                 "SELECT * FROM peer_messages WHERE message_id = ?",
@@ -169,8 +183,15 @@ class PeerChatStore:
         if row is None:
             return None
         result = self._public(row)
+        if only_if is not None and updated.rowcount == 0:
+            return result
         self._notify(result)
         return result
+
+    def message_was_deleted(self, message_id: str) -> bool:
+        with self._lock, closing(self._connect()) as connection:
+            return connection.execute("SELECT 1 FROM peer_message_tombstones WHERE message_id=?",
+                                      (str(message_id),)).fetchone() is not None
 
     def get_message(self, message_id: str) -> dict | None:
         with self._lock, closing(self._connect()) as connection:
@@ -211,6 +232,8 @@ class PeerChatStore:
             return 0
         stored_route_id = self._seal_route(route_id)
         with self._lock, closing(self._connect()) as connection:
+            connection.execute("INSERT OR IGNORE INTO peer_message_tombstones(message_id) "
+                               "SELECT message_id FROM peer_messages WHERE client_route_id=?", (stored_route_id,))
             cursor = connection.execute(
                 "DELETE FROM peer_messages WHERE client_route_id = ?",
                 (stored_route_id,),

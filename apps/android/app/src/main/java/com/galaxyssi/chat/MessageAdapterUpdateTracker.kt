@@ -17,6 +17,7 @@ internal data class MessageRowSnapshot(
 )
 
 internal object MessageRowSnapshotFactory {
+    const val ATTACHMENT_PROGRESS = "attachment-progress"
     private const val TIME_DIVIDER_GAP_MILLIS = 30 * 60 * 1000L
 
     fun from(messages: List<ChatMessage>): List<MessageRowSnapshot> =
@@ -37,6 +38,17 @@ internal object MessageRowSnapshotFactory {
                 voiceTranscriptionPending = message.voiceTranscriptionPending
             )
         }
+
+    fun progressOnly(previous: MessageRowSnapshot, next: MessageRowSnapshot): Boolean {
+        if (previous.attachments.size != next.attachments.size || previous.attachments.isEmpty()) return false
+        val normalized = next.attachments.mapIndexed { index, attachment ->
+            val old = previous.attachments[index]
+            if (attachment.transferProgress != old.transferProgress &&
+                (attachment.transferState != old.transferState || attachment.transferState !in setOf("uploading", "downloading"))) return false
+            attachment.copy(transferProgress = old.transferProgress)
+        }
+        return previous != next && next.copy(attachments = normalized) == previous
+    }
 }
 
 internal object MessageListSnapshot {
@@ -59,6 +71,10 @@ internal class MessageAdapterUpdateTracker(messages: List<ChatMessage>) {
 
             override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
                 previous[oldItemPosition] == next[newItemPosition]
+
+            override fun getChangePayload(oldItemPosition: Int, newItemPosition: Int): Any? =
+                if (MessageRowSnapshotFactory.progressOnly(previous[oldItemPosition], next[newItemPosition]))
+                    MessageRowSnapshotFactory.ATTACHMENT_PROGRESS else null
         }, false)
         rendered = next
         result.dispatchUpdatesTo(adapter)

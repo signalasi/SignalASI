@@ -9,6 +9,7 @@ import com.galaxyssi.chat.metrics.AgentTransportTiming
 
 import android.content.Context
 import com.galaxyssi.chat.blob.AndroidBlobTransfers
+import com.galaxyssi.chat.blob.AndroidBlobArtifactReceives
 import com.galaxyssi.chat.blob.BlobRelayConfiguration
 import com.galaxyssi.chat.blob.BlobRelayConfigurations
 import android.os.Handler
@@ -1135,6 +1136,14 @@ object GalaxySSIMqttClient {
 
     internal fun notifyBlobProgress(payload: JSONObject) = notifyMessageListeners(payload)
 
+    internal fun persistBlobArtifactEvent(context: Context, payload: JSONObject): Boolean {
+        require(payload.optString("type") in setOf("artifact_available", "artifact_download_failed"))
+        val stage = GalaxySSILinkDeliveryStore.stageIncoming(context, payload.getString("message_id"), payload.toString())
+        if (stage == GalaxySSILinkDeliveryStore.IncomingStageResult.INVALID) return false
+        schedulePendingIncomingReplay()
+        return true
+    }
+
     internal fun dispatchBlobDependencies() { retryHandler.post { dispatchPendingMessages() } }
 
     private fun publishJsonResult(
@@ -2039,6 +2048,22 @@ object GalaxySSIMqttClient {
             payload.put("source_id", link.desktopId)
         }
         val incomingMessageId = payload.optString("message_id")
+        if (payload.optString("type") == "artifact_blob_offer") {
+            AndroidBlobArtifactReceives.receive(context, link.desktopId, decrypted.optString("conversation_id"), payload) { result ->
+                result.onSuccess {
+                    runCatching {
+                        val current = GalaxySSILinkProtocol.serverLink(context, link.desktopId)
+                        if (current?.paired != true || current.routes.clientRouteId != link.routes.clientRouteId ||
+                            current.routes.localFingerprint != link.routes.localFingerprint ||
+                            current.routes.remoteFingerprint != link.routes.remoteFingerprint) return@runCatching
+                        GalaxySSILinkDeliveryStore.bindCiphertext(context, ciphertextDigest, incomingMessageId, receiptRequired = true)
+                        GalaxySSILinkDeliveryStore.claimIncoming(context, incomingMessageId)
+                        publishInboundReceipt(current, incomingMessageId)
+                    }.onFailure { Log.w(TAG, "Blob offer ACK deferred: ${it.javaClass.simpleName}") }
+                }.onFailure { Log.w(TAG, "Blob offer persistence deferred: ${it.javaClass.simpleName}") }
+            }
+            return
+        }
         if (payload.optString("type") == BlobRelayConfiguration.TYPE) {
             try {
                 BlobRelayConfigurations.ingest(context, payload, link.desktopId)
@@ -2050,6 +2075,7 @@ object GalaxySSIMqttClient {
             GalaxySSILinkDeliveryStore.claimIncoming(context, incomingMessageId)
             publishInboundReceipt(link, incomingMessageId)
             AndroidBlobTransfers.wake(context)
+            AndroidBlobArtifactReceives.wake(context)
             return
         }
         GalaxySSILinkDeliveryStore.bindCiphertext(
@@ -2280,6 +2306,14 @@ object GalaxySSIMqttClient {
         payload: JSONObject,
         sourceDesktopId: String = payload.optString("desktop_id")
     ) {
+        if (payload.optBoolean("blob_publication") &&
+            payload.optString("type") in setOf("artifact_available", "artifact_download_failed")) {
+            if (listeners.isNotEmpty()) {
+                notifyMessageListeners(payload)
+                GalaxySSILinkDeliveryStore.completeIncoming(context, payload.optString("message_id"))
+            }
+            return
+        }
         if (payload.optString("type") == BlobRelayConfiguration.TYPE) {
             // Configuration is accepted only at the authenticated Desktop ingress above.
             GalaxySSILinkDeliveryStore.completeIncoming(context, payload.optString("message_id"))
@@ -2621,6 +2655,7 @@ object GalaxySSIMqttClient {
 
     private fun resumePendingAttachmentTransfers(context: Context) {
         AndroidBlobTransfers.wake(context)
+        AndroidBlobArtifactReceives.wake(context)
         attachmentTransferExecutor.execute {
             AgentOutboundAttachmentTransferStore.pending(context).forEach { attachment ->
                 if (AndroidBlobTransfers.owns(context, attachment.transferId)) return@forEach

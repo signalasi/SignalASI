@@ -4983,7 +4983,6 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         from artifact_delivery import (
             discard_task_workspace_if_no_artifacts,
             prepare_artifacts,
-            register_artifact_batch,
             should_deliver_task_artifacts,
         )
         from rich_output import build_rich_output
@@ -5044,24 +5043,29 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
                 )
             )
         output_files = list(finalization.output_files)
-        artifacts = [] if artifact_fast_path else prepare_artifacts(task_id, output_files)
+        from blob_artifact_publication import prepare_for_route
+        from blob_protocol import BlobError
+        preparation_error = None
+        try:
+            artifacts = [] if artifact_fast_path else prepare_for_route(
+                sys.modules[__name__], str(wire_payload.get("_client_route_id") or ""), task_id, output_files)
+        except BlobError as error:
+            artifacts, preparation_error = [], error
         deliverable_paths = {item.relative_path.casefold() for item in artifacts}
         deliverable_output_files = [
             item for item in output_files
             if str(item.get("relative_path") or "").replace("\\", "/").strip("/").casefold()
             in deliverable_paths
         ]
+        # Preserve the intended card privately when transport preparation fails.
+        # Only a failure notice is sent until explicit delivery retry succeeds.
+        if preparation_error is not None:
+            deliverable_output_files = output_files
         retain_on_desktop = bool(
             not artifact_fast_path
             and full_desktop_executor
             and _requests_desktop_artifact_retention(current_user_request)
         )
-        if artifacts:
-            register_artifact_batch(
-                artifacts,
-                client_route_id=client_route_id,
-                retain_on_desktop=retain_on_desktop,
-            )
         if structured_connector_response:
             reply = raw_result.strip()
             rich_output = None
@@ -5132,23 +5136,13 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
             reply_payload["exact_content_encoding"] = "base64-utf8"
             reply_payload["exact_content_b64"] = base64.b64encode(raw_result.encode("utf-8")).decode("ascii")
         reply_payload["latency"] = _trace_metrics(reply_payload["delivery_trace"])
-        # Queue artifact bytes before the card that references them. This keeps
-        # a slow broker from exposing a disabled download action to the phone.
-        _publish_task_artifacts(
-            mqttc,
-            wire_payload,
-            artifacts,
-            common={
-                "source_message_id": source_message_id,
-                "conversation_id": task.get("client_conversation_id") or client_conversation_id,
-                "turn_id": _client_task_turn_id(task),
-                "contact_id": contact_id,
-                "agent_id": agent_id,
-                "desktop_id": desktop_id(),
-                "desktop_name": desktop_name(),
-            },
-        )
-        _publish_or_queue_task_result(mqttc, wire_payload, reply_payload)
+        if artifacts or preparation_error is not None:
+            from blob_artifact_deferred import publish_or_defer
+            publish_or_defer(sys.modules[__name__], mqttc, wire_payload, artifacts, reply_payload, output_files,
+                             preparation_error=preparation_error, language=response_language_tag(current_user_request),
+                             retain_on_desktop=retain_on_desktop)
+        else:
+            _publish_or_queue_task_result(mqttc, wire_payload, reply_payload)
         from agent_latency import record_task
         record_task(task_id, "desktop_response_enqueued", once=True)
         if not output_files:
@@ -6614,6 +6608,14 @@ def _process_message(mqttc, userdata, msg):
             # A transport ACK must never outrun durable acceptance of a Blob job.
             from blob_input_bridge import persist_before_ack
             persist_before_ack(sys.modules[__name__], application_envelope, client_route_id)
+            control_type = application_envelope["payload"].get("type")
+            if control_type == "artifact_blob_capability":
+                from blob_pair_configuration import record_artifact_capability
+                record_artifact_capability(sys.modules[__name__], client_route_id,
+                                           application_envelope["source_id"], application_envelope["payload"])
+            elif control_type == "artifact_blob_receipt":
+                from blob_artifact_ingress import persist_receipt_before_ack
+                persist_receipt_before_ack(sys.modules[__name__], application_envelope, client_route_id)
             bind_ciphertext(client_route_id, ciphertext_digest, message_id)
             if not claim_message(client_route_id, message_id):
                 duplicate_type = application_envelope.get("payload", {}).get("type")
@@ -6680,7 +6682,7 @@ def _process_message(mqttc, userdata, msg):
                 accepted_delivery_ack_payload(payload, message_id, trace),
             )
 
-        if payload.get("type") == "input_attachment_blob_offer":
+        if payload.get("type") in {"input_attachment_blob_offer", "artifact_blob_capability", "artifact_blob_receipt"}:
             return
 
         if _local_only_transport_payload(payload):
@@ -8290,14 +8292,28 @@ def publish_peer_message(
     except (OSError, ValueError) as exc:
         return api_error("peer_attachment_unavailable", str(exc))
 
-    artifacts = prepare_artifacts(task_id, output_files, compress_images=False)
+    def attachment_failure(code):
+        existing = store.get_message(message_id)
+        if existing is not None:
+            if existing.get("client_route_id") != route_id or existing.get("direction") != "outbound":
+                return api_error("artifact_blob_publication_scope_mismatch", message_id=message_id)
+            failed = store.update_delivery_status(message_id, "failed", only_if=("sending", "queued")) or existing
+        else:
+            failed = store.append(
+                client_route_id=route_id, direction="outbound", sender_name=desktop_name(),
+                content=clean_content, attachments=stored_attachments, message_id=message_id,
+                delivery_status="failed", idempotent=True,
+            )
+        return api_error(code, message_id=message_id, peer_message=failed)
+
+    from blob_artifact_publication import prepare_for_route
+    from blob_protocol import BlobError
+    try:
+        artifacts = prepare_for_route(sys.modules[__name__], route_id, task_id, output_files, compress_images=False)
+    except BlobError as error:
+        return attachment_failure(error.code)
     if len(artifacts) != len(output_files):
         return api_error("peer_attachment_prepare_failed", "One or more files could not be prepared")
-    register_artifact_batch(
-        artifacts,
-        client_route_id=route_id,
-        retain_on_desktop=False,
-    )
     artifact_descriptors = []
     for index, item in enumerate(artifacts):
         descriptor = {
@@ -8313,6 +8329,29 @@ def publish_peer_message(
         if duration_ms and item.mime_type.startswith("audio/"):
             descriptor["duration_ms"] = min(duration_ms, 60 * 60 * 1000)
         artifact_descriptors.append(descriptor)
+    payload = {
+        "type": PEER_MESSAGE_TYPE, "message_id": message_id, "source_message_id": message_id,
+        "conversation_id": conversation_id, "turn_id": turn_id, "client_route_id": route_id,
+        "contact_id": desktop_id(), "desktop_id": desktop_id(), "desktop_name": desktop_name(),
+        "content": clean_content, "attachments": artifact_descriptors, "sender": "other", "time": time.time(),
+    }
+    voice_duration_ms = next((int(item.get("duration_ms") or 0) for item in artifact_descriptors
+                              if str(item.get("mime_type") or "").startswith("audio/")), 0)
+    if voice_duration_ms > 0:
+        payload["duration_ms"] = voice_duration_ms
+    if artifacts:
+        from blob_artifact_peer import try_publish
+        from blob_protocol import BlobError
+        try:
+            blob_result = try_publish(sys.modules[__name__], artifacts, payload, stored_attachments)
+        except BlobError as error:
+            return attachment_failure(error.code)
+        if blob_result is not None:
+            return blob_result
+    from artifact_delivery import MAX_ARTIFACT_BYTES
+    if any(artifact.size_bytes > MAX_ARTIFACT_BYTES for artifact in artifacts):
+        return attachment_failure("artifact_blob_transport_required")
+    register_artifact_batch(artifacts, client_route_id=route_id, retain_on_desktop=False)
     stored = store.append(
         client_route_id=route_id,
         direction="outbound",
@@ -8336,28 +8375,6 @@ def publish_peer_message(
         "peer_chat": True,
     }
     chunks_ok = _publish_task_artifacts(client, wire_payload, artifacts, common=common)
-    payload = {
-        "type": PEER_MESSAGE_TYPE,
-        "message_id": message_id,
-        "source_message_id": message_id,
-        "conversation_id": conversation_id,
-        "turn_id": turn_id,
-        "client_route_id": route_id,
-        "contact_id": desktop_id(),
-        "desktop_id": desktop_id(),
-        "desktop_name": desktop_name(),
-        "content": clean_content,
-        "attachments": artifact_descriptors,
-        "sender": "other",
-        "time": time.time(),
-    }
-    voice_duration_ms = next((
-        int(item.get("duration_ms") or 0)
-        for item in artifact_descriptors
-        if str(item.get("mime_type") or "").startswith("audio/")
-    ), 0)
-    if voice_duration_ms > 0:
-        payload["duration_ms"] = voice_duration_ms
     try:
         sent = _publish_phone_payload(client, wire_payload, payload)
     except Exception as exc:
@@ -8529,6 +8546,14 @@ def republish_agent_task_result(task_id: str) -> dict:
     route_id = str(task.client_route_id or "")
     if not route_id or get_client(route_id) is None:
         return api_error("client_route_unavailable", task_id=task.task_id)
+    from blob_artifact_replay import republish as republish_blob_result
+    replayed = republish_blob_result(sys.modules[__name__], task.public(), route_id)
+    if replayed is not None:
+        return replayed
+    from blob_artifact_deferred import resume as resume_deferred_artifacts
+    resumed = resume_deferred_artifacts(sys.modules[__name__], task.public(), route_id)
+    if resumed is not None:
+        return resumed
     from artifact_delivery import prepare_artifacts, register_artifact_batch
 
     artifacts = prepare_artifacts(task.task_id, list(task.output_files or []))
@@ -8831,6 +8856,8 @@ def start_background():
     mqtt_lifecycle_stop_event.clear()
     from blob_input_bridge import start as start_blob_input
     start_blob_input(sys.modules[__name__])
+    from blob_artifact_bridge import start as start_blob_output
+    start_blob_output(sys.modules[__name__])
     _ensure_mqtt_worker()
     _ensure_mqtt_supervisor()
     log.info("MQTT bridge started with lifecycle supervision")
@@ -8841,6 +8868,8 @@ def stop():
     mqtt_lifecycle_stop_event.set()
     from blob_input_bridge import stop as stop_blob_input
     stop_blob_input()
+    from blob_artifact_bridge import stop as stop_blob_output
+    stop_blob_output(sys.modules[__name__])
     running = False
     codex_warm_stop_event.set()
     presence_stop_event.set()

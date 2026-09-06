@@ -7,6 +7,8 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Base64
+import com.galaxyssi.chat.blob.BlobArtifactStorage
+import com.galaxyssi.chat.blob.BlobStaging
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
@@ -27,6 +29,16 @@ internal object AgentDesktopArtifactStore {
     private const val MAX_CHUNK_BYTES = 256 * 1024
     private const val MAX_CHUNK_COUNT = 256
     private val HEX_64 = Regex("^[0-9a-f]{64}$")
+
+    internal fun blobStorage(context: Context): BlobArtifactStorage = BlobArtifactStorage(root(context))
+
+    /** Called only by the receiver worker, after authenticating the paired offer. */
+    fun ingestBlob(context: Context, staged: BlobStaging, manifest: JSONObject,
+        checkCurrent: () -> Unit = {}): AgentDesktopArtifactIngestResult {
+        val record = BlobArtifactStorage(root(context)).ingest(staged, manifest, checkCurrent)
+        return AgentDesktopArtifactIngestResult(true, record.getString("artifact_id"),
+            record.getString("artifact_uri"), record.getString("sha256"), record.getString("task_id"))
+    }
 
     @Synchronized
     fun ingest(context: Context, payload: JSONObject): AgentDesktopArtifactIngestResult {
@@ -145,6 +157,7 @@ internal object AgentDesktopArtifactStore {
         val sourceUri = block.metadata["artifact_source_uri"].orEmpty().ifBlank { block.uri }
         if (Uri.parse(sourceUri).scheme != "galaxyssi-artifact") return block
         val record = existingRecord(context, sourceUri) ?: return block
+        if (!matchesBlock(record, block)) return block
         val file = artifactFile(context, record)?.takeIf(File::isFile) ?: return block
         val deliveredSizeBytes = record.optLong("size_bytes")
         val originalSizeBytes = record.optLong("original_size_bytes", deliveredSizeBytes)
@@ -172,7 +185,8 @@ internal object AgentDesktopArtifactStore {
                 "original_size" to humanSize(originalSizeBytes),
                 "original_size_bytes" to originalSizeBytes.toString(),
                 "sha256" to record.optString("sha256"),
-                "transport" to "encrypted-fragmented",
+                "transport" to record.optString("transport", "encrypted-fragmented"),
+                "blob_transfer_id" to record.optString("transfer_id"),
                 "storage" to "app_private",
                 "saved_to_downloads" to record.optBoolean("saved_to_downloads", false).toString()
             )
@@ -183,16 +197,19 @@ internal object AgentDesktopArtifactStore {
         val resolved = resolveBlock(context, block)
         saveArtifactUriToDownloads(
             context,
-            resolved.metadata["artifact_source_uri"].orEmpty()
+            resolved.metadata["artifact_source_uri"].orEmpty(),
+            expectedBlock = block
         ).getOrThrow()
     }
 
-    fun saveArtifactUriToDownloads(context: Context, artifactUri: String): Result<String> = runCatching {
+    fun saveArtifactUriToDownloads(context: Context, artifactUri: String,
+        expectedBlock: AgentRichBlock? = null): Result<String> = runCatching {
         require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             "System Downloads requires Android 10 or newer"
         }
         val sourceUri = artifactUri.trim()
         val record = existingRecord(context, sourceUri) ?: error("Artifact is not available")
+        require(expectedBlock == null || matchesBlock(record, expectedBlock)) { "Artifact version does not match this message" }
         val source = artifactFile(context, record)?.takeIf(File::isFile)
             ?: error("Artifact file is missing")
         val displayName = normalizedDownloadName(
@@ -233,6 +250,7 @@ internal object AgentDesktopArtifactStore {
         val resolved = resolveBlock(context, block)
         val sourceUri = resolved.metadata["artifact_source_uri"].orEmpty()
         val record = existingRecord(context, sourceUri) ?: return null
+        if (!matchesBlock(record, block)) return null
         return artifactFile(context, record)?.takeIf(File::isFile)
     }
 
@@ -266,13 +284,26 @@ internal object AgentDesktopArtifactStore {
 
     private fun existingRecord(context: Context, artifactUri: String): JSONObject? {
         if (artifactUri.isBlank()) return null
+        val blob = runCatching { BlobArtifactStorage(root(context)).readRecord(artifactUri) }
+        if (blob.isFailure) return null
+        blob.getOrNull()?.let { return it }
         val file = recordFile(context, artifactUri)
         return runCatching { JSONObject(file.readText(Charsets.UTF_8)) }.getOrNull()
     }
 
     private fun writeRecord(context: Context, artifactUri: String, record: JSONObject) {
+        if (record.has("transfer_id")) {
+            BlobArtifactStorage(root(context)).markSaved(artifactUri, record.getString("transfer_id"),
+                record.getString("saved_uri"), record.getLong("saved_at"))
+            return
+        }
         writeAtomic(recordFile(context, artifactUri), record.toString().toByteArray(Charsets.UTF_8))
     }
+
+    private fun matchesBlock(record: JSONObject, block: AgentRichBlock): Boolean =
+        mapOf("artifact_id" to "artifact_id", "sha256" to "sha256", "blob_transfer_id" to "transfer_id").all { (input, stored) ->
+            block.metadata[input].isNullOrBlank() || block.metadata[input] == record.optString(stored)
+        }
 
     private fun recordFile(context: Context, artifactUri: String): File {
         val directory = File(root(context), "metadata").apply { require(exists() || mkdirs()) }

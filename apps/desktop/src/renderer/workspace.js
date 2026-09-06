@@ -932,6 +932,11 @@ async function saveViewedPeerImage() {
   }
 }
 
+function peerDeliveryLabel(status) {
+  const labels = { sent: "Sent", failed: "Failed", delivered: "Delivered", read: "Read" };
+  return t(Object.hasOwn(labels, status) ? labels[status] : "Queued");
+}
+
 function renderPeerConversation(force = false) {
   syncPromptPlaceholder();
   const client = pairedClients().find((item) => item.client_route_id === state.activePeerRouteId);
@@ -953,11 +958,7 @@ function renderPeerConversation(force = false) {
   elements.empty.querySelector("p").textContent = t("Messages and files are end-to-end encrypted between paired devices.");
   elements.messages.innerHTML = messages.map((message, index) => {
     const createdAt = Number(message.created_at_ms) || Date.now();
-    const deliveryLabel = message.delivery_status === "sent"
-      ? t("Sent")
-      : message.delivery_status === "failed"
-        ? t("Failed")
-        : t("Queued");
+    const deliveryLabel = peerDeliveryLabel(message.delivery_status);
     const voiceOnly = !message.content && (message.attachments || []).length > 0 &&
       (message.attachments || []).every((file) => String(file.mime_type || "").toLowerCase().startsWith("audio/"));
     const imageOnly = !message.content && (message.attachments || []).length > 0 &&
@@ -1649,7 +1650,7 @@ async function sendTask() {
       elements.prompt.value = prompt;
       state.attachments = attachments;
       renderAttachmentTray();
-      showToast(`${t("Could not send message")}: ${error.message || error}`);
+      showToast(`${t("Could not send message")}: ${t(error.message || String(error))}`);
     } finally {
       state.peerSendPending = false;
       updateSendState();
@@ -4808,7 +4809,7 @@ async function beginPeerVoiceHold(pointerId = null, startY = null) {
         renderHistory();
         renderPeerConversation(true);
       } catch (error) {
-        showToast(`${t("Voice input failed")}: ${error.message || error}`);
+        showToast(`${t("Voice input failed")}: ${t(error.message || String(error))}`);
       } finally {
         audio?.fill(0);
         state.peerSendPending = false;

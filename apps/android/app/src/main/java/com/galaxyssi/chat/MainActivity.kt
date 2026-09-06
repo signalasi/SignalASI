@@ -1560,6 +1560,9 @@ class MainActivity : Activity(), GalaxySSIMqttClient.Listener {
             try {
                 val envelope = runCatching { JSONObject(payload) }.getOrNull()
                 envelope?.optString("desktop_id")?.takeIf(String::isNotBlank)?.let(::markDesktopDomainAvailableById)
+                if (envelope != null && handleBlobArtifactPresentation(envelope)) {
+                    return@runOnUiThread
+                }
                 if (envelope != null && handlePeerAttachmentTransferProgress(envelope)) {
                     return@runOnUiThread
                 }

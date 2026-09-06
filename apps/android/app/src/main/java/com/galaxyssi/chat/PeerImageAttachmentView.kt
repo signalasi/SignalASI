@@ -82,6 +82,8 @@ internal class PeerImageAttachmentView(context: Context) : FrameLayout(context) 
         }
     }
 
+    fun updateProgress(percent: Int) { progressRing.progress = percent.coerceIn(0, 99) }
+
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 }
 

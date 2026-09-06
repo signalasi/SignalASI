@@ -1086,4 +1086,13 @@
 , "Enter an HTTPS origin without a path": "请输入不含路径的 HTTPS 服务地址"
 , "Credential must contain 64 hexadecimal characters": "凭据必须为 64 位十六进制字符"
 , "Encrypted settings storage unavailable": "加密配置存储不可用"
+, "Delivered": "已送达"
+, "Read": "已读"
+, "Large-file transport is unavailable. Restore the connection settings and retry.": "大文件传输通道不可用，请恢复连接配置后重试。"
+, "The attachment exceeds the 1 GiB transport limit.": "附件超过了 1 GiB 传输上限。"
+, "The attachment source cannot be read. Restore the file and retry.": "无法读取附件源文件，请恢复文件后重试。"
+, "The attachment is empty and cannot be sent.": "附件文件为空，无法发送。"
+, "The original attachment has changed. Restore the original file before retrying this delivery.": "原附件已更改，请恢复原文件后重试此次发送。"
+, "The attachment could not be prepared for transfer.": "附件传输准备失败。"
+, "The transfer checkpoint could not be saved. Check local storage and retry.": "无法保存传输检查点，请检查本机存储后重试。"
 }

@@ -391,6 +391,20 @@ internal class MessageAdapter(
 
     override fun getItemCount(): Int = messages.size
 
+    override fun onBindViewHolder(holder: VH, position: Int, payloads: MutableList<Any>) {
+        if (payloads.isNotEmpty() && payloads.all { it == MessageRowSnapshotFactory.ATTACHMENT_PROGRESS } &&
+            holder.attachments.childCount == messages[position].attachments.size) {
+            messages[position].attachments.forEachIndexed { index, attachment ->
+                if (PeerAttachmentTransferProgress.isActive(attachment.transferProgress, attachment.transferState)) {
+                    when (val view = holder.attachments.getChildAt(index)) {
+                        is PeerImageAttachmentView -> view.updateProgress(attachment.transferProgress)
+                        is PeerFileAttachmentView -> view.updateProgress(attachment)
+                    }
+                }
+            }
+        } else onBindViewHolder(holder, position)
+    }
+
     private fun peerImageAttachment(
         holder: VH,
         attachment: PeerChatAttachment,
