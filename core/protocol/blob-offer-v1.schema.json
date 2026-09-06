@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GalaxySSI private Blob offer v1",
+  "description": "Only transmit inside an authenticated end-to-end encrypted control envelope. Never send this object to the Blob relay, logs or UI.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "relay", "private", "read_token"],
+  "properties": {
+    "version": {"const": 1},
+    "relay": {"type": "string", "maxLength": 2048, "pattern": "^https://"},
+    "read_token": {"$ref": "#/$defs/hex32"},
+    "private": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "blob_id", "key", "nonce_prefix", "size", "sha256", "binding_sha256", "manifest_sha256"],
+      "properties": {
+        "version": {"const": 1},
+        "blob_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+        "key": {"$ref": "#/$defs/hex32"},
+        "nonce_prefix": {"type": "string", "pattern": "^[a-f0-9]{16}$"},
+        "size": {"type": "integer", "minimum": 0, "maximum": 1073741824},
+        "sha256": {"$ref": "#/$defs/hex32"},
+        "binding_sha256": {"$ref": "#/$defs/hex32"},
+        "manifest_sha256": {"$ref": "#/$defs/hex32"}
+      }
+    }
+  },
+  "$defs": {"hex32": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
+}

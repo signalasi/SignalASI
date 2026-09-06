@@ -1,0 +1,26 @@
+{
+  "binding": {
+    "client_route_id": "route-a",
+    "conversation_id": "conversation-a",
+    "task_id": "task-a",
+    "turn_id": "turn-a",
+    "attachment_id": "attachment-a"
+  },
+  "private": {
+    "version": 1,
+    "blob_id": "000102030405060708090a0b0c0d0e0f",
+    "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "nonce_prefix": "1011121314151617",
+    "size": 18,
+    "sha256": "1fd7af2b8d09bb66a1eec51252e06c8e1fb50066c25f5025c67f65af44344d14",
+    "binding_sha256": "4c40a8498b3f8db9041d60cdfc09285aecc7754cf158f1c277700aaf10749bfe",
+    "manifest_sha256": "908ce6226200755939661d27a66211bb5c1583b430e34f2e2cc8600a05de601b"
+  },
+  "manifest": {
+    "version": 1,
+    "chunks": [{"sha256": "460a54d24510e9a01dfbbd8969770a29b06687fcb239be91fdd7b44a686d7565", "size": 34}]
+  },
+  "plaintext_hex": "e4bda0e5a5bdefbc8c47616c617879535349",
+  "aad_hex": "47616c6178795353492d426c6f622d414541442d763100000102030405060708090a0b0c0d0e0f4c40a8498b3f8db9041d60cdfc09285aecc7754cf158f1c277700aaf10749bfe0000000000000012001000001fd7af2b8d09bb66a1eec51252e06c8e1fb50066c25f5025c67f65af44344d140000000000000012",
+  "ciphertext_hex": "fd31f5a8297ef3758086b53eaa596241b0e91f802167f8cb1696e5b317d6c4f7ab3a"
+}
