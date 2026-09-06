@@ -16,6 +16,8 @@ boundaries, AndroidWorld-compatible verification, and SM-T575 evidence are docum
 | Gate | Command | Proves |
 | --- | --- | --- |
 | Repository policy | `npm run check` | Public docs and code stay English-first outside i18n files, Desktop structure is intact, protocol naming is GalaxySSI-only, and required capability markers still exist. |
+| Live branch protection | `npm run audit:branch-protection` | Read-only GitHub verification of effective rulesets and legacy protection, mandatory checks, up-to-date branches, PR-only changes, and prevention of bypass, deletion and force pushes. |
+| Protection evaluator regression | `npm run test:branch-protection` | Missing, disabled, bypassable, stale and permission-hidden protection cannot be mistaken for enforced release gates. No GitHub settings are changed. |
 | Security red team | `npm run test:security-red-team` | Malicious README, web, MCP, and model-output payloads remain untrusted, cannot forge authority, and fail integrity checks after tampering. |
 | Agent product benchmark | `npm run benchmark:agent` | Versioned Agent scenarios score response quality, planning, tool use, approval, isolation, recovery, memory, artifact integrity, timeline order, and latency instead of only source-level correctness. |
 | Agent regression DSL | `npm run regression:agent` | Structured input, plan, ordered tool, safety, isolation, and result contracts compile into deterministic executable regressions. |

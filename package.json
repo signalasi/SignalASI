@@ -41,6 +41,8 @@
     "package:desktop:win": "npm --prefix apps/desktop run package:win:python",
     "smoke:desktop:packaged": "npm --prefix apps/desktop run smoke:packaged",
     "audit:release": "node tools/dev/release-audit.js",
+    "audit:branch-protection": "node tools/security/audit-branch-protection.mjs",
+    "test:branch-protection": "node --test tools/security/branch-protection.test.mjs",
     "audit:release:strict": "node tools/dev/release-audit.js --strict",
     "test:release:local": "node tools/dev/run-release-local-gates.js",
     "test:release:device": "node tools/dev/run-release-device-gates.js",

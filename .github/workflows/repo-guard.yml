@@ -16,6 +16,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: npm run check
+      - run: npm run test:branch-protection
       - run: python tools/dev/test-blob-tooling.py -v
       - run: npm run test:trusted-pr-review
       - run: npm run test:runtime-tools
