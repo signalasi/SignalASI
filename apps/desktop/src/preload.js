@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld("galaxyssi", {
   backendStatus: () => ipcRenderer.invoke("backend:status"),
   getRuntimeDiagnostics: (refresh = false) => ipcRenderer.invoke("runtime:diagnostics", refresh),
   getPairingStatus: () => ipcRenderer.invoke("pairing:status"),
+  getBlobSettings: (route) => ipcRenderer.invoke("blob:settings:get", route),
+  saveBlobSettings: (route, payload) => ipcRenderer.invoke("blob:settings:save", route, payload),
   getPairingQr: (grantDesktopExecutor = false) =>
     ipcRenderer.invoke("pairing:qr", Boolean(grantDesktopExecutor)),
   clearPairing: (clientRouteId = "") => ipcRenderer.invoke("pairing:clear", clientRouteId),

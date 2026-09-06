@@ -16,6 +16,7 @@ def _get_receiver(bridge):
     with _lock:
         if _receiver is None:
             from blob_input_receiver import BlobInputReceiver
+            from blob_pair_configuration import origin_for_peer
 
             def is_current(route, source):
                 peer = bridge.get_client(route)
@@ -38,6 +39,7 @@ def _get_receiver(bridge):
 
             _receiver = BlobInputReceiver(bridge.DATA_DIR / "blob-input",
                                          configured_origin=lambda: os.environ.get("GALAXYSSI_BLOB_RELAY_URL", ""),
+                                         peer_origin=lambda route, source: origin_for_peer(bridge, route, source),
                                          peer_identity=is_current, publish_receipt=publish)
         return _receiver
 

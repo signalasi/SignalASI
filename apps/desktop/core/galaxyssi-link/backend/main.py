@@ -375,6 +375,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="GalaxySSI Link", lifespan=lifespan)
 from evolution_v2.api import router as evolution_v2_router
 app.include_router(evolution_v2_router)
+from blob_configuration_api import router as blob_configuration_router
+app.include_router(blob_configuration_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:8765", "http://localhost:8765", "null"],
