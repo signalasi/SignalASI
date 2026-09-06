@@ -375,6 +375,7 @@ internal fun MainActivity.consumeBoundDirectConnectorResponse(response: AgentCon
                     "turn_id" to binding.turnId,
                     "task_id" to taskId,
                     "remote_task_status" to response.taskStatus,
+                    "delivery_failure_code" to response.deliveryFailureCode,
                     "remote_execution_generation" to response.executionGeneration.toString()
                 )
             )
@@ -959,6 +960,7 @@ internal fun MainActivity.recordSupervisedModelOutput(
     conversationId: String,
     turnId: String
 ) {
+    if (response.deliveryFailureCode.isNotBlank()) return
     clearSupersededAgentFailureEntries(conversationId)
     val snapshot = runtime.snapshot()
     val pendingActionId = snapshot.lastActionResult?.actionId.orEmpty()

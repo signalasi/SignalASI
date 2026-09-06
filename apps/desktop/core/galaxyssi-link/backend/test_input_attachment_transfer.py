@@ -10,6 +10,7 @@ from unittest.mock import patch
 from input_attachment_transfer import (
     ATTACHMENT_CHUNK_BYTES,
     ATTACHMENT_REQUEST_WINDOW_CHUNKS,
+    MAX_ATTACHMENTS_PER_TASK,
     ingest_chunk,
     ingest_manifest,
     prune_expired_transfers,
@@ -132,6 +133,9 @@ class InputAttachmentTransferTests(unittest.TestCase):
         content = b"restored"
         manifest = self._manifest(content)
         manifest["attachment_request_id"] = "c" * 32
+        manifest["transfer_id"] = transfer_id_for(*(manifest[key] for key in (
+            "client_route_id", "conversation_id", "task_id", "turn_id", "attachment_id", "sha256")),
+            attachment_request_id=manifest["attachment_request_id"])
         ingest_manifest(manifest, client_route_id=self.route_id)
 
         stored = ingest_chunk(
@@ -142,6 +146,29 @@ class InputAttachmentTransferTests(unittest.TestCase):
         self.assertEqual("c" * 32, stored.attachment_request_id)
         self.assertEqual("attachment-one", stored.attachment_id)
         self.assertEqual("c" * 32, stored.payload()["attachment_request_id"])
+
+    def test_fresh_recovery_attempts_do_not_consume_distinct_attachment_slots(self):
+        content = b"recovery"
+        manifest = self._manifest(content)
+        ids = set()
+        for attempt in range(MAX_ATTACHMENTS_PER_TASK + 3):
+            manifest["attachment_request_id"] = f"{attempt:032x}"
+            manifest["transfer_id"] = transfer_id_for(*(manifest[key] for key in (
+                "client_route_id", "conversation_id", "task_id", "turn_id", "attachment_id", "sha256")),
+                attachment_request_id=manifest["attachment_request_id"])
+            receipt = ingest_manifest(manifest, client_route_id=self.route_id)
+            ids.add(receipt.transfer_id)
+        self.assertEqual(MAX_ATTACHMENTS_PER_TASK + 3, len(ids))
+        for number in range(1, MAX_ATTACHMENTS_PER_TASK + 1):
+            manifest["attachment_id"] = f"distinct-{number}"
+            manifest["transfer_id"] = transfer_id_for(*(manifest[key] for key in (
+                "client_route_id", "conversation_id", "task_id", "turn_id", "attachment_id", "sha256")),
+                attachment_request_id=manifest["attachment_request_id"])
+            if number < MAX_ATTACHMENTS_PER_TASK:
+                ingest_manifest(manifest, client_route_id=self.route_id)
+            else:
+                with self.assertRaisesRegex(ValueError, "task limit"):
+                    ingest_manifest(manifest, client_route_id=self.route_id)
 
     def test_tampered_chunk_is_rejected_and_requested_again(self):
         content = b"trusted"

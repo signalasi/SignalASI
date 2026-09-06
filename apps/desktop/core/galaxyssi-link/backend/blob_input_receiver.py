@@ -13,10 +13,11 @@ import time
 from backend_instance_lock import BackendInstanceAlreadyRunning, BackendInstanceLock
 from blob_client import BlobClient, _RELAY_ERRORS
 from blob_crypto import STATE_FILE
+from blob_failures import TERMINAL_BLOB_ERRORS, failed_input_receipt
 from blob_input_contract import validate_input_offer
 from blob_input_journal import BlobInputJournal
 from blob_protocol import BlobError, checked_hex
-from input_attachment_transfer import ingest_verified_stream
+from input_attachment_transfer import AttachmentIntegrityError, ingest_verified_stream
 
 log = logging.getLogger(__name__)
 _ERROR_CODES = _RELAY_ERRORS | {
@@ -175,11 +176,25 @@ class BlobInputReceiver:
                     check_active=lambda: self._check_active(body))
                 self.journal.receipt_ready(job, receipt.payload())
                 body = job["body"]
-            self._check_active(body)
-            if self.publish_receipt(body["route"], body["source"], body["peer_fingerprint"], body["receipt"]) is not True:
-                raise BlobError("input_blob_receipt_not_queued", 503)
-            self._cleanup(staging)
-            self.journal.finish(job)
+            self._deliver_receipt(job, staging)
         except Exception as error:
             code = error.code if isinstance(error, BlobError) and error.code in _ERROR_CODES else "input_blob_worker_failed"
+            if (job["phase"] == "download" and isinstance(error, (BlobError, AttachmentIntegrityError))
+                    and error.code in TERMINAL_BLOB_ERRORS):
+                # Persist before publishing. A restart retries this receipt, not the failed download.
+                self.journal.receipt_ready(job, failed_input_receipt(body["manifest"], error.code))
+                try:
+                    self._deliver_receipt(job, self._staging_path(job["id"]))
+                    return
+                except Exception as delivery_error:
+                    code = (delivery_error.code if isinstance(delivery_error, BlobError)
+                            and delivery_error.code in _ERROR_CODES else "input_blob_worker_failed")
             self.journal.retry(job, code)
+
+    def _deliver_receipt(self, job: dict, staging: Path):
+        body = job["body"]
+        self._check_active(body)
+        if self.publish_receipt(body["route"], body["source"], body["peer_fingerprint"], body["receipt"]) is not True:
+            raise BlobError("input_blob_receipt_not_queued", 503)
+        self._cleanup(staging)
+        self.journal.finish(job)

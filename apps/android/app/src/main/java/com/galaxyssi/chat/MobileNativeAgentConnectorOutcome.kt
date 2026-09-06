@@ -10,6 +10,17 @@ internal fun MobileNativeAgent.acceptConnectorOutcome(
     if (response.executionGeneration < (lastActionResult?.metadata?.get("remote_execution_generation")?.toLongOrNull() ?: 1L)) {
         return snapshot()
     }
+    if (response.deliveryFailureCode.isNotBlank()) {
+        val pending = lastActionResult?.metadata ?: return null
+        if (response.success || response.deliveryFailureCode !in com.galaxyssi.chat.blob.BlobFailureContract.terminalCodes ||
+            conversationId.isBlank() || turnId.isBlank() || taskId.isBlank() ||
+            response.conversationId != conversationId || response.turnId != turnId || response.taskId != taskId ||
+            pending["conversation_id"] != conversationId || pending["turn_id"] != turnId ||
+            pending["remote_task_id"].orEmpty().ifBlank { pending["task_id"].orEmpty() } != taskId ||
+            expectedSourceMessageId != response.sourceMessageId || !canAcceptConnectorResponse(
+                response.sourceMessageId, response.contactId, conversationId, turnId, taskId)) return null
+        return handleConnectorDeliveryFailure(response.sourceMessageId, response.content, response.deliveryFailureCode)
+    }
     if (response.remoteFailure) return acceptConnectorTerminalStatus(
         sourceMessageId = response.sourceMessageId, contactId = response.contactId,
         taskId = taskId, taskStatus = response.taskStatus, statusSeq = response.statusSequence,

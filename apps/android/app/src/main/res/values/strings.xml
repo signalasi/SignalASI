@@ -2899,4 +2899,8 @@
     <string name="agent_memory_make_private">Make private</string>
     <string name="agent_memory_make_shareable">Allow Agent retrieval</string>
     <string name="agent_memory_deprecate">Mark as historical</string>
+    <string name="agent_attachment_transfer_expired">The attachment transfer has expired or is no longer available. The Agent did not receive the file.</string>
+    <string name="agent_attachment_source_missing">The attachment source file is missing. The Agent did not receive the file.</string>
+    <string name="agent_attachment_identity_changed">The attachment destination or task identity changed. The file was not delivered.</string>
+    <string name="agent_attachment_integrity_failed">The attachment changed or failed its integrity check. The Agent did not receive a verified file.</string>
 </resources>

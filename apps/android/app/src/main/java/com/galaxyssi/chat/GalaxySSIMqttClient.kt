@@ -2620,7 +2620,7 @@ object GalaxySSIMqttClient {
         payload: JSONObject,
         sourceDesktopId: String
     ) {
-        if (AndroidBlobTransfers.acceptStored(context, payload, sourceDesktopId)) return
+        if (AndroidBlobTransfers.acceptReceipt(context, payload, sourceDesktopId)) return
         val transfer = AgentOutboundAttachmentTransferStore.find(
             context,
             payload.optString("transfer_id").lowercase()

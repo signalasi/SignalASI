@@ -17,8 +17,8 @@ internal object BlobOutgoingContract {
             if (BlobProtocol.canonical(it).size > 32 * 1024) BlobProtocol.fail("input_blob_offer_too_large")
         }
 
-    fun receiptMatches(manifest: JSONObject, receipt: JSONObject): Boolean = runCatching {
-        receipt.optString("status") == "stored" &&
+    fun receiptMatches(manifest: JSONObject, receipt: JSONObject, status: String = "stored"): Boolean = runCatching {
+        status in setOf("stored", "failed") && receipt.optString("status") == status &&
             (bindingKeys + "sha256").all { manifest.optString(it).isNotBlank() &&
                 manifest.optString(it) == receipt.optString(it) } &&
             BlobProtocol.integer(manifest, "size_bytes", 0, BlobProtocol.MAX_FILE_BYTES) ==
