@@ -508,7 +508,11 @@ def revoke_client(client_route_id: str, reason: str = "forgotten_by_desktop") ->
         client["updated_at"] = client["revoked_at"]
         state["updated_at"] = client["updated_at"]
         _write_state(state)
-        return public_client_status(client_status(client))
+        result = public_client_status(client_status(client))
+    # Settings read pairing state under their own lock; avoid taking it while holding the registry lock.
+    from blob_pair_configuration import forget_settings
+    forget_settings(STATE_PATH.parent, client_route_id)
+    return result
 
 
 def forget_client(client_route_id: str) -> bool:
@@ -518,12 +522,14 @@ def forget_client(client_route_id: str) -> bool:
         return False
     with _registry_lock:
         state = _read_state()
-        if route_id not in state["clients"]:
-            return False
-        state["clients"].pop(route_id, None)
-        state["updated_at"] = time.time()
-        _write_state(state)
-        return True
+        present = route_id in state["clients"]
+        if present:
+            state["clients"].pop(route_id, None)
+            state["updated_at"] = time.time()
+            _write_state(state)
+    from blob_pair_configuration import forget_settings
+    forget_settings(STATE_PATH.parent, route_id)
+    return present
 
 
 def clear_pairing_state(client_route_id: str = "") -> dict:
@@ -533,9 +539,13 @@ def clear_pairing_state(client_route_id: str = "") -> dict:
     else:
         with _registry_lock:
             state = _read_state()
+            routes = list(state["clients"])
             state["clients"] = {}
             state["updated_at"] = time.time()
             _write_state(state)
+        from blob_pair_configuration import forget_settings
+        for route in routes:
+            forget_settings(STATE_PATH.parent, route)
     return pairing_status()
 
 

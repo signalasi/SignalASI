@@ -273,7 +273,8 @@ class BlobInputReceiverTest(unittest.TestCase):
 
         broker = AttachmentRequestBroker()
         queued, observations = [], []
-        peer = {"signal_name": "paired-phone", "identity_fingerprint": self.fingerprint}
+        peer = {"signal_name": "paired-phone", "identity_fingerprint": self.fingerprint,
+                "local_identity_fingerprint": "b" * 64}
         bridge = SimpleNamespace(DATA_DIR=self.root / "bridge", client=object(),
                                  get_client=lambda _route: peer, attachment_request_broker=broker)
         def queue(_client, recipient, receipt, lane, *, durable):
@@ -284,7 +285,8 @@ class BlobInputReceiverTest(unittest.TestCase):
         bridge._publish_to_registered_client = queue
         self.store.clock = lambda: time.time() + 8 * 86400
         with patch.object(blob_input_bridge, "_receiver", None), \
-                patch.dict(os.environ, {"GALAXYSSI_BLOB_RELAY_URL": self.relay.origin}):
+                patch.dict(os.environ, {"GALAXYSSI_BLOB_RELAY_URL": self.relay.origin,
+                                        "GALAXYSSI_BLOB_PROVISION_TOKEN": self.token}):
             receiver = blob_input_bridge._get_receiver(bridge)
             receiver.client_factory = self.client
             def request(payload):

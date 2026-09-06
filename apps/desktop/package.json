@@ -7,7 +7,7 @@
   "private": true,
   "scripts": {
     "start": "node .electron-runtime/node_modules/electron/cli.js .",
-    "check": "node --test scripts/connecting-animation.test.js scripts/peer-voice-playback.test.js scripts/peer-hold-to-talk.test.js scripts/peer-conversation-preview.test.js scripts/text-context-menu.test.js && node scripts/check.js",
+    "check": "node --test scripts/connecting-animation.test.js scripts/peer-voice-playback.test.js scripts/peer-hold-to-talk.test.js scripts/peer-conversation-preview.test.js scripts/text-context-menu.test.js scripts/blob-settings.test.js && node scripts/check.js",
     "status:connectors": "node scripts/connector-status.js",
     "smoke": "node scripts/smoke.js",
     "smoke:pairing": "node scripts/smoke-pairing.js",
