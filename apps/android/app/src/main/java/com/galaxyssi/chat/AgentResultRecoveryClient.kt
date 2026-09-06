@@ -16,19 +16,28 @@ internal class AgentResultRecoveryClient {
     private val pending = ConcurrentHashMap<String, Pending>()
 
     suspend fun fetch(desktop: String, fields: JSONObject, timeoutMillis: Long = 8_000L,
-        stillPending: () -> Boolean = { true }, publish: (JSONObject) -> Boolean): JSONObject? {
+        stillPending: () -> Boolean = { true }, checkpoint: AgentResultPageCheckpoint? = null,
+        publish: (JSONObject) -> Boolean): JSONObject? {
         val expected = identity(fields)
         val version = AgentRemoteOutcomeCodec.version(fields) ?: return null
         require(desktop.isNotBlank() && expected.all { it.isNotBlank() && it.length <= 200 })
         if (GalaxySSITransportPrivacyPolicy.isLocalOnly(fields)) return null
         val bytes = WipeableBuffer()
         try {
-            var digest = ""
-            var total = -1L
-            var count = 1
+            var manifest = checkpoint?.manifest()
+            var digest = manifest?.digest.orEmpty()
+            var total = manifest?.bytes ?: -1L
+            var count = manifest?.pages ?: 1
             var page = 0
             while (page < count) {
                 if (!stillPending()) return null
+                val cached = manifest?.let { checkpoint?.read(it, page) }
+                if (cached != null) {
+                    val valid = try { cached.size == manifest!!.pageBytes(page) } finally { cached.fill(0) }
+                    if (!valid) { checkpoint?.clear(digest); return null }
+                    page++
+                    continue
+                }
                 val response = query(desktop, fields, page, digest, timeoutMillis, publish) ?: return null
                 if (response.optString("status") != "ready") return null
                 val observedDigest = response.optString("sha256")
@@ -36,8 +45,9 @@ internal class AgentResultRecoveryClient {
                 val observedCount = response.optInt("page_count", -1)
                 if (!HASH.matches(observedDigest) || observedTotal !in 1L..(Int.MAX_VALUE - 8L) ||
                     observedCount.toLong() != (observedTotal + PAGE_BYTES - 1) / PAGE_BYTES) return null
-                if (page == 0) {
+                if (manifest == null) {
                     digest = observedDigest; total = observedTotal; count = observedCount
+                    manifest = AgentResultPageManifest(digest, total, count)
                 } else if (digest != observedDigest || total != observedTotal || count != observedCount) return null
                 val encoded = response.optString("data_b64")
                 if (encoded.length > ((PAGE_BYTES + 2) / 3) * 4) return null
@@ -45,22 +55,38 @@ internal class AgentResultRecoveryClient {
                 try {
                     val expectedSize = minOf(PAGE_BYTES.toLong(), total - page.toLong() * PAGE_BYTES).toInt()
                     if (chunk.size != expectedSize || sha256(chunk) != response.optString("page_sha256")) return null
-                    bytes.write(chunk)
+                    if (!stillPending()) return null
+                    if (checkpoint != null) {
+                        if (!checkpoint.write(requireNotNull(manifest), page, chunk)) return null
+                    } else bytes.write(chunk)
                 } finally { chunk.fill(0) }
                 page++
             }
             if (!stillPending()) return null
+            if (checkpoint != null) {
+                for (index in 0 until count) {
+                    if (!stillPending()) return null
+                    val chunk = checkpoint.read(requireNotNull(manifest), index) ?: return null
+                    try { bytes.write(chunk) } finally { chunk.fill(0) }
+                }
+            }
             val complete = bytes.toByteArray()
             try {
-                if (complete.size.toLong() != total || sha256(complete) != digest) return null
-                val result = runCatching { JSONObject(String(complete, Charsets.UTF_8)) }.getOrNull() ?: return null
-                if (identity(result) != expected || result.optString("type") != "text" ||
+                if (complete.size.toLong() != total || sha256(complete) != digest) {
+                    checkpoint?.clear(digest)
+                    return null
+                }
+                val result = runCatching { JSONObject(String(complete, Charsets.UTF_8)) }.getOrNull()
+                if (result == null || identity(result) != expected || result.optString("type") != "text" ||
                     result.optString("task_status") !in AgentRemoteOutcomeCodec.TERMINAL ||
                     AgentRemoteOutcomeCodec.version(result)?.generation != version.generation ||
                     (fields.optString("expected_status").isNotBlank() &&
                         fields.optString("expected_status") != result.optString("task_status")) ||
                     (result.optString("content").isBlank() && result.optJSONObject("rich_output") == null &&
-                        result.optString("task_status") !in AgentRemoteOutcomeCodec.FAILURES)) return null
+                        result.optString("task_status") !in AgentRemoteOutcomeCodec.FAILURES)) {
+                    checkpoint?.clear(digest)
+                    return null
+                }
                 return result.put("result_recovery", JSONObject().put("sha256", digest))
             } finally { complete.fill(0) }
         } finally { bytes.wipe() }
