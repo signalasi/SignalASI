@@ -42,7 +42,9 @@ def resident_bytes():
                     "peak_nonpaged", "nonpaged", "pagefile", "peak_pagefile", "private")]
         result = Counters()
         result.cb = ctypes.sizeof(result)
-        read = ctypes.windll.psapi.GetProcessMemoryInfo
+        # Never mutate ctypes.windll's cached function signature: other runtime
+        # modules use their own PROCESS_MEMORY_COUNTERS structure in this process.
+        read = ctypes.WinDLL("psapi", use_last_error=True).GetProcessMemoryInfo
         read.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
         read.restype = wintypes.BOOL
         if not read(wintypes.HANDLE(-1), ctypes.byref(result), result.cb):
@@ -147,6 +149,20 @@ class BlobHttpFixture(unittest.TestCase):
 
 
 class BlobHttpTest(BlobHttpFixture):
+    @unittest.skipUnless(os.name == "nt", "Windows API isolation")
+    def test_memory_sampler_does_not_change_shared_windows_api_signature(self):
+        import ctypes
+        from agent_execution_harness import _process_memory_bytes
+        shared = ctypes.windll.psapi.GetProcessMemoryInfo
+        previous = shared.argtypes
+        before = _process_memory_bytes()
+        self.assertGreater(resident_bytes(), 0)
+        self.assertIs(previous, shared.argtypes)
+        # The existing harness uses zero for an unavailable OS reading. Its
+        # availability is separate from preserving its callable signature.
+        self.assertGreaterEqual(before, 0)
+        self.assertGreaterEqual(_process_memory_bytes(), 0)
+
     def test_offer_is_available_before_bulk_bytes_for_early_attachment_card(self):
         staged = self.staged()
         observed = []

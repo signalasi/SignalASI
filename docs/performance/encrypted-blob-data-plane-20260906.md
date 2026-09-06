@@ -59,6 +59,33 @@ failure. The client now inspects both chains and returns the specific TLS
 verification failure without weakening certificate checks. Earlier Windows test
 cleanup also found two test-owned SQLite handles that needed explicit closure.
 
+## Full backend CI isolation follow-up
+
+The first complete backend CI run failed: 18 failed and 1,370 passed. These
+failures were not present in the narrower kernel/MQTT regression above. The
+Windows RSS fixture changed the signature of a globally cached ctypes function,
+so later Codex harness calls using another ctypes structure raised ArgumentError.
+The process-recovery test also assumed the backend directory was its working
+directory; CI starts pytest from apps/desktop, and the child could not import
+blob_crypto.
+
+The RSS fixture now loads an independent WinDLL function and tests that the
+shared API signature remains unchanged. The subprocess explicitly selects the
+backend working directory. The test runner's new --pytest mode uses the same
+working directory and whole-suite ordering as CI, retaining the isolated test
+HOME and state directory so tests cannot open the live Desktop database.
+
+After these fixes, the full backend suite passed: **1,389 tests and 392 subtests,
+zero failures, two existing WebSocket deprecation warnings, 399.27 seconds**.
+This run used the isolated supported dependencies described above. Its log is
+build/blob-ci-full-pytest.log; the original CI failure remains recorded in
+build/blob-ci-backend-failure.log. This is local full-suite evidence, not a claim
+that a later remote CI run or production phone transfer has completed.
+
+```powershell
+python tools/dev/test-run-kernel.py --pytest
+```
+
 ## 152 MiB real loopback transfer
 
 The final full-regression run generated a 152 MiB file, prepared 152 distinct

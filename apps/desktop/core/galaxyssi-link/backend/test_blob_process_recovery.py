@@ -32,6 +32,7 @@ os._exit(74)
         staged_path = self.root / "sender-child"
         result = subprocess.run([sys.executable, "-c", script, str(self.source), str(staged_path),
                                  self.relay.origin, self.token, json.dumps(BINDING)],
+                                cwd=Path(__file__).resolve().parent,
                                 capture_output=True, timeout=45)
         self.assertEqual(73, result.returncode, result.stderr.decode(errors="replace"))
         staged = StagedBlob.open(staged_path, BINDING)

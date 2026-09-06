@@ -28,6 +28,11 @@ def main() -> int:
             "APPDATA": home, "GALAXYSSI_STATE_DIR": str(Path(home) / "GalaxySSI"),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
+        if sys.argv[1:2] == ["--pytest"]:
+            return subprocess.call(
+                [sys.executable, "-m", "pytest", *(sys.argv[2:] or ["-q", "core/galaxyssi-link/backend"])],
+                cwd=root / "apps" / "desktop", env=environment,
+            )
         return subprocess.call(
             [sys.executable, "-m", "unittest", *(sys.argv[1:] or modules), "-q"],
             cwd=backend, env=environment,
