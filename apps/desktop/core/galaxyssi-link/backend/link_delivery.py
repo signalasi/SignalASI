@@ -27,9 +27,30 @@ ROUTE_PURPOSE = "link-delivery-route"
 
 
 def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(DB_PATH, timeout=10)
-    db.execute("PRAGMA journal_mode=WAL")
+    path = Path(DB_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _lock:
+        deadline = time.monotonic() + 10
+        while True:
+            db = sqlite3.connect(path, timeout=max(0, deadline - time.monotonic()))
+            try:
+                return _initialize_connection(db)
+            except BaseException as error:
+                db.close()
+                code = getattr(error, "sqlite_errorcode", 0)
+                remaining = deadline - time.monotonic()
+                if (not isinstance(error, sqlite3.OperationalError)
+                        or (code & 0xFF) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                        or remaining <= 0):
+                    raise
+                # WAL activation may fail immediately despite SQLite's busy timeout.
+                # Retry only initialization, before a caller can write a message.
+                time.sleep(min(0.05, remaining))
+
+
+def _initialize_connection(db: sqlite3.Connection) -> sqlite3.Connection:
+    if str(db.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "wal":
+        db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=FULL")
     db.execute(
         """CREATE TABLE IF NOT EXISTS inbound_messages (
@@ -69,9 +90,13 @@ def _connect() -> sqlite3.Connection:
         for row in db.execute("PRAGMA table_info(outbound_messages)").fetchall()
     }
     if "priority" not in outbound_columns:
-        db.execute(
-            "ALTER TABLE outbound_messages ADD COLUMN priority INTEGER NOT NULL DEFAULT 50"
-        )
+        db.execute("BEGIN IMMEDIATE")
+        # Another process may have completed this migration while we waited.
+        outbound_columns = {str(row[1]) for row in db.execute("PRAGMA table_info(outbound_messages)")}
+        if "priority" not in outbound_columns:
+            db.execute(
+                "ALTER TABLE outbound_messages ADD COLUMN priority INTEGER NOT NULL DEFAULT 50"
+            )
         db.commit()
     db.execute(
         """CREATE TABLE IF NOT EXISTS delivery_metadata (
