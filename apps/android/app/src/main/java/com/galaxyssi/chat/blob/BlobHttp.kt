@@ -41,16 +41,29 @@ internal class BlobHttp(
         .connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS).build()
 
-    init {
-        val url = if (baseUrl.length <= 2048) baseUrl.toHttpUrlOrNull() else null
-        if (url == null || url.username.isNotEmpty() || url.password.isNotEmpty() ||
-            url.query != null || url.fragment != null || url.encodedPath != "/") {
-            BlobProtocol.fail("invalid_relay_origin")
+    init { origin = normalizeOrigin(baseUrl, allowLoopbackHttp) }
+
+    companion object {
+        fun normalizeOrigin(baseUrl: String, allowLoopbackHttp: Boolean = false): String {
+            val url = if (baseUrl.length <= 2048) baseUrl.toHttpUrlOrNull() else null
+            if (url == null || url.username.isNotEmpty() || url.password.isNotEmpty() ||
+                url.query != null || url.fragment != null || url.encodedPath != "/") {
+                BlobProtocol.fail("invalid_relay_origin")
+            }
+            if (url.scheme != "https" && !(allowLoopbackHttp && url.host in setOf("127.0.0.1", "::1"))) {
+                BlobProtocol.fail("relay_requires_https")
+            }
+            return url.toString().removeSuffix("/")
         }
-        if (url.scheme != "https" && !(allowLoopbackHttp && url.host in setOf("127.0.0.1", "::1"))) {
-            BlobProtocol.fail("relay_requires_https")
-        }
-        origin = url.toString().removeSuffix("/")
+        private val sharedClient = OkHttpClient()
+        private val bulkSlots = Semaphore(4, true)
+        private val relayErrors = setOf("authentication_required", "blob_not_found", "blob_expired",
+            "blob_creation_conflict", "relay_session_capacity", "relay_storage_capacity", "ciphertext_hash_mismatch",
+            "chunk_not_ready", "chunk_not_found", "corrupt_chunk_requires_repair", "invalid_json",
+            "invalid_creation_request", "invalid_identifier", "invalid_manifest", "unsupported_blob_version",
+            "invalid_chunk_count", "invalid_chunk_descriptor", "invalid_chunk_size", "invalid_chunk_layout",
+            "file_too_large", "capabilities_must_differ", "invalid_chunk_index", "body_too_large",
+            "body_timeout", "content_encoding_not_supported")
     }
 
     fun json(method: String, path: String, token: String, body: JSONObject? = null,
@@ -117,19 +130,9 @@ internal class BlobHttp(
             throw BlobFailure(code, if (error is InterruptedIOException) 504 else 503)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
-            throw BlobFailure("transfer_cancelled", 499)
+            cancel.check()
+            throw BlobFailure("transfer_interrupted", 503)
         } finally { if (acquired) bulkSlots.release() }
     }
 
-    companion object {
-        private val sharedClient = OkHttpClient()
-        private val bulkSlots = Semaphore(4, true)
-        private val relayErrors = setOf("authentication_required", "blob_not_found", "blob_expired",
-            "blob_creation_conflict", "relay_session_capacity", "relay_storage_capacity", "ciphertext_hash_mismatch",
-            "chunk_not_ready", "chunk_not_found", "corrupt_chunk_requires_repair", "invalid_json",
-            "invalid_creation_request", "invalid_identifier", "invalid_manifest", "unsupported_blob_version",
-            "invalid_chunk_count", "invalid_chunk_descriptor", "invalid_chunk_size", "invalid_chunk_layout",
-            "file_too_large", "capabilities_must_differ", "invalid_chunk_index", "body_too_large",
-            "body_timeout", "content_encoding_not_supported")
-    }
 }

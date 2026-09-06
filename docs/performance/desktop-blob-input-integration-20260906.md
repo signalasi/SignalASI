@@ -3,6 +3,10 @@
 This is an unreleased continuation of the Android Blob branch, based on merged
 main `3c48121ac`. It is not completion of phone/Desktop or App/App migration.
 
+The subsequent Android scheduling/configuration work and S20U installation are
+recorded in [Android sender integration](android-blob-sender-integration-20260906.md).
+The remainder of this report describes the earlier Desktop receiver checkpoint.
+
 ## Implemented path
 
 - `mqtt_bridge` recognizes `input_attachment_blob_offer` only after the existing

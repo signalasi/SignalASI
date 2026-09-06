@@ -6897,6 +6897,7 @@ def _process_message(mqttc, userdata, msg):
                 mqttc,
                 client_route_id,
                 include_capability_manifest=_capability_manifest_requested(payload),
+                include_blob_configuration=payload.get("request_blob_configuration") is True,
             )
             return
 
@@ -7600,6 +7601,7 @@ def _schedule_requested_connector_state(
     client_route_id: str,
     *,
     include_capability_manifest: bool,
+    include_blob_configuration: bool = False,
 ) -> bool:
     if not CONNECTOR_STATUS_SYNC_SLOTS.acquire(blocking=False):
         log.warning("Connector status refresh skipped because all sync slots are busy")
@@ -7607,6 +7609,12 @@ def _schedule_requested_connector_state(
 
     def run() -> None:
         try:
+            if include_blob_configuration:
+                from blob_configuration import publish_configuration
+                try:
+                    publish_configuration(sys.modules[__name__], mqttc, client_route_id)
+                except Exception as error:
+                    log.warning("Blob configuration deferred class=%s", type(error).__name__)
             status = publish_connector_status(
                 mqttc,
                 reason="client_connected",

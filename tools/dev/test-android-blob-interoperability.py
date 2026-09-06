@@ -1,6 +1,7 @@
 """Real HTTPS Kotlin/Python Blob interoperability; isolated state, no production Desktop or phone."""
 from __future__ import annotations
 
+import argparse
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -41,6 +42,9 @@ def certificate(root: Path):
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--assemble", action="store_true", help="Also build the App and instrumentation APKs")
+    options = parser.parse_args()
     original_environment = dict(os.environ)
     with tempfile.TemporaryDirectory(prefix="galaxyssi-blob-interop-") as temporary:
         root = Path(temporary)
@@ -101,8 +105,11 @@ def main() -> int:
                     "com.galaxyssi.chat.AttachmentAtRestCipherTest", "--tests",
                     "com.galaxyssi.chat.AgentAttachmentTransferProtocolTest", "--tests",
                     "com.galaxyssi.chat.AgentAttachmentPublishOrderTest", "--tests",
+                    "com.galaxyssi.chat.AttachmentControlInboxTest", "--tests",
                     "com.galaxyssi.chat.PeerAttachmentTransferProgressTest", "--tests",
                     "com.galaxyssi.chat.PeerChatAttachmentTest", "--console=plain"]
+                if options.assemble:
+                    command.extend([":app:assembleDebug", ":app:assembleDebugAndroidTest"])
                 with log.open("w", encoding="utf-8") as output:
                     result = subprocess.run(command, cwd=ROOT / "apps/android", env=environment,
                         stdout=output, stderr=subprocess.STDOUT,
