@@ -108,10 +108,10 @@ Artifacts:
 
 ## Still required
 
-The user was actively using S20U during the build. Switching it to instrumentation
-and installing 1.0.21 awaits a convenient test window. No post-fix device memory
-improvement is claimed yet. Repeat the 16 MiB and 152 MiB runs on the new APK,
-retain before/after results, and fix any remaining size-dependent growth.
+At the original checkpoint, the user was actively using S20U and post-fix device
+verification was pending. The subsequent 1.0.21 installation and same-scale
+measurements are now recorded in
+[S20U post-fix acceptance](android-blob-s20-acceptance-20260906.md).
 The device driver requires `--expected-app-version 1.0.21` for this comparison;
 it must not silently benchmark the previously installed 1.0.20 APK.
 
