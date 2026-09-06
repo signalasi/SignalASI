@@ -11,6 +11,7 @@ import re
 import secrets
 import shutil
 import socket
+import sys
 import threading
 import time
 import logging
@@ -6594,6 +6595,9 @@ def _process_message(mqttc, userdata, msg):
                 log.warning("Rejected MQTT message: application sender does not match paired identity")
                 return
             message_id = str(application_envelope["message_id"])
+            # A transport ACK must never outrun durable acceptance of a Blob job.
+            from blob_input_bridge import persist_before_ack
+            persist_before_ack(sys.modules[__name__], application_envelope, client_route_id)
             bind_ciphertext(client_route_id, ciphertext_digest, message_id)
             if not claim_message(client_route_id, message_id):
                 duplicate_type = application_envelope.get("payload", {}).get("type")
@@ -6659,6 +6663,9 @@ def _process_message(mqttc, userdata, msg):
                 wire_payload,
                 accepted_delivery_ack_payload(payload, message_id, trace),
             )
+
+        if payload.get("type") == "input_attachment_blob_offer":
+            return
 
         if _local_only_transport_payload(payload):
             log.warning(
@@ -8754,6 +8761,8 @@ def start_background():
     _ensure_codex_warm_thread()
     _ensure_transport_probe_thread()
     mqtt_lifecycle_stop_event.clear()
+    from blob_input_bridge import start as start_blob_input
+    start_blob_input(sys.modules[__name__])
     _ensure_mqtt_worker()
     _ensure_mqtt_supervisor()
     log.info("MQTT bridge started with lifecycle supervision")
@@ -8762,6 +8771,8 @@ def start_background():
 def stop():
     global client, running, codex_app_server, presence_thread, outbound_retry_thread, codex_warm_thread, transport_probe_thread, mqtt_worker_thread, mqtt_supervisor_thread
     mqtt_lifecycle_stop_event.set()
+    from blob_input_bridge import stop as stop_blob_input
+    stop_blob_input()
     running = False
     codex_warm_stop_event.set()
     presence_stop_event.set()

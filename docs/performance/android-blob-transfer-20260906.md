@@ -97,3 +97,8 @@ Next required work, without replacing the requested end state:
 
 The overall goal remains active. This intermediate checkpoint must not be used
 to claim that all attachments have already been removed from MQTT.
+
+The following unreleased checkpoint now wires the Desktop input receiver to its
+actual authenticated MQTT ingress; see
+[Desktop Blob input integration](desktop-blob-input-integration-20260906.md).
+Android scheduling/configuration and real sender selection remain unimplemented.
