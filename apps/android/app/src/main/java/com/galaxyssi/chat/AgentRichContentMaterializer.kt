@@ -52,17 +52,17 @@ object AgentRichContentMaterializer {
         val target = File(directory, "$digest.sasie")
         try {
             val alreadyStored = runCatching {
-                AttachmentAtRestCipher.metadata(target).plaintextLength == bytes.size.toLong()
+                AttachmentLocalStore.metadata(target).plaintextLength == bytes.size.toLong()
             }.getOrDefault(false)
             if (!alreadyStored) {
                 if (!directory.exists() && !directory.mkdirs()) return null
-                if (runCatching { AttachmentAtRestCipher.encryptBytes(bytes, target) }.isFailure) {
+                if (runCatching { AttachmentLocalStore.storeBytes(bytes, target) }.isFailure) {
                     return null
                 }
             }
             val displayName = block.title.ifBlank { "$digest.${extensionFor(block)}" }
             return block.copy(
-                uri = EncryptedAttachmentUris.forFile(
+                uri = LocalAttachmentUris.forFile(
                     context,
                     target,
                     displayName,

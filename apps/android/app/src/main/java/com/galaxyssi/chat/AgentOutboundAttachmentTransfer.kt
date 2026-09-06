@@ -11,7 +11,7 @@ import java.io.InputStream
 import java.security.MessageDigest
 import java.util.UUID
 
-private fun outboundEncryptedChunkFile(directory: File, index: Int): File =
+private fun outboundChunkFile(directory: File, index: Int): File =
     File(directory, "chunk-${index.toString().padStart(6, '0')}.sasie")
 
 internal data class AgentAttachmentTransferScope(
@@ -108,15 +108,15 @@ internal data class AgentPreparedOutboundAttachment(
             sizeBytes - start
         ).toInt()
         require(expected > 0) { "Attachment chunk is empty" }
-        val encryptedChunk = outboundEncryptedChunkFile(chunkDirectory, index)
-        require(encryptedChunk.length() <= expected + 128L &&
-            AttachmentAtRestCipher.metadata(encryptedChunk).plaintextLength == expected.toLong()) {
-            "Encrypted attachment chunk length is invalid"
+        val storedChunk = outboundChunkFile(chunkDirectory, index)
+        require(storedChunk.length() <= expected + 128L &&
+            AttachmentLocalStore.metadata(storedChunk).plaintextLength == expected.toLong()) {
+            "Attachment chunk length is invalid"
         }
-        val bytes = AttachmentAtRestCipher.decryptBytes(encryptedChunk)
+        val bytes = AttachmentLocalStore.readBytes(storedChunk)
         if (bytes.size != expected) {
             bytes.wipeSensitive()
-            throw IllegalArgumentException("Encrypted attachment chunk length is invalid")
+            throw IllegalArgumentException("Attachment chunk length is invalid")
         }
         return bytes
     }
@@ -345,7 +345,7 @@ internal object AgentOutboundAttachmentTransferStore {
         require(attachment.sizeBytes <= MAX_ATTACHMENT_BYTES) { "Agent attachment is too large" }
         val preparing = File(root(context), ".preparing-${UUID.randomUUID()}")
         check(preparing.mkdirs()) { "Attachment transfer staging is unavailable" }
-        val encryptedChunks = File(preparing, CHUNKS_DIRECTORY).apply {
+        val stagedChunks = File(preparing, CHUNKS_DIRECTORY).apply {
             check(mkdirs() || isDirectory) { "Attachment transfer staging is unavailable" }
         }
         var transportName = attachment.displayName.ifBlank { "attachment-${ordinal + 1}" }
@@ -363,10 +363,10 @@ internal object AgentOutboundAttachmentTransferStore {
                 transportName = encoded.transportName(transportName)
                 transportMime = encoded.mimeType
                 try {
-                    transportSize = stageEncryptedChunks(
+                    transportSize = stageChunks(
                         ByteArrayInputStream(encoded.bytes),
                         encoded.bytes.size.toLong(),
-                        encryptedChunks,
+                        stagedChunks,
                         digest
                     )
                 } finally {
@@ -376,10 +376,10 @@ internal object AgentOutboundAttachmentTransferStore {
                 val input = context.contentResolver.openInputStream(attachment.uri)
                     ?: error("Attachment content is unavailable")
                 input.buffered().use { source ->
-                    transportSize = stageEncryptedChunks(
+                    transportSize = stageChunks(
                         source,
                         attachment.sizeBytes,
-                        encryptedChunks,
+                        stagedChunks,
                         digest
                     )
                 }
@@ -459,7 +459,7 @@ internal object AgentOutboundAttachmentTransferStore {
                 chunkCount in 1..MAX_CHUNKS &&
                 (0 until chunkCount).all { index ->
                     runCatching {
-                        AttachmentAtRestCipher.metadata(outboundEncryptedChunkFile(chunks, index)).plaintextLength ==
+                        AttachmentLocalStore.metadata(outboundChunkFile(chunks, index)).plaintextLength ==
                             expectedChunkSize(size, index, chunkSizeBytes).toLong()
                     }.getOrDefault(false)
                 }
@@ -508,7 +508,7 @@ internal object AgentOutboundAttachmentTransferStore {
         check(temporary.renameTo(target)) { "Attachment transfer manifest could not be committed" }
     }
 
-    private fun stageEncryptedChunks(
+    private fun stageChunks(
         input: InputStream,
         declaredLength: Long,
         directory: File,
@@ -531,10 +531,10 @@ internal object AgentOutboundAttachmentTransferStore {
                 total += count
                 require(total <= MAX_ATTACHMENT_BYTES) { "Agent attachment exceeds the transfer limit" }
                 digest.update(buffer, 0, count)
-                AttachmentAtRestCipher.encryptStream(
+                AttachmentLocalStore.storeStream(
                     ByteArrayInputStream(buffer, 0, count),
                     count.toLong(),
-                    outboundEncryptedChunkFile(directory, chunkIndex)
+                    outboundChunkFile(directory, chunkIndex)
                 )
                 buffer.wipeSensitive()
                 chunkIndex += 1

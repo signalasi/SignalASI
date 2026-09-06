@@ -9,7 +9,7 @@ from contextlib import closing
 from pathlib import Path
 
 from peer_chat_store import PeerChatStore
-from peer_attachment_crypto import PeerAttachmentError
+from peer_attachment_storage import PeerAttachmentError
 
 
 class PeerChatStoreTests(unittest.TestCase):
@@ -55,8 +55,11 @@ class PeerChatStoreTests(unittest.TestCase):
             b"".join(self.store.stream_attachment(stored["message_id"], 0)),
         )
         record = self.store.attachment_record(stored["message_id"], 0)
-        encrypted = Path(record["local_path"])
-        self.assertNotIn(source.read_bytes(), encrypted.read_bytes())
+        local_file = Path(record["local_path"])
+        self.assertEqual(source.read_bytes(), local_file.read_bytes())
+        reopened = PeerChatStore(self.store.database_path)
+        self.assertEqual(source.read_bytes(), local_file.read_bytes())
+        self.assertEqual(source.read_bytes(), b"".join(reopened.stream_attachment(stored["message_id"], 0)))
         with closing(sqlite3.connect(self.store.database_path)) as connection:
             raw = " ".join(str(value) for value in connection.execute(
                 "SELECT client_route_id, sender_name, content, attachments_json FROM peer_messages"
@@ -82,7 +85,7 @@ class PeerChatStoreTests(unittest.TestCase):
         self.assertEqual(first["message_id"], second["message_id"])
         self.assertEqual(1, len(self.store.list_messages("phone-a")))
 
-    def test_tampered_encrypted_attachment_is_rejected(self) -> None:
+    def test_tampered_attachment_is_rejected_by_sha256(self) -> None:
         source = Path(self.temporary.name) / "voice.opus"
         source.write_bytes(b"OggS" + b"voice" * 2_000)
         attachment = self.store.import_attachment(

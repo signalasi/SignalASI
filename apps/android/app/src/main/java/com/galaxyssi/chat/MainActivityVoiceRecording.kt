@@ -692,10 +692,10 @@ internal fun MainActivity.sendPeerVoiceRecording(
     val normalizedDurationMillis = durationMillis.coerceAtLeast(1_000L)
     val input = AgentInputAttachment(
         id = "voice-$messageId",
-        uri = EncryptedAttachmentUris.forFile(this, file, "voice-$messageId.$normalizedExtension"),
+        uri = LocalAttachmentUris.forFile(this, file, "voice-$messageId.$normalizedExtension"),
         displayName = "voice-$messageId.$normalizedExtension",
         mimeType = mimeType,
-        sizeBytes = AttachmentAtRestCipher.metadata(file).plaintextLength
+        sizeBytes = AttachmentLocalStore.metadata(file).plaintextLength
     )
     val message = ChatMessage(
         id = messageId,

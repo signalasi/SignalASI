@@ -120,7 +120,7 @@ def main() -> int:
                 environment = {**original_environment, "GALAXYSSI_BLOB_TEST_ROOT": temporary}
                 command = [str(ROOT / "apps/android/gradlew.bat" if os.name == "nt" else ROOT / "apps/android/gradlew"),
                     ":app:testDebugUnitTest", "--tests", "com.galaxyssi.chat.blob.*", "--tests",
-                    "com.galaxyssi.chat.AttachmentAtRestCipherTest", "--tests",
+                    "com.galaxyssi.chat.AttachmentLocalStoreTest", "--tests",
                     "com.galaxyssi.chat.AgentAttachmentTransferProtocolTest", "--tests",
                     "com.galaxyssi.chat.AgentAttachmentPublishOrderTest", "--tests",
                     "com.galaxyssi.chat.AttachmentControlInboxTest", "--tests",

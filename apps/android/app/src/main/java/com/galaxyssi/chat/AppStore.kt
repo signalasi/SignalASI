@@ -43,7 +43,6 @@ object AppStore {
     }
 
     private fun initializeOnce(appContext: Context) {
-        AttachmentAtRestStorageLifecycle.initialize(appContext)
         GalaxySSICrypto.initialize(appContext)
         val prefs = storage(appContext)
         if (!prefs.contains(KEY_PROFILE)) {

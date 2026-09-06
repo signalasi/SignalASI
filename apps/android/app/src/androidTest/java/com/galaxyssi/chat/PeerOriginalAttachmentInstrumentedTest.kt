@@ -89,8 +89,8 @@ class PeerOriginalAttachmentInstrumentedTest {
     }
 
     @Test
-    fun receivedImageCreatesBoundedEncryptedThumbnail() {
-        val directory = File(context.filesDir, "peer-thumbnail-test-${UUID.randomUUID()}")
+    fun receivedImageCreatesBoundedPlainThumbnail() {
+        val directory = File(context.filesDir, "peer-incoming-attachments-v2/thumbnail-test-${UUID.randomUUID()}")
         val encryptedSource = File(directory, "data.sasie")
         val sourceBitmap = Bitmap.createBitmap(900, 1_200, Bitmap.Config.ARGB_8888)
         val pixels = IntArray(sourceBitmap.width * sourceBitmap.height) { index ->
@@ -107,15 +107,15 @@ class PeerOriginalAttachmentInstrumentedTest {
         }
         sourceBitmap.recycle()
         try {
-            AttachmentAtRestCipher.encryptBytes(encoded, encryptedSource)
+            AttachmentLocalStore.storeBytes(encoded, encryptedSource)
         } finally {
             encoded.fill(0)
         }
         val attachment = PeerChatAttachment(
             name = "photo.jpg",
             mimeType = "image/jpeg",
-            sizeBytes = AttachmentAtRestCipher.metadata(encryptedSource).plaintextLength,
-            uri = EncryptedAttachmentUris.forFile(
+            sizeBytes = AttachmentLocalStore.metadata(encryptedSource).plaintextLength,
+            uri = LocalAttachmentUris.forFile(
                 context,
                 encryptedSource,
                 "photo.jpg",
@@ -145,8 +145,8 @@ class PeerOriginalAttachmentInstrumentedTest {
                 it.name == ".peer-image-thumbnail-v1.sasie"
             }
             assertNotNull(thumbnail)
-            assertTrue(AttachmentAtRestCipher.isEncrypted(requireNotNull(thumbnail)))
-            assertTrue(AttachmentAtRestCipher.metadata(thumbnail).plaintextLength <= 100_000L)
+            assertTrue(AttachmentLocalStore.isStored(requireNotNull(thumbnail)))
+            assertTrue(AttachmentLocalStore.metadata(thumbnail).plaintextLength <= 100_000L)
         } finally {
             PeerImageThumbnailRepository.clearRuntimeCache()
             directory.deleteRecursively()

@@ -9,9 +9,7 @@ import android.provider.MediaStore
 import android.util.Base64
 import org.json.JSONObject
 import java.io.File
-import java.io.SequenceInputStream
 import java.security.MessageDigest
-import java.util.Collections
 import java.util.Locale
 import java.util.UUID
 
@@ -94,20 +92,20 @@ internal object AgentDesktopArtifactStore {
             require(sha256(bytes) == chunkDigest)
             if (chunkFile.isFile) {
                 require(
-                    AttachmentAtRestCipher.metadata(chunkFile).plaintextLength == bytes.size.toLong() &&
-                        sha256Decrypted(chunkFile) == chunkDigest
+                    AttachmentLocalStore.metadata(chunkFile).plaintextLength == bytes.size.toLong() &&
+                        sha256Stored(chunkFile) == chunkDigest
                 ) {
                     "Conflicting artifact chunk duplicate"
                 }
             } else {
-                AttachmentAtRestCipher.encryptBytes(bytes, chunkFile)
+                AttachmentLocalStore.storeBytes(bytes, chunkFile)
             }
         } finally {
             bytes.fill(0)
         }
         val complete = (0 until chunkCount).all { index ->
             runCatching {
-                AttachmentAtRestCipher.metadata(File(incoming, "$index.chunk.sasie")).plaintextLength ==
+                AttachmentLocalStore.metadata(File(incoming, "$index.chunk.sasie")).plaintextLength ==
                     expectedArtifactChunkSize(sizeBytes, index)
             }.getOrDefault(false)
         }
@@ -118,11 +116,11 @@ internal object AgentDesktopArtifactStore {
         val filesDirectory = File(root(context), "files").apply { require(exists() || mkdirs()) }
         val target = File(filesDirectory, "$artifactId.sasie")
         val calculated = MessageDigest.getInstance("SHA-256")
-        val inputs = (0 until chunkCount).map { index ->
-            AttachmentAtRestCipher.openDecryptedInput(File(incoming, "$index.chunk.sasie"))
+        val chunks = (0 until chunkCount).map { index ->
+            File(incoming, "$index.chunk.sasie")
         }
-        SequenceInputStream(Collections.enumeration(inputs)).use { plaintext ->
-            AttachmentAtRestCipher.encryptStream(
+        AttachmentLocalStore.openSequence(chunks).use { plaintext ->
+            AttachmentLocalStore.storeStream(
                 plaintext,
                 sizeBytes,
                 target,
@@ -154,7 +152,7 @@ internal object AgentDesktopArtifactStore {
         val generatedSizeText = category.isNotBlank() &&
             block.text.startsWith("$category \u00b7 ")
         return block.copy(
-            uri = EncryptedAttachmentUris.forFile(
+            uri = LocalAttachmentUris.forFile(
                 context,
                 file,
                 record.optString("name"),
@@ -212,7 +210,7 @@ internal object AgentDesktopArtifactStore {
             ?: error("Download destination could not be created")
         try {
             resolver.openOutputStream(destination, "w")?.use { output ->
-                AttachmentAtRestCipher.openDecryptedInput(source).use { it.copyTo(output) }
+                AttachmentLocalStore.openInput(source).use { it.copyTo(output) }
             } ?: error("Download destination could not be opened")
             resolver.update(
                 destination,
@@ -254,7 +252,7 @@ internal object AgentDesktopArtifactStore {
         val temporary = File(directory, "${UUID.randomUUID()}-${safeFileName(displayName)}")
         try {
             temporary.outputStream().buffered().use { output ->
-                AttachmentAtRestCipher.copyDecrypted(encrypted, output)
+                AttachmentLocalStore.copyTo(encrypted, output)
             }
             action(temporary)
         } finally {
@@ -326,9 +324,9 @@ internal object AgentDesktopArtifactStore {
             .digest(bytes)
             .joinToString("") { "%02x".format(it) }
 
-    private fun sha256Decrypted(file: File): String {
+    private fun sha256Stored(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        AttachmentAtRestCipher.openDecryptedInput(file).use { input ->
+        AttachmentLocalStore.openInput(file).use { input ->
             val buffer = ByteArray(64 * 1024)
             try {
                 while (true) {

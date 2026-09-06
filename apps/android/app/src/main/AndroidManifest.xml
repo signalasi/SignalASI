@@ -149,8 +149,8 @@
                 android:resource="@xml/galaxyssi_file_paths" />
         </provider>
         <provider
-            android:name=".EncryptedAttachmentContentProvider"
-            android:authorities="${applicationId}.encrypted-attachments"
+            android:name=".LocalAttachmentContentProvider"
+            android:authorities="${applicationId}.local-attachments"
             android:exported="false"
             android:grantUriPermissions="true" />
         <service

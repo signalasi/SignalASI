@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from pairing_state import DATA_DIR
-from peer_attachment_crypto import PeerAttachmentCipher, PeerAttachmentError
+from peer_attachment_storage import PeerAttachmentStorage, PeerAttachmentError
 from secure_state import decrypt_text, encrypt_text, seal_identifier, unseal_identifier
 
 
@@ -35,7 +35,7 @@ class PeerChatStore:
     def __init__(self, database_path: Path | None = None) -> None:
         self.database_path = Path(database_path or (DATA_DIR / "peer_chat.db"))
         self.files_root = self.database_path.parent / "peer-chat-files"
-        self._attachment_cipher = PeerAttachmentCipher(self.database_path)
+        self._attachment_storage = PeerAttachmentStorage()
         self._lock = threading.RLock()
         self._listeners: dict[str, Callable[[dict], None]] = {}
         self._initialize()
@@ -242,7 +242,7 @@ class PeerChatStore:
         message_directory.mkdir(parents=True, exist_ok=True)
         safe_name = self._safe_name(name or source_path.name)
         target = message_directory / f"{uuid.uuid4().hex}.sasi"
-        stored_size, stored_sha256 = self._attachment_cipher.encrypt_file(
+        stored_size, stored_sha256 = self._attachment_storage.store_file(
             source_path,
             target,
             expected_sha256=sha256,
@@ -299,7 +299,7 @@ class PeerChatStore:
                 return None
         except (OSError, ValueError):
             return None
-        if not value.is_file() or value.is_symlink() or not self._attachment_cipher.is_encrypted(value):
+        if not value.is_file() or value.is_symlink():
             return None
         return value
 
@@ -307,7 +307,7 @@ class PeerChatStore:
         attachment = self.attachment_record(message_id, index)
         if attachment is None:
             raise PeerAttachmentError("Peer attachment is unavailable")
-        return self._attachment_cipher.decrypt_stream(
+        return self._attachment_storage.read_stream(
             Path(attachment["local_path"]),
             expected_size=int(attachment.get("size_bytes") or 0),
             expected_sha256=str(attachment.get("sha256") or ""),
@@ -408,7 +408,6 @@ class PeerChatStore:
 
     def _migrate_plaintext_rows(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute("SELECT * FROM peer_messages").fetchall()
-        plaintext_to_remove: list[Path] = []
         for row in rows:
             requires_migration = (
                 not str(row["client_route_id"] or "").startswith("sid:v1:")
@@ -429,25 +428,6 @@ class PeerChatStore:
                 _ATTACHMENTS_PURPOSE,
             )
             attachments = self._decode_attachment_json(attachment_text)
-            for attachment in attachments:
-                original = Path(str(attachment.get("local_path") or ""))
-                if not original.is_file() or original.is_symlink():
-                    continue
-                if self._attachment_cipher.is_encrypted(original):
-                    continue
-                requires_migration = True
-                target_directory = self._route_directory(route_id) / self._safe_component(row["message_id"])
-                target_directory.mkdir(parents=True, exist_ok=True)
-                target = target_directory / f"{uuid.uuid4().hex}.sasi"
-                size, digest = self._attachment_cipher.encrypt_file(
-                    original,
-                    target,
-                    expected_sha256="",
-                )
-                attachment["local_path"] = str(target.resolve())
-                attachment["size_bytes"] = size
-                attachment["sha256"] = digest
-                plaintext_to_remove.append(original)
             if not requires_migration:
                 continue
             connection.execute(
@@ -466,8 +446,6 @@ class PeerChatStore:
                 ),
             )
         connection.commit()
-        for path in plaintext_to_remove:
-            path.unlink(missing_ok=True)
 
     def _legacy_or_unsealed(self, value: str, purpose: str) -> str:
         text = str(value or "")

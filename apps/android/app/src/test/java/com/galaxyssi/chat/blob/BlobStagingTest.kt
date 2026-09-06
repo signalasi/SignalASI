@@ -1,6 +1,5 @@
 package com.galaxyssi.chat.blob
 
-import com.galaxyssi.chat.AttachmentAtRestCipher
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Rule
@@ -62,7 +61,7 @@ class BlobStagingTest {
                 assertEquals(size.toLong(), staged.copyPlaintext(output, binding))
                 assertArrayEquals(bytes, output.toByteArray())
                 val state = File(path, BlobStaging.STATE_FILE)
-                assertTrue(AttachmentAtRestCipher.isEncrypted(state))
+                assertTrue(BlobCheckpointCipher.isEncrypted(state))
                 assertFalse(state.readBytes().toString(Charsets.ISO_8859_1).contains(BlobProtocol.hex(staged.private.key)))
                 assertTrue(path.listFiles()!!.all { it.name.endsWith(".blob") || it.name == BlobStaging.STATE_FILE })
             }
@@ -165,7 +164,7 @@ class BlobStagingTest {
     @Test fun `malformed private JSON never escapes through parser exception text`() {
         val directory = temporary.newFolder("invalid-json")
         val secret = "test-only-private-capability"
-        AttachmentAtRestCipher.encryptBytes("{\"private\":\"$secret".toByteArray(),
+        BlobCheckpointCipher.encryptBytes("{\"private\":\"$secret".toByteArray(),
             File(directory, BlobStaging.STATE_FILE), storageKey)
         val error = assertThrows(BlobFailure::class.java) { BlobStaging.open(directory, binding, storageKey) }
         assertEquals("invalid_transfer_checkpoint", error.code)

@@ -157,9 +157,9 @@ internal object PeerImageThumbnailRepository {
 
     private fun encryptedThumbnailUri(context: Context, original: Uri): Uri? {
         val thumbnail = encryptedThumbnailFile(context, original)
-            ?.takeIf(AttachmentAtRestCipher::isEncrypted)
+            ?.takeIf(AttachmentLocalStore::isStored)
             ?: return null
-        return EncryptedAttachmentUris.forFile(
+        return LocalAttachmentUris.forFile(
             context,
             thumbnail,
             "thumbnail.jpg",
@@ -168,15 +168,15 @@ internal object PeerImageThumbnailRepository {
     }
 
     private fun encryptedThumbnailFile(context: Context, original: Uri): File? =
-        EncryptedAttachmentUris.resolve(context, original)?.parentFile?.let { File(it, THUMBNAIL_FILE) }
+        LocalAttachmentUris.resolve(context, original)?.parentFile?.let { File(it, THUMBNAIL_FILE) }
 
     private fun persistEncryptedThumbnail(context: Context, original: Uri, bitmap: Bitmap) {
         val destination = encryptedThumbnailFile(context, original) ?: return
         synchronized(thumbnailWriteLock) {
-            if (AttachmentAtRestCipher.isEncrypted(destination)) return
+            if (AttachmentLocalStore.isStored(destination)) return
             val bytes = encodeStoredThumbnail(bitmap) ?: return
             try {
-                AttachmentAtRestCipher.encryptBytes(bytes, destination)
+                AttachmentLocalStore.storeBytes(bytes, destination)
             } finally {
                 bytes.fill(0)
             }

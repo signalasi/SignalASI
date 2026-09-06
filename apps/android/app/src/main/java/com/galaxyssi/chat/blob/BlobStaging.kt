@@ -1,6 +1,5 @@
 package com.galaxyssi.chat.blob
 
-import com.galaxyssi.chat.AttachmentAtRestCipher
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -66,7 +65,7 @@ internal class BlobStaging private constructor(
             if (bytes.size > MAX_CHECKPOINT_BYTES) BlobProtocol.fail("transfer_checkpoint_too_large")
             // The storage helper commits to a fresh file first. Replacing an old
             // checkpoint is one atomic move, never delete-then-rename.
-            AttachmentAtRestCipher.encryptBytes(bytes, temporary, storageKey)
+            BlobCheckpointCipher.encryptBytes(bytes, temporary, storageKey)
             Files.move(temporary.toPath(), File(directory, STATE_FILE).toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
         } finally {
             bytes.fill(0)
@@ -200,10 +199,10 @@ internal class BlobStaging private constructor(
             val file = File(directory, STATE_FILE)
             if (Files.isSymbolicLink(directory.toPath()) || Files.isSymbolicLink(file.toPath()) ||
                 !file.isFile || file.length() > MAX_CHECKPOINT_BYTES + 128 ||
-                AttachmentAtRestCipher.metadata(file).plaintextLength > MAX_CHECKPOINT_BYTES) {
+                BlobCheckpointCipher.metadata(file).plaintextLength > MAX_CHECKPOINT_BYTES) {
                 BlobProtocol.fail("invalid_transfer_checkpoint")
             }
-            val bytes = AttachmentAtRestCipher.decryptBytes(file, storageKey)
+            val bytes = BlobCheckpointCipher.decryptBytes(file, storageKey)
             try {
                 val state = JSONObject(bytes.toString(Charsets.UTF_8))
                 BlobProtocol.keys(state, setOf("private", "manifest", "remote"))

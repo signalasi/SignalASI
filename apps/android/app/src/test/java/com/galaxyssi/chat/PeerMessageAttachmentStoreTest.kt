@@ -7,7 +7,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
-import javax.crypto.spec.SecretKeySpec
 
 class PeerMessageAttachmentStoreTest {
     @get:Rule
@@ -20,21 +19,18 @@ class PeerMessageAttachmentStoreTest {
         val source = cacheDir.resolve("recording.m4a").apply {
             writeBytes(byteArrayOf(1, 2, 3, 4))
         }
-        val key = SecretKeySpec(ByteArray(32) { index -> index.toByte() }, "AES")
 
         val stored = PeerMessageAttachmentStore.persistOutgoingVoice(
             filesDir,
             cacheDir,
             source,
             messageId = 42L,
-            extension = "m4a",
-            encryptionKey = key
+            extension = "m4a"
         ).getOrThrow()
 
         assertFalse(source.exists())
         assertTrue(stored.isFile)
-        assertFalse(stored.readBytes().contentEquals(byteArrayOf(1, 2, 3, 4)))
-        assertArrayEquals(byteArrayOf(1, 2, 3, 4), AttachmentAtRestCipher.decryptBytes(stored, key))
+        assertArrayEquals(byteArrayOf(1, 2, 3, 4), stored.readBytes())
         assertTrue(stored.path.replace('\\', '/').endsWith("peer-message-attachments-v2/outgoing/voice/msg_42.m4a.sasie"))
         assertNotNull(PeerMessageAttachmentStore.resolveOutgoingVoice(filesDir, "voice-42.m4a"))
     }
@@ -49,22 +45,19 @@ class PeerMessageAttachmentStoreTest {
     }
 
     @Test
-    fun `encoded opus bytes are encrypted without a plaintext staging file`() {
+    fun `encoded opus bytes are stored without an AES envelope`() {
         val filesDir = temporaryFolder.newFolder("opus-files")
         val encoded = "OggS-OpusHead-encrypted-payload".toByteArray()
-        val key = SecretKeySpec(ByteArray(32) { index -> (31 - index).toByte() }, "AES")
 
         val stored = PeerMessageAttachmentStore.persistOutgoingVoiceBytes(
             filesDir = filesDir,
             encoded = encoded,
             messageId = 84L,
-            extension = "opus",
-            encryptionKey = key
+            extension = "opus"
         ).getOrThrow()
 
         assertTrue(stored.path.replace('\\', '/').endsWith("peer-message-attachments-v2/outgoing/voice/msg_84.opus.sasie"))
-        assertFalse(stored.readBytes().contentEquals(encoded))
-        assertArrayEquals(encoded, AttachmentAtRestCipher.decryptBytes(stored, key))
+        assertArrayEquals(encoded, stored.readBytes())
         assertNotNull(PeerMessageAttachmentStore.resolveOutgoingVoice(filesDir, "voice-84.opus"))
     }
 }
