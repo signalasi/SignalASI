@@ -28,8 +28,12 @@ class BackendInstanceLock:
     def release(self) -> None:
         if self._handle is not None:
             import ctypes
+            from ctypes import wintypes
 
-            ctypes.windll.kernel32.CloseHandle(self._handle)
+            close = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+            close.argtypes = (wintypes.HANDLE,)
+            close.restype = wintypes.BOOL
+            close(self._handle)
             self._handle = None
         if self._file is not None:
             import fcntl

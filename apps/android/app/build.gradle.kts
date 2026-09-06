@@ -141,8 +141,8 @@ android {
         applicationId = "com.galaxyssi.chat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 865
-        versionName = "1.0.19"
+        versionCode = 867
+        versionName = "1.0.21"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "WHISPER_NATIVE_VERSION", "\"v1.9.1-f049fff95a08\"")
         buildConfigField("String", "WHISPER_NATIVE_BUILD_FINGERPRINT", "\"$whisperNativeBuildFingerprint\"")
@@ -255,6 +255,9 @@ tasks.matching { task ->
 }
 
 tasks.withType<Test>().configureEach {
+    val blobInteropFixture = providers.environmentVariable("GALAXYSSI_BLOB_TEST_ROOT").orElse("")
+    inputs.property("galaxyssi.blobInteropFixture", blobInteropFixture)
+    environment("GALAXYSSI_BLOB_TEST_ROOT", blobInteropFixture.get())
     testLogging {
         events("failed")
         exceptionFormat = TestExceptionFormat.FULL

@@ -6,9 +6,10 @@ set "LOCAL_GRADLE=%USERPROFILE%\.gradle\wrapper\dists\gradle-8.14.3-all\10utluxa
 
 if exist "%LOCAL_GRADLE%" (
   call "%LOCAL_GRADLE%" %*
-  exit /b %ERRORLEVEL%
+  goto finish
 )
 
 set "DIRNAME=%~dp0"
 java -classpath "%DIRNAME%gradle\wrapper\gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain %*
+:finish
 exit /b %ERRORLEVEL%

@@ -56,7 +56,7 @@ def _write(path: Path, data: bytes):
         temporary.unlink(missing_ok=True)
 
 
-def _private(value: dict, public: dict) -> dict:
+def validate_private_descriptor(value: dict) -> dict:
     fields = {"version", "blob_id", "key", "nonce_prefix", "size", "sha256",
               "binding_sha256", "manifest_sha256"}
     if not isinstance(value, dict) or set(value) != fields:
@@ -76,6 +76,12 @@ def _private(value: dict, public: dict) -> dict:
     size = value["size"]
     if type(size) is not int or not 0 <= size <= MAX_FILE_BYTES:
         raise BlobError("invalid_file_size")
+    return dict(value)
+
+
+def _private(value: dict, public: dict) -> dict:
+    value = validate_private_descriptor(value)
+    size = value["size"]
     if sum(chunk["size"] - TAG_BYTES for chunk in public["chunks"]) != size:
         raise BlobError("file_size_mismatch")
     if sha256(canonical(public)) != value["manifest_sha256"]:

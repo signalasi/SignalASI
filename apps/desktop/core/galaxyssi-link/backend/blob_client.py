@@ -28,10 +28,8 @@ _RELAY_ERRORS = {
 }
 
 
-class BlobClient:
-    def __init__(self, base_url: str, *, provisioning_token: str | None = None,
-                 timeout: float = 60, allow_loopback_http: bool = False,
-                 tls_context: ssl.SSLContext | None = None, trust_env: bool = True):
+def relay_origin(base_url: str, *, allow_loopback_http: bool = False) -> str:
+    try:
         if not isinstance(base_url, str) or len(base_url) > 2048:
             raise BlobError("invalid_relay_origin")
         parts = urllib.parse.urlsplit(base_url)
@@ -41,9 +39,20 @@ class BlobClient:
         if (not parts.hostname or parts.username or parts.password or parts.query or parts.fragment
                 or parts.path not in {"", "/"}):
             raise BlobError("invalid_relay_origin")
+        return str(httpx.URL(base_url)).rstrip("/")
+    except BlobError:
+        raise
+    except (ValueError, httpx.InvalidURL):
+        raise BlobError("invalid_relay_origin") from None
+
+
+class BlobClient:
+    def __init__(self, base_url: str, *, provisioning_token: str | None = None,
+                 timeout: float = 60, allow_loopback_http: bool = False,
+                 tls_context: ssl.SSLContext | None = None, trust_env: bool = True):
+        self.base_url = relay_origin(base_url, allow_loopback_http=allow_loopback_http)
         if timeout <= 0:
             raise ValueError("Transfer timeout must be positive")
-        self.base_url = base_url.rstrip("/")
         self.provisioning_token = checked_hex(provisioning_token) if provisioning_token else None
         self.timeout = timeout
         context = tls_context or ssl.create_default_context()

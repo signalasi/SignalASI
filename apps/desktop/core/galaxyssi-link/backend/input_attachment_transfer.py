@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import threading
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -210,6 +211,48 @@ def resolved_attachment_path(
         if not bool(manifest.get("complete")):
             return None
         return target
+
+
+def validate_input_manifest(payload: dict, *, client_route_id: str) -> dict:
+    """Validate metadata without creating a workspace or acknowledging bytes."""
+    return _validated_manifest(payload, client_route_id=client_route_id)
+
+
+def ingest_verified_stream(payload: dict, blocks, *, client_route_id: str,
+                           check_active=lambda: None) -> AttachmentTransferReceipt:
+    """Commit an authenticated Blob stream to the existing scoped input contract."""
+    with _lock:
+        manifest = _ensure_manifest(payload, client_route_id=client_route_id)
+        target = _completed_path(manifest)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".blob-", suffix=".part", dir=target.parent)
+    temporary = Path(temporary_name)
+    digest, written = hashlib.sha256(), 0
+    try:
+        # Network and large-file I/O must not hold the global attachment lock.
+        with os.fdopen(descriptor, "wb") as output:
+            for block in blocks:
+                check_active()
+                written += len(block)
+                if written > manifest["size_bytes"]:
+                    raise ValueError("Attachment transfer exceeds declared length")
+                digest.update(block)
+                output.write(block)
+            if written != manifest["size_bytes"] or digest.hexdigest() != manifest["sha256"]:
+                raise ValueError("Attachment transfer integrity check failed")
+            output.flush()
+            os.fsync(output.fileno())
+        check_active()
+        with _lock:
+            current = _ensure_manifest(payload, client_route_id=client_route_id)
+            _require_same_manifest(current, manifest)
+            os.replace(temporary, target)
+            current["complete"] = True
+            current["completed_at"] = int(time.time() * 1000)
+            _write_manifest(_transfer_directory(current), current)
+            return _receipt_for(current)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def prune_expired_transfers(
@@ -518,11 +561,14 @@ def _read_manifest(transfer_dir: Path) -> dict | None:
 
 def _write_manifest(transfer_dir: Path, manifest: dict) -> None:
     temporary = transfer_dir / f".{MANIFEST_NAME}.{os.getpid()}.tmp"
-    temporary.write_text(
-        json.dumps(manifest, ensure_ascii=True, separators=(",", ":")),
-        encoding="utf-8",
-    )
-    os.replace(temporary, transfer_dir / MANIFEST_NAME)
+    try:
+        with temporary.open("w", encoding="utf-8") as output:
+            json.dump(manifest, output, ensure_ascii=True, separators=(",", ":"))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, transfer_dir / MANIFEST_NAME)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _expected_chunk_size(manifest: dict, index: int) -> int:
