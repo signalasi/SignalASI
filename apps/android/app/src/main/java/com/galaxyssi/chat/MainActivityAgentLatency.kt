@@ -31,6 +31,9 @@ internal fun MainActivity.addAgentLatencySection() {
                 if (isFinishing || isDestroyed || !rows.isAttachedToWindow || request != generation) return@runOnUiThread
                 rows.removeAllViews()
                 val labels = mapOf(
+                    "phone_transport_queue_ms" to R.string.agent_latency_transport_queue,
+                    "phone_broker_ack_ms" to R.string.agent_latency_broker_ack,
+                    "phone_peer_receipt_ms" to R.string.agent_latency_peer_receipt,
                     "phone_context_route_ms" to R.string.agent_latency_context,
                     "phone_send_prepare_ms" to R.string.agent_latency_total_prepare,
                     "phone_send_first_visible_ms" to R.string.agent_latency_user_first,

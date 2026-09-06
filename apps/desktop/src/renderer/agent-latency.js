@@ -1,5 +1,8 @@
 (function (root) {
   const labels = {
+    desktop_transport_queue_ms: 'Transport queue to dispatch',
+    desktop_broker_ack_ms: 'Wire send to broker confirmation',
+    desktop_peer_receipt_ms: 'Queued to encrypted peer receipt',
     desktop_prepare_ms: 'Receive to task creation',
     desktop_receive_queue_ms: 'Inbound queue',
     desktop_decrypt_ms: 'Decrypt and validate',

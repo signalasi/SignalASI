@@ -24,6 +24,9 @@ internal object AgentLatencyContract {
     const val SCHEMA = "galaxyssi.agent-latency.v1"
     const val EVENT_LIMIT = 8_000
     val pairs = linkedMapOf(
+        "phone_transport_queue_ms" to ("phone_transport_queued" to "phone_transport_dispatched"),
+        "phone_broker_ack_ms" to ("phone_wire_started" to "phone_broker_acked"),
+        "phone_peer_receipt_ms" to ("phone_transport_queued" to "phone_peer_received"),
         "phone_context_route_ms" to ("phone_send_started" to "phone_publish_started"),
         "phone_send_prepare_ms" to ("phone_send_started" to "phone_request_queued"),
         "phone_send_first_visible_ms" to ("phone_send_started" to "phone_first_output_visible"),
@@ -110,9 +113,13 @@ internal class AgentLatencyTracer(
 
     fun record(taskId: String, stage: String, outcome: String = "", atNs: Long? = null) {
         if (taskId.isBlank() || stage !in AgentLatencyContract.stages) return
-        val trace = AgentLatencyContract.opaqueId(taskId)
+        recordOpaque(AgentLatencyContract.opaqueId(taskId), stage, "", outcome, atNs)
+    }
+
+    fun recordOpaque(trace: String, stage: String, operation: String, outcome: String = "", atNs: Long? = null) {
+        if (stage !in AgentLatencyContract.stages) return
         synchronized(seen) {
-            if (!seen.add(Triple(trace, stage, ""))) return
+            if (!seen.add(Triple(trace, stage, operation))) return
             if (seen.size > AgentLatencyContract.EVENT_LIMIT) seen.remove(seen.first())
             if (stage == "phone_final_received") {
                 finalOutcomes[trace] = outcome.takeIf { it in setOf("failed", "cancelled", "timed_out") } ?: "completed"
@@ -121,6 +128,7 @@ internal class AgentLatencyTracer(
         }
         sink.append(AgentTimingPoint(
             trace, clockId, stage, (atNs ?: monotonicNs()).coerceAtLeast(0), wallClockMs().coerceAtLeast(0),
+            operationId = operation,
             outcome = outcome.takeIf { it in AgentLatencyContract.outcomes }.orEmpty()
         ))
     }

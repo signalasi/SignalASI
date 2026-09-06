@@ -17,6 +17,12 @@ import uuid
 SCHEMA = "galaxyssi.agent-latency.v1"
 TRACE_LIMIT = 8_000
 STAGE_PAIRS = {
+    "phone_transport_queue_ms": ("phone_transport_queued", "phone_transport_dispatched"),
+    "phone_broker_ack_ms": ("phone_wire_started", "phone_broker_acked"),
+    "phone_peer_receipt_ms": ("phone_transport_queued", "phone_peer_received"),
+    "desktop_transport_queue_ms": ("desktop_transport_queued", "desktop_transport_dispatched"),
+    "desktop_broker_ack_ms": ("desktop_wire_started", "desktop_broker_acked"),
+    "desktop_peer_receipt_ms": ("desktop_transport_queued", "desktop_peer_received"),
     "phone_context_route_ms": ("phone_send_started", "phone_publish_started"),
     "phone_send_prepare_ms": ("phone_send_started", "phone_request_queued"),
     "phone_send_first_visible_ms": ("phone_send_started", "phone_first_output_visible"),
@@ -119,6 +125,13 @@ class AgentLatencyTracer:
             return
         trace_id = opaque_id(task_id)
         operation = opaque_id(operation_id) if operation_id else ""
+        self.record_opaque(trace_id, stage, operation=operation, provider=provider,
+                           outcome=outcome, at_ns=at_ns, once=once)
+
+    def record_opaque(self, trace_id, stage, *, operation="", provider="", outcome="",
+                      at_ns=None, once=True):
+        if stage not in STAGES:
+            return
         if once:
             with self._lock:
                 key = (trace_id, stage, operation)

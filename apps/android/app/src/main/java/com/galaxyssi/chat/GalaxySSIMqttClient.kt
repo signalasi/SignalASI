@@ -4,6 +4,8 @@ import com.galaxyssi.chat.voice.metrics.VoiceLatencyTelemetry
 import com.galaxyssi.chat.voice.metrics.VoiceLatencyTraceContext
 import com.galaxyssi.chat.voice.metrics.VoiceTraceEvents
 import com.galaxyssi.chat.voice.asr.remote.RemoteWhisperNodeRegistry
+import com.galaxyssi.chat.metrics.AgentLatencyTelemetry
+import com.galaxyssi.chat.metrics.AgentTransportTiming
 
 import android.content.Context
 import android.os.Handler
@@ -78,6 +80,7 @@ object GalaxySSIMqttClient {
         val packets: List<String>,
         val purpose: String,
         val brokerAckTimeoutMillis: Long,
+        val timing: AgentTransportTiming.Attempt? = null,
         val queuedAtElapsedMillis: Long = SystemClock.elapsedRealtime(),
         var nextPacketIndex: Int = 0,
         var outstanding: Int = 0,
@@ -390,6 +393,7 @@ object GalaxySSIMqttClient {
 
                 override fun deliveryComplete(token: IMqttDeliveryToken?) {
                     if (client !== callbackClient) return
+                    AgentLatencyTelemetry.transport.broker(token?.userContext as? AgentTransportTiming.Attempt)
                     val context = appContext ?: return
                     val mid = token?.messageId ?: return
                     handleBrokerDeliveryComplete(context, mid)
@@ -1260,6 +1264,9 @@ object GalaxySSIMqttClient {
                     !usesPcConnectorTunnel(contactId)
             )
         )
+        if (!payload.optBoolean("peer_chat")) {
+            AgentLatencyTelemetry.transportQueued(context, targetId, messageId, payload.optString("task_id"))
+        }
         if (queueOnly) {
             if (!deferQueuedDispatch) {
                 if (client?.isConnected != true) connect(context)
@@ -1422,10 +1429,20 @@ object GalaxySSIMqttClient {
         mqtt: MqttAsyncClient,
         topic: String,
         message: MqttMessage,
-        purpose: String
+        purpose: String,
+        timing: AgentTransportTiming.Attempt? = null
     ): IMqttDeliveryToken? = MqttPublishGuard.attempt {
-        mqtt.publish(topic, message)
+        if (timing == null) mqtt.publish(topic, message) else mqtt.publish(topic, message, timing,
+            object : IMqttActionListener {
+                override fun onSuccess(asyncActionToken: IMqttToken?) {
+                    AgentLatencyTelemetry.transport.broker(timing)
+                }
+                override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                    AgentLatencyTelemetry.transport.broker(timing, "failed")
+                }
+            })
     }.onFailure {
+        AgentLatencyTelemetry.transport.broker(timing, "failed")
         Log.w(TAG, "MQTT publish deferred purpose=$purpose", it)
     }.getOrNull()
 
@@ -1438,9 +1455,10 @@ object GalaxySSIMqttClient {
         brokerAckTimeoutMillis: Long = MqttBrokerAckTimeoutPolicy.DEFAULT_TIMEOUT_MILLIS
     ): Boolean {
         val context = appContext ?: return false
-        val linkSecret = GalaxySSILinkProtocol.allServerLinks(context).firstOrNull {
+        val serverLink = GalaxySSILinkProtocol.allServerLinks(context).firstOrNull {
             topic in it.routes.sendWindow
-        }?.routes?.linkSecret ?: AppStore.phoneLinkSecretForOutgoingTopic(context, topic) ?: run {
+        }
+        val linkSecret = serverLink?.routes?.linkSecret ?: AppStore.phoneLinkSecretForOutgoingTopic(context, topic) ?: run {
             Log.w(TAG, "Opaque publish rejected: relationship key not found")
             return false
         }
@@ -1452,11 +1470,13 @@ object GalaxySSIMqttClient {
             .onFailure { Log.e(TAG, "MQTT wire payload rejected purpose=$purpose", it) }
             .getOrNull() ?: return false
         if (packets.size == 1) {
+            val timing = AgentLatencyTelemetry.transport.begin(serverLink?.desktopId.orEmpty(), durableMessageId.orEmpty())
             val token = publishSafely(
                 mqtt,
                 topic,
                 mqttMessage(packets.first()),
-                purpose
+                purpose,
+                timing
             ) ?: return false
             if (!durableMessageId.isNullOrBlank()) {
                 deliveryMessageIds[token.messageId] = durableMessageId
@@ -1479,7 +1499,8 @@ object GalaxySSIMqttClient {
                 topic = topic,
                 packets = packets,
                 purpose = purpose,
-                brokerAckTimeoutMillis = brokerAckTimeoutMillis
+                brokerAckTimeoutMillis = brokerAckTimeoutMillis,
+                timing = AgentLatencyTelemetry.transport.begin(serverLink?.desktopId.orEmpty(), durableMessageId.orEmpty())
             )
             pumpFragmentTransfersLocked(mqtt)
             val transfer = fragmentTransfers[key]
@@ -1525,6 +1546,7 @@ object GalaxySSIMqttClient {
                 )
                 if (token == null) {
                     transfer.failed = true
+                    AgentLatencyTelemetry.transport.broker(transfer.timing, "failed")
                     if (!transfer.durableMessageId.isNullOrBlank()) {
                         retryHandler.post { scheduleOutboxRetries() }
                     }
@@ -1564,6 +1586,7 @@ object GalaxySSIMqttClient {
                 }
                 transfer.nextPacketIndex >= transfer.packets.size && transfer.outstanding == 0 -> {
                     fragmentTransfers.remove(key)
+                    AgentLatencyTelemetry.transport.broker(transfer.timing)
                     completedMessageId = transfer.durableMessageId
                     Log.i(
                         TAG,
@@ -1646,6 +1669,7 @@ object GalaxySSIMqttClient {
         }
 
     private fun clearWireTransportState() {
+        AgentLatencyTelemetry.transport.disconnected()
         deliveryMessageIds.clear()
         brokerDeliveryRegistration.clear()
         brokerAckWatchdog.clear()
@@ -2022,6 +2046,7 @@ object GalaxySSIMqttClient {
             GalaxySSILinkDeliveryAckPolicy.transportMessageId(payload)
                 .takeIf(String::isNotBlank)
                 ?.let {
+                    AgentLatencyTelemetry.transport.received(link.desktopId, it)
                     GalaxySSILinkDeliveryStore.acknowledge(context, it)
                     retryHandler.post { scheduleOutboxRetries() }
                 }

@@ -168,6 +168,8 @@ pending_delivery_acks_lock = threading.Lock()
 delivery_ack_publish_queue: queue.Queue[tuple[object, dict, object] | None] = queue.Queue()
 delivery_ack_publisher_started = threading.Event()
 delivery_ack_publisher_lock = threading.Lock()
+from agent_transport_timing import transport_timing
+
 pending_outbound_acks: dict[int, tuple[str, str]] = {}
 pending_outbound_acks_lock = threading.RLock()
 MAX_MQTT_WIRE_BYTES = MAX_OPAQUE_PACKET_BYTES
@@ -492,6 +494,7 @@ class _OutboundFragmentTransfer:
     topic: str
     packets: list[str]
     info: _FragmentPublishInfo
+    timing: Any = None
     queued_at_monotonic: float = field(default_factory=time.monotonic)
     next_packet_index: int = 0
     pending_mids: set[int] = field(default_factory=set)
@@ -2484,13 +2487,25 @@ def _publish_mqtt_wire_payload(
     topic: str,
     wire_payload: str,
     link_secret: str,
+    timing_scope: tuple[str, str] | None = None,
 ):
     packets = [
         seal_wire_packet(packet, link_secret)
         for packet in encode_wire_payload(wire_payload)
     ]
     if len(packets) == 1:
-        return mqttc.publish(topic, packets[0], qos=MQTT_QOS)
+        timing = transport_timing.begin(*timing_scope) if timing_scope else None
+        generation = mqtt_connection_generation
+        try:
+            info = mqttc.publish(topic, packets[0], qos=MQTT_QOS)
+        except Exception:
+            transport_timing.broker(timing, "failed")
+            raise
+        if timing is not None and info.rc == mqtt.MQTT_ERR_SUCCESS:
+            transport_timing.bind((id(mqttc), generation, int(info.mid)), timing)
+        elif info.rc != mqtt.MQTT_ERR_SUCCESS:
+            transport_timing.broker(timing, "failed")
+        return info
 
     digest = hashlib.sha256(wire_payload.encode("utf-8")).hexdigest()
     with fragment_publish_lock:
@@ -2508,6 +2523,7 @@ def _publish_mqtt_wire_payload(
             topic=topic,
             packets=packets,
             info=publish_info,
+            timing=transport_timing.begin(*timing_scope) if timing_scope else None,
         )
         fragment_publish_transfers[transfer_id] = transfer
         fragment_publish_transfer_by_digest[digest] = transfer_id
@@ -2547,6 +2563,7 @@ def _pump_fragment_transfers_locked() -> None:
                 )
             except Exception as exc:
                 transfer.failed = True
+                transport_timing.broker(transfer.timing, "failed")
                 transfer.info.rc = getattr(mqtt, "MQTT_ERR_NO_CONN", 4)
                 log.warning(
                     "MQTT fragment publish deferred chunk=%s/%s: %s",
@@ -2560,6 +2577,7 @@ def _pump_fragment_transfers_locked() -> None:
                 continue
             if physical_info.rc != mqtt.MQTT_ERR_SUCCESS:
                 transfer.failed = True
+                transport_timing.broker(transfer.timing, "failed")
                 transfer.info.rc = physical_info.rc
                 log.warning(
                     "MQTT fragment publish rejected chunk=%s/%s rc=%s",
@@ -2578,7 +2596,7 @@ def _pump_fragment_transfers_locked() -> None:
             made_progress = True
 
 
-def _complete_fragment_publish(mqttc, mid: int) -> tuple[bool, int | None]:
+def _complete_fragment_publish(mqttc, mid: int, *, ack_ns=None, failed=False) -> tuple[bool, int | None]:
     global fragment_publish_inflight
     with fragment_publish_lock:
         transfer_id = fragment_publish_transfer_by_mid.pop(mid, None)
@@ -2587,6 +2605,8 @@ def _complete_fragment_publish(mqttc, mid: int) -> tuple[bool, int | None]:
         transfer = fragment_publish_transfers.get(transfer_id)
         if transfer is None:
             return True, None
+        if failed:
+            transport_timing.broker(transfer.timing, "failed", ack_ns)
         transfer.pending_mids.discard(mid)
         fragment_publish_inflight = max(0, fragment_publish_inflight - 1)
         logical_mid = None
@@ -2600,6 +2620,7 @@ def _complete_fragment_publish(mqttc, mid: int) -> tuple[bool, int | None]:
             fragment_publish_transfers.pop(transfer_id, None)
             fragment_publish_transfer_by_digest.pop(transfer.digest, None)
             transfer.info.mark_published()
+            transport_timing.broker(transfer.timing, at=ack_ns)
             logical_mid = transfer.info.mid
             log.info(
                 "MQTT fragmented transfer broker-acked chunks=%s topic=%s elapsed_ms=%s",
@@ -2614,6 +2635,7 @@ def _complete_fragment_publish(mqttc, mid: int) -> tuple[bool, int | None]:
 def _clear_mqtt_wire_transport_state() -> None:
     global fragment_publish_inflight
     inbound_chunk_assembler.clear()
+    transport_timing.disconnected()
     with pending_outbound_acks_lock:
         pending_outbound_acks.clear()
     with pending_delivery_acks_lock:
@@ -2658,12 +2680,18 @@ def on_subscribe(mqttc, userdata, mid, reason_codes, properties=None):
 
 
 def on_publish(mqttc, userdata, mid, reason_code=None, properties=None):
+    ack_ns = time.monotonic_ns()
+    failed = _reason_code_value(reason_code) >= 128 if reason_code is not None else False
+    transport_timing.acknowledged(
+        (id(mqttc), mqtt_connection_generation, int(mid)),
+        "failed" if failed else "completed", ack_ns,
+    )
     log.debug(f"MQTT broker publish ack mid={mid} rc={reason_code}")
     # PUBACK proves only that the outbound half reached the broker. The
     # loopback health probe must remain pending until on_mqtt_message observes
     # traffic on a subscribed topic; otherwise a dead inbound callback looks
     # healthy forever because publishing the probe acknowledges itself.
-    handled, logical_mid = _complete_fragment_publish(mqttc, int(mid))
+    handled, logical_mid = _complete_fragment_publish(mqttc, int(mid), ack_ns=ack_ns, failed=failed)
     if handled:
         if logical_mid is None:
             return
@@ -6612,6 +6640,7 @@ def _process_message(mqttc, userdata, msg):
             )
             if payload.get("type") == "delivery_ack":
                 acknowledged_id = acknowledged_transport_message_id(payload, application_envelope)
+                transport_timing.received(client_route_id, acknowledged_id)
                 if acknowledge_outbound(client_route_id, acknowledged_id):
                     flush_outbound_messages(mqttc)
                 complete_message(client_route_id, message_id, "completed", {"status": "completed"})
@@ -7642,6 +7671,8 @@ def _publish_to_registered_client(
             wire_payload,
             priority=_outbound_delivery_priority(payload),
         )
+        if not payload.get("peer_chat"):
+            transport_timing.queued(client_route_id, message_id, str(payload.get("task_id") or ""))
         published = flush_outbound_messages(
             mqttc,
             preferred_client_route_id=client_route_id,
@@ -7781,6 +7812,7 @@ def flush_outbound_messages(
                     _topics_for_client(paired_client).send,
                     pending["wire_payload"],
                     str(paired_client.get("link_secret") or ""),
+                    timing_scope=(client_route_id, message_id),
                 )
                 if info.rc == mqtt.MQTT_ERR_SUCCESS:
                     track_outbound_publish(info, client_route_id, message_id)
