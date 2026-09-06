@@ -671,3 +671,29 @@ sampled PSS growth was 14,206 KiB. This run FAILED the control-latency benchmark
 534 ms maximum exceeded the unchanged 500 ms gate (main callback maximum 6 ms,
 397 probes, no probe failures). It is retained as failed evidence, not counted
 as a full pass. This fixture does not exercise production pairing or MQTT.
+
+After the migration repair, all 137 JVM regressions and both debug APK builds
+passed again. Physical SM-G9880 instrumentation passed all 30 tests in 2.354 s,
+including the v4 migration, preserved metadata, missing metadata initialization,
+terminal-event ordering, stale writes, deletion and encrypted journal recovery.
+
+Two subsequent same-size 152 MiB device runs passed the unchanged acceptance
+gates. Both verified 152 accepted upload chunks, each uploaded once, the final
+hash, intentional process death, TLS rejection and the 3,145,801-byte return:
+
+| Metric | Rerun 1 | Rerun 2 |
+| --- | ---: | ---: |
+| Preparation time | 2,662 ms | 1,998 ms |
+| Preparation sampled PSS growth | 12,820 KiB | 14,029 KiB |
+| Resume checkpoint | 19 ms | 16 ms |
+| Remaining upload | 26,349 ms | 26,387 ms |
+| Return download | 626 ms | 565 ms |
+| Maximum control probe | 118 ms | 126 ms |
+| Maximum main-thread callback | 3 ms | 7 ms |
+| Control probes / failures | 343 / 0 | 321 / 0 |
+
+These are debug instrumentation and HTTPS-over-ADB-reverse results, not WAN
+throughput, frame-time percentiles, production MQTT/pairing acceptance, or proof
+that tail latency can never exceed the gate. The initial 534 ms failure remains
+part of the evidence. The new Blob receiver capability remains unadvertised;
+Relay provisioning and complete production UI/paired-device rollout are pending.
