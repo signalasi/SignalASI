@@ -33,13 +33,22 @@ class BlobTransferClientTest {
 
     @Before fun start() {
         server.dispatcher = relay
-        server.start(InetAddress.getByName("127.0.0.1"), 0)
-        http = BlobHttp(server.url("/").toString(), allowLoopbackHttp = true)
+        server.start(InetAddress.getByAddress("localhost", byteArrayOf(127, 0, 0, 1)), 0)
+        // MockWebServer may reverse-resolve to localhost on Linux; the HTTP test opt-in is literal-only.
+        http = BlobHttp(server.url("/").newBuilder().host("127.0.0.1").build().toString(), allowLoopbackHttp = true)
         client = BlobTransferClient(http, "f".repeat(64))
     }
     @After fun stop() { server.shutdown() }
     private fun staged(name: String = "sender") = BlobStaging.prepare(File(temporary.root, name), data.size.toLong(),
         BlobProtocol.hash(data), binding, { data.inputStream() }, key)
+
+    @Test fun `fixture hostname never broadens the literal loopback exception`() {
+        val namedOrigin = server.url("/").newBuilder().host("localhost").build().toString()
+        assertEquals("relay_requires_https", assertThrows(BlobFailure::class.java) {
+            BlobHttp(namedOrigin, allowLoopbackHttp = true)
+        }.code)
+        assertTrue(http.origin.startsWith("http://127.0.0.1:"))
+    }
 
     @Test fun `round trip sends early private offer and binary blocks with verified completion`() {
         staged().use { sender ->

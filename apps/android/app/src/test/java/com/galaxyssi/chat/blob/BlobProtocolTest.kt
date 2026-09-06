@@ -5,9 +5,52 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.File
+import javax.crypto.Cipher
 import javax.crypto.AEADBadTagException
 
 class BlobProtocolTest {
+    @Test fun `caller buffers preserve shared ciphertext and never write the unused tail`() {
+        val fixture = fixture()
+        BlobPrivate.parse(fixture.getJSONObject("private"), fixture.getJSONObject("manifest")).use { private ->
+            val plain = BlobProtocol.unhex(fixture.getString("plaintext_hex"), private.size.toInt())
+            val input = plain.copyOf(1024).also { it.fill(99, plain.size) }
+            val output = ByteArray(1024) { 42 }
+            val count = BlobProtocol.cryptInto(private, 0, input, plain.size, output, true)
+            assertEquals(plain.size + BlobProtocol.TAG_BYTES, count)
+            assertEquals(fixture.getString("ciphertext_hex"), BlobProtocol.hex(output.copyOf(count)))
+            assertTrue(output.drop(count).all { it == 42.toByte() })
+            assertEquals(BlobProtocol.hash(output.copyOf(count)), BlobProtocol.hash(output, count))
+            val decrypted = ByteArray(1024) { 43 }
+            assertEquals(plain.size, BlobProtocol.cryptInto(private, 0, output, count, decrypted, false))
+            assertArrayEquals(plain, decrypted.copyOf(plain.size))
+            assertTrue(decrypted.drop(plain.size).all { it == 43.toByte() })
+            output[0] = (output[0].toInt() xor 1).toByte()
+            assertThrows(AEADBadTagException::class.java) {
+                BlobProtocol.cryptInto(private, 0, output, count, decrypted, false)
+            }
+            assertTrue(decrypted.all { it == 0.toByte() })
+            assertThrows(BlobFailure::class.java) { BlobProtocol.cryptInto(private, 0, input, -1, output, true) }
+            assertThrows(BlobFailure::class.java) { BlobProtocol.cryptInto(private, 0, input, input.size + 1, output, true) }
+            assertThrows(IllegalArgumentException::class.java) {
+                BlobProtocol.cryptInto(private, 0, input, plain.size, ByteArray(count - 1), true)
+            }
+        }
+    }
+
+    @Test fun `cipher reuse across full and short chunks matches independent encryption`() {
+        val size = BlobProtocol.CHUNK_BYTES.toLong() + 73
+        BlobPrivate("a".repeat(32), ByteArray(32) { it.toByte() }, ByteArray(8) { it.toByte() },
+            size, "b".repeat(64), "c".repeat(64), "").use { private ->
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val buffer = ByteArray(BlobProtocol.CHUNK_BYTES) { (it % 251).toByte() }
+            val output = ByteArray(buffer.size + BlobProtocol.TAG_BYTES)
+            listOf(buffer.size, 73).forEachIndexed { index, length ->
+                val count = BlobProtocol.cryptInto(private, index, buffer, length, output, true, cipher)
+                assertArrayEquals(BlobProtocol.crypt(private, index, buffer.copyOf(length), true), output.copyOf(count))
+            }
+        }
+    }
+
     @Test fun `shared Python vector matches Android binding AAD ciphertext and plaintext`() {
         val fixture = fixture()
         val bindingJson = fixture.getJSONObject("binding")

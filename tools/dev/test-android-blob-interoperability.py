@@ -17,9 +17,26 @@ import sys
 import tempfile
 import threading
 import time
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "apps/desktop/core/galaxyssi-link/backend"
+
+
+def junit_results(directory: Path) -> dict[str, int]:
+    reports = list(directory.glob("TEST-*.xml"))
+    if not reports:
+        raise RuntimeError("Android regression produced no JUnit reports")
+    totals = dict(tests=0, failures=0, errors=0, skipped=0)
+    for report in reports:
+        suite = ET.parse(report).getroot()
+        if suite.tag != "testsuite":
+            raise RuntimeError(f"Unexpected JUnit report format: {report.name}")
+        for field in totals:
+            totals[field] += int(suite.attrib.get(field, "0"))
+    if not totals["tests"] or totals["failures"] or totals["errors"]:
+        raise RuntimeError(f"Android regression did not pass: {totals}")
+    return totals
 
 
 def certificate(root: Path):
@@ -44,6 +61,7 @@ def certificate(root: Path):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--assemble", action="store_true", help="Also build the App and instrumentation APKs")
+    parser.add_argument("--all-tests", action="store_true", help="Run the complete Android JVM suite with a live HTTPS fixture")
     options = parser.parse_args()
     original_environment = dict(os.environ)
     with tempfile.TemporaryDirectory(prefix="galaxyssi-blob-interop-") as temporary:
@@ -97,7 +115,7 @@ def main() -> int:
                 offer = client.upload(staged)
                 (root / "fixture.json").write_text(json.dumps({"offer": offer, "token": token,
                     "binding": binding, "sha256": expected_hash}), encoding="utf-8")
-                log = ROOT / "build/android-blob-interop-gradle.log"
+                log = ROOT / "build" / ("android-blob-interop-all-gradle.log" if options.all_tests else "android-blob-interop-gradle.log")
                 log.parent.mkdir(parents=True, exist_ok=True)
                 environment = {**original_environment, "GALAXYSSI_BLOB_TEST_ROOT": temporary}
                 command = [str(ROOT / "apps/android/gradlew.bat" if os.name == "nt" else ROOT / "apps/android/gradlew"),
@@ -108,6 +126,8 @@ def main() -> int:
                     "com.galaxyssi.chat.AttachmentControlInboxTest", "--tests",
                     "com.galaxyssi.chat.PeerAttachmentTransferProgressTest", "--tests",
                     "com.galaxyssi.chat.PeerChatAttachmentTest", "--console=plain"]
+                if options.all_tests:
+                    command = [command[0], ":app:testDebugUnitTest", "--console=plain"]
                 if options.assemble:
                     command.extend([":app:assembleDebug", ":app:assembleDebugAndroidTest"])
                 with log.open("w", encoding="utf-8") as output:
@@ -117,6 +137,7 @@ def main() -> int:
                 if result.returncode:
                     print(f"Android regression failed; see {log}", flush=True)
                     return result.returncode
+                counts_junit = junit_results(ROOT / "apps/android/app/build/test-results/testDebugUnitTest")
                 result_path = root / "kotlin-offer.json"
                 if not result_path.is_file():
                     raise RuntimeError("Kotlin interoperability case did not run; a cached or skipped test is not evidence")
@@ -132,7 +153,8 @@ def main() -> int:
                 if counts != [1, 1, 1, 1]:
                     raise RuntimeError(f"Kotlin resume resent accepted chunks: {counts}")
                 print(json.dumps({"result": "passed", "transport": "real_loopback_https", "bytes_each_direction": len(data),
-                    "kotlin_upload_counts": counts, "sha256_verified": True, "phone_test": False}), flush=True)
+                    "kotlin_upload_counts": counts, "sha256_verified": True, "phone_test": False,
+                    "junit": counts_junit}), flush=True)
         finally:
             server.should_exit = True
             thread.join(timeout=10)

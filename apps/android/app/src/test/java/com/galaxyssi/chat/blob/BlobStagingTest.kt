@@ -17,6 +17,41 @@ class BlobStagingTest {
     private val storageKey = SecretKeySpec(ByteArray(32) { (it + 1).toByte() }, "AES")
     private val binding = mapOf("client_route_id" to "route-a", "conversation_id" to "conversation-a", "turn_id" to "turn-a")
 
+    @Test fun `preparation reuses one plaintext buffer and clears it on success and interruption`() {
+        val data = ByteArray(3 * BlobProtocol.CHUNK_BYTES + 73) { (it % 251).toByte() }
+        listOf(false, true).forEach { interrupt ->
+            var captured: ByteArray? = null
+            var reads = 0
+            val source = object : java.io.ByteArrayInputStream(data) {
+                override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                    if (captured == null) captured = buffer else assertSame(captured, buffer)
+                    assertEquals(BlobProtocol.CHUNK_BYTES, buffer.size)
+                    reads++
+                    return super.read(buffer, offset, length)
+                }
+            }
+            val directory = File(temporary.root, "reuse-$interrupt")
+            val prepare = {
+                BlobStaging.prepare(directory, data.size.toLong(), BlobProtocol.hash(data), binding,
+                    { source }, storageKey, checkCancelled = {
+                        if (interrupt && reads == 2) throw BlobFailure("transfer_cancelled", 499)
+                    })
+            }
+            if (interrupt) {
+                assertEquals("transfer_cancelled", assertThrows(BlobFailure::class.java) { prepare() }.code)
+                assertFalse(BlobStaging.exists(directory))
+            } else prepare().use { staged ->
+                assertEquals(4, staged.chunks.size)
+                assertEquals(89, staged.chunks.last().size)
+                val output = ByteArrayOutputStream()
+                staged.copyPlaintext(output, binding)
+                assertArrayEquals(data, output.toByteArray())
+            }
+            assertNotNull(captured)
+            assertTrue(captured!!.all { it == 0.toByte() })
+        }
+    }
+
     @Test fun `empty exact and partial files round trip without plaintext staging`() {
         listOf(0, 1_048_576, 1_048_597).forEach { size ->
             val bytes = ByteArray(size) { (it % 131).toByte() }

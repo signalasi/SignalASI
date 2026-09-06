@@ -13,6 +13,7 @@ import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.security.MessageDigest
 import javax.crypto.AEADBadTagException
+import javax.crypto.Cipher
 import javax.crypto.SecretKey
 
 /** Worker-owned ciphertext staging. No plaintext attachment or capability is written unencrypted. */
@@ -152,23 +153,24 @@ internal class BlobStaging private constructor(
                 Files.createDirectory(directory.toPath())
                 val chunks = mutableListOf<BlobChunk>()
                 val digest = MessageDigest.getInstance("SHA-256")
-                source().use { input ->
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                val plain = ByteArray(minOf(size, BlobProtocol.CHUNK_BYTES.toLong()).toInt())
+                val encrypted = ByteArray(plain.size + BlobProtocol.TAG_BYTES)
+                try { source().use { input ->
                     val count = maxOf(1L, (size + BlobProtocol.CHUNK_BYTES - 1) / BlobProtocol.CHUNK_BYTES).toInt()
                     repeat(count) { index ->
                         checkCancelled()
                         val expected = minOf(BlobProtocol.CHUNK_BYTES.toLong(), size - index.toLong() * BlobProtocol.CHUNK_BYTES).toInt()
-                        val plain = readExact(input, expected)
                         try {
-                            digest.update(plain)
-                            val encrypted = BlobProtocol.crypt(private, index, plain, true)
-                            try {
-                                atomicWrite(File(directory, index.toString().padStart(8, '0') + ".blob"), encrypted)
-                                chunks.add(BlobChunk(BlobProtocol.hash(encrypted), encrypted.size))
-                            } finally { encrypted.fill(0) }
-                        } finally { plain.fill(0) }
+                            readExact(input, plain, expected)
+                            digest.update(plain, 0, expected)
+                            val length = BlobProtocol.cryptInto(private, index, plain, expected, encrypted, true, cipher)
+                            atomicWrite(File(directory, index.toString().padStart(8, '0') + ".blob"), encrypted, length)
+                            chunks.add(BlobChunk(BlobProtocol.hash(encrypted, length), length))
+                        } finally { plain.fill(0); encrypted.fill(0) }
                     }
                     if (input.read() != -1 || BlobProtocol.hex(digest.digest()) != hash) BlobProtocol.fail("source_changed")
-                }
+                } } finally { plain.fill(0); encrypted.fill(0) }
                 private.manifestHash = BlobProtocol.hash(BlobProtocol.canonical(BlobProtocol.manifest(chunks)))
                 return BlobStaging(directory, private, chunks, JSONObject(), storageKey).also { it.writeCheckpoint() }
             } catch (error: Exception) {
@@ -215,10 +217,11 @@ internal class BlobStaging private constructor(
             } finally { bytes.fill(0) }
         }
 
-        private fun atomicWrite(file: File, bytes: ByteArray) {
+        private fun atomicWrite(file: File, bytes: ByteArray, length: Int = bytes.size) {
+            require(length in 0..bytes.size)
             val temporary = File(file.parentFile, ".${file.name}-${BlobProtocol.hex(BlobProtocol.randomBytes(8))}")
             try {
-                FileOutputStream(temporary).use { output -> output.write(bytes); output.fd.sync() }
+                FileOutputStream(temporary).use { output -> output.write(bytes, 0, length); output.fd.sync() }
                 Files.move(temporary.toPath(), file.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
             } finally { temporary.delete() }
         }
@@ -241,8 +244,7 @@ internal class BlobStaging private constructor(
             } finally { buffer.fill(0) }
         }
 
-        private fun readExact(input: InputStream, size: Int): ByteArray {
-            val buffer = ByteArray(size)
+        private fun readExact(input: InputStream, buffer: ByteArray, size: Int) {
             try {
                 var offset = 0
                 while (offset < size) {
@@ -254,7 +256,6 @@ internal class BlobStaging private constructor(
                         buffer[offset++] = one.toByte()
                     } else offset += count
                 }
-                return buffer
             } catch (error: Exception) { buffer.fill(0); throw error }
         }
     }

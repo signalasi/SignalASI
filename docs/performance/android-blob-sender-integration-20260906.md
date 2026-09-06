@@ -5,6 +5,11 @@ Date: 2026-09-06. Main fetched before final verification and submission:
 This is a staged phone-to-Desktop Agent input path, not completion of the
 whole communication data-plane or reliability goal.
 
+Follow-up: [bounded preparation and regression gates](android-blob-bounded-preparation-20260906.md)
+records real 16/152 MiB S20U HTTPS tests, the preparation memory finding, the
+1.0.21 buffer correction and full JVM regression. Post-fix phone measurements
+and production paired-network acceptance remain pending.
+
 ## Application integration
 
 - A paired Desktop can provide a versioned `blob_relay_config` only when the

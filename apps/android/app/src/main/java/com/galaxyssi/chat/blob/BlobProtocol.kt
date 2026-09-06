@@ -40,7 +40,11 @@ internal object BlobProtocol {
         return ByteArray(bytes) { index -> value.substring(index * 2, index * 2 + 2).toInt(16).toByte() }
     }
 
-    fun hash(bytes: ByteArray): String = hex(MessageDigest.getInstance("SHA-256").digest(bytes))
+    fun hash(bytes: ByteArray, length: Int = bytes.size): String = MessageDigest.getInstance("SHA-256").run {
+        require(length in 0..bytes.size)
+        update(bytes, 0, length)
+        hex(digest())
+    }
     fun randomBytes(size: Int): ByteArray = ByteArray(size).also(random::nextBytes)
 
     fun string(value: JSONObject, key: String): String = value.opt(key) as? String ?: fail("invalid_$key")
@@ -137,21 +141,37 @@ internal object BlobProtocol {
         .putInt(index).putInt(plaintextSize).array()
 
     fun crypt(private: BlobPrivate, index: Int, bytes: ByteArray, encrypt: Boolean): ByteArray {
+        val output = ByteArray(if (encrypt) bytes.size + TAG_BYTES else maxOf(0, bytes.size - TAG_BYTES))
+        try {
+            cryptInto(private, index, bytes, bytes.size, output, encrypt)
+            return output
+        } catch (error: Exception) { output.fill(0); throw error }
+    }
+
+    /** Caller-owned buffers keep worker memory independent of attachment length. */
+    fun cryptInto(private: BlobPrivate, index: Int, bytes: ByteArray, length: Int, output: ByteArray,
+        encrypt: Boolean, cipher: Cipher = Cipher.getInstance("AES/GCM/NoPadding")): Int {
         private.checkOpen()
         val count = maxOf(1L, (private.size + CHUNK_BYTES - 1) / CHUNK_BYTES).toInt()
         if (index !in 0 until count) fail("invalid_chunk_index")
-        val plaintextSize = if (encrypt) bytes.size else bytes.size - TAG_BYTES
+        if (length !in 0..bytes.size) fail("invalid_chunk_size")
+        val plaintextSize = if (encrypt) length else length - TAG_BYTES
         val expected = minOf(CHUNK_BYTES.toLong(), private.size - index.toLong() * CHUNK_BYTES).toInt()
         if (plaintextSize != expected) fail("invalid_chunk_size")
+        val outputSize = if (encrypt) plaintextSize + TAG_BYTES else plaintextSize
+        require(output.size >= outputSize && output !== bytes)
         val nonce = ByteBuffer.allocate(12).put(private.noncePrefix).putInt(index).array()
         val aad = aad(private, index, plaintextSize)
         return try {
-            Cipher.getInstance("AES/GCM/NoPadding").run {
+            cipher.run {
                 init(if (encrypt) Cipher.ENCRYPT_MODE else Cipher.DECRYPT_MODE,
                     SecretKeySpec(private.key, "AES"), GCMParameterSpec(128, nonce))
                 updateAAD(aad)
-                doFinal(bytes)
+                doFinal(bytes, 0, length, output, 0).also { check(it == outputSize) }
             }
+        } catch (error: Exception) {
+            output.fill(0)
+            throw error
         } finally {
             nonce.fill(0)
             aad.fill(0)
