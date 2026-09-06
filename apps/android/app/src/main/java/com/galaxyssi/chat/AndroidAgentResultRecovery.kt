@@ -40,8 +40,7 @@ internal object AndroidAgentResultRecovery {
                         CodexStyleResponsePolicy.filterAssistantRichOutput(AgentRichContentCodec.fromEnvelope(payload)))
                         ?: return@withPermit
                     // The bus commits to the encrypted inbox before notifying the UI.
-                    AgentConnectorResponseBus.publish(app, response)
-                    acknowledge(app, payload, response)
+                    publishResult(app, payload, response)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -51,36 +50,21 @@ internal object AndroidAgentResultRecovery {
         }
     }
 
+    fun publishResult(context: Context, payload: JSONObject, response: AgentConnectorResponse): Boolean {
+        val digest = payload.optJSONObject("result_recovery")?.optString("sha256").orEmpty()
+        val receipt = if (Regex("[a-f0-9]{64}").matches(digest)) {
+            val desktop = AppStore.contactById(context, payload.optString("contact_id"))?.optString("desktop_id").orEmpty()
+            AgentResultReceipt.from(payload, desktop)?.takeIf { it.matches(response) && paired(context, desktop, payload) }
+        } else null
+        val consumed = AgentConnectorResponseBus.publishWithReceipt(context, response, receipt)
+        if (receipt != null) AndroidAgentResultReceipts.request(context)
+        return consumed
+    }
+
     fun acknowledge(context: Context, payload: JSONObject, response: AgentConnectorResponse) {
         val digest = payload.optJSONObject("result_recovery")?.optString("sha256") ?: return
         if (!Regex("[a-f0-9]{64}").matches(digest)) return
-        val app = context.applicationContext
-        val snapshot = JSONObject().apply {
-            AgentResultRecoveryClient.FIELDS.forEach { put(it, payload.optString(it)) }
-            put("execution_generation", response.executionGeneration)
-            put("result_recovery", JSONObject().put("sha256", digest))
-        }
-        scope.launch {
-            runCatching { acknowledgeStored(app, snapshot, response) }
-                .onFailure { Log.w("GalaxySSIRecovery", "Durable result receipt deferred: ${it.javaClass.simpleName}") }
-        }
-    }
-
-    private fun acknowledgeStored(context: Context, payload: JSONObject, response: AgentConnectorResponse) {
-        val receipt = payload.optJSONObject("result_recovery") ?: return
-        if (!AgentConnectorResponseStore.wasRecorded(context, response)) return
-        val digest = receipt.optString("sha256")
-        if (!Regex("[a-f0-9]{64}").matches(digest)) return
-        val contact = AppStore.contactById(context, payload.optString("contact_id")) ?: return
-        val desktop = contact.optString("desktop_id")
-        if (desktop.isBlank() || !paired(context, desktop, payload)) return
-        // The durable inbox, not a transport ACK, is the checkpoint ownership boundary.
-        AgentResultPageDatabase(context).use { it.checkpoint(desktop, payload).clear(digest) }
-        val ack = JSONObject().put("type", "agent_task_result_received").put("sha256", digest)
-            .put("execution_generation", response.executionGeneration)
-        AgentResultRecoveryClient.FIELDS.forEach { ack.put(it, payload.optString(it)) }
-        runCatching { publish(context, desktop, ack) }
-            .onFailure { Log.w("GalaxySSIRecovery", "Durable result receipt deferred") }
+        if (response.executionGeneration > 0) AndroidAgentResultReceipts.request(context)
     }
 
     internal fun eligible(context: Context, desktop: String, fields: JSONObject): Boolean {

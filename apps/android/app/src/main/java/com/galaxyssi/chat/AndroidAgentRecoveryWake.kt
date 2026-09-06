@@ -13,10 +13,12 @@ internal object AndroidAgentRecoveryWake {
     @Volatile private var coordinator: AgentRecoveryWakeCoordinator? = null
 
     fun connectionChanged(context: Context, connected: Boolean) {
+        AndroidAgentResultReceipts.connectionChanged(context, connected)
         coordinator(context).connectionChanged(connected)
     }
 
     fun request(context: Context) {
+        AndroidAgentResultReceipts.request(context)
         coordinator(context).request(GalaxySSIMqttClient.isConnected())
     }
 

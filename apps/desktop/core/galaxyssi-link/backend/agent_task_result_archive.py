@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 from pathlib import Path
 import sqlite3
 import threading
@@ -134,6 +135,18 @@ class TaskResultArchive:
                     return bool(updated)
             finally:
                 db.close()
+
+    def receipt_confirmation(self, request: dict, *, client_route_id: str) -> dict | None:
+        receipt_id = request.get("receipt_id")
+        if not isinstance(receipt_id, str) or not re.fullmatch(r"[a-f0-9]{64}", receipt_id):
+            return None
+        if not self.acknowledge(request, client_route_id=client_route_id):
+            return None
+        # acknowledge commits before this reply. Its retained digest tombstone
+        # makes a duplicate request confirmable after a lost downlink or restart.
+        return {**identity(request), "type": "agent_task_result_receipt_confirmed",
+                "execution_generation": execution_generation(request), "receipt_id": receipt_id,
+                "sha256": request["sha256"]}
 
 
 archive = TaskResultArchive()

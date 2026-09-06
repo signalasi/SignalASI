@@ -6879,7 +6879,12 @@ def _process_message(mqttc, userdata, msg):
             from agent_task_terminal_outcome import recover_terminal_outcome
 
             if msg_type == "agent_task_result_received":
-                archive.acknowledge(payload, client_route_id=client_route_id)
+                if "receipt_id" in payload:
+                    response = archive.receipt_confirmation(payload, client_route_id=client_route_id)
+                    if response is not None:
+                        _publish_phone_payload(mqttc, wire_payload, response)
+                else:
+                    archive.acknowledge(payload, client_route_id=client_route_id)
             else:
                 response = archive.page(payload, client_route_id=client_route_id)
                 if response is not None and response["status"] == "unavailable":

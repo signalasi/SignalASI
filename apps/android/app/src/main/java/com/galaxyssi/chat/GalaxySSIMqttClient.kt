@@ -2208,6 +2208,11 @@ object GalaxySSIMqttClient {
                 payload.put("content", AgentRemoteOutcomeCodec.content(context, payload))
             }
         }
+        if (payload.optString("type") == "agent_task_result_receipt_confirmed") {
+            AndroidAgentResultReceipts.receive(context, payload, sourceDesktopId)
+            GalaxySSILinkDeliveryStore.completeIncoming(context, payload.optString("message_id"))
+            return
+        }
         if (payload.optString("type") == "agent_task_result_page") {
             AndroidAgentResultRecovery.receive(context, payload, sourceDesktopId)
             GalaxySSILinkDeliveryStore.completeIncoming(context, payload.optString("message_id"))

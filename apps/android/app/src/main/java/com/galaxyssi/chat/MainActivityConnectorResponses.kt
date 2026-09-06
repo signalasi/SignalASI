@@ -298,7 +298,7 @@ internal fun MainActivity.publishAgentConnectorResponse(envelope: JSONObject?, m
                 if (!isFinishing && !isDestroyed) refreshGlobalAgentCognition()
             }
         } else {
-            AgentConnectorResponseBus.publish(this, response)
+            AndroidAgentResultRecovery.publishResult(this, payload, response)
         }
         AndroidAgentResultRecovery.acknowledge(this, payload, response)
         // The durable reply must not wait for the optional voice projection's ledger scan.

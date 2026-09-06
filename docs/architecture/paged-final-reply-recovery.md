@@ -37,9 +37,11 @@ and recovered deliveries share the same inbox identity, so they cannot create a
 second message. Final local cancellation/turn guards still apply at consumption.
 
 Desktop only deletes archived body pages on a scoped `agent_task_result_received`
-receipt with the matching full digest. Android sends it only after the inbox
-confirms a persisted row or handled tombstone, not merely a broker ACK or an
-in-memory callback. Acknowledged archive tombstones prevent resurrection by a
+receipt with the matching full digest. Android commits its receipt intent with
+the inbox row, not merely after a broker ACK or an in-memory callback. The
+application confirmation and durable cleanup are described in
+[durable-result-receipts.md](durable-result-receipts.md).
+Acknowledged archive tombstones prevent resurrection by a
 late publish retry. A lost receipt retains an encrypted pending copy; no pending
 body is silently age-evicted. Managed replies that bypass this inbox do not yet
 send this receipt and remain encrypted on Desktop until their own durable
@@ -49,10 +51,11 @@ acceptance lifecycle is integrated.
 
 This follows the verified-observation PR and adds final reply recovery. Old tasks
 without an archive return unavailable; they are not rerendered from raw model
-output or automatically executed again. A process death during assembly restarts
-the small-page pull from page zero. Persistent missing-page checkpoints, full
-event replay, every runtime's UI reattachment and the end-to-end five-second
-recovery SLO remain separate acceptance work.
+output or automatically executed again. Android 1.0.17 added encrypted
+[missing-page checkpoints](android-result-page-checkpoints.md), so process death
+no longer forces already committed pages to download again. Full event replay,
+every runtime's UI reattachment and the end-to-end five-second recovery SLO
+remain separate acceptance work.
 
 Unit tests cover exact scope, encrypted persistence, immutable output, Unicode
 page boundaries, tampering, wrong/missing pages, cancellation, late/duplicate

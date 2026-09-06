@@ -96,7 +96,9 @@ object AgentConnectorResponseBus {
         listeners -= listener
     }
 
-    fun publish(context: Context, response: AgentConnectorResponse): Boolean {
+    fun publish(context: Context, response: AgentConnectorResponse): Boolean = publishWithReceipt(context, response, null)
+
+    internal fun publishWithReceipt(context: Context, response: AgentConnectorResponse, receipt: AgentResultReceipt?): Boolean {
         if (response.sourceMessageId <= 0L) return false
         AgentGlobalRunSlotStore(context).releaseBySourceMessageId(response.sourceMessageId)
         val richOutput = AgentRichContentMaterializer.materialize(context, response.richOutputJson)
@@ -108,7 +110,7 @@ object AgentConnectorResponseBus {
         if (!AgentConnectorResponseStore.isCurrentExecution(context, normalized)) return false
         if (AgentManagedConnectorResponseRegistry.consume(normalized)) return true
         if (EncryptedAgentManagedResponseLedger(context).complete(normalized) != null) return true
-        val durable = if (AgentConnectorResponseStore.append(context, normalized)) normalized
+        val durable = if (AgentConnectorResponseStore.appendWithReceipt(context, normalized, receipt)) normalized
             else AgentConnectorResponseStore.find(context, normalized)
         if (durable != null) {
             listeners.forEach { listener -> listener.onConnectorResponse(durable) }
