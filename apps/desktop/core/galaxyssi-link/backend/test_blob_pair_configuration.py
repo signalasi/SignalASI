@@ -193,3 +193,19 @@ class PairConfigurationTest(PairConfigurationFixture):
             pairing_state.clear_pairing_state(self.routes[1])
             self.assertFalse(second.exists())
             self.assertFalse(pairing_state.forget_client(self.routes[1]))
+
+    def test_clear_all_pairings_removes_both_settings_but_not_global_defaults(self):
+        import pairing_state
+        from link_protocol import new_link_secret
+        with patch.object(pairing_state, "STATE_PATH", self.root / "registry.json"):
+            for route in self.routes:
+                peer = self.peers[route]
+                pairing_state.record_pairing_success(peer["identity_fingerprint"], peer["signal_name"],
+                    client_route_id=route, link_secret=new_link_secret(), local_identity_fingerprint="f" * 64)
+                self.save(route=route)
+            default = self.root / "blob-relay-configuration.secure.json"
+            before = default.read_bytes()
+            pairing_state.clear_pairing_state()
+            self.assertTrue(all(not settings._path(self.bridge, route).exists() for route in self.routes))
+            self.assertEqual(before, default.read_bytes())
+            self.assertEqual([], pairing_state.list_clients())

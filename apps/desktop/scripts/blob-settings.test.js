@@ -24,13 +24,15 @@ function fixture(overrides = {}) {
     revision: 1, enabled: true, origin: "https://relay.test", credential_present: true, client_opted_in: true });
   let saved;
   let clear;
+  let resume;
   const api = { getBlobSettings: async (route) => value(route),
     saveBlobSettings: async (route, payload) => { saved = { route, payload: { ...payload } }; return { ...value(route), configuration_queued: true }; },
-    onSensitiveStateClear: (callback) => { clear = callback; }, ...overrides };
+    onSensitiveStateClear: (callback) => { clear = callback; },
+    onSensitiveStateResume: (callback) => { resume = callback; }, ...overrides };
   const controller = createController(doc, api, (key) => key);
   const clients = ["first", "second"].map((id) => ({ paired: true, client_route_id: id, display_name: id }));
   controller.setClients(clients);
-  return { get, controller, clients, value, saved: () => saved, clear: () => clear() };
+  return { get, controller, clients, value, saved: () => saved, clear: () => clear(), resume: () => resume() };
 }
 
 test("closed settings do not trigger background configuration reads", () => {
@@ -111,4 +113,31 @@ test("pair removal clears selection and cannot preserve a stale credential", asy
 test("errors use bounded reason labels and never display arbitrary exception content", () => {
   assert.equal(errorLabel(new Error("private-token-value"), "Fallback"), "Fallback");
   assert.equal(errorLabel(new Error("remote: blob_config_revision_conflict"), "Fallback"), "Relay settings changed; refresh");
+});
+
+test("resume refreshes only the open active gateway without restoring a credential", async () => {
+  let reads = 0;
+  const f = fixture({ getBlobSettings: async (route) => { reads++; return f.value(route); } });
+  f.resume();
+  assert.equal(reads, 0);
+  f.get("blobSettingsSection").open = true;
+  f.get("gatewayPanel").classList = { contains: () => false };
+  f.resume();
+  assert.equal(reads, 0);
+  f.get("gatewayPanel").classList = { contains: () => true };
+  f.resume();
+  await new Promise(setImmediate);
+  assert.equal(reads, 1);
+  assert.equal(f.get("blobSettingsSave").disabled, false);
+  assert.equal(f.get("blobSettingsCredential").value, "");
+});
+
+test("unchanged device refresh preserves an unsaved credential and origin", async () => {
+  const f = fixture();
+  await f.controller.refresh();
+  f.get("blobSettingsOrigin").value = "https://unsaved.test";
+  f.get("blobSettingsCredential").value = "private-secret";
+  f.controller.setClients(f.clients.map((item) => ({ ...item, last_seen_at: Date.now() })));
+  assert.equal(f.get("blobSettingsOrigin").value, "https://unsaved.test");
+  assert.equal(f.get("blobSettingsCredential").value, "private-secret");
 });
