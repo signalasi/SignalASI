@@ -70,6 +70,11 @@ This phase guarantees restartable partial download, not cross-store atomic
 cleanup or complete lifecycle garbage collection for cancelled/deleted tasks.
 Those remain explicit follow-up work in the larger recovery goal.
 
+Android 1.0.18's [durable result receipts](durable-result-receipts.md) subsequently
+adds transactionally persisted confirmation and cleanup intent for inbox-owned
+results. Cancelled/deleted scopes that never committed an inbox receipt remain a
+separate lifecycle concern; the two databases are not one atomic transaction.
+
 ## Tests
 
 JVM tests exercise interruption, missing middle pages, timeout/cancellation,

@@ -21,17 +21,21 @@ internal class AgentConnectorResponseInbox(
     private val legacyPreferences: String = LEGACY_PREFERENCES
 ) : Closeable {
     private val helper = InboxDatabase(context, databaseName)
+    private val receipts = AgentResultReceiptJournal(databaseName)
     private var migrationChecked = false
 
     @Synchronized
-    fun append(response: AgentConnectorResponse): Boolean {
+    fun append(response: AgentConnectorResponse, receipt: AgentResultReceipt? = null): Boolean {
         migrate()
         require(response.sourceMessageId > 0) { "Invalid connector response source identity" }
         require(response.content.isNotBlank() || response.richOutputJson.isNotBlank()) { "Empty connector response" }
+        require(receipt == null || receipt.matches(response)) { "Result receipt identity mismatch" }
         val database = helper.writableDatabase
         database.beginTransaction()
         return try {
             val inserted = insert(database, response)
+            val key = AgentConnectorResponseCodec.identity(response)
+            if (receipt != null && exists("identity_key=?", arrayOf(key))) receipts.insert(database, receipt, key)
             database.setTransactionSuccessful()
             inserted
         } finally { database.endTransaction() }
@@ -140,6 +144,7 @@ internal class AgentConnectorResponseInbox(
         val database = helper.writableDatabase
         database.beginTransaction()
         try {
+            database.delete("result_receipts", null, null)
             database.delete("inbox", null, null)
             database.delete("remote_executions", null, null)
             database.execSQL("INSERT OR IGNORE INTO inbox_metadata(name) VALUES ('legacy_migrated')")
@@ -152,6 +157,21 @@ internal class AgentConnectorResponseInbox(
 
     @Synchronized
     override fun close() = helper.close()
+
+    @Synchronized
+    fun dueReceipts(now: Long, limit: Int = 32): List<AgentResultReceiptWork> = receipts.due(helper.writableDatabase, now, limit)
+
+    @Synchronized
+    fun claimReceipt(work: AgentResultReceiptWork, now: Long): Boolean = receipts.claim(helper.writableDatabase, work, now)
+
+    @Synchronized
+    fun confirmReceipt(receipt: AgentResultReceipt): Boolean = receipts.confirm(helper.writableDatabase, receipt)
+
+    @Synchronized
+    fun cleanedReceipt(receipt: AgentResultReceipt): Boolean = receipts.cleaned(helper.writableDatabase, receipt)
+
+    @Synchronized
+    fun nextReceiptWake(): Long? = receipts.nextWake(helper.readableDatabase)
 
     private fun exists(selection: String, args: Array<String>): Boolean = helper.readableDatabase.rawQuery(
         "SELECT 1 FROM inbox WHERE $selection LIMIT 1", args
@@ -263,7 +283,7 @@ internal class AgentConnectorResponseInbox(
 
     private fun aad(key: String): ByteArray = "connector-inbox:$databaseName:$key".toByteArray(Charsets.UTF_8)
 
-    private class InboxDatabase(context: Context, name: String) : SQLiteOpenHelper(context, name, null, 2) {
+    private class InboxDatabase(context: Context, name: String) : SQLiteOpenHelper(context, name, null, 3) {
         init { setWriteAheadLoggingEnabled(true) }
 
         override fun onConfigure(db: SQLiteDatabase) {
@@ -280,6 +300,7 @@ internal class AgentConnectorResponseInbox(
             db.execSQL("CREATE INDEX inbox_turn ON inbox(turn_key,handled)")
             db.execSQL("CREATE TABLE inbox_metadata (name TEXT PRIMARY KEY NOT NULL)")
             createExecutionTable(db)
+            AgentResultReceiptJournal.create(db)
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -288,6 +309,7 @@ internal class AgentConnectorResponseInbox(
                 db.execSQL("ALTER TABLE inbox ADD COLUMN execution_generation INTEGER NOT NULL DEFAULT 1")
                 createExecutionTable(db)
             }
+            if (oldVersion < 3) AgentResultReceiptJournal.create(db)
         }
 
         private fun createExecutionTable(db: SQLiteDatabase) {

@@ -17,6 +17,17 @@ object AgentConnectorResponseStore {
         return store(context).append(response)
     }
 
+    internal fun appendWithReceipt(context: Context, response: AgentConnectorResponse, receipt: AgentResultReceipt?): Boolean {
+        if (superseded(context, response)) return false
+        return store(context).append(response, receipt)
+    }
+
+    internal fun dueReceipts(context: Context, now: Long): List<AgentResultReceiptWork> = store(context).dueReceipts(now)
+    internal fun claimReceipt(context: Context, work: AgentResultReceiptWork, now: Long): Boolean = store(context).claimReceipt(work, now)
+    internal fun confirmReceipt(context: Context, receipt: AgentResultReceipt): Boolean = store(context).confirmReceipt(receipt)
+    internal fun cleanedReceipt(context: Context, receipt: AgentResultReceipt): Boolean = store(context).cleanedReceipt(receipt)
+    internal fun nextReceiptWake(context: Context): Long? = store(context).nextReceiptWake()
+
     internal fun observeExecution(context: Context, response: AgentConnectorResponse, finalReply: Boolean = false): Boolean =
         !superseded(context, response) && store(context).observeExecution(response, finalReply)
 
