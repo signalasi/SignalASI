@@ -29,6 +29,14 @@ def test_desktop_task_runs_async_and_reuses_conversation_context(tmp_path, monke
     monkeypatch.setenv("GALAXYSSI_WORKSPACE_ROOT", str(tmp_path / "workspace"))
     monkeypatch.setattr(
         main,
+        "_desktop_evolution_manager",
+        lambda: SimpleNamespace(
+            store=SimpleNamespace(list=lambda **_kwargs: []),
+            audit=SimpleNamespace(list_for_tasks=lambda *_args, **_kwargs: {}),
+        ),
+    )
+    monkeypatch.setattr(
+        main,
         "connector_diagnostics",
         lambda quick=False: {
             "agents": [
