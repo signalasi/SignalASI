@@ -32,12 +32,14 @@ _ERROR_CODES = _RELAY_ERRORS | {
 
 class BlobInputReceiver:
     def __init__(self, root: Path, *, configured_origin, peer_identity, publish_receipt,
-                 client_factory=BlobClient, workers: int = 4, allow_loopback_http: bool = False):
+                 client_factory=BlobClient, workers: int = 4, allow_loopback_http: bool = False,
+                 peer_origin=None):
         if not 1 <= workers <= 64:
             raise ValueError("Invalid Blob worker capacity")
         self.root = Path(root).resolve()
         self.journal = BlobInputJournal(self.root / "input-jobs.sqlite3")
         self.origin = configured_origin
+        self.peer_origin = peer_origin
         self.peer_identity = peer_identity
         self.publish_receipt = publish_receipt
         self.client_factory = client_factory
@@ -52,12 +54,15 @@ class BlobInputReceiver:
         fingerprint = self.peer_identity(route, source)
         if not fingerprint:
             raise BlobError("paired_identity_unavailable", 409)
-        body = validate_input_offer(payload, route, source, self.origin(),
+        body = validate_input_offer(payload, route, source, self._origin(route, source),
                                     allow_loopback_http=self.allow_loopback_http)
         body["peer_fingerprint"] = checked_hex(fingerprint)
         job_id = self.journal.enqueue(body)
         self._wake.set()
         return job_id
+
+    def _origin(self, route: str, source: str) -> str:
+        return self.peer_origin(route, source) if self.peer_origin is not None else self.origin()
 
     def start(self):
         with self._lifecycle:
@@ -157,7 +162,8 @@ class BlobInputReceiver:
                 # Configuration is local/paired authority, not a URL supplied by an offer.
                 validate_input_offer({**body["manifest"], "type": "input_attachment_blob_offer",
                                       "blob_offer": body["offer"]}, body["route"], body["source"],
-                                     self.origin(), allow_loopback_http=self.allow_loopback_http)
+                                     self._origin(body["route"], body["source"]),
+                                     allow_loopback_http=self.allow_loopback_http)
                 if staging.exists() and not (staging / STATE_FILE).exists():
                     self._cleanup(staging)
                 with self.client_factory(body["offer"]["relay"]) as client:

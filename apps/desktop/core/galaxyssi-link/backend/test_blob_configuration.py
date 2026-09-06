@@ -20,6 +20,8 @@ class BlobConfigurationTest(unittest.TestCase):
                             "GALAXYSSI_BLOB_PROVISION_TOKEN": "a" * 64}
 
     def bridge(self, peer=None):
+        if peer is not None:
+            peer = {"signal_name": "phone", "identity_fingerprint": "e" * 64, **peer}
         return SimpleNamespace(DATA_DIR=self.root, desktop_id=lambda: "desktop",
             get_client=Mock(return_value=peer), _publish_to_registered_client=Mock())
 
@@ -78,12 +80,12 @@ class BlobConfigurationTest(unittest.TestCase):
         bridge = self.bridge(peer)
         mqttc = object()
         with patch.dict("os.environ", self.environment):
-            self.assertTrue(blob_configuration.publish_configuration(bridge, mqttc, "route"))
+            self.assertTrue(blob_configuration.publish_configuration(bridge, mqttc, "r" * 22))
         args, kwargs = bridge._publish_to_registered_client.call_args
-        self.assertIs(mqttc, args[0]); self.assertIs(peer, args[1])
+        self.assertIs(mqttc, args[0]); self.assertEqual(peer["local_identity_fingerprint"], args[1]["local_identity_fingerprint"])
         payload = args[2]
         self.assertEqual("blob_relay_config", payload["type"])
-        self.assertEqual("route", payload["client_route_id"])
+        self.assertEqual("r" * 22, payload["client_route_id"])
         self.assertEqual("desktop", payload["desktop_id"])
         self.assertEqual("f" * 64, payload["desktop_fingerprint"])
         self.assertEqual("control", args[3]); self.assertTrue(kwargs["durable"])
@@ -94,7 +96,7 @@ class BlobConfigurationTest(unittest.TestCase):
         with patch.dict("os.environ", self.environment), \
                 patch.object(blob_configuration, "write_secure_json", side_effect=OSError("disk")), \
                 self.assertRaises(OSError):
-            blob_configuration.publish_configuration(bridge, object(), "route")
+            blob_configuration.publish_configuration(bridge, object(), "r" * 22)
         bridge._publish_to_registered_client.assert_not_called()
 
     def test_status_request_without_opt_in_does_not_send_private_configuration(self):

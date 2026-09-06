@@ -2854,6 +2854,12 @@ ipcMain.handle("backend:start", startBackend);
 ipcMain.handle("backend:status", backendStatus);
 ipcMain.handle("runtime:diagnostics", (_event, refresh = false) => runtimeDiagnostics(Boolean(refresh)));
 ipcMain.handle("pairing:status", getPairingStatus);
+ipcMain.handle("blob:settings:get", (_event, route) =>
+  fetchJson(`/api/blob/settings/${encodeURIComponent(String(route || ""))}`));
+ipcMain.handle("blob:settings:save", (_event, route, payload) =>
+  fetchJson(`/api/blob/settings/${encodeURIComponent(String(route || ""))}`, {
+    method: "PUT", body: JSON.stringify(payload)
+  }));
 ipcMain.handle("pairing:qr", (_event, grantDesktopExecutor = false) =>
   getPairingQr(Boolean(grantDesktopExecutor)));
 ipcMain.handle("pairing:clear", (_event, clientRouteId = "") => clearPairing(clientRouteId));

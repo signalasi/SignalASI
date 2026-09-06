@@ -30,11 +30,18 @@ def configuration(path: Path, *, environ=None) -> dict:
         return value
 
 
-def publish_configuration(bridge, mqttc, route: str) -> bool:
+def publish_configuration(bridge, mqttc, route: str, *, requested: bool = True) -> bool:
     peer = bridge.get_client(route)
     if not peer:
         return False
-    settings = configuration(bridge.DATA_DIR / "blob-relay-configuration.secure.json")
+    from blob_pair_configuration import can_publish, private_settings
+    if not requested and not can_publish(bridge, route):
+        return False
+    settings = private_settings(bridge, route, requested=requested)
+    current = bridge.get_client(route)
+    if not current or any(current.get(key) != peer.get(key) for key in
+                          ("signal_name", "identity_fingerprint", "local_identity_fingerprint")):
+        return False
     payload = {"type": "blob_relay_config", "version": 1, **settings,
                "desktop_id": bridge.desktop_id(), "client_route_id": route,
                "desktop_fingerprint": peer["local_identity_fingerprint"]}

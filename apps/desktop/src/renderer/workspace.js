@@ -2399,6 +2399,7 @@ async function saveCustomAgent() {
 function renderGateway() {
   const status = state.pairing || {};
   const clients = Array.isArray(status.clients) ? status.clients : [];
+  window.GalaxySSIBlobSettings?.setClients(clients);
   const count = Number(status.client_count || clients.length || 0);
   elements.gatewayCount.textContent = count ? t("{count} online", { count }) : t("Offline");
   $("#gatewaySummary .status-orb").classList.toggle("online", count > 0);
@@ -4493,6 +4494,7 @@ async function openPanel(name) {
     }
     if (panelName === "gateway") {
       await Promise.all([refreshGateway(), refreshDesktopControl()]);
+      if ($("#blobSettingsSection")?.open) await window.GalaxySSIBlobSettings?.refresh();
       if (!(state.pairing?.client_count > 0)) $("#pairingDetails").open = true;
       await loadPairingFrame();
     }
@@ -4516,6 +4518,7 @@ async function openPanel(name) {
 }
 
 function closePanel() {
+  window.GalaxySSIBlobSettings?.clearSensitive();
   elements.drawer.classList.remove("open");
   elements.drawer.setAttribute("aria-hidden", "true");
   window.setTimeout(() => { elements.backdrop.hidden = true; }, 180);

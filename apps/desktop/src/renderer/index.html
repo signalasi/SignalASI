@@ -169,6 +169,21 @@
     <section id="gatewayPanel" class="drawer-panel">
       <div id="gatewaySummary" class="gateway-summary"><span class="status-orb"></span><div><strong>GalaxySSI Link</strong><p data-i18n="Checking device connections">Checking device connections</p></div><div class="gateway-summary-actions"><button id="pairDeviceButton" class="secondary-button pair-device-button" data-i18n="Pair device">Pair device</button><button id="refreshGatewayButton" class="secondary-button" data-i18n="Refresh">Refresh</button></div></div>
       <div id="pairedClientList" class="paired-client-list"></div>
+      <details class="drawer-details" id="blobSettingsSection">
+        <summary data-i18n="Attachment Relay">Attachment Relay</summary>
+        <form id="blobSettingsForm" class="form-stack" autocomplete="off">
+          <label><span data-i18n="Device">Device</span><select id="blobSettingsDevice"></select></label>
+          <label class="check-row"><input id="blobSettingsEnabled" type="checkbox"><span data-i18n="Enabled">Enabled</span></label>
+          <label><span data-i18n="HTTPS origin">HTTPS origin</span><input id="blobSettingsOrigin" type="url" maxlength="2048" spellcheck="false"></label>
+          <label><span data-i18n="Provisioning credential">Provisioning credential</span><input id="blobSettingsCredential" type="password" maxlength="64" autocomplete="new-password" spellcheck="false"></label>
+          <small id="blobSettingsCredentialState"></small>
+          <div class="panel-action-row">
+            <button id="blobSettingsReload" class="secondary-button" type="button" data-i18n="Refresh">Refresh</button>
+            <button id="blobSettingsSave" class="primary-button" type="submit" data-i18n="Save">Save</button>
+          </div>
+          <p id="blobSettingsStatus" role="status" aria-live="polite"></p>
+        </form>
+      </details>
       <details id="pairingDetails" class="drawer-details pairing-details">
         <summary data-i18n="Pair a phone">Pair a phone</summary>
         <label class="setting-row compact-setting pairing-executor-setting">
@@ -620,6 +635,7 @@
   <script src="../peer_hold_to_talk.js"></script>
   <script src="../peer_conversation_preview.js"></script>
   <script src="./agent-latency.js"></script>
+  <script src="./blob-settings.js"></script>
   <script src="./workspace.js"></script>
   <script src="./evolution-v2-panel.js"></script>
 </body>
