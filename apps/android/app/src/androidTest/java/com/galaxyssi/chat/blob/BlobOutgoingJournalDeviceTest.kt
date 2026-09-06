@@ -91,4 +91,77 @@ class BlobOutgoingJournalDeviceTest {
             assertEquals("turn", it.body(id)!!.getJSONObject("manifest").getString("turn_id"))
         }
     }
+
+    @Test fun failureReceiptSurvivesRestartAndFencesLateSuccess() = fixture { path ->
+        val failed = BlobFailureContract.receipt(body().getJSONObject("manifest"), "blob_expired")
+        BlobOutgoingJournal(path).use {
+            it.register(id, body(), active = true)
+            val upload = it.claimDue(10, 1, emptySet()).single()
+            assertTrue(it.failedReceipt(id, failed, "test-desktop-private", fingerprint))
+            assertFalse(it.stored(id, receipt(), "test-desktop-private", fingerprint))
+            it.defer(upload, Long.MAX_VALUE, "late_worker")
+        }
+        BlobOutgoingJournal(path).use {
+            it.recover()
+            val failure = it.claimDue(11, 1, emptySet()).single()
+            assertEquals(BlobOutgoingJournal.FAILURE, failure.phase)
+            assertEquals("blob_expired", failure.body.getJSONObject("receipt").getString("error_code"))
+            assertTrue(it.failureObserved(failure))
+        }
+        BlobOutgoingJournal(path).use {
+            it.recover()
+            assertTrue(it.failedReceipt(id, failed, "test-desktop-private", fingerprint))
+            val cleanup = it.claimDue(12, 1, emptySet()).single()
+            assertEquals(BlobOutgoingJournal.FAILED_CLEANUP, cleanup.phase)
+            it.finish(cleanup)
+            it.activate(id)
+            assertTrue(it.claimDue(Long.MAX_VALUE, 1, emptySet()).isEmpty())
+            assertFalse(it.stored(id, receipt(), "test-desktop-private", fingerprint))
+        }
+    }
+
+    @Test fun untrustedOrMisboundFailureCannotChangeUploadState() = fixture { path ->
+        BlobOutgoingJournal(path).use {
+            it.register(id, body(), active = true)
+            val failed = BlobFailureContract.receipt(body().getJSONObject("manifest"), "blob_expired")
+            assertFalse(it.failedReceipt(id, failed, "other", fingerprint))
+            assertFalse(it.failedReceipt(id, failed, "test-desktop-private", "b".repeat(64)))
+            assertFalse(it.failedReceipt(id, JSONObject(failed.toString()).put("turn_id", "other"),
+                "test-desktop-private", fingerprint))
+            assertFalse(it.failedReceipt(id, JSONObject(failed.toString()).put("error_code", "unknown"),
+                "test-desktop-private", fingerprint))
+            assertEquals(BlobOutgoingJournal.UPLOAD, it.claimDue(10, 1, emptySet()).single().phase)
+        }
+    }
+
+    @Test fun localFailureCannotOverwriteReceivedSuccessOrCancellation() = fixture { path ->
+        BlobOutgoingJournal(path).use {
+            it.register(id, body(), active = true)
+            val work = it.claimDue(10, 1, emptySet()).single()
+            assertTrue(it.stored(id, receipt(), "test-desktop-private", fingerprint))
+            assertFalse(it.fail(work, "source_changed"))
+            val failed = BlobFailureContract.receipt(body().getJSONObject("manifest"), "blob_expired")
+            assertFalse(it.failedReceipt(id, failed, "test-desktop-private", fingerprint))
+            it.cancel(id)
+            assertFalse(it.failedReceipt(id, failed, "test-desktop-private", fingerprint))
+        }
+    }
+
+    @Test fun localFailureIsReplayedUntilObservationIsPersisted() = fixture { path ->
+        BlobOutgoingJournal(path).use {
+            it.register(id, body(), active = true)
+            assertTrue(it.fail(it.claimDue(10, 1, emptySet()).single(), "source_changed"))
+            assertEquals(BlobOutgoingJournal.FAILURE, it.claimDue(11, 1, emptySet()).single().phase)
+        }
+        BlobOutgoingJournal(path).use {
+            it.recover()
+            val work = it.claimDue(12, 1, emptySet()).single()
+            assertEquals(BlobOutgoingJournal.FAILURE, work.phase)
+            it.finish(work)
+            assertEquals(BlobOutgoingJournal.FAILURE, work.phase)
+            assertTrue(it.failureObserved(work))
+            assertFalse(it.failureObserved(work))
+            assertEquals(BlobOutgoingJournal.FAILED_CLEANUP, it.claimDue(13, 1, emptySet()).single().phase)
+        }
+    }
 }

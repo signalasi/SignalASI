@@ -91,7 +91,14 @@ internal data class AgentPreparedOutboundAttachment(
         }
     }
 
-    fun openPlaintext(): InputStream = BlobChunkInputStream(chunkCount, sizeBytes, ::readPlainChunk)
+    fun openPlaintext(): InputStream = BlobChunkInputStream(chunkCount, sizeBytes) { index ->
+        try { readPlainChunk(index) }
+        catch (_: javax.crypto.AEADBadTagException) {
+            throw com.galaxyssi.chat.blob.BlobFailure("local_chunk_missing_or_corrupt", 409)
+        } catch (_: IllegalArgumentException) {
+            throw com.galaxyssi.chat.blob.BlobFailure("local_chunk_missing_or_corrupt", 409)
+        }
+    }
 
     private fun readPlainChunk(index: Int): ByteArray {
         require(index in 0 until chunkCount) { "Attachment chunk index is invalid" }
@@ -161,7 +168,9 @@ internal object AgentAttachmentTransferProtocol {
             scope.turnId,
             attachmentId,
             sha256
-        ).joinToString("\u0000")
+        ).let { parts ->
+            if (scope.attachmentRequestId.isBlank()) parts else parts + scope.attachmentRequestId
+        }.joinToString("\u0000")
         return sha256(canonical.toByteArray(Charsets.UTF_8))
     }
 

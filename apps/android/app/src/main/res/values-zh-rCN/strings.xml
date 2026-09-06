@@ -2806,4 +2806,8 @@
     <string name="agent_memory_make_private">设为私密</string>
     <string name="agent_memory_make_shareable">允许 Agent 检索</string>
     <string name="agent_memory_deprecate">标记为历史状态</string>
+    <string name="agent_attachment_transfer_expired">附件传输已过期或不可用，智能体尚未收到文件。</string>
+    <string name="agent_attachment_source_missing">附件的源文件不存在，智能体尚未收到文件。</string>
+    <string name="agent_attachment_identity_changed">附件的接收设备或任务身份已变化，文件未送达。</string>
+    <string name="agent_attachment_integrity_failed">附件内容已变化或完整性校验失败，智能体尚未收到经过验证的文件。</string>
 </resources>

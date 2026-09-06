@@ -44,4 +44,22 @@ class AgentConnectorResponseCodecTest {
     @Test(expected = IllegalArgumentException::class) fun invalidSourceRejected() {
         AgentConnectorResponseCodec.decode(AgentConnectorResponseCodec.encode(response.copy(sourceMessageId = 0)))
     }
+
+    @Test fun attachmentFailureRetainsScopeAndCodeThroughDurableCodec() {
+        val failed = response.copy(success = false, deliveryFailureCode = "blob_expired")
+        val restored = AgentConnectorResponseCodec.decode(AgentConnectorResponseCodec.encode(failed))
+        assertEquals(failed, restored)
+        assertTrue(AgentConnectorResponseCodec.matches(failed, restored))
+        assertFalse(restored.remoteFailure)
+    }
+
+    @Test fun malformedAttachmentObservationsCannotMasqueradeAsModelOutcomes() {
+        val failed = response.copy(success = false, deliveryFailureCode = "blob_expired")
+        listOf(failed.copy(success = true), failed.copy(deliveryFailureCode = "private server error"),
+            failed.copy(taskStatus = "completed"), failed.copy(taskStatus = "failed")).forEach {
+            assertThrows(IllegalArgumentException::class.java) {
+                AgentConnectorResponseCodec.decode(AgentConnectorResponseCodec.encode(it))
+            }
+        }
+    }
 }

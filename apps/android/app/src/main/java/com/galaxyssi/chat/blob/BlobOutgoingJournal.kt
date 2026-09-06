@@ -111,31 +111,52 @@ internal class BlobOutgoingJournal(path: File) : Closeable {
         }, "id=? AND claim=?", arrayOf(work.id, work.claim))
     }
 
-    @Synchronized fun stored(id: String, payload: JSONObject, sourceId: String, fingerprint: String): Boolean {
+    @Synchronized fun stored(id: String, payload: JSONObject, sourceId: String, fingerprint: String): Boolean =
+        acceptReceipt(id, payload, sourceId, fingerprint, CLEANUP)
+
+    @Synchronized fun failedReceipt(id: String, payload: JSONObject, sourceId: String, fingerprint: String): Boolean =
+        acceptReceipt(id, payload, sourceId, fingerprint, FAILURE)
+
+    private fun acceptReceipt(id: String, payload: JSONObject, sourceId: String, fingerprint: String, target: Int): Boolean {
         db.beginTransaction()
         try {
             val body = body(id) ?: return false
             val phase = db.rawQuery("SELECT phase FROM jobs WHERE id=?", arrayOf(id)).use {
                 if (it.moveToFirst()) it.getInt(0) else DISCARD
             }
-            if (phase == DISCARD) return false
+            if (phase != UPLOAD && phase != target && !(target == FAILURE && phase == FAILED_CLEANUP)) return false
             if (body.optString("desktop_id") != sourceId || body.optString("fingerprint") != fingerprint ||
-                !BlobOutgoingContract.receiptMatches(body.getJSONObject("manifest"), payload)) return false
+                !(if (target == FAILURE) BlobFailureContract.matches(body.getJSONObject("manifest"), payload)
+                  else BlobOutgoingContract.receiptMatches(body.getJSONObject("manifest"), payload))) return false
             body.put("receipt", payload)
-            db.update("jobs", ContentValues().apply { put("body", encode(id, body)); put("phase", CLEANUP)
+            db.update("jobs", ContentValues().apply { put("body", encode(id, body)); put("phase", target)
                 put("state", READY); put("claim", ""); put("due", 0) },
                 "id=? AND phase=0 AND state<>?", arrayOf(id, DONE.toString()))
             db.setTransactionSuccessful()
             return true
         } finally { db.endTransaction() }
     }
+
+    @Synchronized fun fail(work: BlobOutgoingWork, code: String): Boolean {
+        val body = JSONObject(work.body.toString()).put("receipt",
+            BlobFailureContract.receipt(work.body.getJSONObject("manifest"), code))
+        return db.update("jobs", ContentValues().apply {
+            put("body", encode(work.id, body)); put("phase", FAILURE); put("state", READY)
+            put("claim", ""); put("due", 0); put("error", code)
+        }, "id=? AND claim=? AND phase=?", arrayOf(work.id, work.claim, UPLOAD.toString())) == 1
+    }
+
+    @Synchronized fun failureObserved(work: BlobOutgoingWork): Boolean = db.update("jobs", ContentValues().apply {
+        put("phase", FAILED_CLEANUP); put("state", READY); put("claim", ""); put("due", 0)
+    }, "id=? AND claim=? AND phase=?", arrayOf(work.id, work.claim, FAILURE.toString())) == 1
     @Synchronized fun finish(work: BlobOutgoingWork) {
         db.update("jobs", ContentValues().apply { put("state", DONE); put("claim", ""); put("error", "") },
-            "id=? AND claim=?", arrayOf(work.id, work.claim))
+            "id=? AND claim=? AND phase IN (?,?,?)", arrayOf(work.id, work.claim,
+                CLEANUP.toString(), DISCARD.toString(), FAILED_CLEANUP.toString()))
     }
     @Synchronized fun cancel(id: String) {
         db.update("jobs", ContentValues().apply { put("phase", DISCARD); put("state", READY); put("claim", ""); put("due", 0) },
-            "id=? AND state<>?", arrayOf(id, DONE.toString()))
+            "id=? AND (state<>? OR phase=?)", arrayOf(id, DONE.toString(), FAILED_CLEANUP.toString()))
     }
     @Synchronized fun nextDue(): Long? = listOf(WAITING, READY).mapNotNull { state ->
         db.rawQuery("SELECT due FROM jobs WHERE state=? ORDER BY due,id LIMIT 1", arrayOf(state.toString()))
@@ -144,6 +165,7 @@ internal class BlobOutgoingJournal(path: File) : Closeable {
     @Synchronized override fun close() = db.close()
     companion object {
         const val UPLOAD = 0; const val CLEANUP = 1; const val DISCARD = 2
+        const val FAILURE = 3; const val FAILED_CLEANUP = 4
         private const val WAITING = 0; private const val READY = 1; private const val RUNNING = 2; private const val DONE = 3
     }
 }

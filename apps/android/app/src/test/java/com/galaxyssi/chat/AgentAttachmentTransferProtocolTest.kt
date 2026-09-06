@@ -38,6 +38,19 @@ class AgentAttachmentTransferProtocolTest {
     }
 
     @Test
+    fun freshRecoveryRequestGetsIndependentTransferButDuplicateRemainsIdempotent() {
+        val scope = scope()
+        val digest = AgentAttachmentTransferProtocol.sha256("content".toByteArray())
+        val initial = AgentAttachmentTransferProtocol.transferId(scope, "attachment", digest)
+        val first = AgentAttachmentTransferProtocol.transferId(scope.copy(attachmentRequestId = "a".repeat(32)), "attachment", digest)
+        val duplicate = AgentAttachmentTransferProtocol.transferId(scope.copy(attachmentRequestId = "a".repeat(32)), "attachment", digest)
+        val next = AgentAttachmentTransferProtocol.transferId(scope.copy(attachmentRequestId = "b".repeat(32)), "attachment", digest)
+        assertNotEquals(initial, first)
+        assertEquals(first, duplicate)
+        assertNotEquals(first, next)
+    }
+
+    @Test
     fun missingChunkRangesRejectOutOfBoundsRequests() {
         val encoded = AgentAttachmentTransferProtocol.missingRanges(listOf(0, 3))
 

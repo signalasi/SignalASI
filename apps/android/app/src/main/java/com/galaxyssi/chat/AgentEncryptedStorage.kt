@@ -390,7 +390,7 @@ class AgentEncryptedDatabase(
         val DATABASES = ConcurrentHashMap<String, SharedEncryptedDatabase>()
 
         fun sharedDatabase(context: Context, databaseName: String): SharedEncryptedDatabase =
-            DATABASES.computeIfAbsent(databaseName) {
+            DATABASES.computeIfAbsent(context.getDatabasePath("$databaseName.db").absolutePath) {
                 SharedEncryptedDatabase(context.applicationContext, databaseName)
             }
     }

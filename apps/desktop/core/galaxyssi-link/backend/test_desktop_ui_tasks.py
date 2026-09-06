@@ -29,6 +29,14 @@ def test_desktop_task_runs_async_and_reuses_conversation_context(tmp_path, monke
     monkeypatch.setenv("GALAXYSSI_WORKSPACE_ROOT", str(tmp_path / "workspace"))
     monkeypatch.setattr(
         main,
+        "_desktop_evolution_manager",
+        lambda: SimpleNamespace(
+            store=SimpleNamespace(list=lambda **_kwargs: []),
+            audit=SimpleNamespace(list_for_tasks=lambda *_args, **_kwargs: {}),
+        ),
+    )
+    monkeypatch.setattr(
+        main,
         "connector_diagnostics",
         lambda quick=False: {
             "agents": [
@@ -41,6 +49,7 @@ def test_desktop_task_runs_async_and_reuses_conversation_context(tmp_path, monke
     deliveries: list[dict] = []
 
     def fake_delivery(agent_id, prompt, **kwargs):
+        assert agent_id == "codex"
         prompts.append(prompt)
         deliveries.append(kwargs)
         return {"reply": f"reply-{len(prompts)}", "agent_id": agent_id}
@@ -52,6 +61,7 @@ def test_desktop_task_runs_async_and_reuses_conversation_context(tmp_path, monke
     first = main.api_start_desktop_task(
         main.DesktopTaskStartReq(
             prompt="Inspect the attached release brief",
+            agent_id="codex",
             conversation_id="conversation-1",
             attachments=[str(source)],
         ),
@@ -68,6 +78,7 @@ def test_desktop_task_runs_async_and_reuses_conversation_context(tmp_path, monke
     second = main.api_start_desktop_task(
         main.DesktopTaskStartReq(
             prompt="Continue with the release notes",
+            agent_id="codex",
             conversation_id="conversation-1",
         ),
         LoopbackRequest(),

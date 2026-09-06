@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from blob_client import BlobClient
@@ -33,7 +34,8 @@ class BlobInputReceiverTest(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.token = secrets.token_hex(32)
-        app = create_app(BlobStore(self.root / "relay.sqlite3"), self.token)
+        self.store = BlobStore(self.root / "relay.sqlite3")
+        app = create_app(self.store, self.token)
         self.gets = []
         @app.middleware("http")
         async def record(request, call_next):
@@ -68,8 +70,17 @@ class BlobInputReceiverTest(unittest.TestCase):
         self.addCleanup(cleanup)
         return result
 
-    def upload(self, content, suffix="1"):
+    def upload(self, content, suffix="1", recovery_request_id="", base_manifest=None):
         manifest = input_manifest(content, suffix=suffix)
+        if base_manifest is not None:
+            manifest.update(base_manifest)
+            manifest.pop("blob_offer", None)
+        if recovery_request_id:
+            from input_attachment_transfer import transfer_id_for
+            manifest["attachment_request_id"] = recovery_request_id
+            manifest["transfer_id"] = transfer_id_for(*(manifest[key] for key in (
+                "client_route_id", "conversation_id", "task_id", "turn_id", "attachment_id", "sha256")),
+                attachment_request_id=recovery_request_id)
         source = self.root / ("source-" + suffix)
         source.write_bytes(content)
         staged = StagedBlob.prepare(source, self.root / ("sender-" + suffix), input_binding(manifest))
@@ -159,9 +170,147 @@ class BlobInputReceiverTest(unittest.TestCase):
         self.payload["blob_offer"]["private"]["key"] = secrets.token_hex(32)
         self.enqueue()
         self.receiver._process(self.claim())
-        self.assertEqual([], self.receipts)
+        self.assertEqual("failed", self.receipts[0]["status"])
+        self.assertEqual("chunk_authentication_failed", self.receipts[0]["error_code"])
         self.assertIsNone(self.resolve())
+        self.assertEqual({"done": 1}, self.receiver.journal.snapshot())
         self.assertEqual([], list((self.root / "workspace").rglob("*.part")))
+
+    def test_real_expiry_persists_failure_then_retries_receipt_after_restart(self):
+        job_id = self.enqueue()
+        self.store.clock = lambda: time.time() + 8 * 86400
+        self.publish_ok = False
+        self.receiver._process(self.claim())
+        receipt = self.receipts[0]
+        self.assertEqual("failed", receipt["status"])
+        self.assertEqual("blob_expired", receipt["error_code"])
+        self.assertEqual(self.payload["client_message_id"], receipt["source_message_id"])
+        for field in (*input_binding(self.payload), "sha256", "size_bytes"):
+            self.assertEqual(self.payload[field], receipt[field], field)
+        self.assertNotIn("blob_offer", receipt)
+        self.assertNotIn("read_token", str(receipt))
+        self.assertIsNone(self.resolve())
+        self.assertEqual({"pending": 1}, self.receiver.journal.snapshot())
+        self.receiver.journal = BlobInputJournal(self.receiver.journal.path)
+        self.receiver.journal.recover()
+        self.receiver.client_factory = lambda _: self.fail("Failed receipt must not retry download")
+        self.publish_ok = True
+        self.receiver._process(self.claim())
+        self.assertEqual(receipt, self.receipts[1])
+        self.assertEqual({"done": 1}, self.receiver.journal.snapshot())
+        self.assertFalse((self.receiver.root / "staging" / job_id).exists())
+        self.enqueue()
+        self.receiver._process(self.claim())
+        self.assertEqual(receipt, self.receipts[2])
+
+    def test_failed_receipt_does_not_cross_a_changed_pairing_after_restart(self):
+        self.enqueue()
+        self.store.clock = lambda: time.time() + 8 * 86400
+        self.publish_ok = False
+        self.receiver._process(self.claim())
+        self.receiver.journal.recover()
+        self.fingerprint = "b" * 64
+        self.publish_ok = True
+        self.receiver._process(self.claim())
+        self.assertEqual(1, len(self.receipts))
+        self.assertEqual({"pending": 1}, self.receiver.journal.snapshot())
+
+    def test_fresh_request_recovers_expired_blob_without_reviving_old_attempt(self):
+        old_id = self.enqueue()
+        self.store.clock = lambda: time.time() + 8 * 86400
+        self.receiver._process(self.claim())
+        self.assertEqual("blob_expired", self.receipts[-1]["error_code"])
+        self.store.clock = time.time
+        fresh = self.upload(self.content, suffix="fresh", recovery_request_id="f" * 32,
+                            base_manifest=self.payload)
+        self.assertNotEqual(self.payload["transfer_id"], fresh["transfer_id"])
+        self.assertNotEqual(self.payload["blob_offer"]["private"]["blob_id"],
+                            fresh["blob_offer"]["private"]["blob_id"])
+        self.assertNotEqual(old_id, self.enqueue(fresh))
+        self.receiver._process(self.claim())
+        self.assertEqual("stored", self.receipts[-1]["status"])
+        self.assertEqual("f" * 32, self.receipts[-1]["attachment_request_id"])
+        self.assertEqual(self.content, self.resolve(fresh).read_bytes())
+        self.assertIsNone(self.resolve())
+        before = list(self.gets)
+        self.enqueue()
+        self.receiver._process(self.claim())
+        self.assertEqual("blob_expired", self.receipts[-1]["error_code"])
+        self.assertEqual(before, self.gets)
+        self.assertEqual(self.content, self.resolve(fresh).read_bytes())
+
+    def test_failure_checkpoint_write_error_does_not_publish_or_lose_claim(self):
+        self.enqueue()
+        self.store.clock = lambda: time.time() + 8 * 86400
+        with patch.object(self.receiver.journal, "receipt_ready", side_effect=OSError("isolated disk failure")):
+            with self.assertRaises(OSError):
+                self.receiver._process(self.claim())
+        self.assertEqual([], self.receipts)
+        self.receiver.journal.recover()
+        self.receiver._process(self.claim())
+        self.assertEqual("blob_expired", self.receipts[0]["error_code"])
+
+    def test_not_yet_uploaded_chunk_keeps_resume_state_without_terminal_failure(self):
+        self.enqueue()
+        original = BlobClient._request
+        def not_ready(client, method, path, *args, **kwargs):
+            if method == "GET" and path.endswith("/chunks/1"):
+                raise BlobError("chunk_not_ready", 404)
+            return original(client, method, path, *args, **kwargs)
+        with patch.object(BlobClient, "_request", not_ready):
+            self.receiver._process(self.claim())
+        self.assertEqual([], self.receipts)
+        self.assertEqual({"pending": 1}, self.receiver.journal.snapshot())
+        self.receiver._process(self.claim())
+        self.assertEqual("stored", self.receipts[0]["status"])
+        self.assertEqual(1, sum(path.endswith("/chunks/0") for path in self.gets))
+
+    def test_real_expiry_reaches_model_follow_up_through_production_bridge_adapter(self):
+        import blob_input_bridge
+        from attachment_request_broker import AttachmentRequestBroker
+        from attachment_recovery_observation import observe_attachment_recovery
+        from model_recovery import ModelRecoveryAction, ModelRecoveryDecision
+
+        broker = AttachmentRequestBroker()
+        queued, observations = [], []
+        peer = {"signal_name": "paired-phone", "identity_fingerprint": self.fingerprint}
+        bridge = SimpleNamespace(DATA_DIR=self.root / "bridge", client=object(),
+                                 get_client=lambda _route: peer, attachment_request_broker=broker)
+        def queue(_client, recipient, receipt, lane, *, durable):
+            self.assertIs(recipient, peer)
+            self.assertEqual("control", lane)
+            self.assertTrue(durable)
+            queued.append(receipt)
+        bridge._publish_to_registered_client = queue
+        self.store.clock = lambda: time.time() + 8 * 86400
+        with patch.object(blob_input_bridge, "_receiver", None), \
+                patch.dict(os.environ, {"GALAXYSSI_BLOB_RELAY_URL": self.relay.origin}):
+            receiver = blob_input_bridge._get_receiver(bridge)
+            receiver.client_factory = self.client
+            def request(payload):
+                # Prepare a fresh request-bound transfer, then expire it on the real relay.
+                self.store.clock = time.time
+                offer = self.upload(self.content, suffix="recovery", recovery_request_id=payload["request_id"],
+                                    base_manifest=self.payload)
+                self.store.clock = lambda: time.time() + 8 * 86400
+                receiver.enqueue(offer, offer["client_route_id"], "paired-phone")
+                receiver._process(receiver.journal.claim_due(1)[0])
+                return True
+            observation = observe_attachment_recovery(lambda: broker.request(
+                **{key: self.payload[key] for key in (
+                    "client_route_id", "conversation_id", "task_id", "turn_id", "contact_id")},
+                source_message_id=self.payload["client_message_id"],
+                attachment_ids=[self.payload["attachment_id"]], reason="Inspect image", publish=request,
+                timeout_seconds=2), on_failure=observations.append)
+        self.assertEqual(["blob_expired"], observations)
+        self.assertEqual(1, len(queued))
+        self.assertEqual("failed", queued[0]["status"])
+        self.assertEqual("blob_expired", queued[0]["error_code"])
+        self.assertEqual({"done": 1}, receiver.journal.snapshot())
+        self.assertIsNone(self.resolve())
+        prompt = observation.follow_up(ModelRecoveryDecision(ModelRecoveryAction.REQUEST_ATTACHMENT))
+        self.assertIn("No verified attachment was delivered", prompt)
+        self.assertNotIn("restored the attachment", prompt)
 
     def test_repaired_route_with_different_fingerprint_cannot_resume_old_transfer(self):
         self.enqueue()

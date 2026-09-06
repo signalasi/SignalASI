@@ -326,6 +326,7 @@ private object AgentManagedResponseCodec {
         .put("turn_id", response.turnId)
         .put("task_id", response.taskId)
         .put("success", response.success)
+        .put("delivery_failure_code", response.deliveryFailureCode)
         .put("input_tokens", response.inputTokens)
         .put("output_tokens", response.outputTokens)
         .put("cost_micros", response.costMicros)
@@ -354,7 +355,10 @@ private object AgentManagedResponseCodec {
             richOutputJson = richOutput,
             receivedAtMillis = json.optLong("received_at_millis"),
             resolvedContactId = json.optString("resolved_contact_id"),
-            providerAttempts = json.optJSONObject("provider_attempts")?.let(AgentProviderAttemptCodec::decode)
+            providerAttempts = json.optJSONObject("provider_attempts")?.let(AgentProviderAttemptCodec::decode),
+            deliveryFailureCode = json.optString("delivery_failure_code").takeIf {
+                it in com.galaxyssi.chat.blob.BlobFailureContract.terminalCodes
+            }.orEmpty()
         )
     }
 

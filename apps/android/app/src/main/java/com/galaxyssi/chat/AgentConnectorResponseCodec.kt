@@ -30,6 +30,7 @@ internal object AgentConnectorResponseCodec {
         .put("turn_id", response.turnId)
         .put("task_id", response.taskId)
         .put("success", response.success)
+        .put("delivery_failure_code", response.deliveryFailureCode)
         .put("task_status", response.taskStatus)
         .put("execution_generation", response.executionGeneration)
         .put("status_sequence", response.statusSequence)
@@ -49,6 +50,9 @@ internal object AgentConnectorResponseCodec {
         val version = requireNotNull(AgentRemoteOutcomeCodec.version(value)) { "Invalid execution version" }
         val status = value.optString("task_status")
         require(status.isBlank() || status in AgentRemoteOutcomeCodec.TERMINAL) { "Invalid terminal status" }
+        val deliveryFailure = value.optString("delivery_failure_code")
+        require(deliveryFailure.isBlank() || (deliveryFailure in com.galaxyssi.chat.blob.BlobFailureContract.terminalCodes &&
+            status.isBlank() && !value.optBoolean("success", true))) { "Invalid delivery failure observation" }
         return AgentConnectorResponse(
             sourceMessageId = source, contactId = value.optString("contact_id"), content = content,
             conversationId = value.optString("conversation_id"), turnId = value.optString("turn_id"),
@@ -58,7 +62,8 @@ internal object AgentConnectorResponseCodec {
             receivedAtMillis = value.optLong("received_at", System.currentTimeMillis()),
             resolvedContactId = value.optString("resolved_contact_id"),
             providerAttempts = value.optJSONObject("provider_attempts")?.let(AgentProviderAttemptCodec::decode),
-            taskStatus = status, executionGeneration = version.generation, statusSequence = version.sequence
+            taskStatus = status, executionGeneration = version.generation, statusSequence = version.sequence,
+            deliveryFailureCode = deliveryFailure
         )
     }
 

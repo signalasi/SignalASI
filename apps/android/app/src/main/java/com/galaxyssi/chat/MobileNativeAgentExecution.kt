@@ -1815,7 +1815,8 @@ internal fun MobileNativeAgent.recoverAfterConnectorDeliveryFailure(
     val elapsed = (System.currentTimeMillis() -
         (failedResult.metadata["resource_started_at"]?.toLongOrNull() ?: System.currentTimeMillis()))
         .coerceAtLeast(0L)
-    AgentResourceHealthStore(appContext).also { health ->
+    val attachmentFailure = failedResult.metadata["attachment_delivery_failed"] == "true"
+    if (!attachmentFailure) AgentResourceHealthStore(appContext).also { health ->
         if (resourceId.isNotBlank()) health.record("target:$resourceId", false, elapsed)
         if (failureDomain.isNotBlank()) health.record("domain:$failureDomain", false, elapsed)
     }
@@ -1829,10 +1830,12 @@ internal fun MobileNativeAgent.recoverAfterConnectorDeliveryFailure(
         saveTaskRecord(result = lastActionResult?.message.orEmpty().ifBlank { failedResult.message })
         return reconcileExecutionLoop(snapshot())
     }
-    continueWithConnectorFallback(failedPlan, failedResult)?.let { return it }
+    if (!attachmentFailure) continueWithConnectorFallback(failedPlan, failedResult)?.let { return it }
     val replanned = replanFromCurrentState(
         failedPlan,
-        "connector_delivery_failed:${failureDomain.ifBlank { resourceId }}",
+        if (attachmentFailure) com.galaxyssi.chat.blob.BlobFailureContract.observation(
+            failedResult.metadata["delivery_failure_code"].orEmpty())
+        else "connector_delivery_failed:${failureDomain.ifBlank { resourceId }}",
         force = true
     )
     if (replanned == null) {
@@ -1896,7 +1899,9 @@ internal fun MobileNativeAgent.resumeFailedConnectorDeliveryRecovery(): AgentUiS
     val failureDomain = failedResult.metadata["failure_domain"].orEmpty()
     val replanned = replanFromCurrentState(
         plan,
-        "connector_delivery_failed:${failureDomain.ifBlank { resourceId }}",
+        if (failedResult.metadata["attachment_delivery_failed"] == "true")
+            com.galaxyssi.chat.blob.BlobFailureContract.observation(failedResult.metadata["delivery_failure_code"].orEmpty())
+        else "connector_delivery_failed:${failureDomain.ifBlank { resourceId }}",
         force = true
     ) ?: return snapshot()
     currentPlan = replanned
