@@ -19,7 +19,7 @@ internal object AndroidAgentRecoveryWake {
 
     fun request(context: Context) {
         AndroidAgentResultReceipts.request(context)
-        coordinator(context).request(GalaxySSIMqttClient.isConnected())
+        coordinator(context).request(GalaxySSIMqttClient.isRequestReplyReady())
     }
 
     private fun coordinator(context: Context): AgentRecoveryWakeCoordinator = coordinator ?: synchronized(this) {
@@ -28,7 +28,7 @@ internal object AndroidAgentRecoveryWake {
 
     private fun create(context: Context) = AgentRecoveryWakeCoordinator(scope, recover = {
         var beforeSource: Long? = null
-        while (GalaxySSIMqttClient.isConnected()) {
+        while (GalaxySSIMqttClient.isRequestReplyReady()) {
             val page = AgentPendingDeliveryStore.page(context, beforeSource)
             val next = page.nextBeforeSource ?: break
             AndroidAgentRemoteRecovery.recoverPendingReplies(context, page.deliveries)

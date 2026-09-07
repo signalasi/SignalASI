@@ -22,6 +22,7 @@ internal class AgentRemoteRecoveryClient {
         routeId: String,
         items: List<JSONObject>,
         timeoutMillis: Long = 8_000L,
+        report: (String) -> Unit = {},
         publish: (JSONObject) -> Boolean
     ): List<JSONObject> {
         require(desktopId.isNotBlank() && routeId.isNotBlank())
@@ -37,8 +38,15 @@ internal class AgentRemoteRecoveryClient {
             val payload = JSONObject().put("type", "agent_task_recovery_request")
                 .put("request_id", requestId).put("client_route_id", routeId)
                 .put("desktop_id", desktopId).put("items", JSONArray(items))
-            if (!publish(payload)) return emptyList()
-            return withTimeoutOrNull(timeoutMillis) { request.result.await() } ?: emptyList()
+            if (!publish(payload)) {
+                report("publish_rejected")
+                return emptyList()
+            }
+            val response = withTimeoutOrNull(timeoutMillis) { request.result.await() }
+            report(if (response == null) "response_timeout" else if (response.any {
+                    it.optString("status") == "unavailable"
+                }) "remote_unavailable" else "authenticated_response")
+            return response ?: emptyList()
         } finally {
             pending.remove(requestId, request)
             request.result.cancel()

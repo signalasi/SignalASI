@@ -191,6 +191,10 @@ internal class MqttSubscriptionRecoveryState {
     private var generation = 0
     private var remaining = 0
     private var failed = false
+    private var ready = false
+
+    @Synchronized
+    fun isReady(): Boolean = ready
 
     @Synchronized
     fun begin(subscriptionCount: Int): Int {
@@ -198,6 +202,7 @@ internal class MqttSubscriptionRecoveryState {
         generation += 1
         remaining = subscriptionCount
         failed = false
+        ready = false
         return generation
     }
 
@@ -209,6 +214,7 @@ internal class MqttSubscriptionRecoveryState {
         if (!succeeded) failed = true
         remaining -= 1
         if (remaining > 0) return MqttSubscriptionAttemptOutcome.PENDING
+        ready = !failed
         return if (failed) MqttSubscriptionAttemptOutcome.RETRY else MqttSubscriptionAttemptOutcome.READY
     }
 
@@ -217,6 +223,7 @@ internal class MqttSubscriptionRecoveryState {
         generation += 1
         remaining = 0
         failed = false
+        ready = false
     }
 }
 

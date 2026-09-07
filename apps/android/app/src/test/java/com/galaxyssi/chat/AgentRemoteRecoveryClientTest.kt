@@ -81,14 +81,34 @@ class AgentRemoteRecoveryClientTest {
 
     @Test fun queryTimeoutIsAnUnavailableObservation(): Unit = runBlocking {
         val client = AgentRemoteRecoveryClient()
-        assertTrue(client.query("desktop", "route", listOf(item()), timeoutMillis = 5) { true }.isEmpty())
+        val outcomes = mutableListOf<String>()
+        assertTrue(client.query("desktop", "route", listOf(item()), timeoutMillis = 5,
+            report = { outcomes.add(it) }) { true }.isEmpty())
+        assertEquals(listOf("response_timeout"), outcomes)
         assertEquals(0, client.pendingCount)
     }
 
     @Test fun publishFailureReleasesRequest(): Unit = runBlocking {
         val client = AgentRemoteRecoveryClient()
-        assertTrue(client.query("desktop", "route", listOf(item())) { false }.isEmpty())
+        val outcomes = mutableListOf<String>()
+        assertTrue(client.query("desktop", "route", listOf(item()), report = { outcomes.add(it) }) { false }.isEmpty())
+        assertEquals(listOf("publish_rejected"), outcomes)
         assertEquals(0, client.pendingCount)
+    }
+
+    @Test fun remoteUnavailableIsNotReportedAsNetworkTimeout(): Unit = runBlocking {
+        for (status in listOf("unavailable", "completed")) {
+            val client = AgentRemoteRecoveryClient()
+            val outcomes = mutableListOf<String>()
+            val response = client.query("desktop", "route", listOf(item()), report = { outcomes.add(it) }) { sent ->
+                val reply = result(sent)
+                reply.getJSONArray("items").getJSONObject(0).put("status", status)
+                client.receive(reply, "desktop")
+                true
+            }
+            assertEquals(status, response.single().getString("status"))
+            assertEquals(listOf(if (status == "unavailable") "remote_unavailable" else "authenticated_response"), outcomes)
+        }
     }
 
     @Test fun batchCannotHideLocalOnlyConversationFromPrivacyPolicy(): Unit = runBlocking {

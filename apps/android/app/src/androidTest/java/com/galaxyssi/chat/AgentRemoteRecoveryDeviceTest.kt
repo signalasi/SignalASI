@@ -65,7 +65,7 @@ class AgentRemoteRecoveryDeviceTest {
             .getString("live_recovery_probe") == "true")
         withContext(Dispatchers.IO) { GalaxySSIMqttClient.connect(context) }
         withTimeout(15_000L) {
-            while (!GalaxySSIMqttClient.isConnected()) delay(100L)
+            while (!GalaxySSIMqttClient.isRequestReplyReady()) delay(100L)
         }
         val handoff = withContext(Dispatchers.IO) {
             context.getSharedPreferences("galaxyssi_agent_task_identities", Context.MODE_PRIVATE).all.keys
