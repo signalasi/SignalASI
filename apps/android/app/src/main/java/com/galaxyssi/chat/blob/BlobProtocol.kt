@@ -102,7 +102,9 @@ internal object BlobProtocol {
         }
         is JSONArray -> (0 until value.length()).joinToString(",", "[", "]") { encode(value.get(it)) }
         is String -> quote(value)
+        is Boolean -> value.toString()
         is Int, is Long -> value.toString()
+        JSONObject.NULL -> "null"
         else -> fail("invalid_canonical_json")
     }
 

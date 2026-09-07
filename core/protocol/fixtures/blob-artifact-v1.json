@@ -1,0 +1,34 @@
+{
+  "manifest": {
+    "client_route_id": "aaaaaaaaaaaaaaaaaaaaaa",
+    "conversation_id": "\u4f1a\u8bdd-\u4f60\u597d",
+    "task_id": "task",
+    "turn_id": "turn",
+    "contact_id": "contact",
+    "source_message_id": "message",
+    "desktop_id": "desktop",
+    "artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "artifact_uri": "galaxyssi-artifact://task/homework.png",
+    "name": "\u6279\u6539\u7ed3\u679c.png",
+    "relative_path": "output/homework.png",
+    "mime_type": "image/png",
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "original_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "size_bytes": 1234,
+    "original_size_bytes": 2345,
+    "execution_generation": 1,
+    "peer_chat": false,
+    "transfer_id": "e64adb4580bdaec6b70110be46b8c37f3f2e472eebee231c1b8d90209c526f39"
+  },
+  "binding_sha256": "82bf39b91db3460f9c4dc45bbd65fe32068edcf55ee65d8966c3bf5758acc131",
+  "receipt": {
+    "type": "artifact_blob_receipt",
+    "version": 1,
+    "status": "stored",
+    "transfer_id": "e64adb4580bdaec6b70110be46b8c37f3f2e472eebee231c1b8d90209c526f39",
+    "client_route_id": "aaaaaaaaaaaaaaaaaaaaaa",
+    "artifact_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "size_bytes": 1234
+  }
+}

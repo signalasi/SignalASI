@@ -9,6 +9,8 @@ import com.galaxyssi.chat.metrics.AgentTransportTiming
 
 import android.content.Context
 import com.galaxyssi.chat.blob.AndroidBlobTransfers
+import com.galaxyssi.chat.blob.AndroidBlobArtifactReceives
+import com.galaxyssi.chat.blob.AndroidBlobArtifactCapability
 import com.galaxyssi.chat.blob.BlobRelayConfiguration
 import com.galaxyssi.chat.blob.BlobRelayConfigurations
 import android.os.Handler
@@ -37,7 +39,8 @@ internal object PairingConfirmationDeliveryPolicy {
     fun messageId(suppliedId: String, desktopId: String, clientRouteId: String): String =
         suppliedId.trim().ifBlank { "pairing-confirmed:$desktopId:$clientRouteId" }
 
-    fun needsSessionBootstrap(hasExistingSession: Boolean): Boolean = !hasExistingSession
+    fun needsSessionBootstrap(hasExistingSession: Boolean, routePaired: Boolean = true): Boolean =
+        !hasExistingSession || !routePaired
 
     fun isFirstDelivery(stage: GalaxySSILinkDeliveryStore.IncomingStageResult): Boolean =
         stage == GalaxySSILinkDeliveryStore.IncomingStageResult.STAGED
@@ -188,6 +191,8 @@ object GalaxySSIMqttClient {
     }
 
     fun isConnected(): Boolean = connected
+
+    fun isRequestReplyReady(): Boolean = connected && subscriptionRecoveryState.isReady()
 
     fun isSecureReady(): Boolean = secureReady
 
@@ -1063,6 +1068,7 @@ object GalaxySSIMqttClient {
                 if (pendingPairingClaim == pending) pendingPairingClaim = null
             }
             Log.w(TAG, "Discarded expired pending pairing claim")
+            notifyPairingFailure(pending.desktopId, "timeout")
             return
         }
         val mqtt = client
@@ -1132,6 +1138,15 @@ object GalaxySSIMqttClient {
         publishJsonResult(payload, outgoingTopic(contactId), contactId, queueOnly = true).accepted
 
     internal fun notifyBlobProgress(payload: JSONObject) = notifyMessageListeners(payload)
+
+    internal fun persistBlobArtifactEvent(context: Context, payload: JSONObject): Boolean {
+        require(payload.optString("type") in setOf("artifact_available", "artifact_download_failed"))
+        val stage = GalaxySSILinkDeliveryStore.stageIncoming(context, payload.getString("message_id"), payload.toString())
+        if (stage == GalaxySSILinkDeliveryStore.IncomingStageResult.INVALID) return false
+        com.galaxyssi.chat.blob.BlobArtifactCardUpdates.publish(payload)
+        schedulePendingIncomingReplay()
+        return true
+    }
 
     internal fun dispatchBlobDependencies() { retryHandler.post { dispatchPendingMessages() } }
 
@@ -1955,6 +1970,26 @@ object GalaxySSIMqttClient {
             handleIncomingDecoded(topic, link, reassembledWire)
             return
         }
+        if (wire.optString("type") == "pairing_rejected") {
+            if (wire.optString("protocol") != GalaxySSILinkProtocol.NAME ||
+                wire.optInt("version") != GalaxySSILinkProtocol.VERSION ||
+                wire.optString("desktop_id") != link.desktopId ||
+                wire.optString("desktop_fingerprint") != link.desktopFingerprint ||
+                wire.optString("client_route_id") != link.routes.clientRouteId ||
+                link.paired
+            ) return
+            val removed = synchronized(pairingClaimLock) {
+                if (pendingPairingClaim?.desktopId != link.desktopId) false else {
+                    pendingPairingClaim = null
+                    true
+                }
+            }
+            if (removed) {
+                retryHandler.removeCallbacks(pairingClaimRetryRunnable)
+                notifyPairingFailure(link.desktopId, wire.optString("reason"))
+            }
+            return
+        }
         if (wire.optString("type") == "pairing_confirmed") {
             handlePairingConfirmation(link, wire)
             return
@@ -2017,6 +2052,22 @@ object GalaxySSIMqttClient {
             payload.put("source_id", link.desktopId)
         }
         val incomingMessageId = payload.optString("message_id")
+        if (payload.optString("type") == "artifact_blob_offer") {
+            AndroidBlobArtifactReceives.receive(context, link.desktopId, decrypted.optString("conversation_id"), payload) { result ->
+                result.onSuccess {
+                    runCatching {
+                        val current = GalaxySSILinkProtocol.serverLink(context, link.desktopId)
+                        if (current?.paired != true || current.routes.clientRouteId != link.routes.clientRouteId ||
+                            current.routes.localFingerprint != link.routes.localFingerprint ||
+                            current.routes.remoteFingerprint != link.routes.remoteFingerprint) return@runCatching
+                        GalaxySSILinkDeliveryStore.bindCiphertext(context, ciphertextDigest, incomingMessageId, receiptRequired = true)
+                        GalaxySSILinkDeliveryStore.claimIncoming(context, incomingMessageId)
+                        publishInboundReceipt(current, incomingMessageId)
+                    }.onFailure { Log.w(TAG, "Blob offer ACK deferred: ${it.javaClass.simpleName}") }
+                }.onFailure { Log.w(TAG, "Blob offer persistence deferred: ${it.javaClass.simpleName}") }
+            }
+            return
+        }
         if (payload.optString("type") == BlobRelayConfiguration.TYPE) {
             try {
                 BlobRelayConfigurations.ingest(context, payload, link.desktopId)
@@ -2028,6 +2079,8 @@ object GalaxySSIMqttClient {
             GalaxySSILinkDeliveryStore.claimIncoming(context, incomingMessageId)
             publishInboundReceipt(link, incomingMessageId)
             AndroidBlobTransfers.wake(context)
+            AndroidBlobArtifactReceives.wake(context)
+            AndroidBlobArtifactCapability.refresh(context)
             return
         }
         GalaxySSILinkDeliveryStore.bindCiphertext(
@@ -2258,6 +2311,14 @@ object GalaxySSIMqttClient {
         payload: JSONObject,
         sourceDesktopId: String = payload.optString("desktop_id")
     ) {
+        if (payload.optBoolean("blob_publication") &&
+            payload.optString("type") in setOf("artifact_available", "artifact_download_failed")) {
+            if (listeners.isNotEmpty()) {
+                notifyMessageListeners(payload)
+                GalaxySSILinkDeliveryStore.completeIncoming(context, payload.optString("message_id"))
+            }
+            return
+        }
         if (payload.optString("type") == BlobRelayConfiguration.TYPE) {
             // Configuration is accepted only at the authenticated Desktop ingress above.
             GalaxySSILinkDeliveryStore.completeIncoming(context, payload.optString("message_id"))
@@ -2440,6 +2501,7 @@ object GalaxySSIMqttClient {
     }
 
     private fun notifyMessageListeners(payload: JSONObject) {
+        com.galaxyssi.chat.blob.BlobArtifactCardUpdates.publish(payload)
         val encoded = payload.toString()
         listeners.forEach { listener ->
             runCatching { listener.onMessage(encoded) }
@@ -2514,13 +2576,13 @@ object GalaxySSIMqttClient {
         val expected = json.optString("desktop_fingerprint")
         if (!expected.equals(link.desktopFingerprint, ignoreCase = true)) return
         val hasSession = GalaxySSICrypto.hasDesktopSession(context, desktopId)
-        val sessionReady = if (PairingConfirmationDeliveryPolicy.needsSessionBootstrap(hasSession)) {
+        val sessionReady = if (PairingConfirmationDeliveryPolicy.needsSessionBootstrap(hasSession, link.paired)) {
             json.optJSONObject("signal_bundle")?.let { bundle ->
                 GalaxySSICrypto.processPcBundleForDesktop(
                     desktopId,
                     bundle,
                     expected,
-                    replaceExisting = false
+                    replaceExisting = !link.paired
                 )
             } == true
         } else {
@@ -2537,6 +2599,8 @@ object GalaxySSIMqttClient {
             json.optJSONObject("pairing_access")
         )
         AppStore.updateDesktopDeviceContact(context, json)
+        setSecureReady(true)
+        dispatchPendingMessages()
         json.optJSONArray("connector_agents")?.let { AppStore.updateConnectorAgentStatuses(context, it) }
         val stage = GalaxySSILinkDeliveryStore.stageIncoming(context, messageId, json.toString())
         if (!PairingConfirmationDeliveryPolicy.isFirstDelivery(stage)) return
@@ -2547,6 +2611,25 @@ object GalaxySSIMqttClient {
             bypassThrottle = true
         )
         listeners.forEach { listener -> listener.onMessage(json.toString()) }
+    }
+
+    private fun notifyPairingFailure(desktopId: String, reason: String) {
+        val context = appContext ?: return
+        val message = context.getString(
+            if (reason == "token_bound") R.string.desktop_pairing_code_used
+            else R.string.desktop_pairing_timed_out
+        )
+        val event = JSONObject()
+            .put("type", "pairing_failed")
+            .put("desktop_id", desktopId)
+            .put("sender", "system")
+            .put("contact_id", "system")
+            .put("message_id", UUID.randomUUID().toString())
+            .put("content", message)
+        retryHandler.post {
+            android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_LONG).show()
+            listeners.forEach { it.onMessage(event.toString()) }
+        }
     }
 
     private fun handleSecureControlMessage(json: JSONObject): Boolean {
@@ -2569,6 +2652,7 @@ object GalaxySSIMqttClient {
     }
 
     private fun requestMissingSignalSessions(context: Context) {
+        AndroidBlobArtifactCapability.refresh(context, reconnect = true)
         setSecureReady(GalaxySSILinkProtocol.allServerLinks(context).any { link ->
             link.paired && GalaxySSICrypto.hasDesktopSession(context, link.desktopId)
         })
@@ -2578,6 +2662,7 @@ object GalaxySSIMqttClient {
 
     private fun resumePendingAttachmentTransfers(context: Context) {
         AndroidBlobTransfers.wake(context)
+        AndroidBlobArtifactReceives.wake(context)
         attachmentTransferExecutor.execute {
             AgentOutboundAttachmentTransferStore.pending(context).forEach { attachment ->
                 if (AndroidBlobTransfers.owns(context, attachment.transferId)) return@forEach
@@ -2943,6 +3028,7 @@ object GalaxySSIMqttClient {
         }
         val extraAttempts = listOf(phoneTopics, rendezvousTopics).count { it.isNotEmpty() }
         val generation = subscriptionRecoveryState.begin(maxOf(1, links.size + extraAttempts))
+        AndroidAgentRecoveryWake.connectionChanged(context, false)
         subscriptionCoordinator.reconcile(mqtt, links, phoneTopics, rendezvousTopics, generation)
         if (links.isEmpty() && extraAttempts == 0) {
             completeSubscriptionAttempt(generation, succeeded = true)
@@ -2955,6 +3041,7 @@ object GalaxySSIMqttClient {
             MqttSubscriptionAttemptOutcome.PENDING -> Unit
             MqttSubscriptionAttemptOutcome.READY -> {
                 cancelSubscriptionRetry()
+                appContext?.let { AndroidAgentRecoveryWake.connectionChanged(it, isRequestReplyReady()) }
                 appContext?.let(::requestMissingSignalSessions)
                 replayApprovedPhoneContactDecisionsOnce()
                 Log.i(TAG, "Subscribed to rotating opaque relationship mailboxes")
@@ -2988,6 +3075,7 @@ object GalaxySSIMqttClient {
 
     private fun invalidateSubscriptions() {
         subscriptionRecoveryState.invalidate()
+        appContext?.let { AndroidAgentRecoveryWake.connectionChanged(it, false) }
         cancelSubscriptionRetry()
         retryHandler.removeCallbacks(topicRotationRefreshRunnable)
         subscriptionCoordinator.invalidate()
@@ -3037,7 +3125,7 @@ object GalaxySSIMqttClient {
     private fun setConnected(value: Boolean): Boolean {
         if (connected == value) return false
         connected = value
-        appContext?.let { AndroidAgentRecoveryWake.connectionChanged(it, value) }
+        appContext?.let { AndroidAgentRecoveryWake.connectionChanged(it, isRequestReplyReady()) }
         listeners.forEach { it.onConnectionChanged(value) }
         return true
     }

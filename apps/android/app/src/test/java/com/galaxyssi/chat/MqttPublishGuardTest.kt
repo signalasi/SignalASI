@@ -77,16 +77,19 @@ class MqttPublishGuardTest {
     @Test
     fun `relationship subscriptions become ready only when every link succeeds`() {
         val state = MqttSubscriptionRecoveryState()
+        assertFalse(state.isReady())
         val generation = state.begin(2)
 
         assertEquals(
             MqttSubscriptionAttemptOutcome.PENDING,
             state.complete(generation, succeeded = true)
         )
+        assertFalse(state.isReady())
         assertEquals(
             MqttSubscriptionAttemptOutcome.READY,
             state.complete(generation, succeeded = true)
         )
+        assertTrue(state.isReady())
     }
 
     @Test
@@ -102,6 +105,7 @@ class MqttPublishGuardTest {
             MqttSubscriptionAttemptOutcome.RETRY,
             state.complete(generation, succeeded = true)
         )
+        assertFalse(state.isReady())
     }
 
     @Test
@@ -114,6 +118,23 @@ class MqttPublishGuardTest {
             MqttSubscriptionAttemptOutcome.STALE,
             state.complete(generation, succeeded = true)
         )
+        assertFalse(state.isReady())
+    }
+
+    @Test
+    fun `new subscription generation and disconnect retire previous readiness`() {
+        val state = MqttSubscriptionRecoveryState()
+        val old = state.begin(1)
+        state.complete(old, true)
+        assertTrue(state.isReady())
+        val fresh = state.begin(1)
+        assertFalse(state.isReady())
+        assertEquals(MqttSubscriptionAttemptOutcome.STALE, state.complete(old, true))
+        assertFalse(state.isReady())
+        state.complete(fresh, true)
+        assertTrue(state.isReady())
+        state.invalidate()
+        assertFalse(state.isReady())
     }
 
     @Test

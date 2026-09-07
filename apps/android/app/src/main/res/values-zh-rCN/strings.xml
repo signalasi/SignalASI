@@ -2115,6 +2115,10 @@
     <string name="rich_output_open">打开</string>
     <string name="rich_output_download">保存到下载目录</string>
     <string name="rich_output_download_preparing">正在获取文件…</string>
+    <string name="blob_artifact_progress">正在接收 %1$d%%</string>
+    <string name="blob_artifact_verifying">正在准备文件</string>
+    <string name="blob_artifact_failed">附件接收失败</string>
+    <string name="blob_artifact_unavailable">无法确认附件归属</string>
     <string name="rich_output_downloaded">已保存到 %1$s</string>
     <string name="rich_output_download_failed">文件保存失败</string>
     <string name="rich_output_saved">已保存</string>

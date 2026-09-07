@@ -60,6 +60,7 @@ class BlobStagingTest {
                 val output = ByteArrayOutputStream()
                 assertEquals(size.toLong(), staged.copyPlaintext(output, binding))
                 assertArrayEquals(bytes, output.toByteArray())
+                staged.openPlaintext(binding).use { assertArrayEquals(bytes, it.readBytes()) }
                 val state = File(path, BlobStaging.STATE_FILE)
                 assertTrue(BlobCheckpointCipher.isEncrypted(state))
                 assertFalse(state.readBytes().toString(Charsets.ISO_8859_1).contains(BlobProtocol.hex(staged.private.key)))
@@ -83,6 +84,16 @@ class BlobStagingTest {
             assertThrows(java.nio.file.FileAlreadyExistsException::class.java) {
                 BlobStaging.prepare(directory, 3, BlobProtocol.hash(expected), binding, { expected.inputStream() }, storageKey)
             }
+        }
+    }
+
+    @Test fun `empty plaintext still authenticates its encrypted chunk`() {
+        BlobStaging.prepare(File(temporary.root, "empty-auth"), 0, BlobProtocol.hash(byteArrayOf()), binding,
+            { byteArrayOf().inputStream() }, storageKey).use { staged ->
+            File(staged.directory, "00000000.blob").writeBytes(ByteArray(16))
+            assertEquals("local_chunk_missing_or_corrupt", assertThrows(BlobFailure::class.java) {
+                staged.openPlaintext(binding).use { it.read() }
+            }.code)
         }
     }
 

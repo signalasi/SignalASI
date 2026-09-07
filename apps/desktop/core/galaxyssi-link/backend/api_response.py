@@ -14,6 +14,13 @@ DEFAULT_MESSAGES = {
     "agent_push_token_invalid": "Invalid GalaxySSI Agent push token.",
     "publish_failed": "Publish failed.",
     "mobile_status_publish_failed": "Mobile status publish failed.",
+    "artifact_blob_transport_required": "Large-file transport is unavailable. Restore the connection settings and retry.",
+    "artifact_blob_size_exceeded": "The attachment exceeds the 1 GiB transport limit.",
+    "artifact_source_unavailable": "The attachment source cannot be read. Restore the file and retry.",
+    "artifact_source_empty": "The attachment is empty and cannot be sent.",
+    "artifact_source_changed": "The original attachment has changed. Restore the original file before retrying this delivery.",
+    "artifact_preparation_failed": "The attachment could not be prepared for transfer.",
+    "artifact_blob_checkpoint_unavailable": "The transfer checkpoint could not be saved. Check local storage and retry.",
 }
 
 

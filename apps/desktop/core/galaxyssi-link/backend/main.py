@@ -112,6 +112,7 @@ def galaxyssi_pairing_payload(
     payload["pairing_token"] = pairing["token"]
     payload["pairing_secret"] = pairing["secret"]
     payload["pairing_access"] = pairing["access"]
+    payload["pairing_created_at"] = pairing["created_at"]
     try:
         from mqtt_bridge import reconcile_mqtt_subscriptions
 
@@ -181,6 +182,7 @@ def galaxyssi_pairing_qr(grant_desktop_executor: bool = False) -> dict:
         "pairing_access": payload["pairing_access"],
         "desktop_device": payload.get("desktop_device") or {},
         "expires_at": int(time.time()) + 10 * 60,
+        "created_at": payload["pairing_created_at"],
         "qr_payload_bytes": len(encoded_payload.encode("utf-8")),
         "qr_version": qr.version,
     }
@@ -256,6 +258,8 @@ async def lifespan(app: FastAPI):
             log.info("Signal sidecar started (:%s)", galaxyssi_client.SIDECAR_PORT)
         except Exception as e:
             log.warning(f"Signal sidecar start failed: {e}")
+        from signal_sidecar_supervisor import start_supervisor
+        start_supervisor()
         if signal_sidecar_ready:
             try:
                 from agent_reputation_ledger import agent_reputation_ledger
@@ -365,6 +369,8 @@ async def lifespan(app: FastAPI):
                     file_server_process.kill()
         if external_services_enabled:
             try:
+                from signal_sidecar_supervisor import stop_supervisor
+                stop_supervisor()
                 from galaxyssi_client import stop_signal_sidecar
                 stop_signal_sidecar()
             except Exception as exc:
@@ -448,12 +454,8 @@ def api_health():
             "supervised": False,
             "last_error": str(exc)[:500],
         }
-    return {
-        "status": "ok",
-        "protocol": "GalaxySSI Link Protocol",
-        "connector": "GalaxySSI Desktop",
-        "message_bridge": message_bridge,
-    }
+    from signal_sidecar_supervisor import encrypted_transport_health, sidecar_status
+    return encrypted_transport_health(message_bridge, sidecar_status())
 
 @app.get("/api/agents/execution-log")
 def api_agent_execution_log(limit: int = Query(50)):

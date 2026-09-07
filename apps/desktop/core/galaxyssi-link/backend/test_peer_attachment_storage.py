@@ -2,11 +2,35 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from peer_attachment_storage import PeerAttachmentError, PeerAttachmentStorage
 
 
 class PeerAttachmentStorageTests(unittest.TestCase):
+    def test_staging_name_does_not_expand_a_long_valid_destination(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "source"
+            source.write_bytes(b"image")
+            parent = Path(root) / ("d" * max(1, 205 - len(str(Path(root))) - 1))
+            destination = parent / ("0123456789abcdef" * 2 + ".sasi")
+            opened = []
+            original_open = Path.open
+
+            def record_open(path, mode="r", *args, **kwargs):
+                if mode == "xb":
+                    opened.append(path)
+                return original_open(path, mode, *args, **kwargs)
+
+            with patch.object(Path, "open", record_open):
+                PeerAttachmentStorage().store_file(source, destination)
+            self.assertEqual(b"image", destination.read_bytes())
+            self.assertEqual(1, len(opened))
+            self.assertEqual(destination.parent, opened[0].parent)
+            self.assertLessEqual(len(opened[0].name), 37)
+            self.assertNotIn(destination.name, opened[0].name)
+            self.assertFalse(opened[0].exists())
+
     def test_raw_storage_and_stream_across_chunk_boundaries(self):
         with tempfile.TemporaryDirectory() as root:
             source, destination = Path(root) / "source", Path(root) / "stored"

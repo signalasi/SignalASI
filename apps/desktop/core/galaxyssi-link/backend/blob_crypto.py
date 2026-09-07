@@ -104,7 +104,7 @@ class StagedBlob:
         size = source.stat().st_size
         if not 0 <= size <= MAX_FILE_BYTES:
             raise BlobError("file_too_large", 413)
-        binding_digest = binding_hash(binding)
+        binding_hash(binding)
         first_hash = hashlib.sha256()
         with source.open("rb") as stream:
             read_size = 0
@@ -115,9 +115,25 @@ class StagedBlob:
                 first_hash.update(block)
         if read_size != size:
             raise BlobError("source_changed")
+        return cls.prepare_stream(lambda: source.open("rb"), directory, binding,
+                                  size=size, digest=first_hash.hexdigest())
+
+    @classmethod
+    def prepare_stream(cls, open_source, directory: Path, binding: dict, *, size: int, digest: str,
+                       cancel=None) -> "StagedBlob":
+        """Stage a known artifact or decrypted stream without a plaintext disk copy."""
+        directory = Path(directory)
+        if type(size) is not int or not 0 <= size <= MAX_FILE_BYTES:
+            raise BlobError("file_too_large", 413)
+        checked_hex(digest)
+        binding_digest = binding_hash(binding)
+        def check_cancelled():
+            if cancel is not None and cancel():
+                raise BlobError("transfer_cancelled", 499)
+        check_cancelled()
         private = {"version": VERSION, "blob_id": secrets.token_hex(16),
                    "key": secrets.token_hex(32), "nonce_prefix": secrets.token_hex(8),
-                   "size": size, "sha256": first_hash.hexdigest(),
+                   "size": size, "sha256": digest,
                    "binding_sha256": binding_digest, "manifest_sha256": ""}
         # A new directory and key are mandatory. Interrupted preparation is never
         # resumed by encrypting changed source bytes with an old nonce/key pair.
@@ -126,14 +142,19 @@ class StagedBlob:
         prefix = bytes.fromhex(private["nonce_prefix"])
         second_hash = hashlib.sha256()
         chunks = []
-        with source.open("rb") as stream:
+        with open_source() as stream:
             count = max(1, (size + CHUNK_BYTES - 1) // CHUNK_BYTES)
             for index in range(count):
                 expected = min(CHUNK_BYTES, size - index * CHUNK_BYTES)
-                plain = bytearray(stream.read(expected))
+                plain = bytearray()
                 try:
-                    if len(plain) != expected:
-                        raise BlobError("source_changed")
+                    while len(plain) < expected:
+                        check_cancelled()
+                        part = stream.read(expected - len(plain))
+                        if not part or len(part) > expected - len(plain):
+                            raise BlobError("source_changed")
+                        plain.extend(part)
+                    check_cancelled()
                     second_hash.update(plain)
                     encrypted = cipher.encrypt(prefix + struct.pack(">I", index), bytes(plain),
                                                associated_data(private, index, expected))
@@ -146,6 +167,7 @@ class StagedBlob:
         public = {"version": VERSION, "chunks": chunks}
         private["manifest_sha256"] = sha256(canonical(public))
         staged = cls(directory, private, public)
+        check_cancelled()
         staged.save()
         return staged
 

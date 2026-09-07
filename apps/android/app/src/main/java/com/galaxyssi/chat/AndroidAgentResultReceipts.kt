@@ -13,7 +13,7 @@ internal object AndroidAgentResultReceipts {
     @Volatile private var coordinator: AgentResultReceiptCoordinator? = null
 
     fun connectionChanged(context: Context, connected: Boolean) = coordinator(context).connectionChanged(connected)
-    fun request(context: Context) = coordinator(context).request(GalaxySSIMqttClient.isConnected())
+    fun request(context: Context) = coordinator(context).request(GalaxySSIMqttClient.isRequestReplyReady())
 
     fun receive(context: Context, payload: JSONObject, desktop: String) {
         val receipt = AgentResultReceipt.confirmed(payload, desktop) ?: return
@@ -35,7 +35,7 @@ internal object AndroidAgentResultReceipts {
     private fun drain(context: Context): Long? {
         val now = System.currentTimeMillis()
         for (work in AgentConnectorResponseStore.dueReceipts(context, now)) {
-            if (!GalaxySSIMqttClient.isConnected()) break
+            if (!GalaxySSIMqttClient.isRequestReplyReady()) break
             if (!AgentConnectorResponseStore.claimReceipt(context, work, now)) continue
             runCatching {
                 val receipt = work.receipt

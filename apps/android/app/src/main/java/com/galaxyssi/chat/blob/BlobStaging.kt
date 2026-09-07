@@ -129,6 +129,22 @@ internal class BlobStaging private constructor(
         return total
     }
 
+    /** Bounded plaintext bridge to encrypted local storage; consume through EOF before committing. */
+    fun openPlaintext(binding: Map<String, String>, checkCancelled: () -> Unit = {}): InputStream {
+        checkBinding(binding)
+        val load: (Int) -> ByteArray = { index ->
+            private.checkOpen()
+            checkCancelled()
+            val encrypted = readChunk(index)
+            try { BlobProtocol.crypt(private, index, encrypted, false) }
+            catch (_: AEADBadTagException) { throw BlobFailure("chunk_authentication_failed", 409) }
+            finally { encrypted.fill(0) }
+        }
+        val input = if (private.size == 0L) java.io.ByteArrayInputStream(load(0)) else
+            BlobChunkInputStream(chunks.size, private.size, load)
+        return BlobVerifiedInputStream(input, private.size, private.plaintextHash, checkCancelled)
+    }
+
     override fun close() {
         private.close()
         remote = JSONObject()

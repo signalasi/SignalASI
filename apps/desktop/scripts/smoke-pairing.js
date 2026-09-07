@@ -10,7 +10,8 @@ function main() {
   console.log("[pairing-smoke] running clean-break Link v1 protocol and multi-client tests");
   execFileSync(
     findBackendPython(),
-    ["-m", "unittest", "-v", "test_link_protocol.py", "test_link_pairing_integration.py"],
+    ["-m", "unittest", "-v", "test_link_protocol.py", "test_link_pairing_integration.py",
+      "test_pairing_first_message.py", "test_mqtt_subscriptions.py"],
     { cwd: backendDir, windowsHide: true, stdio: "inherit" }
   );
   console.log("[pairing-smoke] GalaxySSI Link v1 pairing smoke OK");

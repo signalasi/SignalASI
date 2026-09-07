@@ -18,6 +18,13 @@ internal object AndroidAgentRemoteRecovery {
     }
 
     suspend fun recover(context: Context, handoffs: List<AgentHandoffRecord>): List<AgentRecoverableRun> =
+        queryHandoffs(context, handoffs, inspectOnly = false)
+
+    /** Query authenticated facts without registering execution or requesting final-result redelivery. */
+    suspend fun inspect(context: Context, handoffs: List<AgentHandoffRecord>): List<AgentRecoverableRun> =
+        queryHandoffs(context, handoffs, inspectOnly = true)
+
+    private suspend fun queryHandoffs(context: Context, handoffs: List<AgentHandoffRecord>, inspectOnly: Boolean): List<AgentRecoverableRun> =
         withContext(Dispatchers.IO) {
             val queries = handoffs.mapNotNull { handoff ->
                 if (GalaxySSITransportPrivacyPolicy.isLocalOnly(JSONObject(handoff.request.context)
@@ -26,7 +33,7 @@ internal object AndroidAgentRemoteRecovery {
                     handoff.request.conversationId, handoff.request.context["turn_id"]?.toString().orEmpty()
                         .ifBlank { handoff.request.taskId })?.copy(handoff = handoff)
             }
-            observe(context, queries).mapNotNull { (query, observation) ->
+            observe(context, queries, inspectOnly).mapNotNull { (query, observation) ->
                 val handoff = query.handoff ?: return@mapNotNull null
                 AgentRecoverableRun(
                     handle = AgentRunHandle(handoff.request.runId, handoff.request.taskId,
@@ -65,15 +72,17 @@ internal object AndroidAgentRemoteRecovery {
             .put("source_message_id", source.toString()).put("agent_id", agentId))
     }
 
-    private suspend fun observe(context: Context, queries: List<Query>): List<Pair<Query, AgentRemoteRecoveryObservation>> =
+    private suspend fun observe(context: Context, queries: List<Query>, inspectOnly: Boolean = false): List<Pair<Query, AgentRemoteRecoveryObservation>> =
             buildList {
                 queries.distinctBy { listOf(it.desktopId, it.payload.toString()) }
                     .groupBy { it.desktopId to it.routeId }.values.forEach { group ->
                     group.chunked(32).forEach { batch ->
                         val first = batch.first()
                         val observations = try {
-                            client.query(first.desktopId, first.routeId, batch.map { it.payload }) { payload ->
-                                GalaxySSIMqttClient.publishJsonForTransport(payload,
+                            client.query(first.desktopId, first.routeId, batch.map { it.payload }, report = { outcome ->
+                                if (BuildConfig.DEBUG) Log.i("GalaxySSIRecovery", "query_outcome=$outcome")
+                            }) { payload ->
+                                GalaxySSIMqttClient.isRequestReplyReady() && GalaxySSIMqttClient.publishJsonForTransport(payload,
                                     GalaxySSIMqttClient.outgoingTopicFor(first.payload.getString("contact_id")),
                                     first.payload.getString("contact_id"))
                             }
@@ -99,9 +108,9 @@ internal object AndroidAgentRemoteRecovery {
                                 executionGeneration = version.generation, awaitingTerminalReply = terminal)
                             if (observation.workspaceStatus == null || observation.remoteRunId.isBlank() ||
                                 observation.statusSequence < 0L) return@forEachIndexed
-                            if (!AgentConnectorResponseStore.observeExecution(context, identity)) return@forEachIndexed
-                            if (terminal) {
-                                AndroidAgentResultRecovery.request(context, query.desktopId, fields)
+                            if (!inspectOnly) {
+                                if (!AgentConnectorResponseStore.observeExecution(context, identity)) return@forEachIndexed
+                                if (terminal) AndroidAgentResultRecovery.request(context, query.desktopId, fields)
                             }
                             add(query to observation)
                         }

@@ -36,6 +36,7 @@ internal class ChatHistoryDatabase(
     private val databaseName: String = DATABASE_NAME
 ) : SQLiteOpenHelper(context.applicationContext, databaseName, null, DATABASE_VERSION) {
     private val rowCipher = AgentRowStorageCipher(context.applicationContext, "chat-history:$databaseName")
+    private val blobAttachmentEvents = BlobChatAttachmentEvents(rowCipher)
     @Volatile private var legacyRowsMigrated = false
     init {
         setWriteAheadLoggingEnabled(true)
@@ -113,6 +114,7 @@ internal class ChatHistoryDatabase(
             """.trimIndent()
         )
         writeMetadata(db, KEY_LEGACY_ROWS_MIGRATED, 1L)
+        BlobChatAttachmentEvents.createSchema(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -131,6 +133,7 @@ internal class ChatHistoryDatabase(
             )
         }
         writeMetadataIfAbsent(db, KEY_LEGACY_ROWS_MIGRATED, 0L)
+        if (oldVersion < 5) BlobChatAttachmentEvents.createSchema(db)
     }
 
     override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -165,6 +168,27 @@ internal class ChatHistoryDatabase(
         } finally {
             db.endTransaction()
         }
+    }
+
+    @Synchronized
+    fun matchingBlobAttachmentEvents(message: JSONObject): List<JSONObject> =
+        blobAttachmentEvents.matching(readableDatabase, message)
+
+    @Synchronized
+    fun applyBlobAttachmentEvent(event: JSONObject): Boolean {
+        if (!com.galaxyssi.chat.blob.BlobArtifactPresentation.isTerminalPeerEvent(event)) return false
+        ensureLegacyRowsMigrated()
+        val db = writableDatabase
+        db.beginTransaction()
+        return try {
+            blobAttachmentEvents.store(db, event)
+            val current = querySingle(db, "contact_id = ? AND remote_message_id_hash = ? AND is_mine = 0",
+                arrayOf(event.getString("contact_id"), digest(event.getString("source_message_id"))))
+            val changed = current?.let { insertOrMerge(db, it) } ?: false
+            if (changed) incrementVersion(db)
+            db.setTransactionSuccessful()
+            changed
+        } finally { db.endTransaction() }
     }
 
     @Synchronized
@@ -216,6 +240,7 @@ internal class ChatHistoryDatabase(
         val db = writableDatabase
         db.beginTransaction()
         try {
+            db.delete(BlobChatAttachmentEvents.TABLE, null, null)
             db.delete(TABLE_MESSAGES, null, null)
             db.delete(TABLE_TOMBSTONES, null, null)
             writeMetadata(db, KEY_NEXT_MESSAGE_ID, 1L)
@@ -478,6 +503,10 @@ internal class ChatHistoryDatabase(
         val db = writableDatabase
         db.beginTransaction()
         return try {
+            querySingle(db, "message_id = ?", arrayOf(messageId.toString()))?.let { message ->
+                db.delete(BlobChatAttachmentEvents.TABLE, "contact_id = ? AND remote_hash = ?",
+                    arrayOf(message.optString("contactId"), digest(message.optString("remoteMessageId"))))
+            }
             val deleted = db.delete(TABLE_MESSAGES, "message_id = ?", arrayOf(messageId.toString())) > 0
             val tombstoned = insertTombstone(db, messageId)
             if (deleted || tombstoned) {
@@ -495,6 +524,7 @@ internal class ChatHistoryDatabase(
         val db = writableDatabase
         db.beginTransaction()
         return try {
+            db.delete(BlobChatAttachmentEvents.TABLE, "contact_id = ?", arrayOf(contactId))
             val messageIds = linkedSetOf<Long>().apply {
                 addAll(pendingMessageIds.filter { it > 0L })
             }
@@ -529,6 +559,7 @@ internal class ChatHistoryDatabase(
         val db = writableDatabase
         db.beginTransaction()
         try {
+            db.delete(BlobChatAttachmentEvents.TABLE, null, null)
             db.delete(TABLE_MESSAGES, null, null)
             db.delete(TABLE_TOMBSTONES, null, null)
             writeMetadata(db, KEY_NEXT_MESSAGE_ID, 1L)
@@ -575,7 +606,7 @@ internal class ChatHistoryDatabase(
         if (messageId <= 0L || contactId.isBlank()) return false
         if (isTombstoned(db, messageId)) return false
         val current = querySingle(db, "message_id = ?", arrayOf(messageId.toString()))
-        val message = mergeMessage(current, incoming)
+        val message = blobAttachmentEvents.project(db, mergeMessage(current, incoming))
         val isRead = message.optBoolean("isRead") || payloadHasReadTrace(message)
         val readAtMillis = message.optLong("readAt", 0L).takeIf { isRead && it > 0L }
             ?: if (isRead) System.currentTimeMillis() else 0L
@@ -716,6 +747,7 @@ internal class ChatHistoryDatabase(
     }
 
     private fun recreateCurrentSchema(db: SQLiteDatabase) {
+        db.execSQL("DROP TABLE IF EXISTS ${BlobChatAttachmentEvents.TABLE}")
         db.execSQL("DROP TABLE IF EXISTS $TABLE_TOMBSTONES")
         db.execSQL("DROP TABLE IF EXISTS $TABLE_METADATA")
         db.execSQL("DROP TABLE IF EXISTS $TABLE_MESSAGES")
@@ -761,13 +793,11 @@ internal class ChatHistoryDatabase(
     }
 
     private fun writeMetadataIfAbsent(db: SQLiteDatabase, key: String, value: Long) {
-        val values = ContentValues().apply {
-            put("metadata_key", key)
-            put("metadata_value", value)
-        }
-        check(
-            db.insertWithOnConflict(TABLE_METADATA, null, values, SQLiteDatabase.CONFLICT_IGNORE) != -1L
-        ) { "Chat history metadata initialization failed" }
+        // An existing key is a successful no-op, not a failed migration.
+        db.execSQL(
+            "INSERT OR IGNORE INTO $TABLE_METADATA(metadata_key,metadata_value) VALUES(?,?)",
+            arrayOf<Any>(key, value)
+        )
     }
 
     private fun insertTombstone(db: SQLiteDatabase, messageId: Long): Boolean {
@@ -843,7 +873,7 @@ internal class ChatHistoryDatabase(
 
     companion object {
         const val DATABASE_NAME = "galaxyssi_chat_history.db"
-        private const val DATABASE_VERSION = 4
+        private const val DATABASE_VERSION = 5
         private const val TABLE_MESSAGES = "chat_messages"
         private const val TABLE_METADATA = "chat_metadata"
         private const val TABLE_TOMBSTONES = "deleted_chat_messages"

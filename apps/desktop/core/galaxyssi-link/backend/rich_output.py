@@ -139,6 +139,19 @@ def _load_json(raw: str) -> Any:
         return None
 
 
+def _bounded_metadata(metadata: dict, artifact_uris=()) -> dict:
+    # JSON canonicalization can reorder keys. Reserve identity fields explicitly,
+    # then spend the remaining existing 32 slots on model-provided presentation.
+    preferred = ["transport", "artifact_source_uri", "artifact_id", "transfer_id", "blob_transfer_id",
+                 "size", "size_bytes", "sha256", "original_size_bytes", "original_sha256",
+                 "blob_client_route_id", "blob_desktop_id", "blob_conversation_id", "blob_task_id",
+                 "blob_turn_id", "blob_execution_generation"]
+    preferred += ["blob_item_" + uri.rsplit("/", 1)[1] for uri in list(artifact_uris)[:10]
+                  if isinstance(uri, str) and uri.startswith("galaxyssi-artifact://blob/")]
+    keys = list(dict.fromkeys([key for key in preferred if key in metadata] + list(metadata)))[:32]
+    return {str(key)[:80]: str(metadata[key])[:2000] for key in keys}
+
+
 def _normalize_block(raw: dict) -> dict:
     block_type = str(raw.get("type") or "").strip().lower()
     if block_type not in ALLOWED_TYPES:
@@ -170,10 +183,8 @@ def _normalize_block(raw: dict) -> dict:
         ]
     metadata = raw.get("metadata")
     if isinstance(metadata, dict):
-        block["metadata"] = {
-            str(key)[:80]: str(value)[:2000]
-            for key, value in list(metadata.items())[:32]
-        }
+        uris = ([block["uri"]] if block.get("uri") else []) + [row[0] for row in block.get("rows", []) if row]
+        block["metadata"] = _bounded_metadata(metadata, uris)
     if block_type == "progress":
         block["value"] = _bounded_int(raw.get("value"), -1, 1_000_000, 0)
         block["maximum"] = _bounded_int(raw.get("maximum"), 1, 1_000_000, 100)

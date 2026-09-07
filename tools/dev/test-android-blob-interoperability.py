@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -58,9 +59,33 @@ def certificate(root: Path):
         serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
 
 
+def verify_receiver_capabilities(root: Path):
+    from blob_pair_configuration import can_receive_artifacts, record_artifact_capability
+    declarations = json.loads((root / "kotlin-receiver-capabilities.json").read_text(encoding="utf-8"))
+    route = "a" * 22
+    peer = {"signal_name": "phone", "identity_fingerprint": "e" * 64, "local_identity_fingerprint": "f" * 64}
+    def bridge():
+        return SimpleNamespace(DATA_DIR=root / "capability-state", desktop_id=lambda: "desktop",
+                               get_client=lambda candidate: peer if candidate == route else None)
+    observed = []
+    for declaration in declarations:
+        # Recreate the bridge each time to prove state comes from the encrypted store.
+        runtime = bridge()
+        if not record_artifact_capability(runtime, route, "phone", declaration):
+            raise RuntimeError("Kotlin receiver declaration was not accepted")
+        observed.append(can_receive_artifacts(runtime, route))
+    if observed != [False, True, True, False, False]:
+        raise RuntimeError(f"Cross-runtime receiver declaration replay failed: {observed}")
+    peer["identity_fingerprint"] = "d" * 64
+    if can_receive_artifacts(bridge(), route):
+        raise RuntimeError("Replacement identity inherited receiver capability")
+    return observed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--assemble", action="store_true", help="Also build the App and instrumentation APKs")
+    parser.add_argument("--compile-device-tests", action="store_true", help="Compile instrumentation tests without building APKs")
     parser.add_argument("--all-tests", action="store_true", help="Run the complete Android JVM suite with a live HTTPS fixture")
     options = parser.parse_args()
     original_environment = dict(os.environ)
@@ -81,6 +106,7 @@ def main() -> int:
         token = secrets.token_hex(32)
         relay = create_app(BlobStore(root / "relay.sqlite3"), provisioning_token=token)
         uploads: Counter[tuple[str, int]] = Counter()
+        downloads: Counter[tuple[str, int]] = Counter()
 
         @relay.middleware("http")
         async def count_chunks(request, call_next):
@@ -88,6 +114,8 @@ def main() -> int:
             parts = request.url.path.split("/")
             if request.method == "PUT" and len(parts) == 6 and parts[4] == "chunks" and response.status_code == 200:
                 uploads[(parts[3], int(parts[5]))] += 1
+            if request.method == "GET" and len(parts) == 6 and parts[4] == "chunks" and response.status_code == 200:
+                downloads[(parts[3], int(parts[5]))] += 1
             return response
 
         listener = socket.socket()
@@ -125,11 +153,14 @@ def main() -> int:
                     "com.galaxyssi.chat.AgentAttachmentPublishOrderTest", "--tests",
                     "com.galaxyssi.chat.AttachmentControlInboxTest", "--tests",
                     "com.galaxyssi.chat.PeerAttachmentTransferProgressTest", "--tests",
-                    "com.galaxyssi.chat.PeerChatAttachmentTest", "--console=plain"]
+                    "com.galaxyssi.chat.PeerChatAttachmentTest", "--tests",
+                    "com.galaxyssi.chat.MessageRowSnapshotFactoryTest", "--console=plain"]
                 if options.all_tests:
                     command = [command[0], ":app:testDebugUnitTest", "--console=plain"]
                 if options.assemble:
                     command.extend([":app:assembleDebug", ":app:assembleDebugAndroidTest"])
+                elif options.compile_device_tests:
+                    command.append(":app:compileDebugAndroidTestKotlin")
                 with log.open("w", encoding="utf-8") as output:
                     result = subprocess.run(command, cwd=ROOT / "apps/android", env=environment,
                         stdout=output, stderr=subprocess.STDOUT,
@@ -138,6 +169,7 @@ def main() -> int:
                     print(f"Android regression failed; see {log}", flush=True)
                     return result.returncode
                 counts_junit = junit_results(ROOT / "apps/android/app/build/test-results/testDebugUnitTest")
+                receiver_states = verify_receiver_capabilities(root)
                 result_path = root / "kotlin-offer.json"
                 if not result_path.is_file():
                     raise RuntimeError("Kotlin interoperability case did not run; a cached or skipped test is not evidence")
@@ -152,8 +184,23 @@ def main() -> int:
                 counts = [uploads[(blob_id, index)] for index in range(4)]
                 if counts != [1, 1, 1, 1]:
                     raise RuntimeError(f"Kotlin resume resent accepted chunks: {counts}")
+                artifact_result = json.loads((root / "kotlin-artifact-result.json").read_text(encoding="utf-8"))
+                artifact_counts = [downloads[(artifact_result["blob_id"], index)] for index in range(4)]
+                if (artifact_counts != [1, 1, 1, 1] or artifact_result["sha256"] != expected_hash
+                        or artifact_result["phases"] != ["publish", "receipt"]
+                        or artifact_result["local_verified_after_revoke"] is not True):
+                    raise RuntimeError(f"Artifact output resume/receipt validation failed: {artifact_counts}")
+                rekey = json.loads((root / "kotlin-artifact-rekey-result.json").read_text(encoding="utf-8"))
+                old_counts = [downloads[(rekey["old_blob_id"], index)] for index in range(4)]
+                new_counts = [downloads[(rekey["new_blob_id"], index)] for index in range(4)]
+                if (old_counts != [1, 0, 0, 0] or new_counts != [1, 1, 1, 1]
+                        or rekey["sha256"] != expected_hash or rekey["local_verified"] is not True):
+                    raise RuntimeError(f"Artifact transport revision validation failed: {old_counts}, {new_counts}")
                 print(json.dumps({"result": "passed", "transport": "real_loopback_https", "bytes_each_direction": len(data),
                     "kotlin_upload_counts": counts, "sha256_verified": True, "phone_test": False,
+                    "artifact_download_counts": artifact_counts, "artifact_stored_before_receipt": True,
+                    "artifact_rekey_download_counts": {"old": old_counts, "new": new_counts},
+                    "receiver_capability_states": receiver_states,
                     "junit": counts_junit}), flush=True)
         finally:
             server.should_exit = True

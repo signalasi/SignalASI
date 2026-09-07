@@ -83,7 +83,10 @@ class AgentRichContentView(
         expanded: Boolean
     ) -> Unit = { _, _, _ -> }
 ) {
+    private data class RenderScope(val conversation: String, val task: String, val turn: String)
+
     fun create(entry: AgentTranscriptEntry): View {
+        val scope = RenderScope(entry.conversationId, entry.taskId, entry.turnId)
         val explicit = AgentRichContentCodec.decode(entry.richOutputJson)
         val blocks = explicit.ifEmpty { AgentRichContentCodec.fromText(entry.text) }
         val sectionLayout = AgentResponseSectionOrganizer.organize(blocks)
@@ -100,9 +103,9 @@ class AgentRichContentView(
                 sectionLayout.sections.forEachIndexed { index, section ->
                     addView(
                         if (section.kind == AgentResponseSectionKind.FINAL_ANSWER) {
-                            finalAnswerSection(section)
+                            finalAnswerSection(section, scope)
                         } else {
-                            collapsibleSection(entry.id, section)
+                            collapsibleSection(entry.id, section, scope)
                         },
                         LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -113,19 +116,19 @@ class AgentRichContentView(
                     )
                 }
             } else {
-                addBlockViews(this, blocks)
+                addBlockViews(this, blocks, scope)
             }
         }
     }
 
-    private fun finalAnswerSection(section: AgentResponseSection): View =
+    private fun finalAnswerSection(section: AgentResponseSection, scope: RenderScope): View =
         LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(4), 0, dp(4))
-            addBlockViews(this, section.blocks)
+            addBlockViews(this, section.blocks, scope)
         }
 
-    private fun addBlockViews(container: LinearLayout, blocks: List<AgentRichBlock>) {
+    private fun addBlockViews(container: LinearLayout, blocks: List<AgentRichBlock>, scope: RenderScope) {
         var sourceIndex = 0
         var renderedIndex = 0
         while (sourceIndex < blocks.size) {
@@ -150,7 +153,7 @@ class AgentRichContentView(
                         onTextViewReady = onTextViewReady
                     )
                 } else {
-                    blockView(block)
+                    blockView(block, scope)
                 },
                 LinearLayout.LayoutParams(
                     width,
@@ -171,7 +174,8 @@ class AgentRichContentView(
 
     private fun collapsibleSection(
         entryId: String,
-        section: AgentResponseSection
+        section: AgentResponseSection,
+        scope: RenderScope
     ): View {
         var expanded = isSectionExpanded(entryId, section.kind, section.expandedByDefault)
         val body = LinearLayout(activity).apply {
@@ -183,7 +187,7 @@ class AgentRichContentView(
         fun renderBody() {
             if (bodyRendered) return
             bodyRendered = true
-            addBlockViews(body, section.blocks)
+            addBlockViews(body, section.blocks, scope)
         }
         if (expanded) renderBody()
 
@@ -256,8 +260,19 @@ class AgentRichContentView(
         )
     }
 
-    private fun blockView(source: AgentRichBlock): View {
+    private fun blockView(source: AgentRichBlock, scope: RenderScope, compact: Boolean = false): View {
+        if (source.type == AgentRichBlockType.GALLERY) return galleryBlock(source, scope)
+        val uri = source.metadata["artifact_source_uri"].orEmpty().ifBlank { source.uri }
+        if (uri.startsWith("galaxyssi-artifact://blob/")) {
+            val key = com.galaxyssi.chat.blob.BlobAgentArtifactKey.from(
+                scope.conversation, scope.task, scope.turn, uri, source.metadata)
+            return BlobAgentArtifactCardView(activity, source, key, { resolved -> renderBlock(resolved, scope) }, compact = compact)
+        }
         val block = AgentDesktopArtifactStore.resolveBlock(activity, source)
+        return renderBlock(block, scope)
+    }
+
+    private fun renderBlock(block: AgentRichBlock, scope: RenderScope): View {
         return when (block.type) {
         AgentRichBlockType.TEXT -> selectableText(block.text, 16f)
         AgentRichBlockType.HEADING -> selectableText(
@@ -278,7 +293,7 @@ class AgentRichContentView(
         AgentRichBlockType.KEY_VALUE -> keyValueBlock(block)
         AgentRichBlockType.TABLE -> tableBlock(block)
         AgentRichBlockType.IMAGE -> imageBlock(block)
-        AgentRichBlockType.GALLERY -> galleryBlock(block)
+        AgentRichBlockType.GALLERY -> galleryBlock(block, scope)
         AgentRichBlockType.VIDEO -> videoBlock(block)
         AgentRichBlockType.AUDIO -> audioBlock(block)
         AgentRichBlockType.FILE -> artifactBlock(block)
@@ -589,17 +604,18 @@ class AgentRichContentView(
         }
     }
 
-    private fun galleryBlock(block: AgentRichBlock): View {
+    private fun galleryBlock(block: AgentRichBlock, scope: RenderScope): View {
         val items = buildList {
             if (block.uri.isNotBlank()) add(listOf(block.uri, block.title, block.mimeType))
             addAll(block.rows.filter { it.firstOrNull().orEmpty().isNotBlank() })
         }.take(MAX_GALLERY_ITEMS)
         if (items.size <= 1) {
             val item = items.firstOrNull()
-            return imageBlock(block.copy(
+            val image = block.copy(type = AgentRichBlockType.IMAGE,
                 uri = item?.firstOrNull().orEmpty().ifBlank { block.uri },
                 title = item?.getOrNull(1).orEmpty().ifBlank { block.title }
-            ))
+            )
+            return blockView(image.copy(metadata = galleryMetadata(block, image.uri)), scope)
         }
         return LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -617,8 +633,15 @@ class AgentRichContentView(
                             type = AgentRichBlockType.IMAGE,
                             uri = row.firstOrNull().orEmpty(),
                             title = row.getOrNull(1).orEmpty(),
-                            mimeType = row.getOrNull(2).orEmpty()
+                            mimeType = row.getOrNull(2).orEmpty(),
+                            metadata = galleryMetadata(block, row.firstOrNull().orEmpty())
                         )
+                        if (itemBlock.uri.startsWith("galaxyssi-artifact://blob/")) {
+                            addView(blockView(itemBlock, scope, compact = true), LinearLayout.LayoutParams(
+                                dp(AGENT_IMAGE_THUMBNAIL_WIDTH_DP), ViewGroup.LayoutParams.WRAP_CONTENT
+                            ).apply { if (index > 0) marginStart = dp(8) })
+                            return@forEachIndexed
+                        }
                         addView(ImageView(activity).apply {
                             scaleType = ImageView.ScaleType.CENTER_CROP
                             contentDescription = itemBlock.title.ifBlank {
@@ -651,6 +674,11 @@ class AgentRichContentView(
             })
         }
     }
+
+    private fun galleryMetadata(block: AgentRichBlock, uri: String): Map<String, String> = runCatching {
+        val item = org.json.JSONObject(block.metadata["blob_item_" + uri.substringAfterLast('/')].orEmpty())
+        item.keys().asSequence().associateWith { item.getString(it) }
+    }.getOrDefault(block.metadata)
 
     private fun applyImageThumbnailSize(view: View, sourceWidth: Int, sourceHeight: Int) {
         val size = agentImageThumbnailSize(sourceWidth, sourceHeight)
