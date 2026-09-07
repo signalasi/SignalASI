@@ -13,6 +13,7 @@ internal object AndroidAgentRecoveryWake {
     @Volatile private var coordinator: AgentRecoveryWakeCoordinator? = null
 
     fun connectionChanged(context: Context, connected: Boolean) {
+        AndroidTransportReceipts.connectionChanged(context, connected)
         AndroidAgentResultReceipts.connectionChanged(context, connected)
         coordinator(context).connectionChanged(connected)
     }
