@@ -760,3 +760,58 @@ interoperability; 64 Desktop publication/peer/bridge/rich-output tests passed.
 The UI loader fixtures are not a production paired transfer or a full-frame-time
 benchmark. Production Relay provisioning, capability advertisement and paired
 end-to-end acceptance remain pending; this change does not enable the capability.
+
+## Event-Driven Receiver Capability (2026-09-07)
+
+Android now declares `artifact_blob_capability` through the existing encrypted,
+durable Desktop control path. Subscription readiness and authenticated Relay
+configuration changes trigger synchronization; normal unchanged state does not
+introduce a periodic MQTT heartbeat. A disconnected sender resumes on the next
+subscription-ready event. Failed initialization or queue acceptance retries on a
+control worker while connected.
+
+The declaration is committed in encrypted per-Desktop preferences before it is
+sent. It binds both fingerprints and the route, keeps the same revision across
+reconnect/process restart, and increments the revision on state or identity
+changes even if the clock moves backwards. Pair/configuration identity is
+rechecked after asynchronous preparation. Corrupt committed state is not reset
+to an older revision. Credentials and the local fingerprint are not included in
+the capability payload.
+
+An enabled Relay configuration alone is insufficient: the receiver must open its
+journal, acquire the process owner lock, and recover abandoned claims before
+declaring readiness. Disabled/unavailable configuration or failed preparation
+declares the receiver unavailable. This activates the existing output transport
+only for an actually configured, ready receiver, not for every paired phone.
+
+Validation for Android 1.0.30 (code 874):
+
+- 158 Android JVM regressions passed, including 13 capability lifecycle cases.
+- The real loopback HTTPS runner consumed Kotlin-generated declarations through
+  Python's encrypted paired-state store, recreating the bridge on each step.
+  Observed states were disabled, enabled, enabled replay, disabled, and still
+  disabled after a late older enable. A replacement identity inherited nothing.
+- The same runner retained 3,145,801-byte bidirectional HTTPS, SHA verification,
+  resume, receipt ordering, and transport rekey coverage. This is not a WAN test.
+- 38 Desktop paired settings, configuration API, and artifact ingress tests passed.
+- SM-G9880: 48 instrumentation tests passed in 9.736 seconds, including three
+  new receiver ownership/readiness cases and the existing journal/card/history
+  regressions. Test state is isolated; production chat or pairing was not cleared.
+- Repository guard passed with the new files staged.
+- Release build and the 72-library AArch64 16 KB audit passed. Release 1.0.30 was
+  installed with the existing development certificate on S20U; DEBUGGABLE is
+  absent and firstInstallTime is unchanged. This is not production-key signing.
+
+Read-only inspection of the running Desktop's S20U settings found Relay disabled,
+an empty origin, and no credential. Production HTTPS Relay provisioning and
+paired large-file/control-message acceptance therefore remain pending. No Relay
+address was invented and no TLS verification was bypassed.
+
+The initial real declaration check found that the running Desktop was still the
+older `GalaxySSI-attachment-plain-20260906` checkout, without the capability
+handler. After verifying zero active/queued runs, Desktop was gracefully restarted
+from this checkout (Desktop 1.0.29). Its missing Signal sidecar was built from the
+current Java sources with `installDist`. The existing identity/registry was kept.
+The actual encrypted Desktop pair-state file then contained the phone-generated
+version-1, disabled receiver declaration. This proves real paired control ingress
+and persistence for the unavailable state, not a production Blob file transfer.
