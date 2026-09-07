@@ -301,7 +301,11 @@ internal object AgentDesktopArtifactStore {
     }
 
     private fun matchesBlock(record: JSONObject, block: AgentRichBlock): Boolean =
-        mapOf("artifact_id" to "artifact_id", "sha256" to "sha256", "blob_transfer_id" to "transfer_id").all { (input, stored) ->
+        mapOf("artifact_id" to "artifact_id", "sha256" to "sha256", "blob_transfer_id" to "transfer_id",
+            "transfer_id" to "transfer_id", "size_bytes" to "size_bytes", "blob_client_route_id" to "client_route_id",
+            "blob_desktop_id" to "desktop_id", "blob_conversation_id" to "conversation_id",
+            "blob_task_id" to "task_id", "blob_turn_id" to "turn_id",
+            "blob_execution_generation" to "execution_generation").all { (input, stored) ->
             block.metadata[input].isNullOrBlank() || block.metadata[input] == record.optString(stored)
         }
 

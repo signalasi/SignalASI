@@ -722,3 +722,41 @@ HTTPS interop fixture. On physical SM-G9880, the contact projection and receive
 journal instrumentation suites passed all 34 tests in 2.589 seconds. These tests
 use isolated databases and do not replace production pairing or chat history.
 The Android patch release is 1.0.28 (872); Desktop code is unchanged.
+
+### Scoped Agent attachment cards
+
+Android and Desktop code version 1.0.29 adds a local Agent-card presentation path.
+Desktop includes immutable route, Desktop, conversation, task, turn, generation,
+transfer, URI, hash and size metadata. The Android card requires matching entry
+scope and rejects foreign events. Per-gallery-item metadata keeps each image
+independent and stays within the existing metadata field/value limits.
+
+The first Desktop regression exposed that canonical JSON sorting could undo
+insertion-order priority and drop required fields from the 32-field codec. The
+bounded metadata encoder now explicitly reserves protocol identity and visible
+gallery-item fields before retaining other presentation metadata. Field limits
+were not increased. Follow-up regressions exercise canonical sorting and ten
+gallery items with individual JSON values rather than one oversized value.
+
+Cards subscribe to an ephemeral, weak local UI event bus, not MQTT. Attaching a
+card does not request replay or start a receiver. A two-worker presentation pool
+reads only local artifact metadata and an indexed read-only receive-journal row.
+Queued reads are removed on detach, and attachment epochs reject stale callbacks.
+Progress updates the existing label/ring, with 99% as the maximum until a local
+file is available. Completion replaces only the attachment view; Blob terminal
+events no longer trigger a transcript-wide `notifyDataSetChanged`.
+
+Validation on physical SM-G9880: the 37 database/journal tests plus 8 real-view
+tests passed (45 total, 9.559 seconds on the final run). UI tests cover slow
+worker reads, progress without another read, completion once, stale callbacks,
+cross-task events, detach/reattach recovery, read failure, and rich file/gallery
+construction. Screenshots after rendering frames confirm the ordinary progress
+ring and separate compact gallery states. Fixtures do not clear chat history,
+pairing, model files, or the artifact directory. The instrumentation APK and
+phone-side screenshots are removed after verification.
+
+All 144 selected Android JVM regressions passed with live loopback HTTPS
+interoperability; 64 Desktop publication/peer/bridge/rich-output tests passed.
+The UI loader fixtures are not a production paired transfer or a full-frame-time
+benchmark. Production Relay provisioning, capability advertisement and paired
+end-to-end acceptance remain pending; this change does not enable the capability.

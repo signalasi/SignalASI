@@ -17,6 +17,10 @@ internal object AndroidBlobArtifactReceives {
     private val control = Executors.newSingleThreadExecutor { Thread(it, "blob-artifact-control") }
     private var coordinator: BlobArtifactReceiveCoordinator? = null
 
+    /** Call from a presentation worker, never from the main thread. */
+    fun presentation(context: Context, transferId: String): JSONObject? = BlobArtifactReceiveJournal.readPresentation(
+        File(context.noBackupFilesDir, "$DIRECTORY/jobs.sqlite3"), transferId)
+
     fun receive(context: Context, desktopId: String, conversationId: String, payload: JSONObject,
         committed: (Result<Unit>) -> Unit) {
         val snapshot = payload.toString()

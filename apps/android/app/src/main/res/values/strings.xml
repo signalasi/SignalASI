@@ -2222,6 +2222,10 @@
     <string name="rich_output_open">Open</string>
     <string name="rich_output_download">Save to Downloads</string>
     <string name="rich_output_download_preparing">Retrieving file…</string>
+    <string name="blob_artifact_progress">Receiving %1$d%%</string>
+    <string name="blob_artifact_verifying">Preparing file</string>
+    <string name="blob_artifact_failed">Attachment could not be received</string>
+    <string name="blob_artifact_unavailable">Attachment identity is unavailable</string>
     <string name="rich_output_downloaded">Saved to %1$s</string>
     <string name="rich_output_download_failed">Could not save this file</string>
     <string name="rich_output_saved">Saved</string>

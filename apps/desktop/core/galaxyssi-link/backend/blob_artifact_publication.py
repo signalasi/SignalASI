@@ -104,6 +104,17 @@ def prepare_result(bridge, peer: dict, artifacts: list, payload: dict, origin: s
             "local_fingerprint": peer["local_identity_fingerprint"], "origin": origin})
         replacements[artifact.artifact_uri] = manifest["artifact_uri"]
 
+    def card_metadata(manifest):
+        from rich_output import _human_size
+        return {"transport": "encrypted-blob", "artifact_source_uri": manifest["artifact_uri"],
+                "artifact_id": manifest["artifact_id"], "transfer_id": manifest["transfer_id"],
+                **{f"blob_{key}": str(manifest[key]) for key in (
+                    "client_route_id", "desktop_id", "conversation_id", "task_id", "turn_id", "execution_generation")},
+                "size": _human_size(manifest["size_bytes"]),
+                "size_bytes": str(manifest["size_bytes"]), "sha256": manifest["sha256"],
+                "original_size_bytes": str(manifest["original_size_bytes"]),
+                "original_sha256": manifest["original_sha256"]}
+
     def rewrite(value):
         if isinstance(value, dict):
             result = {key: rewrite(item) for key, item in value.items()}
@@ -111,16 +122,29 @@ def prepare_result(bridge, peer: dict, artifacts: list, payload: dict, origin: s
                 result["transfer_id"] = next(body["manifest"]["transfer_id"] for body in bodies
                                              if body["manifest"]["artifact_uri"] == result["artifact_uri"])
             if value.get("uri") in replacements:
-                from rich_output import _human_size
                 manifest = next(body["manifest"] for body in bodies
                                 if body["manifest"]["artifact_uri"] == result["uri"])
-                result["metadata"] = {**(result.get("metadata") or {}),
-                    "transport": "encrypted-blob", "artifact_source_uri": manifest["artifact_uri"],
-                    "artifact_id": manifest["artifact_id"], "transfer_id": manifest["transfer_id"],
-                    "size": _human_size(manifest["size_bytes"]),
-                    "size_bytes": str(manifest["size_bytes"]), "sha256": manifest["sha256"],
-                    "original_size_bytes": str(manifest["original_size_bytes"]),
-                    "original_sha256": manifest["original_sha256"]}
+                protected = card_metadata(manifest)
+                result["metadata"] = {**protected, **{key: item for key, item in (result.get("metadata") or {}).items()
+                                                       if key not in protected}}
+            if value.get("type") == "gallery":
+                uris = {row[0] for row in result.get("rows", []) if isinstance(row, list)
+                        and row and isinstance(row[0], str)}
+                if isinstance(result.get("uri"), str):
+                    uris.add(result["uri"])
+                items = {"blob_item_" + body["manifest"]["artifact_uri"].rsplit("/", 1)[1]:
+                         json.dumps(card_metadata(body["manifest"]), separators=(",", ":"), ensure_ascii=False)
+                         for body in bodies if body["manifest"]["artifact_uri"] in uris}
+                if items:
+                    result["metadata"] = {**items, **{key: item for key, item in (result.get("metadata") or {}).items()
+                                                     if key not in items}}
+            if value.get("uri") in replacements or value.get("type") == "gallery":
+                from rich_output import _bounded_metadata
+                metadata = result.get("metadata")
+                if isinstance(metadata, dict):
+                    uris = ([result["uri"]] if result.get("uri") else []) + [
+                        row[0] for row in result.get("rows", []) if isinstance(row, list) and row]
+                    result["metadata"] = _bounded_metadata(metadata, uris)
             return result
         if isinstance(value, list):
             return [rewrite(item) for item in value]

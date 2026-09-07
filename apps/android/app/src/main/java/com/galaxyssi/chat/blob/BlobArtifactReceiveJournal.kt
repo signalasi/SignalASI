@@ -31,18 +31,6 @@ internal class BlobArtifactReceiveJournal(path: File) : Closeable {
         } catch (error: Exception) { db.close(); throw error }
     }
 
-    private fun aad(id: String) = "blob-artifact-receive-v1:$id".toByteArray(Charsets.UTF_8)
-    private fun encode(id: String, body: JSONObject) = AgentStorageCipher.encrypt(body.toString(), aad(id))
-    private fun decode(id: String, encoded: String): JSONObject {
-        val body = JSONObject(AgentStorageCipher.decrypt(encoded, aad(id))
-            ?: BlobProtocol.fail("artifact_blob_checkpoint_invalid"))
-        return BlobArtifactReceiveJob.validate(body).also {
-            if (it.getJSONObject("offer").getJSONObject("manifest").getString("transfer_id") != id) {
-                BlobProtocol.fail("artifact_blob_checkpoint_invalid")
-            }
-        }
-    }
-
     fun enqueue(body: JSONObject): String = enqueueCommitted(body).id
 
     @Synchronized fun enqueueCommitted(body: JSONObject): BlobArtifactOfferCommit {
@@ -189,6 +177,43 @@ internal class BlobArtifactReceiveJournal(path: File) : Closeable {
         const val DOWNLOAD = 0; const val PUBLISH = 1; const val RECEIPT = 2; const val CLEANUP = 3
         const val OBSERVE_FAILURE = 4; const val DISCARD = 5
         private const val READY = 0; private const val RUNNING = 1; private const val DONE = 2; private const val QUARANTINED = 3
+
+        /** Indexed read only: rendering a card must not create a queue, claim work, or start networking. */
+        fun readPresentation(path: File, id: String): JSONObject? {
+            if (!id.matches(Regex("[0-9a-f]{64}")) || !path.isFile) return null
+            return SQLiteDatabase.openDatabase(path.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { database ->
+                database.rawQuery("SELECT body,phase,state,revision,identity,error FROM artifact_receives WHERE id=?",
+                    arrayOf(id)).use cursorRead@ { cursor ->
+                    if (!cursor.moveToFirst()) return@cursorRead null
+                    val body = decode(id, cursor.getString(0))
+                    val phase = cursor.getInt(1)
+                    if (phase !in DOWNLOAD..DISCARD || cursor.getInt(2) !in READY..DONE ||
+                        BlobArtifactReceiveJob.revision(body) != cursor.getLong(3) ||
+                        BlobArtifactReceiveJob.identity(body) != cursor.getString(4)) {
+                        BlobProtocol.fail("artifact_blob_checkpoint_invalid")
+                    }
+                    val manifest = body.getJSONObject("offer").getJSONObject("manifest")
+                    when (phase) {
+                        OBSERVE_FAILURE, DISCARD -> BlobArtifactIngressPolicy.event(manifest, "artifact_download_failed",
+                            if (phase == DISCARD) "artifact_blob_cancelled" else cursor.getString(5))
+                        PUBLISH, RECEIPT, CLEANUP -> BlobArtifactIngressPolicy.event(manifest, "artifact_available")
+                        else -> BlobArtifactPresentation.progress(manifest, 0, manifest.getLong("size_bytes"))
+                    }
+                }
+            }
+        }
+
+        private fun aad(id: String) = "blob-artifact-receive-v1:$id".toByteArray(Charsets.UTF_8)
+        private fun encode(id: String, body: JSONObject) = AgentStorageCipher.encrypt(body.toString(), aad(id))
+        private fun decode(id: String, encoded: String): JSONObject {
+            val body = JSONObject(AgentStorageCipher.decrypt(encoded, aad(id))
+                ?: BlobProtocol.fail("artifact_blob_checkpoint_invalid"))
+            return BlobArtifactReceiveJob.validate(body).also {
+                if (it.getJSONObject("offer").getJSONObject("manifest").getString("transfer_id") != id) {
+                    BlobProtocol.fail("artifact_blob_checkpoint_invalid")
+                }
+            }
+        }
     }
 }
 

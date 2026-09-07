@@ -1140,6 +1140,7 @@ object GalaxySSIMqttClient {
         require(payload.optString("type") in setOf("artifact_available", "artifact_download_failed"))
         val stage = GalaxySSILinkDeliveryStore.stageIncoming(context, payload.getString("message_id"), payload.toString())
         if (stage == GalaxySSILinkDeliveryStore.IncomingStageResult.INVALID) return false
+        com.galaxyssi.chat.blob.BlobArtifactCardUpdates.publish(payload)
         schedulePendingIncomingReplay()
         return true
     }
@@ -2496,6 +2497,7 @@ object GalaxySSIMqttClient {
     }
 
     private fun notifyMessageListeners(payload: JSONObject) {
+        com.galaxyssi.chat.blob.BlobArtifactCardUpdates.publish(payload)
         val encoded = payload.toString()
         listeners.forEach { listener ->
             runCatching { listener.onMessage(encoded) }

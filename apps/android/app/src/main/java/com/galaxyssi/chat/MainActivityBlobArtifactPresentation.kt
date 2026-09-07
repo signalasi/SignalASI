@@ -34,7 +34,7 @@ internal fun MainActivity.hydrateBlobAttachmentPresentation(message: ChatMessage
 /** Updates loaded cards only, without creating messages or writing history per chunk. */
 internal fun MainActivity.handleBlobArtifactPresentation(event: JSONObject): Boolean {
     if (!BlobArtifactPresentation.isEvent(event)) return false
-    if (!event.optBoolean("peer_chat")) return event.optString("type") == BlobArtifactPresentation.PROGRESS
+    if (!event.optBoolean("peer_chat")) return true
     val contactId = event.optString("contact_id")
     val loaded = messages[contactId] ?: return true
     var changed = false
