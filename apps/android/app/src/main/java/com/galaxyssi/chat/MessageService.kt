@@ -176,25 +176,27 @@ class MessageService : Service(), GalaxySSIMqttClient.Listener {
                     ?: envelope?.optLong("source_message_id", 0L)?.takeIf { it > 0L }
                 if (sourceMessageId != null) {
                     val preview = ChatHistoryStore.inspectIncoming(this, payload) ?: return
-                    if (VoiceFeatureFlags.isAgentVoiceRunBridgeEnabled(this)) {
-                        VoiceAgentRunBridge.get(this).consumeLegacyFinal(
-                            sourceMessageId = sourceMessageId,
-                            taskId = envelope?.optString("task_id").orEmpty(),
-                            content = preview.content
-                        )
+                    val response = envelope?.takeUnless { it.optBoolean("peer_chat") }?.let {
+                        AgentRemoteOutcomeCodec.decode(it,
+                            AgentRemoteOutcomeCodec.content(this, it, preview.content),
+                            CodexStyleResponsePolicy.filterAssistantRichOutput(AgentRichContentCodec.fromEnvelope(it)))
                     }
-                    val response = AgentConnectorResponse(
-                        sourceMessageId = sourceMessageId,
-                        contactId = envelope?.optString("contact_id").orEmpty().ifBlank { preview.contactId },
-                        content = preview.content,
-                        conversationId = envelope?.optString("conversation_id").orEmpty(),
-                        turnId = envelope?.optString("turn_id").orEmpty(),
-                        taskId = envelope?.optString("task_id").orEmpty(),
-                        richOutputJson = AgentRichContentCodec.fromEnvelope(envelope)
-                    )
-                    val controlPayload = AgentSupervisedProjectControlPayload
-                        .isControlPayloadFragment(preview.content)
-                    if (AgentConnectorResponseBus.publish(this, response) || controlPayload) return
+                    if (response != null) {
+                        if (AgentTerminalDeliveryStore.isTerminal(this, response.sourceMessageId) ||
+                            !AgentConnectorResponseStore.isCurrentExecution(this, response)) return
+                        val consumed = AndroidAgentResultRecovery.publishResult(this, envelope, response)
+                        // Commit the exact versioned reply before optional voice projection or notification work.
+                        if (VoiceFeatureFlags.isAgentVoiceRunBridgeEnabled(this)) {
+                            VoiceAgentRunBridge.get(this).consumeLegacyFinal(
+                                sourceMessageId = response.sourceMessageId,
+                                taskId = response.taskId,
+                                content = response.content
+                            )
+                        }
+                        val controlPayload = AgentSupervisedProjectControlPayload
+                            .isControlPayloadFragment(response.content)
+                        if (consumed || controlPayload) return
+                    }
                 }
             }
             val stored = ChatHistoryStore.appendIncoming(this, payload) ?: return
