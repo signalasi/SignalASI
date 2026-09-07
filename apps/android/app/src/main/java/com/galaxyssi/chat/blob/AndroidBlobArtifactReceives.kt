@@ -55,6 +55,14 @@ internal object AndroidBlobArtifactReceives {
         }
     }
 
+    fun prepare(context: Context, completed: (Result<Unit>) -> Unit) {
+        val app = context.applicationContext
+        control.execute {
+            try { get(app).prepare(completed) }
+            catch (error: Exception) { completed(Result.failure(error)) }
+        }
+    }
+
     private fun get(context: Context): BlobArtifactReceiveCoordinator {
         coordinator?.let { return it }
         val root = File(context.noBackupFilesDir, DIRECTORY)

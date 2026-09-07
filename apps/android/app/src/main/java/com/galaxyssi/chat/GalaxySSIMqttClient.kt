@@ -10,6 +10,7 @@ import com.galaxyssi.chat.metrics.AgentTransportTiming
 import android.content.Context
 import com.galaxyssi.chat.blob.AndroidBlobTransfers
 import com.galaxyssi.chat.blob.AndroidBlobArtifactReceives
+import com.galaxyssi.chat.blob.AndroidBlobArtifactCapability
 import com.galaxyssi.chat.blob.BlobRelayConfiguration
 import com.galaxyssi.chat.blob.BlobRelayConfigurations
 import android.os.Handler
@@ -2077,6 +2078,7 @@ object GalaxySSIMqttClient {
             publishInboundReceipt(link, incomingMessageId)
             AndroidBlobTransfers.wake(context)
             AndroidBlobArtifactReceives.wake(context)
+            AndroidBlobArtifactCapability.refresh(context)
             return
         }
         GalaxySSILinkDeliveryStore.bindCiphertext(
@@ -2648,6 +2650,7 @@ object GalaxySSIMqttClient {
     }
 
     private fun requestMissingSignalSessions(context: Context) {
+        AndroidBlobArtifactCapability.refresh(context, reconnect = true)
         setSecureReady(GalaxySSILinkProtocol.allServerLinks(context).any { link ->
             link.paired && GalaxySSICrypto.hasDesktopSession(context, link.desktopId)
         })

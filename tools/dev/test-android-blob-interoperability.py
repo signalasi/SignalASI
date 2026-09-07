@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -56,6 +57,29 @@ def certificate(root: Path):
     (root / "relay.crt").write_bytes(cert.public_bytes(serialization.Encoding.PEM))
     (root / "relay.key").write_bytes(key.private_bytes(serialization.Encoding.PEM,
         serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+
+
+def verify_receiver_capabilities(root: Path):
+    from blob_pair_configuration import can_receive_artifacts, record_artifact_capability
+    declarations = json.loads((root / "kotlin-receiver-capabilities.json").read_text(encoding="utf-8"))
+    route = "a" * 22
+    peer = {"signal_name": "phone", "identity_fingerprint": "e" * 64, "local_identity_fingerprint": "f" * 64}
+    def bridge():
+        return SimpleNamespace(DATA_DIR=root / "capability-state", desktop_id=lambda: "desktop",
+                               get_client=lambda candidate: peer if candidate == route else None)
+    observed = []
+    for declaration in declarations:
+        # Recreate the bridge each time to prove state comes from the encrypted store.
+        runtime = bridge()
+        if not record_artifact_capability(runtime, route, "phone", declaration):
+            raise RuntimeError("Kotlin receiver declaration was not accepted")
+        observed.append(can_receive_artifacts(runtime, route))
+    if observed != [False, True, True, False, False]:
+        raise RuntimeError(f"Cross-runtime receiver declaration replay failed: {observed}")
+    peer["identity_fingerprint"] = "d" * 64
+    if can_receive_artifacts(bridge(), route):
+        raise RuntimeError("Replacement identity inherited receiver capability")
+    return observed
 
 
 def main() -> int:
@@ -145,6 +169,7 @@ def main() -> int:
                     print(f"Android regression failed; see {log}", flush=True)
                     return result.returncode
                 counts_junit = junit_results(ROOT / "apps/android/app/build/test-results/testDebugUnitTest")
+                receiver_states = verify_receiver_capabilities(root)
                 result_path = root / "kotlin-offer.json"
                 if not result_path.is_file():
                     raise RuntimeError("Kotlin interoperability case did not run; a cached or skipped test is not evidence")
@@ -175,6 +200,7 @@ def main() -> int:
                     "kotlin_upload_counts": counts, "sha256_verified": True, "phone_test": False,
                     "artifact_download_counts": artifact_counts, "artifact_stored_before_receipt": True,
                     "artifact_rekey_download_counts": {"old": old_counts, "new": new_counts},
+                    "receiver_capability_states": receiver_states,
                     "junit": counts_junit}), flush=True)
         finally:
             server.should_exit = True

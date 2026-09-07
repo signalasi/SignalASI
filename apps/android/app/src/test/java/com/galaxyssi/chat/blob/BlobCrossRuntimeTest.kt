@@ -17,6 +17,22 @@ import javax.crypto.spec.SecretKeySpec
 
 /** Invoked by tools/dev/test-android-blob-interoperability.py with an isolated HTTPS relay. */
 class BlobCrossRuntimeTest {
+    @Test fun `Kotlin receiver declarations are replayed by the Python paired state store`() {
+        val fixtureRoot = System.getenv("GALAXYSSI_BLOB_TEST_ROOT").orEmpty()
+        assumeTrue("Requires the isolated cross-runtime test runner", fixtureRoot.isNotEmpty())
+        val persisted = mutableMapOf<String, String>()
+        val declarations = org.json.JSONArray()
+        val pair = BlobArtifactCapabilityPair("desktop", "a".repeat(22), "f".repeat(64), "e".repeat(64))
+        val sender = BlobArtifactCapabilityPublisher(persisted::get, { key, value -> persisted[key] = value },
+            { true }, { _, value -> declarations.put(value); true }, { 100L })
+        sender.update(pair, false)
+        sender.update(pair, true)
+        sender.reconnect(); sender.update(pair, true)
+        sender.update(pair, false)
+        declarations.put(declarations.getJSONObject(1))
+        File(fixtureRoot, "kotlin-receiver-capabilities.json").writeText(declarations.toString())
+    }
+
     @Test fun `artifact output resumes then publishes and receipts before staging cleanup`() {
         val fixtureRoot = System.getenv("GALAXYSSI_BLOB_TEST_ROOT").orEmpty()
         assumeTrue("Requires the isolated cross-runtime test runner", fixtureRoot.isNotEmpty())

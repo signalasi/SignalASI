@@ -62,18 +62,37 @@ internal class BlobArtifactReceiveCoordinator(
         if (!stopped.get()) runCatching { scheduler.execute { scheduled?.cancel(false); tick() } }
     }
 
+    /** Called before capability publication; opening a database alone does not establish ownership. */
+    fun prepare(completed: (Result<Unit>) -> Unit) {
+        if (stopped.get()) { completed(Result.failure(IllegalStateException("blob_receiver_stopped"))); return }
+        try { scheduler.execute {
+            val result = runCatching {
+                check(!stopped.get()) { "blob_receiver_stopped" }
+                check(acquireAndRecover()) { "artifact_blob_receiver_busy" }
+            }
+            try { completed(result) } finally { wake() }
+        } } catch (_: RejectedExecutionException) {
+            completed(Result.failure(IllegalStateException("blob_receiver_stopped")))
+        }
+    }
+
+    private fun acquireAndRecover(): Boolean {
+        if (owner == null) {
+            check(root.mkdirs() || root.isDirectory)
+            val opened = FileChannel.open(File(root, "owner.lock").toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE)
+            val lock = runCatching { opened.tryLock() }.getOrNull()
+            if (lock == null) { opened.close(); return false }
+            channel = opened; owner = lock
+        }
+        if (!recovered) { journal.recover(); recovered = true }
+        return true
+    }
+
     private fun tick() {
         if (stopped.get()) return
         scheduled?.cancel(false)
         try {
-            if (owner == null) {
-                check(root.mkdirs() || root.isDirectory)
-                val opened = FileChannel.open(File(root, "owner.lock").toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE)
-                val lock = runCatching { opened.tryLock() }.getOrNull()
-                if (lock == null) { opened.close(); schedule(2_000); return }
-                channel = opened; owner = lock
-            }
-            if (!recovered) { journal.recover(); recovered = true }
+            if (!acquireAndRecover()) { schedule(2_000); return }
             val available = capacity().coerceIn(1, 4) - active.size
             journal.claimDue(System.currentTimeMillis(), available, active.keys.toSet()).forEach { work ->
                 val cancel = BlobCancellation()
