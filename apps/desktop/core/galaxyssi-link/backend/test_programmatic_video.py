@@ -101,8 +101,12 @@ def run_fixture(root, *, review=None, no_source=False, cancel=None, media_fail=F
 
 
 def test_full_pipeline_resume_and_artifact(isolated):
-    reply, calls = run_fixture(isolated)
+    prompts = []
+    reply, calls = run_fixture(isolated, render_prompts=prompts)
     assert calls == ["plan", "render", "review"]
+    assert "high-contrast throughout transitions" in prompts[0]
+    assert "transition midpoints at 240p" in prompts[0]
+    assert "cache static backgrounds/fonts" in prompts[0]
     assert "Programmatically" in reply and "not native" in reply
     assert run_fixture(isolated)[1] == []
     checkpoint = isolated / "tasks/video-test/.video-generation/job.json"

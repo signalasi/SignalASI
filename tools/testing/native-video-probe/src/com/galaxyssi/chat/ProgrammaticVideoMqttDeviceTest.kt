@@ -62,6 +62,10 @@ class ProgrammaticVideoMqttDeviceTest {
             reportFile.writeText(report.toString(2))
             if (resolved == null) SystemClock.sleep(1500)
         }
+        if (resolved == null) {
+            report.put("status", "failed").put("error", "No received video before the deadline")
+            reportFile.writeText(report.toString(2))
+        }
         val block = checkNotNull(resolved) { "No received video; inspect programmatic-video-mqtt.json" }
         val bytes = context.contentResolver.openInputStream(Uri.parse(block.uri))!!.use { it.readBytes() }
         val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }

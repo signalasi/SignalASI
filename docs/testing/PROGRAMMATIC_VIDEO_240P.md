@@ -77,6 +77,10 @@ Tests cover intent variants, no model-name routing, negative requests, storyboar
 bounds, actual-file requirement, bounded review retries, full-decode failures,
 checkpoint reuse/binding, cancellation, selected-model preservation, read-only
 versus rendering stages, SHA-256 artifacts and real FFmpeg derivative encoding.
+Set `GALAXYSSI_STATE_DIR` to a fresh temporary directory before starting the test
+process. Some legacy tests initialize runtime singletons; never let an offline
+regression process use the running Desktop's state directory. A second runtime
+store can incorrectly recover an active production run as interrupted.
 
 The existing `tools/testing/native-video-probe` name is a historical test fixture
 name, not a native-model integration. It tests artifact assembly and actual Android
@@ -142,6 +146,16 @@ path. It waits for the actual returned video artifact, checks its SHA-256, then
 checks VideoView playback advancement and seeking. It creates a private test
 conversation and writes a device report and screenshot; it never injects video
 bytes, changes pairing grants, or overrides the selected target's model.
+
+The first live 8-second binary-counter request reached Desktop and returned real
+progress but failed independent review: state digits lost contrast during color
+transitions. No video was published. Its 20-minute device test consequently failed;
+this is not a successful MQTT acceptance. An external runtime-store initialization
+also marked the still-running runtime interrupted, masking the review error with
+a stale event sequence conflict. Subsequent offline regressions use an isolated
+state directory. Rendering instructions now require high-contrast transition text,
+240p preview inspection before full rendering, and lower-cost source rendering
+for simple explainers. Review criteria and bounded correction limits are unchanged.
 
 ## Reference
 
