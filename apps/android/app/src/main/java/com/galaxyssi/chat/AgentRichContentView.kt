@@ -710,7 +710,7 @@ class AgentRichContentView(
                 setTypeface(typeface, Typeface.BOLD)
                 setPadding(0, 0, 0, dp(7))
             }) }
-            val video = VideoView(activity).apply {
+            val video = AspectRatioVideoView(activity).apply {
                 val controls = MediaController(activity)
                 controls.setAnchorView(this)
                 setMediaController(controls)
@@ -718,12 +718,16 @@ class AgentRichContentView(
                 contentDescription = block.title.ifBlank { activity.getString(R.string.rich_output_type_video) }
                 setOnPreparedListener { player ->
                     player.isLooping = false
+                    setVideoDimensions(player.videoWidth, player.videoHeight)
                     setOnClickListener {
                         AgentRichPlaybackCoordinator.activate(this)
                         if (isPlaying) pause() else start()
                     }
                 }
                 setOnCompletionListener { AgentRichPlaybackCoordinator.detach(this) }
+                AgentVideoFullscreen.attach(activity, this, controls, Uri.parse(block.uri),
+                    { AgentRichPlaybackCoordinator.activate(it) },
+                    { AgentRichPlaybackCoordinator.detach(it) })
                 addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
                     override fun onViewAttachedToWindow(view: View) = Unit
                     override fun onViewDetachedFromWindow(view: View) {
@@ -731,7 +735,7 @@ class AgentRichContentView(
                     }
                 })
             }
-            addView(video, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(220)))
+            addView(video, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
     }
 

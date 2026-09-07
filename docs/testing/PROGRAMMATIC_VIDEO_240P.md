@@ -188,6 +188,38 @@ coverage, Desktop checks and the test APK build passed. Device evidence is store
 outside version control; only SM-T575 was operated by this task. Task workspace
 cleanup after acknowledged handoff remains governed by the existing retention policy.
 
+## Android Video Presentation
+
+Android 1.0.35 (879) removes the fixed 220dp video height. Inline video fills the
+available output width and derives its height from the prepared video's actual
+dimensions. Portrait and square content retain their aspect ratios. This change
+does not transcode files or alter MQTT payload sizes.
+
+Double-tapping the video opens an immersive, aspect-preserving fullscreen player.
+Double-tap, Back, or the close button returns to the conversation. Single-tap
+play/pause and the existing seek controls remain available. Playback position and
+playing/paused state are captured before Dialog teardown destroys the fullscreen
+VideoView, then restored to the inline player. Detaching the transcript dismisses
+the dialog and releases its decoder without restarting a detached player.
+
+`AspectRatioVideoViewDeviceTest` checks wide, narrow, portrait, invalid-dimension,
+and square measurements. The opt-in `VideoFullscreenDeviceTest` uses the real
+received artifact from a successful `programmatic-video-mqtt.json` report on
+SM-T575; it never creates a substitute video. It checks full-width sizing, paused
+seek preservation, playback advancement, double-tap exit and Back exit. Build it
+with the same native-video-probe Gradle init script used for the MQTT test, then
+select only these two classes rather than rerunning generation.
+
+On SM-T575, the first fullscreen test exposed a real lifecycle defect: reading
+position in OnDismiss returned zero after SurfaceView teardown. Capturing before
+`Dialog.dismiss()` fixes that reset. Both device tests passed on installed Android
+1.0.35 (879), `OK (2 tests)` in 4.003 seconds. Normal UI inspection measured the
+inline 426x240 video at 1144x645 pixels (previously about 781x440); fullscreen used
+1200x676 centered in an immersive 1200x1920 window. Screenshots confirmed visible,
+uncropped content. The existing conversation and pairing data were retained.
+The focused Desktop video suite was rerun with isolated state: 68 tests passed
+in 22.48 seconds. Repository and Desktop structure checks also passed.
+
 ## Reference
 
 The user supplied a ChatGPT web execution transcript: Python frame rendering,
