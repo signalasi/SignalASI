@@ -1573,9 +1573,10 @@ async function backendStatus() {
     return {
       running: response.ok && identityMatches,
       messageBridgeConnected: payload?.message_bridge?.connected === true,
+      messageBridgeReady: payload?.ready === true,
       messageBridgeRunning: payload?.message_bridge?.running === true,
       messageBridgeSupervised: payload?.message_bridge?.supervised === true,
-      messageBridgeError: payload?.message_bridge?.last_error || "",
+      messageBridgeError: payload?.signal_sidecar?.error_code || payload?.message_bridge?.last_error || "",
       status: response.status,
       identityMatches,
       origin: BACKEND_ORIGIN,
@@ -1589,6 +1590,7 @@ async function backendStatus() {
     return {
       running: false,
       messageBridgeConnected: false,
+      messageBridgeReady: false,
       messageBridgeRunning: false,
       messageBridgeSupervised: false,
       status: 0,

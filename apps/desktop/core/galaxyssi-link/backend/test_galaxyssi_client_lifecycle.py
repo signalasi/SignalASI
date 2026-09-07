@@ -65,6 +65,27 @@ class SignalSidecarLifecycleTests(unittest.TestCase):
         terminate.assert_called_once_with(process)
         self.assertIsNone(galaxyssi_client._process)
 
+    def test_failed_stop_retains_the_owned_handle_for_retry(self):
+        process = Mock(pid=654)
+        process.poll.return_value = None
+        galaxyssi_client._process = process
+        with patch.object(galaxyssi_client, "_terminate_process", side_effect=RuntimeError("still stopping")):
+            with self.assertRaisesRegex(RuntimeError, "still stopping"):
+                galaxyssi_client.stop_signal_sidecar()
+        self.assertIs(process, galaxyssi_client._process)
+
+    def test_failed_stale_process_stop_cannot_spawn_a_second_sidecar(self):
+        process = Mock(pid=654)
+        process.poll.return_value = None
+        galaxyssi_client._process = process
+        with patch.object(galaxyssi_client, "_is_healthy", return_value=False), \
+                patch.object(galaxyssi_client, "_terminate_process", side_effect=RuntimeError("still stopping")), \
+                patch.object(galaxyssi_client.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(RuntimeError, "still stopping"):
+                galaxyssi_client.start_signal_sidecar()
+        popen.assert_not_called()
+        self.assertIs(process, galaxyssi_client._process)
+
     def test_configured_sidecar_runtime_is_discovered(self):
         with tempfile.TemporaryDirectory() as directory:
             script = Path(directory) / ("galaxyssi-link-sidecar.bat" if os.name == "nt" else "galaxyssi-link-sidecar")

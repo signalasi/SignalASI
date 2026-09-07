@@ -95,9 +95,9 @@ def start_signal_sidecar() -> None:
             return
 
         stale_process = _process
-        _process = None
         if stale_process is not None and stale_process.poll() is None:
             _terminate_process(stale_process)
+        _process = None
 
         sidecar_script = resolve_sidecar_script()
         if sidecar_script is None:
@@ -140,9 +140,9 @@ def start_signal_sidecar() -> None:
                 return
             time.sleep(0.25)
 
+        _terminate_process(process)
         if _process is process:
             _process = None
-        _terminate_process(process)
         raise RuntimeError("Signal sidecar did not become healthy")
 
 
@@ -151,10 +151,11 @@ def stop_signal_sidecar() -> None:
     global _process
     with _startup_lock:
         process = _process
-        _process = None
         if process is None or process.poll() is not None:
+            _process = None
             return
         _terminate_process(process)
+        _process = None
 
 
 def _terminate_process(process: subprocess.Popen) -> None:
@@ -168,6 +169,11 @@ def _terminate_process(process: subprocess.Popen) -> None:
             stderr=subprocess.DEVNULL,
             check=False,
         )
+        # Reap the launcher too; taskkill returning does not update Popen.returncode.
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Signal sidecar process did not stop") from None
         return
     process.terminate()
     try:
@@ -296,7 +302,7 @@ def remove_peer_signal_session(remote_name: str, remote_device_id: int = 1) -> d
 
 def _is_healthy() -> bool:
     try:
-        status = _request("GET", "/health")
+        status = _request("GET", "/health", timeout=0.5)
         return bool(
             status.get("ok")
             and status.get("protocol") == "galaxyssi-link"
@@ -321,7 +327,7 @@ def _available_local_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def _request(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def _request(method: str, path: str, payload: dict[str, Any] | None = None, *, timeout: float = 20) -> dict[str, Any]:
     data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         SIDECAR_BASE + path,
@@ -330,7 +336,7 @@ def _request(method: str, path: str, payload: dict[str, Any] | None = None) -> d
         headers={"Content-Type": "application/json; charset=utf-8"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")

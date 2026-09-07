@@ -1815,7 +1815,7 @@ async function refreshBackend() {
     state.backend = { running: false, error: error.message || String(error) };
   }
   const backendRunning = Boolean(state.backend?.running);
-  const online = backendRunning && Boolean(state.backend?.messageBridgeConnected);
+  const online = backendRunning && state.backend?.messageBridgeReady === true;
   elements.backendBadge.className = `state-badge ${online ? "ok" : "bad"}`;
   elements.backendBadge.textContent = t(online ? "Online" : "Offline");
   elements.backendDetail.textContent = online
