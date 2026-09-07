@@ -172,7 +172,8 @@ class AgentCliExecutionTest(unittest.TestCase):
         )
 
         self.assertEqual("read-only", codex[codex.index("--sandbox") + 1])
-        self.assertEqual("untrusted", codex[codex.index("--ask-for-approval") + 1])
+        self.assertNotIn("--ask-for-approval", codex)
+        self.assertIn('approval_policy="never"', codex)
         self.assertEqual("plan", claude[claude.index("--permission-mode") + 1])
         self.assertEqual("none", hermes[hermes.index("--toolsets") + 1])
         self.assertEqual("1", hermes[hermes.index("--max-turns") + 1])

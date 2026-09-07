@@ -928,7 +928,11 @@ def execution_policy_for(
     )
     has_install = _contains_any(normalized, _INSTALL_TERMS)
     has_build = _contains_any(normalized, _BUILD_TERMS)
-    has_artifact_request = _contains_any(normalized, _ARTIFACT_TERMS)
+    from video_generation_policy import video_creation_requested
+    has_artifact_request = (
+        _contains_any(normalized, _ARTIFACT_TERMS)
+        or video_creation_requested(normalized)
+    )
     has_research = _contains_any(normalized, _RESEARCH_TERMS)
     has_device = _contains_any(normalized, _DEVICE_TERMS)
     target_platform = "android" if _contains_any(normalized, _ANDROID_TERMS) else ""

@@ -683,6 +683,65 @@ def _execute_agent_adapter_request(agent_id: str, request: AgentAdapterRequest) 
         )
 
     add_phase("plan", "Execution plan prepared")
+    from conversation_context import current_request
+    from video_generation_policy import video_creation_requested
+    video_prompt = current_request(execution_prompt)
+    if not plan_only and not structured_connector_response and video_creation_requested(video_prompt):
+        from programmatic_video_task import run_programmatic_video_task
+        from video_transport import VideoError
+        from video_execution_permissions import require_video_executor
+        try:
+            require_video_executor(request.checkpoint)
+        except VideoError as exc:
+            raise AgentAdapterExecutionError(str(exc)) from exc
+        if spec is not None and spec.kind != "local-cli":
+            raise AgentAdapterExecutionError(
+                "video_tool_agent_required: choose a Desktop coding Agent with terminal, file and image tools"
+            )
+        if request.artifacts:
+            raise AgentAdapterExecutionError(
+                "video_reference_not_supported: this first animation pipeline accepts text storyboards; "
+                "reference attachments were not used"
+            )
+
+        def video_check() -> None:
+            require_video_executor(request.checkpoint)
+            task = agent_task_manager.get(request.run_id) if request.run_id else None
+            if task is not None and (
+                task.cancel_requested or task.pause_requested
+                or task.status in {"cancelled", "timed_out", "paused", "takeover"}
+            ):
+                raise VideoError("video_interrupted: rendering checkpoint is retained for resume")
+            harness.account_usage()
+
+        def video_invoke(stage: str, text: str, readonly: bool, remaining: float) -> str:
+            video_check()
+            result = _ask_agent_sync_inner(
+                agent_id, text, replace(spec, timeout=max(1, int(min(remaining, harness.effective_timeout(spec.timeout))))) if spec else None,
+                task_id=request.run_id, response_language=preferred_language,
+                restricted_workspace=(readonly or str(request.checkpoint.get("desktop_access_profile") or "") == "restricted"),
+                plan_only=readonly, priority=request.priority,
+                agent_model_id=agent_model_id, agent_reasoning_effort=agent_reasoning_effort,
+                codex_video_permissions="read-only" if readonly else "workspace-write",
+            )
+            harness.account_usage(input_tokens=estimate_text_tokens(text),
+                                  output_tokens=estimate_text_tokens(result), estimated=True)
+            return result
+
+        try:
+            harness.begin_attempt()
+            reply = run_programmatic_video_task(
+                task_id=request.run_id, agent_id=agent_id, prompt=video_prompt,
+                invoke=video_invoke, check=video_check,
+                planner_model=agent_model_id,
+                progress=lambda phase, title, status: add_phase(phase, title, status=status),
+                timeout=harness.effective_timeout(900),
+            )
+            harness.progress("finalize", programmatic_video_verified=True)
+            return reply
+        except VideoError as exc:
+            add_phase("video_failed", "Video production did not complete", status="failed", detail=str(exc))
+            raise AgentAdapterExecutionError(str(exc)) from exc
     while True:
         attempt = harness.begin_attempt()
         add_phase("act", f"Running {spec.name if spec else agent_id}", status="running")
@@ -2017,6 +2076,7 @@ def _ask_agent_sync_inner(
     priority: AgentRunPriority = AgentRunPriority.FOREGROUND,
     agent_model_id: str = "",
     agent_reasoning_effort: str = "",
+    codex_video_permissions: str = "",
 ) -> str:
     if spec is None:
         return f"[GalaxySSI] \u672a\u77e5 Agent: {contact_id}"
@@ -2036,6 +2096,7 @@ def _ask_agent_sync_inner(
         priority=priority,
         agent_model_id=agent_model_id,
         agent_reasoning_effort=agent_reasoning_effort,
+        codex_video_permissions=codex_video_permissions,
     )
 
 
@@ -2203,6 +2264,7 @@ def ask_cli_agent(
     priority: AgentRunPriority = AgentRunPriority.FOREGROUND,
     agent_model_id: str = "",
     agent_reasoning_effort: str = "",
+    codex_video_permissions: str = "",
 ) -> str:
     command = _command_for(spec)
     if not command:
@@ -2224,6 +2286,7 @@ def ask_cli_agent(
             priority=priority,
             agent_model_id=agent_model_id,
             agent_reasoning_effort=agent_reasoning_effort,
+            codex_video_permissions=codex_video_permissions,
         )
 
 
@@ -2333,6 +2396,7 @@ def _ask_cli_agent_locked(
     priority: AgentRunPriority = AgentRunPriority.FOREGROUND,
     agent_model_id: str = "",
     agent_reasoning_effort: str = "",
+    codex_video_permissions: str = "",
 ) -> str:
     from agent_conversation_sessions import agent_conversation_sessions
 
@@ -2373,6 +2437,8 @@ def _ask_cli_agent_locked(
         )
     invocation_text = protect_agent_prompt(invocation_text)
     command = _apply_selected_agent_model(spec, command, agent_model_id)
+    if spec.id == "codex" and codex_video_permissions:
+        command = _video_codex_command(command, codex_video_permissions)
     session_command = (
         _plan_only_command(spec, command)
         if plan_only
@@ -2681,19 +2747,42 @@ def _native_session_command(
     return list(command)
 
 
+def _video_codex_command(command: list[str], mode: str) -> list[str]:
+    if mode not in {"read-only", "workspace-write"}:
+        raise ValueError("Invalid video permission mode")
+    command = _plan_only_command(BASE_AGENTS["codex"], command)
+    command = _replace_cli_options(command, {"--sandbox": mode})
+    if os.name == "nt":
+        position = len(command) - 1 if command[-1:] == ["-"] else len(command)
+        command[position:position] = ["-c", 'windows.sandbox="elevated"']
+    return command
+
+
 def _plan_only_command(spec: AgentSpec, command: list[str]) -> list[str]:
     if spec.kind == "custom-cli":
         raise RuntimeError(
             f"{spec.name} does not declare a verifiable read-only planning mode"
         )
     if spec.id == "codex":
-        return _replace_cli_options(
-            command,
-            {
-                "--sandbox": "read-only",
-                "--ask-for-approval": "untrusted",
-            },
-        )
+        # Current `codex exec` does not accept the old `untrusted` approval flag.
+        # Keep a read-only sandbox and fail denied actions instead of prompting.
+        clean = []
+        index = 0
+        while index < len(command):
+            value = command[index]
+            if value in {"--ask-for-approval", "-a"}:
+                index += 2
+                continue
+            if (value.startswith("--ask-for-approval=")
+                    or value in {"--dangerously-bypass-approvals-and-sandbox", "--full-auto", "--approve-for-me"}):
+                index += 1
+                continue
+            clean.append(value)
+            index += 1
+        result = _replace_cli_options(clean, {"--sandbox": "read-only"})
+        position = len(result) - 1 if result[-1:] == ["-"] else len(result)
+        result[position:position] = ["-c", 'approval_policy="never"']
+        return result
     if spec.id == "claude":
         return _replace_cli_options(command, {"--permission-mode": "plan"})
     if spec.id == "hermes":

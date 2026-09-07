@@ -1,0 +1,8 @@
+gradle.afterProject { project ->
+    if (project.name == 'app') {
+        def root = System.getenv('GALAXYSSI_VIDEO_PROBE_ROOT')
+        if (!root) throw new GradleException('GALAXYSSI_VIDEO_PROBE_ROOT is required')
+        project.android.sourceSets.androidTest.java.srcDir(new File(root, 'src'))
+        project.android.sourceSets.androidTest.assets.srcDir(new File(root, 'assets'))
+    }
+}
