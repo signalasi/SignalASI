@@ -122,6 +122,27 @@ content URI, actual VideoView playback advancement and seek. A screenshot captur
 the Chinese transistor scene on the device. Only the test APK was replaced; no
 other phone, App data, pairing grant or production Desktop runtime was modified.
 
+## Production MQTT Acceptance
+
+On 2026-09-07, Desktop 1.0.31 was launched from this worktree using the existing
+production data and pairing grants. The TLS MQTT connection and subscriptions
+became ready. No main-App reinstall or authorization change was necessary.
+
+The live path exposed a separate Codex MQTT app-server dispatch that bypassed the
+verified video runner. Video creation now uses the generic task runner and its
+scoped execution permissions; normal Codex chat and plan-only requests retain the
+app-server path. Regression coverage explicitly checks all three routing cases.
+The combined desktop regression suite passed 187 tests and 67 subtests. Repository
+and Desktop checks passed.
+
+`ProgrammaticVideoMqttDeviceTest.realPhoneRequestReturnsPlayableVideoOverMqtt`
+is a separate real-device test, not the earlier artifact fixture. On SM-T575 only,
+it uses an existing available paired Codex target and the App's normal submission
+path. It waits for the actual returned video artifact, checks its SHA-256, then
+checks VideoView playback advancement and seeking. It creates a private test
+conversation and writes a device report and screenshot; it never injects video
+bytes, changes pairing grants, or overrides the selected target's model.
+
 ## Reference
 
 The user supplied a ChatGPT web execution transcript: Python frame rendering,

@@ -4406,6 +4406,11 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         )
     selected_agent_model = turn_agent_invocation.model_id
     plan_only = execution_policy.execution_mode == AgentExecutionMode.PLAN_ONLY
+    from video_generation_policy import video_creation_requested
+    programmatic_video_requested = (
+        not plan_only and not structured_connector_response
+        and video_creation_requested(current_user_request)
+    )
     fast_chat_delivery = (
         execution_policy.task_kind == AgentTaskKind.CHAT
         and not has_attachments
@@ -5285,7 +5290,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
         add_task_trace("desktop_task_created", created.task_id)
         return
 
-    if agent_id == "codex":
+    if agent_id == "codex" and not programmatic_video_requested:
         from agent_gateway import BASE_AGENTS, _agent_env, _find_codex_desktop_cli
         codex_conversation_id = backend_conversation_id
         codex_run_conversation_id = "" if plan_only else codex_conversation_id

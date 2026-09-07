@@ -180,6 +180,36 @@ def test_video_requires_executor_grant(profile):
         require_video_executor({"desktop_access_profile": profile})
 
 
+@pytest.mark.parametrize("prompt,mode,generic", [
+    ("Create an 8 second video", "auto_complete", True),
+    ("Explain binary counting", "auto_complete", False),
+    ("Create an 8 second video", "plan_only", False),
+])
+def test_mqtt_codex_video_uses_verified_runner(isolated, prompt, mode, generic):
+    import agent_gateway
+    import mqtt_bridge
+    from pairing_access import grant_for_executor
+    class Dispatched(Exception):
+        pass
+    manager = Mock()
+    manager.get.return_value = None
+    manager.active_for_conversation.return_value = None
+    manager.create.side_effect = Dispatched()
+    manager.create_external.side_effect = Dispatched()
+    payload = {"agent_id": "codex", "contact_id": "codex", "client_message_id": "m1",
+               "client_route_id": "phone-test", "conversation_id": "conv-test",
+               "task_id": "mqtt-video-test", "turn_id": "turn-test", "execution_mode": mode}
+    with patch.object(mqtt_bridge, "agent_task_manager", manager), \
+         patch.object(mqtt_bridge, "get_client", return_value={"access": grant_for_executor(True)}), \
+         patch.object(agent_gateway, "all_agent_specs", return_value=agent_gateway.BASE_AGENTS), \
+         patch.object(agent_gateway, "_command_for", return_value=["codex", "exec", "-"]), \
+         pytest.raises(Dispatched):
+        mqtt_bridge._start_remote_agent_task(Mock(), {"scheme": "signal", "_client_route_id": "phone-test"},
+                                             payload, [], prompt, "text")
+    assert manager.create.called is generic
+    assert manager.create_external.called is not generic
+
+
 def test_video_rechecks_current_pairing_grant():
     from video_execution_permissions import require_video_executor
     checkpoint = {"desktop_access_profile": "desktop_executor", "client_route_id": "phone-test"}
