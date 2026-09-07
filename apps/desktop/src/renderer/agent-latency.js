@@ -1,5 +1,9 @@
 (function (root) {
   const labels = {
+    desktop_recovery_lookup_ms: 'Recovery status lookup',
+    desktop_recovery_page_ms: 'Recovery archive page read',
+    desktop_recovery_restore_ms: 'Recovery terminal archive repair',
+    desktop_recovery_publish_ms: 'Recovery response publish call',
     desktop_transport_queue_ms: 'Transport queue to dispatch',
     desktop_broker_ack_ms: 'Wire send to broker confirmation',
     desktop_peer_receipt_ms: 'Queued to encrypted peer receipt',

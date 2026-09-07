@@ -11,6 +11,7 @@ import sqlite3
 import threading
 
 from agent_task_recovery_query import IDENTITY_FIELDS
+from agent_recovery_timing import recovery_timing
 from pairing_state import DATA_DIR
 from secure_state import decrypt_text, encrypt_text, seal_identifier
 
@@ -100,6 +101,12 @@ class TaskResultArchive:
             return None
         response = {**fields, "request_id": nonce, "type": "agent_task_result_page",
                     "page_index": page, "status": "unavailable", "execution_generation": generation}
+        with recovery_timing(response, "page") as measurement:
+            result = self._page(request, response, fields, generation, page)
+            measurement.completed = result["status"] == "ready"
+            return result
+
+    def _page(self, request, response, fields, generation, page):
         scope = self._scope(fields, generation)
         with _lock:
             db = self._connect()
