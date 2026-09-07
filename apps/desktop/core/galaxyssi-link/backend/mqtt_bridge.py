@@ -6926,17 +6926,22 @@ def _process_message(mqttc, userdata, msg):
 
         if msg_type == "agent_task_recovery_request":
             from agent_task_recovery_query import recovery_query
+            from agent_recovery_timing import recovery_timing
 
             response = recovery_query(
                 payload, client_route_id=client_route_id, manager=agent_task_manager,
             )
             if response is not None:
-                _publish_phone_payload(mqttc, wire_payload, response)
+                # One batch is one publish call, not one latency sample per item.
+                with recovery_timing(response["items"][0], "publish", request_id=response["request_id"]) as measurement:
+                    _publish_phone_payload(mqttc, wire_payload, response)
+                    measurement.completed = True
             return
 
         if msg_type in {"agent_task_result_page_request", "agent_task_result_received"}:
             from agent_task_result_archive import archive
             from agent_task_terminal_outcome import recover_terminal_outcome
+            from agent_recovery_timing import recovery_timing
 
             if msg_type == "agent_task_result_received":
                 if "receipt_id" in payload:
@@ -6948,11 +6953,16 @@ def _process_message(mqttc, userdata, msg):
             else:
                 response = archive.page(payload, client_route_id=client_route_id)
                 if response is not None and response["status"] == "unavailable":
-                    if recover_terminal_outcome(payload, client_route_id=client_route_id,
-                                                manager=agent_task_manager, result_archive=archive):
+                    with recovery_timing(response, "restore") as measurement:
+                        restored = recover_terminal_outcome(payload, client_route_id=client_route_id,
+                                                            manager=agent_task_manager, result_archive=archive)
+                        measurement.completed = bool(restored)
+                    if restored:
                         response = archive.page(payload, client_route_id=client_route_id)
                 if response is not None:
-                    _publish_phone_payload(mqttc, wire_payload, response)
+                    with recovery_timing(response, "publish") as measurement:
+                        _publish_phone_payload(mqttc, wire_payload, response)
+                        measurement.completed = True
             return
 
         if msg_type == "agent_task_cancel":

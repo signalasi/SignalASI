@@ -17,6 +17,10 @@ import uuid
 SCHEMA = "galaxyssi.agent-latency.v1"
 TRACE_LIMIT = 8_000
 STAGE_PAIRS = {
+    "desktop_recovery_lookup_ms": ("desktop_recovery_lookup_started", "desktop_recovery_lookup_finished"),
+    "desktop_recovery_page_ms": ("desktop_recovery_page_started", "desktop_recovery_page_finished"),
+    "desktop_recovery_restore_ms": ("desktop_recovery_restore_started", "desktop_recovery_restore_finished"),
+    "desktop_recovery_publish_ms": ("desktop_recovery_publish_started", "desktop_recovery_publish_finished"),
     "phone_transport_queue_ms": ("phone_transport_queued", "phone_transport_dispatched"),
     "phone_broker_ack_ms": ("phone_wire_started", "phone_broker_acked"),
     "phone_peer_receipt_ms": ("phone_transport_queued", "phone_peer_received"),
