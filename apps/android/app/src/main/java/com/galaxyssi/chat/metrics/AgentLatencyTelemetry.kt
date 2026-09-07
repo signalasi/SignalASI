@@ -37,6 +37,12 @@ internal object AgentLatencyTelemetry {
         runCatching { get(context).record(taskId, stage, outcome, atNs) }
     }
 
+    fun recovery(context: Context): AgentRecoveryTiming = AgentRecoveryTiming(
+        emit = { trace, stage, operation, outcome, at ->
+            get(context).recordOpaque(trace, stage, operation, outcome, at)
+        }, nowNs = SystemClock::elapsedRealtimeNanos
+    )
+
     fun bindReply(conversationId: String, turnId: String, entryTaskId: String, transportTaskId: String) {
         replyBindings.bind(conversationId, turnId, entryTaskId, transportTaskId)
     }

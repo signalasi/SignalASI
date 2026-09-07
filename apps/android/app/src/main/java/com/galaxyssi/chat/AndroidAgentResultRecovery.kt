@@ -32,6 +32,7 @@ internal object AndroidAgentResultRecovery {
                 transfers.withPermit {
                     val payload = AgentResultPageDatabase(app).use { pages ->
                         client.fetch(desktopId, fields, checkpoint = pages.checkpoint(desktopId, fields),
+                            timing = com.galaxyssi.chat.metrics.AgentLatencyTelemetry.recovery(app),
                             stillPending = { eligible(app, desktopId, fields) },
                             publish = { publish(app, desktopId, it) })
                     } ?: return@withPermit
@@ -40,7 +41,12 @@ internal object AndroidAgentResultRecovery {
                         CodexStyleResponsePolicy.filterAssistantRichOutput(AgentRichContentCodec.fromEnvelope(payload)))
                         ?: return@withPermit
                     // The bus commits to the encrypted inbox before notifying the UI.
-                    publishResult(app, payload, response)
+                    com.galaxyssi.chat.metrics.AgentLatencyTelemetry.recovery(app)
+                        .begin(fields.optString("task_id"), "publish").use { span ->
+                            publishResult(app, payload, response)
+                            // Return value means consumer handling, not whether persistence succeeded.
+                            span.outcome = "completed"
+                        }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled

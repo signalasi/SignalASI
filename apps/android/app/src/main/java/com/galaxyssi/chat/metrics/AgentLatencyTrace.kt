@@ -24,6 +24,11 @@ internal object AgentLatencyContract {
     const val SCHEMA = "galaxyssi.agent-latency.v1"
     const val EVENT_LIMIT = 8_000
     val pairs = linkedMapOf(
+        "phone_recovery_query_ms" to ("phone_recovery_query_started" to "phone_recovery_query_finished"),
+        "phone_recovery_page_ms" to ("phone_recovery_page_started" to "phone_recovery_page_finished"),
+        "phone_recovery_body_ms" to ("phone_recovery_body_started" to "phone_recovery_body_finished"),
+        "phone_recovery_checkpoint_ms" to ("phone_recovery_checkpoint_started" to "phone_recovery_checkpoint_finished"),
+        "phone_recovery_publish_ms" to ("phone_recovery_publish_started" to "phone_recovery_publish_finished"),
         "phone_transport_queue_ms" to ("phone_transport_queued" to "phone_transport_dispatched"),
         "phone_broker_ack_ms" to ("phone_wire_started" to "phone_broker_acked"),
         "phone_peer_receipt_ms" to ("phone_transport_queued" to "phone_peer_received"),

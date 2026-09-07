@@ -6,6 +6,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
+import com.galaxyssi.chat.metrics.AgentRecoveryTiming
+import kotlinx.coroutines.CancellationException
 
 internal class AgentRemoteRecoveryClient {
     private data class Pending(
@@ -23,6 +25,7 @@ internal class AgentRemoteRecoveryClient {
         items: List<JSONObject>,
         timeoutMillis: Long = 8_000L,
         report: (String) -> Unit = {},
+        timing: AgentRecoveryTiming? = null,
         publish: (JSONObject) -> Boolean
     ): List<JSONObject> {
         require(desktopId.isNotBlank() && routeId.isNotBlank())
@@ -34,6 +37,8 @@ internal class AgentRemoteRecoveryClient {
         val requestId = UUID.randomUUID().toString()
         val request = Pending(desktopId, routeId, identities)
         pending[requestId] = request
+        // A batch is one round trip, not one duplicate sample for each item.
+        val span = timing?.begin(items.first().optString("task_id"), "query")
         try {
             val payload = JSONObject().put("type", "agent_task_recovery_request")
                 .put("request_id", requestId).put("client_route_id", routeId)
@@ -43,13 +48,20 @@ internal class AgentRemoteRecoveryClient {
                 return emptyList()
             }
             val response = withTimeoutOrNull(timeoutMillis) { request.result.await() }
+            span?.outcome = if (response == null) "timed_out" else if (response.any {
+                it.optString("status") == "unavailable"
+            }) "failed" else "completed"
             report(if (response == null) "response_timeout" else if (response.any {
                     it.optString("status") == "unavailable"
                 }) "remote_unavailable" else "authenticated_response")
             return response ?: emptyList()
+        } catch (cancelled: CancellationException) {
+            span?.outcome = "cancelled"
+            throw cancelled
         } finally {
             pending.remove(requestId, request)
             request.result.cancel()
+            span?.close()
         }
     }
 

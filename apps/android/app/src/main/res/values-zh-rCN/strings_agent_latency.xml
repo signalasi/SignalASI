@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="agent_latency_recovery_query">恢复状态查询往返</string>
+    <string name="agent_latency_recovery_page">恢复结果页请求往返</string>
+    <string name="agent_latency_recovery_body">恢复正文获取与校验</string>
+    <string name="agent_latency_recovery_checkpoint">恢复加密结果页写入</string>
+    <string name="agent_latency_recovery_publish">恢复收件箱发布调用</string>
     <string name="agent_latency_transport_queue">传输出队等待</string>
     <string name="agent_latency_broker_ack">线路发送至 broker 确认</string>
     <string name="agent_latency_peer_receipt">入队至对端加密接收确认</string>
