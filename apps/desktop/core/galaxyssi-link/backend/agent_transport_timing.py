@@ -3,10 +3,10 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import os
 import threading
-import time
 import uuid
 
 from agent_latency import opaque_id
+from agent_timing_clock import now_ns
 
 
 @dataclass(frozen=True)
@@ -17,7 +17,7 @@ class Attempt:
 
 
 class TransportTiming:
-    def __init__(self, emit, *, now_ns=time.monotonic_ns, limit=1024, ttl_ns=3_600_000_000_000):
+    def __init__(self, emit, *, now_ns=now_ns, limit=1024, ttl_ns=3_600_000_000_000):
         self.emit, self.now_ns = emit, now_ns
         self.limit, self.ttl_ns = max(1, limit), ttl_ns
         self.messages, self.attempts = OrderedDict(), OrderedDict()

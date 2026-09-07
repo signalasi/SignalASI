@@ -128,7 +128,7 @@ class MqttTransportTimingTest(TimingFixture, unittest.TestCase):
         with patch.object(bridge, "transport_timing", self.timing), \
              patch.object(bridge, "encode_wire_payload", return_value=["packet"]), \
              patch.object(bridge, "seal_wire_packet", side_effect=lambda value, _: value), \
-             patch.object(bridge.time, "monotonic_ns", side_effect=lambda: self.now):
+             patch.object(bridge, "timing_now_ns", side_effect=lambda: self.now):
             bridge._publish_mqtt_wire_payload(client, "topic", "wire", "secret", timing_scope=("p", "m"))
         self.assertEqual(5, self.metric("broker_ack")["p50_ms"])
 
@@ -144,7 +144,7 @@ class MqttTransportTimingTest(TimingFixture, unittest.TestCase):
         with patch.object(bridge, "transport_timing", self.timing), \
              patch.object(bridge, "encode_wire_payload", return_value=["a", "b", "c"]), \
              patch.object(bridge, "seal_wire_packet", side_effect=lambda value, _: value), \
-             patch.object(bridge.time, "monotonic_ns", side_effect=lambda: self.now):
+             patch.object(bridge, "timing_now_ns", side_effect=lambda: self.now):
             info = bridge._publish_mqtt_wire_payload(client, "topic", "unique-fragment-wire", "secret", timing_scope=("p", "m"))
             self.at(2); bridge.on_publish(client, None, mids[1])
             self.at(4); bridge.on_publish(client, None, mids[0])

@@ -23,6 +23,16 @@ clock is never subtracted from the Desktop clock. Process restarts cannot turn
 old starts and new finishes into fabricated durations. Repeated stage updates
 are idempotent within a bounded recent-event window.
 
+Desktop Agent diagnostics use a shared `perf_counter_ns()` clock, including
+explicit MQTT callback timestamps, transport ACKs and recovery spans. On the
+Windows Python 3.11 runtime this uses QueryPerformanceCounter rather than the
+coarser GetTickCount64 clock. The serialized `monotonic_ns` field remains a
+monotonic timestamp; its name is not a promise of a particular Python function.
+Summary `active_clock` metadata describes only the current tracer, not retained
+events from earlier process clocks. Injected test clocks are labeled as such.
+Watchdog deadlines, retry policies and the separate voice clock are unchanged.
+See the [clock validation record](../performance/desktop-timing-clock-20260907.md).
+
 ## Observed Boundaries
 
 | Metric | Start | End |

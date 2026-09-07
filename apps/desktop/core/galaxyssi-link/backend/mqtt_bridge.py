@@ -171,6 +171,7 @@ delivery_ack_publish_queue: queue.Queue[tuple[object, dict, object] | None] = qu
 delivery_ack_publisher_started = threading.Event()
 delivery_ack_publisher_lock = threading.Lock()
 from agent_transport_timing import transport_timing
+from agent_timing_clock import now_ns as timing_now_ns
 
 pending_outbound_acks: dict[int, tuple[str, str]] = {}
 pending_outbound_acks_lock = threading.RLock()
@@ -2685,7 +2686,7 @@ def on_subscribe(mqttc, userdata, mid, reason_codes, properties=None):
 
 
 def on_publish(mqttc, userdata, mid, reason_code=None, properties=None):
-    ack_ns = time.monotonic_ns()
+    ack_ns = timing_now_ns()
     failed = _reason_code_value(reason_code) >= 128 if reason_code is not None else False
     transport_timing.acknowledged(
         (id(mqttc), mqtt_connection_generation, int(mid)),
@@ -6476,7 +6477,7 @@ def _start_remote_agent_task(mqttc, wire_payload: dict, payload: dict, trace: li
 
 def _process_message(mqttc, userdata, msg):
     try:
-        received_at_ns = getattr(msg, "received_at_ns", 0) or time.monotonic_ns()
+        received_at_ns = getattr(msg, "received_at_ns", 0) or timing_now_ns()
         mqtt_received_at = int(getattr(msg, "received_at_ms", 0) or time.time() * 1000)
         if len(msg.payload) > MAX_MQTT_WIRE_BYTES:
             log.warning("MQTT message rejected: envelope exceeds size limit")
@@ -6586,7 +6587,7 @@ def _process_message(mqttc, userdata, msg):
                 )
                 return
             decrypt_started_at = int(time.time() * 1000)
-            decrypt_started_ns = time.monotonic_ns()
+            decrypt_started_ns = timing_now_ns()
             try:
                 application_envelope = decrypt_signal_envelope(
                     wire_payload,
@@ -7180,7 +7181,7 @@ def on_mqtt_message(mqttc, userdata, msg):
             topic=str(msg.topic or ""),
             payload=payload,
             received_at_ms=int(time.time() * 1000),
-            received_at_ns=time.monotonic_ns(),
+            received_at_ns=timing_now_ns(),
         ),
     )
 
