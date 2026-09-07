@@ -451,6 +451,9 @@ def _file_sha256(source: Path) -> str:
 
 
 def _inline_artifact(task_id: str, relative: str, mime_type: str) -> tuple[str, str, int, str] | None:
+    # Videos always use the acknowledged artifact path, including tiny 240p clips.
+    if mime_type.lower().startswith("video/"):
+        return None
     if not str(mime_type or "").lower().startswith("image/"):
         return None
     try:

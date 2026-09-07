@@ -188,6 +188,10 @@ class _SteeringCodexServer:
 
 
 class MqttCodexSteeringTests(unittest.TestCase):
+    def setUp(self):
+        # The synchronous thread fake must not run the telemetry worker's loop.
+        self.enterContext(patch("agent_latency_hooks.trace_stage"))
+
     def test_same_conversation_follow_up_steers_without_publishing_assistant_result(self):
         manager = _SteeringTaskManager()
         server = _SteeringCodexServer()

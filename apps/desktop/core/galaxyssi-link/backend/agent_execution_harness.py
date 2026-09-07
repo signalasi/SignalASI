@@ -928,7 +928,11 @@ def execution_policy_for(
     )
     has_install = _contains_any(normalized, _INSTALL_TERMS)
     has_build = _contains_any(normalized, _BUILD_TERMS)
-    has_artifact_request = _contains_any(normalized, _ARTIFACT_TERMS)
+    from video_generation_policy import video_creation_requested
+    has_artifact_request = (
+        _contains_any(normalized, _ARTIFACT_TERMS)
+        or video_creation_requested(normalized)
+    )
     has_research = _contains_any(normalized, _RESEARCH_TERMS)
     has_device = _contains_any(normalized, _DEVICE_TERMS)
     target_platform = "android" if _contains_any(normalized, _ANDROID_TERMS) else ""
@@ -1537,6 +1541,7 @@ def _contains_any(value: str, terms: Iterable[str]) -> bool:
 def _workspace_candidates(root: Path) -> list[Path]:
     excluded_parts = {
         ".git", ".gradle", ".idea", ".galaxyssi", "__pycache__", "node_modules",
+        ".video-generation",
         "downloads", "outputs", "temp", "build", "dist",
     }
     candidates: list[Path] = []
@@ -1554,7 +1559,7 @@ def _workspace_candidates(root: Path) -> list[Path]:
             candidates.append(item)
     # Build outputs may contain the requested APK even though caches stay excluded.
     for apk in root.rglob("*.apk"):
-        if apk.is_file() and not any(part in {".gradle", ".git"} for part in apk.parts):
+        if apk.is_file() and not any(part in {".gradle", ".git", ".video-generation"} for part in apk.parts):
             candidates.append(apk)
     unique = {str(item.resolve()).casefold(): item for item in candidates}
     return sorted(unique.values(), key=lambda item: str(item).casefold())
@@ -1615,6 +1620,7 @@ def _package_candidates(root: Path, candidates: list[Path], archive: Path) -> No
                 relative = source.relative_to(root)
                 if any(part in {
                     ".git", ".gradle", ".idea", ".galaxyssi", "__pycache__",
+                    ".video-generation",
                     "node_modules", "outputs", "temp",
                 } for part in relative.parts):
                     continue
