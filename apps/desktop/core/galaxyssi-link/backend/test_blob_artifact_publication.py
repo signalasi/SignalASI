@@ -80,6 +80,9 @@ class BlobArtifactPublicationTests(unittest.TestCase):
         self.assertEqual("encrypted-blob", block["metadata"]["transport"])
         self.assertEqual(str(self.artifact.size_bytes), block["metadata"]["size_bytes"])
         self.assertEqual(self.artifact.sha256, block["metadata"]["sha256"])
+        for key in ("client_route_id", "desktop_id", "conversation_id", "task_id", "turn_id", "execution_generation"):
+            self.assertEqual(str(manifest[key]), block["metadata"][f"blob_{key}"])
+        self.assertEqual(manifest["transfer_id"], block["metadata"]["transfer_id"])
 
     def test_new_turn_and_generation_get_distinct_uris_while_retry_is_stable(self):
         first, _ = self.prepare()
@@ -88,6 +91,42 @@ class BlobArtifactPublicationTests(unittest.TestCase):
         for change in ({"turn_id": "new-turn"}, {"execution_generation": 2}, {"conversation_id": "new-conversation"}):
             bodies, _ = self.prepare(payload={**self.payload, **change})
             self.assertNotEqual(first[0]["manifest"]["artifact_uri"], bodies[0]["manifest"]["artifact_uri"])
+
+    def test_gallery_rows_retain_per_item_scoped_progress_metadata(self):
+        payload = {**self.payload, "rich_output": {"blocks": [{"id": "gallery", "type": "gallery", "rows": [
+            [self.artifact.artifact_uri, "Report", "image/png"], ["https://example.test/image.png", "Other"]]}]}}
+        bodies, reply = self.prepare(payload=payload)
+        manifest = bodies[0]["manifest"]
+        gallery = reply["rich_output"]["blocks"][0]
+        key = "blob_item_" + manifest["artifact_uri"].rsplit("/", 1)[1]
+        self.assertEqual([key], list(gallery["metadata"]))
+        item = json.loads(gallery["metadata"][key])
+        self.assertEqual(manifest["transfer_id"], item["transfer_id"])
+        self.assertEqual("conversation", item["blob_conversation_id"])
+        self.assertLessEqual(len(gallery["metadata"][key]), 2000)
+        self.assertNotIn("provisioning_token", json.dumps(item))
+
+    def test_protocol_metadata_precedes_model_metadata_in_bounded_card_codec(self):
+        payload = json.loads(json.dumps(self.payload))
+        payload["rich_output"]["blocks"][0]["metadata"] = {f"custom-{index}": "text" for index in range(32)}
+        _, reply = self.prepare(payload=payload)
+        metadata = dict(list(reply["rich_output"]["blocks"][0]["metadata"].items())[:32])
+        self.assertEqual("conversation", metadata["blob_conversation_id"])
+        self.assertEqual("encrypted-blob", metadata["transport"])
+        self.assertIn("transfer_id", metadata)
+
+    def test_ten_gallery_items_survive_canonical_order_and_existing_metadata_limits(self):
+        from rich_output import _normalize_block
+        uris = ["galaxyssi-artifact://blob/" + f"{index:064x}" for index in range(10)]
+        metadata = {f"custom-{index}": "text" for index in range(32)}
+        for uri in uris:
+            metadata["blob_item_" + uri.rsplit("/", 1)[1]] = json.dumps({"artifact_source_uri": uri, "detail": "x" * 1200})
+        raw = json.loads(json.dumps({"type": "gallery", "metadata": metadata, "rows": [[uri] for uri in uris]}, sort_keys=True))
+        normalized = _normalize_block(raw)
+        self.assertLessEqual(len(normalized["metadata"]), 32)
+        for uri in uris:
+            item = json.loads(normalized["metadata"]["blob_item_" + uri.rsplit("/", 1)[1]])
+            self.assertEqual(uri, item["artifact_source_uri"])
 
     def test_compressed_image_metadata_describes_actual_transported_bytes(self):
         raw = b"compressed"

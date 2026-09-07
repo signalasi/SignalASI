@@ -35,6 +35,48 @@ class BlobArtifactReceiveJournalDeviceTest {
         try { block(File(root, "journal.sqlite3")) } finally { root.deleteRecursively() }
     }
     private fun next(journal: BlobArtifactReceiveJournal) = journal.claimDue(Long.MAX_VALUE, 1).single()
+
+    @Test fun presentationReadDoesNotCreateQueueOrClaimExistingWork() = fixture { path ->
+        assertNull(BlobArtifactReceiveJournal.readPresentation(path, "a".repeat(64)))
+        assertFalse(path.exists())
+        BlobArtifactReceiveJournal(path).use { journal ->
+            val id = journal.enqueue(body())
+            val event = BlobArtifactReceiveJournal.readPresentation(path, id)!!
+            assertEquals("artifact_blob_progress", event.getString("type"))
+            assertFalse(event.toString().contains("read_token"))
+            assertFalse(event.toString().contains("https://blob.test"))
+            assertEquals(BlobArtifactReceiveJournal.DOWNLOAD, next(journal).phase)
+        }
+    }
+
+    @Test fun presentationReadRestoresCompletionFailureAndCancellationWithoutRevivingThem() = fixture { path ->
+        BlobArtifactReceiveJournal(path).use { journal ->
+            val id = journal.enqueue(body())
+            assertTrue(journal.advance(next(journal)))
+            assertEquals("artifact_available", BlobArtifactReceiveJournal.readPresentation(path, id)!!.getString("type"))
+            assertTrue(journal.fail(next(journal), "blob_expired"))
+            assertTrue(journal.finish(next(journal)))
+            assertEquals("blob_expired", BlobArtifactReceiveJournal.readPresentation(path, id)!!.getString("error_code"))
+            assertNull(journal.nextDue())
+            journal.cancel(id)
+            assertTrue(journal.finish(next(journal)))
+            assertEquals("artifact_blob_cancelled", BlobArtifactReceiveJournal.readPresentation(path, id)!!.getString("error_code"))
+            assertNull(journal.nextDue())
+        }
+    }
+
+    @Test fun presentationRejectsCorruptIdentityWithoutWritingQuarantineState() = fixture { path ->
+        val id = BlobArtifactReceiveJournal(path).use { it.enqueue(body()) }
+        SQLiteDatabase.openDatabase(path.path, null, SQLiteDatabase.OPEN_READWRITE).use {
+            it.execSQL("UPDATE artifact_receives SET identity='wrong'")
+        }
+        assertThrows(BlobFailure::class.java) { BlobArtifactReceiveJournal.readPresentation(path, id) }
+        SQLiteDatabase.openDatabase(path.path, null, SQLiteDatabase.OPEN_READONLY).use { database ->
+            database.rawQuery("SELECT state FROM artifact_receives", null).use {
+                assertTrue(it.moveToFirst()); assertEquals(0, it.getInt(0))
+            }
+        }
+    }
     private fun revised(revision: Long) = body().also { value ->
         value.getJSONObject("offer").put("transport_revision", revision).getJSONObject("blob_offer")
             .put("read_token", revision.toString(16).padStart(64, '0')).getJSONObject("private")
