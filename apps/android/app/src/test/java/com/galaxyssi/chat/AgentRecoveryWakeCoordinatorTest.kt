@@ -13,6 +13,32 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AgentRecoveryWakeCoordinatorTest {
+    @Test fun recoveryWaitsForSubscriptionAcknowledgementAndRetainsWakeAcrossRotation() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            val subscriptions = MqttSubscriptionRecoveryState()
+            var calls = 0
+            val wake = AgentRecoveryWakeCoordinator(scope, recover = { calls++ })
+            val generation = subscriptions.begin(2)
+            repeat(20) { wake.request(isConnected = subscriptions.isReady()) }
+            subscriptions.complete(generation, true)
+            wake.connectionChanged(subscriptions.isReady())
+            assertEquals(0, calls)
+            subscriptions.complete(generation, true)
+            wake.connectionChanged(subscriptions.isReady())
+            assertEquals(1, calls)
+            val rotated = subscriptions.begin(1)
+            wake.connectionChanged(subscriptions.isReady())
+            wake.request(isConnected = subscriptions.isReady())
+            subscriptions.complete(generation, true)
+            wake.connectionChanged(subscriptions.isReady())
+            assertEquals(1, calls)
+            subscriptions.complete(rotated, true)
+            wake.connectionChanged(subscriptions.isReady())
+            assertEquals(2, calls)
+        } finally { scope.cancel() }
+    }
+
     @Test fun foregroundRequestCombinesConnectionAndWakeAtomically() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         try {

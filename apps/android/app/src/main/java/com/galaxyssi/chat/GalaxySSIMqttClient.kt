@@ -192,6 +192,8 @@ object GalaxySSIMqttClient {
 
     fun isConnected(): Boolean = connected
 
+    fun isRequestReplyReady(): Boolean = connected && subscriptionRecoveryState.isReady()
+
     fun isSecureReady(): Boolean = secureReady
 
     fun refreshOpaqueSubscriptions(context: Context) {
@@ -3026,6 +3028,7 @@ object GalaxySSIMqttClient {
         }
         val extraAttempts = listOf(phoneTopics, rendezvousTopics).count { it.isNotEmpty() }
         val generation = subscriptionRecoveryState.begin(maxOf(1, links.size + extraAttempts))
+        AndroidAgentRecoveryWake.connectionChanged(context, false)
         subscriptionCoordinator.reconcile(mqtt, links, phoneTopics, rendezvousTopics, generation)
         if (links.isEmpty() && extraAttempts == 0) {
             completeSubscriptionAttempt(generation, succeeded = true)
@@ -3038,6 +3041,7 @@ object GalaxySSIMqttClient {
             MqttSubscriptionAttemptOutcome.PENDING -> Unit
             MqttSubscriptionAttemptOutcome.READY -> {
                 cancelSubscriptionRetry()
+                appContext?.let { AndroidAgentRecoveryWake.connectionChanged(it, isRequestReplyReady()) }
                 appContext?.let(::requestMissingSignalSessions)
                 replayApprovedPhoneContactDecisionsOnce()
                 Log.i(TAG, "Subscribed to rotating opaque relationship mailboxes")
@@ -3071,6 +3075,7 @@ object GalaxySSIMqttClient {
 
     private fun invalidateSubscriptions() {
         subscriptionRecoveryState.invalidate()
+        appContext?.let { AndroidAgentRecoveryWake.connectionChanged(it, false) }
         cancelSubscriptionRetry()
         retryHandler.removeCallbacks(topicRotationRefreshRunnable)
         subscriptionCoordinator.invalidate()
@@ -3120,7 +3125,7 @@ object GalaxySSIMqttClient {
     private fun setConnected(value: Boolean): Boolean {
         if (connected == value) return false
         connected = value
-        appContext?.let { AndroidAgentRecoveryWake.connectionChanged(it, value) }
+        appContext?.let { AndroidAgentRecoveryWake.connectionChanged(it, isRequestReplyReady()) }
         listeners.forEach { it.onConnectionChanged(value) }
         return true
     }

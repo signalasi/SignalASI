@@ -79,8 +79,10 @@ internal object AndroidAgentRemoteRecovery {
                     group.chunked(32).forEach { batch ->
                         val first = batch.first()
                         val observations = try {
-                            client.query(first.desktopId, first.routeId, batch.map { it.payload }) { payload ->
-                                GalaxySSIMqttClient.publishJsonForTransport(payload,
+                            client.query(first.desktopId, first.routeId, batch.map { it.payload }, report = { outcome ->
+                                if (BuildConfig.DEBUG) Log.i("GalaxySSIRecovery", "query_outcome=$outcome")
+                            }) { payload ->
+                                GalaxySSIMqttClient.isRequestReplyReady() && GalaxySSIMqttClient.publishJsonForTransport(payload,
                                     GalaxySSIMqttClient.outgoingTopicFor(first.payload.getString("contact_id")),
                                     first.payload.getString("contact_id"))
                             }
