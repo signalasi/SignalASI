@@ -168,6 +168,26 @@ APK discovery and recursive archive packaging. A regression checks finalization,
 not only raw artifact enumeration: only `outputs/video-240p.mp4` may be selected,
 and private intermediate files must not cause a project archive to be published.
 
+The third live round passed on SM-T575 with installed App 1.0.27 (871), production
+Desktop 1.0.31 and its configured Codex model `gpt-5.6-sol`. The phone originated
+the request through the normal App path and the existing TLS MQTT relationship;
+no fixture bytes or result injection were used. Desktop completed in 311.688
+seconds; instrumentation completed in 343.884 seconds with `OK (1 test)`.
+The actual received MP4 is 8 seconds, 426x240, H.264, 154,155 bytes, without audio
+as requested. Device SHA-256 matched the Desktop artifact metadata:
+`a4be41da6c18aa03c1f732f656f0ad1816f38728f035519f219d3913ad401104`.
+VideoView playback advancement and seeking passed. After instrumentation, the
+normal conversation page was reopened and its real video card was tapped and
+visually checked, rather than relying only on the temporary test player.
+
+The approved third round did not need a correction pass. This is one successful
+end-to-end smoke case after two failed integration rounds, not a reliability or
+content-quality percentage. Short programmatic videos still take minutes to plan,
+render and review. Final regression: 187 tests and 67 subtests passed; video-specific
+coverage, Desktop checks and the test APK build passed. Device evidence is stored
+outside version control; only SM-T575 was operated by this task. Task workspace
+cleanup after acknowledged handoff remains governed by the existing retention policy.
+
 ## Reference
 
 The user supplied a ChatGPT web execution transcript: Python frame rendering,
