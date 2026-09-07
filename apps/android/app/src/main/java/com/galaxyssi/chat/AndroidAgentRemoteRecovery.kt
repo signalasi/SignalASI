@@ -81,7 +81,7 @@ internal object AndroidAgentRemoteRecovery {
                         val observations = try {
                             client.query(first.desktopId, first.routeId, batch.map { it.payload }, report = { outcome ->
                                 if (BuildConfig.DEBUG) Log.i("GalaxySSIRecovery", "query_outcome=$outcome")
-                            }) { payload ->
+                            }, timing = com.galaxyssi.chat.metrics.AgentLatencyTelemetry.recovery(context)) { payload ->
                                 GalaxySSIMqttClient.isRequestReplyReady() && GalaxySSIMqttClient.publishJsonForTransport(payload,
                                     GalaxySSIMqttClient.outgoingTopicFor(first.payload.getString("contact_id")),
                                     first.payload.getString("contact_id"))

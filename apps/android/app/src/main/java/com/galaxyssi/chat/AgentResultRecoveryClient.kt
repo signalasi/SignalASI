@@ -8,6 +8,8 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
+import com.galaxyssi.chat.metrics.AgentRecoveryTiming
+import kotlinx.coroutines.CancellationException
 
 /** Pulls one canonical reply in bounded pages; it never executes or resumes a tool. */
 internal class AgentResultRecoveryClient {
@@ -17,12 +19,14 @@ internal class AgentResultRecoveryClient {
 
     suspend fun fetch(desktop: String, fields: JSONObject, timeoutMillis: Long = 8_000L,
         stillPending: () -> Boolean = { true }, checkpoint: AgentResultPageCheckpoint? = null,
+        timing: AgentRecoveryTiming? = null,
         publish: (JSONObject) -> Boolean): JSONObject? {
         val expected = identity(fields)
         val version = AgentRemoteOutcomeCodec.version(fields) ?: return null
         require(desktop.isNotBlank() && expected.all { it.isNotBlank() && it.length <= 200 })
         if (GalaxySSITransportPrivacyPolicy.isLocalOnly(fields)) return null
         val bytes = WipeableBuffer()
+        val span = timing?.begin(fields.optString("task_id"), "body")
         try {
             var manifest = checkpoint?.manifest()
             var digest = manifest?.digest.orEmpty()
@@ -38,7 +42,7 @@ internal class AgentResultRecoveryClient {
                     page++
                     continue
                 }
-                val response = query(desktop, fields, page, digest, timeoutMillis, publish) ?: return null
+                val response = query(desktop, fields, page, digest, timeoutMillis, timing, publish) ?: return null
                 if (response.optString("status") != "ready") return null
                 val observedDigest = response.optString("sha256")
                 val observedTotal = response.optLong("total_bytes", -1L)
@@ -57,7 +61,11 @@ internal class AgentResultRecoveryClient {
                     if (chunk.size != expectedSize || sha256(chunk) != response.optString("page_sha256")) return null
                     if (!stillPending()) return null
                     if (checkpoint != null) {
-                        if (!checkpoint.write(requireNotNull(manifest), page, chunk)) return null
+                        val saved = timing?.begin(fields.optString("task_id"), "checkpoint")
+                        try {
+                            if (!checkpoint.write(requireNotNull(manifest), page, chunk)) return null
+                            saved?.outcome = "completed"
+                        } finally { saved?.close() }
                     } else bytes.write(chunk)
                 } finally { chunk.fill(0) }
                 page++
@@ -87,17 +95,23 @@ internal class AgentResultRecoveryClient {
                     checkpoint?.clear(digest)
                     return null
                 }
-                return result.put("result_recovery", JSONObject().put("sha256", digest))
+                val recovered = result.put("result_recovery", JSONObject().put("sha256", digest))
+                span?.outcome = "completed"
+                return recovered
             } finally { complete.fill(0) }
-        } finally { bytes.wipe() }
+        } catch (cancelled: CancellationException) {
+            span?.outcome = "cancelled"
+            throw cancelled
+        } finally { bytes.wipe(); span?.close() }
     }
 
     private suspend fun query(desktop: String, fields: JSONObject, page: Int, digest: String,
-        timeoutMillis: Long, publish: (JSONObject) -> Boolean): JSONObject? {
+        timeoutMillis: Long, timing: AgentRecoveryTiming?, publish: (JSONObject) -> Boolean): JSONObject? {
         val nonce = UUID.randomUUID().toString()
         val generation = requireNotNull(AgentRemoteOutcomeCodec.version(fields)).generation
         val request = Pending(desktop, identity(fields), generation, page)
         pending[nonce] = request
+        val span = timing?.begin(fields.optString("task_id"), "page")
         try {
             val payload = JSONObject().apply { FIELDS.forEach { put(it, fields.optString(it)) } }
                 .put("type", "agent_task_result_page_request")
@@ -105,8 +119,14 @@ internal class AgentResultRecoveryClient {
                 .put("desktop_id", desktop)
                 .put("execution_generation", generation)
             if (!publish(payload)) return null
-            return withTimeoutOrNull(timeoutMillis) { request.result.await() }
-        } finally { pending.remove(nonce, request); request.result.cancel() }
+            val response = withTimeoutOrNull(timeoutMillis) { request.result.await() }
+            span?.outcome = if (response == null) "timed_out"
+                else if (response.optString("status") == "ready") "completed" else "failed"
+            return response
+        } catch (cancelled: CancellationException) {
+            span?.outcome = "cancelled"
+            throw cancelled
+        } finally { pending.remove(nonce, request); request.result.cancel(); span?.close() }
     }
 
     fun receive(payload: JSONObject, authenticatedDesktop: String): Boolean {

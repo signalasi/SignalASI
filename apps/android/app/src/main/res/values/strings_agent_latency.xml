@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="agent_latency_recovery_query">Recovery status round trip</string>
+    <string name="agent_latency_recovery_page">Recovery page round trip</string>
+    <string name="agent_latency_recovery_body">Recovery body fetch and validation</string>
+    <string name="agent_latency_recovery_checkpoint">Recovery encrypted page write</string>
+    <string name="agent_latency_recovery_publish">Recovery inbox publish call</string>
     <string name="agent_latency_transport_queue">Transport queue to dispatch</string>
     <string name="agent_latency_broker_ack">Wire send to broker confirmation</string>
     <string name="agent_latency_peer_receipt">Queued to encrypted peer receipt</string>
