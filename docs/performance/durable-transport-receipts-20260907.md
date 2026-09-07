@@ -58,3 +58,8 @@ target, full terminal-result-loss/UI recovery, deterministic real broker ACK-los
 injection, and a second live phone peer still require broader verification.
 Historical failed deliveries remain intact for diagnosis rather than being
 silently retried or deleted.
+
+Follow-up: [live final-result recovery](live-final-result-recovery-20260907.md)
+now verifies a short real Codex body across process death, encrypted-inbox recovery,
+visible UI consumption, and subsequent cold-start deduplication on S20U. Its small
+sample does not close the broader performance, large-body, or broker-fault gates.
