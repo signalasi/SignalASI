@@ -13,6 +13,8 @@ import threading
 import time
 import uuid
 
+from agent_timing_clock import now_ns, details as clock_details
+
 
 SCHEMA = "galaxyssi.agent-latency.v1"
 TRACE_LIMIT = 8_000
@@ -114,7 +116,7 @@ def summarize(points: list[AgentTimingPoint]) -> dict:
 
 
 class AgentLatencyTracer:
-    def __init__(self, sink, *, monotonic_ns=time.monotonic_ns,
+    def __init__(self, sink, *, monotonic_ns=now_ns,
                  wall_clock_ms=lambda: int(time.time() * 1000), clock_id=None):
         self.sink = sink
         self.monotonic_ns = monotonic_ns
@@ -157,6 +159,8 @@ class AgentLatencyTracer:
     def summary(self):
         result = summarize(self.sink.snapshot())
         result.update(self.sink.health())
+        result["active_clock"] = (clock_details(self.clock_id) if self.monotonic_ns is now_ns else
+                                  {"clock_id": self.clock_id, "source": "injected", "scope": "active_clock_only"})
         return result
 
 

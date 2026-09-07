@@ -3,10 +3,10 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
-import time
 import uuid
 
 from agent_latency import record_task
+from agent_timing_clock import now_ns
 
 PHASES = frozenset({"lookup", "page", "restore", "publish"})
 SCOPE = ("client_route_id", "conversation_id", "task_id", "turn_id", "contact_id",
@@ -47,7 +47,7 @@ def _record(binding, phase, boundary, at, outcome=""):
 
 @contextmanager
 def recovery_timing(fields, phase, *, request_id=None):
-    start = time.monotonic_ns()
+    start = now_ns()
     try:
         binding = _binding(fields, phase, request_id)
     except Exception:
@@ -60,5 +60,5 @@ def recovery_timing(fields, phase, *, request_id=None):
         result.completed = False
         raise
     finally:
-        _record(binding, phase, "finished", time.monotonic_ns(),
+        _record(binding, phase, "finished", now_ns(),
                 "completed" if result.completed else "failed")

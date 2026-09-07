@@ -35,7 +35,7 @@ class RecoveryTimingTest(unittest.TestCase):
         return summarize(self.sink.points)["metrics"][f"desktop_recovery_{phase}_ms"]
 
     def test_exact_monotonic_span(self):
-        with patch("agent_recovery_timing.time.monotonic_ns", side_effect=[1_000_000, 7_500_000]):
+        with patch("agent_recovery_timing.now_ns", side_effect=[1_000_000, 7_500_000]):
             with recovery_timing(self.fields, "page") as measurement:
                 measurement.completed = True
         self.assertEqual(6.5, self.metric("page")["p95_ms"])
