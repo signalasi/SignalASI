@@ -121,6 +121,12 @@ def test_full_pipeline_resume_and_artifact(isolated):
     chunks = list(artifact_chunk_payloads(prepare_artifacts("video-test", files)[0]))
     data = b"".join(base64.b64decode(chunk["data_b64"]) for chunk in chunks)
     assert hashlib.sha256(data).hexdigest() == chunks[0]["sha256"]
+    from agent_execution_harness import finalize_task_artifacts
+    (checkpoint.parent / "internal.apk").write_bytes(b"not-a-deliverable")
+    finalization = finalize_task_artifacts("video-test", "Create a video", "codex")
+    assert not finalization.packaged
+    assert [f["relative_path"] for f in finalization.output_files] == ["outputs/video-240p.mp4"]
+    assert not list((isolated / "tasks/video-test/outputs").glob("*.zip"))
 
 
 @pytest.mark.parametrize("kwargs,error", [({"no_source": True}, "render_no_output"),

@@ -157,6 +157,17 @@ state directory. Rendering instructions now require high-contrast transition tex
 240p preview inspection before full rendering, and lower-cost source rendering
 for simple explainers. Review criteria and bounded correction limits are unchanged.
 
+The second live request completed reviewed generation in 610.922 seconds, including
+one correction for mismatched binary labels during transitions. However, generic
+artifact finalization bundled the private rendering directory into a project ZIP,
+so the phone received an archive rather than a playable video. The device test was
+stopped after diagnosing that failure; its forced-stop instrumentation result is
+not a spontaneous App crash. This round also does not count as end-to-end success.
+The `.video-generation` directory is now excluded from project candidate discovery,
+APK discovery and recursive archive packaging. A regression checks finalization,
+not only raw artifact enumeration: only `outputs/video-240p.mp4` may be selected,
+and private intermediate files must not cause a project archive to be published.
+
 ## Reference
 
 The user supplied a ChatGPT web execution transcript: Python frame rendering,
