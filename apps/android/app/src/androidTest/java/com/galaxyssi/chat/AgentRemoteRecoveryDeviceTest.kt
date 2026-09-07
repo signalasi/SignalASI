@@ -1,6 +1,7 @@
 package com.galaxyssi.chat
 
 import android.content.Context
+import android.content.ContextWrapper
 import android.os.SystemClock
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -15,6 +16,8 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.UUID
+import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(AndroidJUnit4::class)
 class AgentRemoteRecoveryDeviceTest {
@@ -69,6 +72,8 @@ class AgentRemoteRecoveryDeviceTest {
                 .mapNotNull { key ->
                     val parts = key.split('\u001f')
                     val source = parts.getOrNull(1)?.toLongOrNull() ?: return@mapNotNull null
+                    val requestedSource = InstrumentationRegistry.getArguments().getString("live_recovery_source")?.toLongOrNull()
+                    if (requestedSource != null && source != requestedSource) return@mapNotNull null
                     parts[0] to source
                 }.sortedByDescending { it.second }.firstNotNullOfOrNull { (contactId, source) ->
                     val contact = AppStore.contactById(context, contactId) ?: return@firstNotNullOfOrNull null
@@ -85,10 +90,67 @@ class AgentRemoteRecoveryDeviceTest {
         }
         assertNotNull("No existing paired task identity", handoff)
         val start = SystemClock.elapsedRealtime()
-        val result = AndroidAgentRemoteRecovery.recover(context, listOf(handoff!!)).singleOrNull()
+        val forbiddenWrites = AtomicInteger()
+        val inspectionContext = object : ContextWrapper(context) {
+            override fun getApplicationContext(): Context = this
+            override fun getDatabasePath(name: String): File {
+                if (name in setOf(AgentConnectorResponseInbox.DATABASE_NAME, AgentResultPageDatabase.DATABASE_NAME)) {
+                    forbiddenWrites.incrementAndGet()
+                    throw AssertionError("Read-only inspection must not open the execution/response inbox")
+                }
+                return super.getDatabasePath(name)
+            }
+        }
+        val result = AndroidAgentRemoteRecovery.inspect(inspectionContext, listOf(handoff!!)).singleOrNull()
         assertNotNull("No verified Desktop observation", result)
+        assertEquals("Read-only inspection opened the response inbox", 0, forbiddenWrites.get())
         assertEquals(handoff.request.conversationId, result!!.observation!!.conversationId)
-        Log.i("GalaxySSIRecoveryTest", "verified_query_ms=${SystemClock.elapsedRealtime() - start} status=${result.observation!!.status}")
+        val elapsed = SystemClock.elapsedRealtime() - start
+        Log.i("GalaxySSIRecoveryTest", "verified_query_ms=$elapsed status=${result.observation!!.status}")
+        println("LIVE_RECOVERY verified_query_ms=$elapsed status=${result.observation!!.status} read_only=true")
+    }
+
+    /** Separate explicit setup, never an automatic fallback inside the read-only query. */
+    @Test fun submitExplicitLiveRecoveryProbe(): Unit = runBlocking {
+        val arguments = InstrumentationRegistry.getArguments()
+        assumeTrue("Explicit live provider setup", arguments.getString("live_recovery_setup") == "true")
+        val probe = requireNotNull(arguments.getString("live_recovery_id"))
+        require(probe.startsWith("recovery-live-") && probe.length <= 80)
+        val source = requireNotNull(arguments.getString("live_recovery_source")?.toLongOrNull())
+        require(source > 0)
+        withContext(Dispatchers.IO) { GalaxySSIMqttClient.connect(context) }
+        val contactId = withTimeout(20_000L) {
+            var selected: String? = null
+            while (selected == null) {
+                if (GalaxySSIMqttClient.isConnected()) selected = withContext(Dispatchers.IO) {
+                    val contacts = AppStore.contacts(context)
+                    (0 until contacts.length()).asSequence().mapNotNull { contacts.optJSONObject(it) }
+                        .firstOrNull { contact ->
+                            val id = contact.optString("id")
+                            val desktop = contact.optString("desktop_id")
+                            desktop.isNotBlank() && !AppStore.isDesktopDeviceContact(context, id) &&
+                                AppStore.agentIdForContact(context, id) == "codex" &&
+                                GalaxySSILinkProtocol.serverLink(context, desktop)?.paired == true
+                        }?.optString("id")
+                }
+                if (selected == null) delay(100)
+            }
+            selected
+        }
+        withContext(Dispatchers.IO) {
+            val existing = AgentTaskIdentityStore.find(context, contactId, source)
+            if (existing != null) {
+                assertEquals("A test source cannot be reused for a different conversation", probe, existing.conversationId)
+                println("LIVE_RECOVERY_SETUP already_registered=true")
+                return@withContext
+            }
+            assertTrue("Test request was not accepted by the normal paired transport", GalaxySSIMqttClient.publishUserMessage(
+                content = "这是恢复链路验证。请只回复：恢复验证完成。不调用工具，不修改文件。",
+                contactId = contactId, clientMessageId = source, conversationId = probe, turnId = "$probe-turn",
+                taskId = "$probe-task", runId = "$probe-run"))
+            assertNotNull(AgentTaskIdentityStore.find(context, contactId, source))
+            println("LIVE_RECOVERY_SETUP published=true")
+        }
     }
 
     private fun event(type: AgentRunControlEventType) = AgentRunControlEvent(
